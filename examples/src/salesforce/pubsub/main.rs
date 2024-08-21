@@ -1,14 +1,12 @@
 use flowgen_salesforce::eventbus::v1::{pub_sub_client::PubSubClient, SchemaRequest, TopicRequest};
 use oauth2::TokenResponse;
 use std::env;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::AsciiMetadataValue;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup environment variables.
     let sfdc_credentials = env!("SALESFORCE_CREDENTIALS");
-    let sfdc_instance_url = env!("SALESFORCE_INSTANCE_URL");
-    let sfdc_tenant_id = env!("SALESFORCE_TENANT_ID");
     let sfdc_topic_name = env!("SALESFORCE_TOPIC_NAME");
 
     // Setup Flowgen client.
@@ -22,24 +20,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Connect to Salesforce and get token response.
-    let sfdc_token_resp = flowgen_salesforce::auth::Client::new()
+    let sfdc_client = flowgen_salesforce::auth::Client::new()
         .with_credentials_path(sfdc_credentials.to_string())
-        .build()?
-        .connect()
-        .await?;
+        .build()?;
 
-    // Put Salesforce token into auth header of PubSub GRPC call.
-    let auth_header: MetadataValue<_> = sfdc_token_resp.access_token().secret().parse()?;
+    // Setup required Salesforce PubSub request metadata.
+    let auth_header: AsciiMetadataValue = sfdc_client
+        .connect()
+        .await?
+        .access_token()
+        .secret()
+        .parse()?;
+    let iu: AsciiMetadataValue = sfdc_client.instance_url.parse()?;
+    let tid: AsciiMetadataValue = sfdc_client.tenant_id.parse()?;
 
     // Setup Salesforce grpc client for PubSub.
     let mut sfdc_grpc_client =
         PubSubClient::with_interceptor(flowgen_client, move |mut req: tonic::Request<()>| {
             req.metadata_mut()
                 .insert("accesstoken", auth_header.clone());
-            req.metadata_mut()
-                .insert("instanceurl", MetadataValue::from_static(sfdc_instance_url));
-            req.metadata_mut()
-                .insert("tenantid", MetadataValue::from_static(sfdc_tenant_id));
+            req.metadata_mut().insert("instanceurl", iu.clone());
+            req.metadata_mut().insert("tenantid", tid.clone());
             Ok(req)
         });
 

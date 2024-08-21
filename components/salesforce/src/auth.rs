@@ -10,8 +10,8 @@ use std::fs;
 pub struct Client {
     pub client_id: String,
     pub client_secret: String,
-    pub auth_url: String,
-    pub token_url: String,
+    pub instance_url: String,
+    pub tenant_id: String,
 }
 
 impl Client {
@@ -28,8 +28,14 @@ impl Client {
         let auth_client = BasicClient::new(
             ClientId::new(self.client_id.clone()),
             Some(ClientSecret::new(self.client_secret.clone())),
-            AuthUrl::new(self.auth_url.clone())?,
-            Some(TokenUrl::new(self.token_url.clone())?),
+            AuthUrl::new(format!(
+                "{0}/services/oauth2/authorize",
+                self.instance_url.clone()
+            ))?,
+            Some(TokenUrl::new(format!(
+                "{0}/services/oauth2/token",
+                self.instance_url.clone()
+            ))?),
         );
 
         let token_result = auth_client
