@@ -5,6 +5,7 @@ rust-latest:
   stage: build
   image: rust:latest
   script:
+    - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
 
 rust-nightly:
