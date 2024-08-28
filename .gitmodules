@@ -1,3 +1,6 @@
 [submodule "components/salesforce/proto/pubsub"]
 	path = components/salesforce/proto/pubsub
 	url = https://github.com/forcedotcom/pub-sub-api
+[submodule "components/google/proto/googleapis"]
+	path = components/google/proto/googleapis
+	url = https://github.com/googleapis/googleapis
