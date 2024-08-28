@@ -12,10 +12,14 @@ use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Cannot open the credentials file")]
+    #[error("Cannot open/read the credentials file at path {1}")]
     OpenFile(#[source] std::io::Error, PathBuf),
     #[error("Cannot parse the credentials file")]
     ParseCredentials(#[source] serde_json::Error),
+    #[error("Cannot parse url")]
+    ParseUrl(#[source] url::ParseError),
+    #[error("Other Auth error")]
+    NotCategorized(#[source] Box<dyn std::error::Error>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,27 +45,29 @@ impl Client {
     /// It then exchanges them for auth_token and refresh_token or returns error.
     pub async fn connect(
         &self,
-    ) -> Result<
-        StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-        Box<dyn std::error::Error>,
-    > {
+    ) -> Result<StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>, Error> {
         let auth_client = BasicClient::new(
             ClientId::new(self.client_id.clone()),
             Some(ClientSecret::new(self.client_secret.to_owned())),
             AuthUrl::new(format!(
                 "{0}/services/oauth2/authorize",
                 self.instance_url.to_owned()
-            ))?,
-            Some(TokenUrl::new(format!(
-                "{0}/services/oauth2/token",
-                self.instance_url.to_owned()
-            ))?),
+            ))
+            .map_err(Error::ParseUrl)?,
+            Some(
+                TokenUrl::new(format!(
+                    "{0}/services/oauth2/token",
+                    self.instance_url.to_owned()
+                ))
+                .map_err(Error::ParseUrl)?,
+            ),
         );
 
         let token_result = auth_client
             .exchange_client_credentials()
             .request_async(async_http_client)
-            .await?;
+            .await
+            .map_err(|e| Error::NotCategorized(Box::new(e)))?;
 
         Ok(token_result)
     }
@@ -105,11 +111,27 @@ mod tests {
 
     #[test]
     fn test_build_with_invalid_credentials() {
-        let creds: &str = r#"[{"client_id":"client_id"}]"#;
+        let creds: &str = r#"{"client_id":"client_id"}"#;
         let mut path = PathBuf::new();
         path.push("credentials.json");
         let _ = fs::write(path.clone(), creds);
         let client = Client::new().with_credentials_path(path.clone()).build();
         assert!(matches!(client, Err(Error::ParseCredentials(..))));
+    }
+
+    #[test]
+    fn test_build_with_valid_credentials() {
+        let creds: &str = r#"
+            {
+                "client_id": "some_client_id",
+                "client_secret": "some_client_secret", 
+                "instance_url": "some_instance_url", 
+                "tenant_id": "some_tenant_id"
+            }"#;
+        let mut path = PathBuf::new();
+        path.push("credentials.json");
+        let _ = fs::write(path.clone(), creds);
+        let client = Client::new().with_credentials_path(path.clone()).build();
+        assert!(client.is_ok());
     }
 }

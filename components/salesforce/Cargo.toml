@@ -23,6 +23,7 @@ futures-util = "0.3.30"
 tokio-stream = "0.1.14"
 tokio-util = "0.7.10"
 thiserror = "1.0.63"
+url = "2.5.2"
 
 [build-dependencies]
 tonic-build = "0.10.2"
