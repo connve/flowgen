@@ -11,5 +11,6 @@ rust-nightly:
   stage: build
   image: rustlang/rust:nightly
   script:
+    - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
   allow_failure: true
