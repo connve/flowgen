@@ -13,7 +13,7 @@ path = "src/salesforce/pubsub/main.rs"
 
 [dependencies]
 oauth2 = "4.4.2"
-flowgen = { path = "../flowgen" }
+flowgen = { path = "../components/flowgen" }
 flowgen_salesforce = { path = "../components/salesforce" }
 flowgen_google = { path = "../components/google" }
 prost = "0.12.3"

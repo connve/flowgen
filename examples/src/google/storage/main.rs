@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "GCP_CREDENTIALS are required.".to_string())?;
 
     // Setup Flowgen client.
-    let flowgen_client = flowgen::core::Client::new()
+    let flowgen = flowgen::core::ServiceBuilder::new()
         .with_endpoint(format!("{0}:443", flowgen_google::storage::ENDPOINT))
         .build()?
         .connect()
@@ -31,13 +31,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let x_goog: AsciiMetadataValue = format!("project={0}", project_path).parse()?;
 
     // Setup Storage Client.
-    let mut client = StorageClient::with_interceptor(flowgen_client, move |mut req: Request<()>| {
-        req.metadata_mut()
-            .insert("authorization", auth_header.clone());
-        req.metadata_mut()
-            .insert("x-goog-request-params", x_goog.clone());
-        Ok(req)
-    });
+    let mut client = StorageClient::with_interceptor(
+        flowgen.channel.to_owned().unwrap(),
+        move |mut req: Request<()>| {
+            req.metadata_mut()
+                .insert("authorization", auth_header.clone());
+            req.metadata_mut()
+                .insert("x-goog-request-params", x_goog.clone());
+            Ok(req)
+        },
+    );
 
     // List all buckets in the project.
     let list_buckets_resp = client

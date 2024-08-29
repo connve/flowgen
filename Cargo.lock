@@ -345,6 +345,7 @@ checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 name = "flowgen"
 version = "0.0.1"
 dependencies = [
+ "thiserror",
  "tonic",
 ]
 
@@ -369,6 +370,7 @@ name = "flowgen_salesforce"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "flowgen",
  "futures-util",
  "oauth2",
  "prost",

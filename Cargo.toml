@@ -1,12 +1,12 @@
 [workspace]
-members = ["flowgen", "examples"]
+members = ["examples"]
 resolver = "2"
 exclude = [".cargo"]
 
 [workspace.dependencies]
 flowgen_salesforce = { path = "components/salesforce" }
 flowgen_google = { path = "components/google" }
-flowgen = { path = "flowgen" }
+flowgen = { path = "components/flowgen" }
 
 [workspace.package]
 version = "0.0.1"

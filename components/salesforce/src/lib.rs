@@ -9,3 +9,4 @@ pub mod eventbus {
     pub const DE_ENDPOINT: &str = "https://api.deu.pubsub.salesforce.com";
 }
 pub mod auth;
+pub mod pubsub;
