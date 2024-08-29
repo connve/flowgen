@@ -12,10 +12,10 @@ use crate::{auth, eventbus};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Client not available")]
-    ClientNotAvailavle(),
-    #[error("Client not available")]
-    ValueNotAvailable(),
+    #[error("Client is missing")]
+    ClientMissing(),
+    #[error("TokenResponse is missing")]
+    TokenResponseMissing(),
     #[error("Invalid metadata value")]
     InvalidMetadataValue(#[source] InvalidMetadataValue),
 }
@@ -99,12 +99,12 @@ impl ContextBuilder {
 
     /// Generates a new PubSub Context that allow for interacting with Salesforce PubSub API..
     pub fn build(&mut self) -> Result<Context, Error> {
-        let client = self.client.as_ref().ok_or_else(Error::ClientNotAvailavle)?;
+        let client = self.client.as_ref().ok_or_else(Error::ClientMissing)?;
 
         let auth_header: AsciiMetadataValue = client
             .token_result
             .as_ref()
-            .ok_or_else(Error::ValueNotAvailable)?
+            .ok_or_else(Error::TokenResponseMissing)?
             .access_token()
             .secret()
             .parse()
