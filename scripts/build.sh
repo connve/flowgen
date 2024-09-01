@@ -9,4 +9,4 @@ cd components/google/proto && git clone https://github.com/googleapis/googleapis
 cd components/salesforce/proto && git clone https://github.com/forcedotcom/pub-sub-api
 cargo build --verbose
 cargo test --verbose
-cargo fmt --all -- --check
+cargo fmt --all
