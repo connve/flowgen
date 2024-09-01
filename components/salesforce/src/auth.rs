@@ -127,7 +127,7 @@ impl ClientBuilder {
 #[cfg(test)]
 mod tests {
 
-    use std::{path::PathBuf, sync::atomic::AtomicUsize};
+    use std::path::PathBuf;
 
     use super::*;
 
