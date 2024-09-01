@@ -1,14 +1,10 @@
+use crate::eventbus::v1::pub_sub_client::PubSubClient;
+use crate::{auth, eventbus};
 /// This Source Code Form is subject to the terms of the Mozilla Public
 /// License, v. 2.0. If a copy of the MPL was not distributed with this
 /// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 use oauth2::TokenResponse;
-use tonic::metadata::errors::InvalidMetadataValue;
-use tonic::metadata::AsciiMetadataValue;
-use tonic::service::Interceptor;
-
-use crate::eventbus::v1::pub_sub_client::PubSubClient;
-use crate::eventbus::v1::{SchemaInfo, SchemaRequest, TopicInfo, TopicRequest};
-use crate::{auth, eventbus};
+use tokio_stream::StreamExt;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -17,16 +13,18 @@ pub enum Error {
     #[error("TokenResponse is missing")]
     TokenResponseMissing(),
     #[error("Invalid metadata value")]
-    InvalidMetadataValue(#[source] InvalidMetadataValue),
+    InvalidMetadataValue(#[source] tonic::metadata::errors::InvalidMetadataValue),
+    #[error("There was an error with gRPC call")]
+    GrpcStatus(#[source] tonic::Status),
 }
 
 struct ContextInterceptor {
-    auth_header: AsciiMetadataValue,
-    instance_url: AsciiMetadataValue,
-    tenant_id: AsciiMetadataValue,
+    auth_header: tonic::metadata::AsciiMetadataValue,
+    instance_url: tonic::metadata::AsciiMetadataValue,
+    tenant_id: tonic::metadata::AsciiMetadataValue,
 }
 
-impl Interceptor for ContextInterceptor {
+impl tonic::service::Interceptor for ContextInterceptor {
     fn call(
         &mut self,
         mut request: tonic::Request<()>,
@@ -46,34 +44,50 @@ impl Interceptor for ContextInterceptor {
 
 #[derive(Debug)]
 pub struct Context {
-    pubsub_client: eventbus::v1::pub_sub_client::PubSubClient<
+    pubsub: eventbus::v1::pub_sub_client::PubSubClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
             ContextInterceptor,
         >,
     >,
 }
+fn fetch_requests_iter(
+    request: eventbus::v1::FetchRequest,
+) -> impl tokio_stream::Stream<Item = eventbus::v1::FetchRequest> {
+    tokio_stream::iter(1..usize::MAX).map(move |_| request.to_owned())
+}
 
 impl Context {
     #[allow(clippy::new_ret_no_self)]
     pub async fn get_topic(
         &mut self,
-        topic_request: TopicRequest,
-    ) -> Result<TopicInfo, Box<dyn std::error::Error>> {
-        self.pubsub_client
-            .get_topic(tonic::Request::new(topic_request))
+        request: eventbus::v1::TopicRequest,
+    ) -> Result<eventbus::v1::TopicInfo, Error> {
+        self.pubsub
+            .get_topic(tonic::Request::new(request))
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map_err(Error::GrpcStatus)
             .map(|response| response.into_inner())
     }
     pub async fn get_schema(
         &mut self,
-        schema_request: SchemaRequest,
-    ) -> Result<SchemaInfo, Box<dyn std::error::Error>> {
-        self.pubsub_client
-            .get_schema(tonic::Request::new(schema_request))
+        request: eventbus::v1::SchemaRequest,
+    ) -> Result<eventbus::v1::SchemaInfo, Error> {
+        self.pubsub
+            .get_schema(tonic::Request::new(request))
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map_err(Error::GrpcStatus)
+            .map(|response| response.into_inner())
+    }
+
+    pub async fn subscribe(
+        &mut self,
+        request: eventbus::v1::FetchRequest,
+    ) -> Result<tonic::codec::Streaming<eventbus::v1::FetchResponse>, Error> {
+        self.pubsub
+            .subscribe(fetch_requests_iter(request).throttle(std::time::Duration::from_millis(100)))
+            .await
+            .map_err(Error::GrpcStatus)
             .map(|response| response.into_inner())
     }
 }
@@ -101,7 +115,7 @@ impl ContextBuilder {
     pub fn build(&mut self) -> Result<Context, Error> {
         let client = self.client.as_ref().ok_or_else(Error::ClientMissing)?;
 
-        let auth_header: AsciiMetadataValue = client
+        let auth_header: tonic::metadata::AsciiMetadataValue = client
             .token_result
             .as_ref()
             .ok_or_else(Error::TokenResponseMissing)?
@@ -110,12 +124,12 @@ impl ContextBuilder {
             .parse()
             .map_err(Error::InvalidMetadataValue)?;
 
-        let instance_url: AsciiMetadataValue = client
+        let instance_url: tonic::metadata::AsciiMetadataValue = client
             .instance_url
             .parse()
             .map_err(Error::InvalidMetadataValue)?;
 
-        let tenant_id: AsciiMetadataValue = client
+        let tenant_id: tonic::metadata::AsciiMetadataValue = client
             .tenant_id
             .parse()
             .map_err(Error::InvalidMetadataValue)?;
@@ -126,9 +140,9 @@ impl ContextBuilder {
             tenant_id,
         };
 
-        let pubsub_client =
+        let pubsub =
             PubSubClient::with_interceptor(self.service.channel.clone().unwrap(), interceptor);
 
-        Ok(Context { pubsub_client })
+        Ok(Context { pubsub })
     }
 }

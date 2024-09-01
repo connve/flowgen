@@ -1,5 +1,7 @@
-use flowgen_salesforce::eventbus::v1::{SchemaRequest, TopicRequest};
+use flowgen_salesforce::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use std::env;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,5 +45,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{:?}", schema_info);
 
+    // Establish stream of messages for a provided topic.
+    let mut stream = pubsub
+        .subscribe(FetchRequest {
+            topic_name: sfdc_topic_name.to_owned(),
+            num_requested: 1,
+            ..Default::default()
+        })
+        .await?;
+
+    // Setup channel.
+    let (tx, mut rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        while let Some(received) = stream.next().await {
+            match received {
+                Ok(fr) => {
+                    let ce_ops = fr.events.into_iter().next();
+                    if let Some(ce) = ce_ops {
+                        let pe_ops = ce.event;
+                        if let Some(pe) = pe_ops {
+                            if let Err(err) = tx.send(pe).await {
+                                // error!("{:?}", err);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    // error!("{:?}", err)
+                }
+            }
+        }
+    });
+
+    // Process stream of events.
+    while let Some(event) = rx.recv().await {
+        println!("{:?}", event);
+    }
     Ok(())
 }
