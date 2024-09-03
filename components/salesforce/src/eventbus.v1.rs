@@ -69,6 +69,7 @@ pub struct ProducerEvent {
 ///
 /// Represents an event that is consumed in a subscriber client.
 /// In addition to the fields in ProducerEvent, ConsumerEvent has the replay_id field.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConsumerEvent {
