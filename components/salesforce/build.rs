@@ -14,6 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .type_attribute(
+            "ConsumerEvent",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
             "EventHeader",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
