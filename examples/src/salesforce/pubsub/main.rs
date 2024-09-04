@@ -1,5 +1,4 @@
 use flowgen_salesforce::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
-use serde::{Deserialize, Serialize};
 use std::env;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -60,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_inner();
 
     // Setup channel.
-    let (tx, mut rx) = mpsc::channel(1);
+    let (tx, mut rx) = mpsc::channel(200);
     tokio::spawn(async move {
         while let Some(received) = stream.next().await {
             match received {

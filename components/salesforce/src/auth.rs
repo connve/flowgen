@@ -61,7 +61,7 @@ pub struct Client {
 impl Client {
     /// Authorizes to Salesforce based on provided credentials.
     /// It then exchanges them for auth_token and refresh_token or returns error.
-    pub async fn connect(mut self) -> Result<Client, Error> {
+    pub async fn connect(mut self) -> Result<Self, Error> {
         let token_result = self
             .oauth2_client
             .exchange_client_credentials()
