@@ -1,4 +1,5 @@
 use flowgen_salesforce::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
+use serde::{Deserialize, Serialize};
 use std::env;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = pubsub
         .subscribe(FetchRequest {
             topic_name: sfdc_topic_name.to_owned(),
-            num_requested: 1,
+            num_requested: 200,
             ..Default::default()
         })
         .await?
@@ -62,21 +63,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel(1);
     tokio::spawn(async move {
         while let Some(received) = stream.next().await {
-            let event = received
-                .unwrap()
-                .events
-                .into_iter()
-                .next()
-                .unwrap()
-                .event
-                .unwrap();
-            tx.send(event).await.unwrap();
+            match received {
+                Ok(fr) => {
+                    for event in fr.events {
+                        if let Err(e) = tx.send(event).await {
+                            eprintln!("error sending event: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error receiving events: {}", e);
+                    break;
+                }
+            }
         }
     });
 
     // Process stream of events.
-    while let Some(event) = rx.recv().await {
-        println!("{:?}", event);
+    while let Some(ce) = rx.recv().await {
+        if let Some(pe) = ce.event {
+            println!("{:?}", pe.id);
+        }
     }
     Ok(())
 }

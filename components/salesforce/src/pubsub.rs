@@ -53,11 +53,6 @@ pub struct Context {
         >,
     >,
 }
-fn fetch_requests_iter(
-    request: eventbus::v1::FetchRequest,
-) -> impl tokio_stream::Stream<Item = eventbus::v1::FetchRequest> {
-    tokio_stream::iter(1..usize::MAX).map(move |_| request.to_owned())
-}
 
 impl Context {
     pub async fn get_topic(
@@ -94,11 +89,46 @@ impl Context {
         request: eventbus::v1::FetchRequest,
     ) -> Result<tonic::Response<tonic::codec::Streaming<eventbus::v1::FetchResponse>>, Error> {
         self.pubsub
-            .subscribe(fetch_requests_iter(request).throttle(std::time::Duration::from_millis(100)))
+            .subscribe(
+                tokio_stream::iter(1..usize::MAX)
+                    .map(move |_| request.to_owned())
+                    .throttle(std::time::Duration::from_millis(10)),
+            )
+            .await
+            .map_err(Error::RPCFailed)
+    }
+
+    pub async fn managed_subscribe(
+        &mut self,
+        request: eventbus::v1::ManagedFetchRequest,
+    ) -> Result<tonic::Response<tonic::codec::Streaming<eventbus::v1::ManagedFetchResponse>>, Error>
+    {
+        self.pubsub
+            .managed_subscribe(
+                tokio_stream::iter(1..usize::MAX)
+                    .map(move |_| request.to_owned())
+                    .throttle(std::time::Duration::from_millis(10)),
+            )
+            .await
+            .map_err(Error::RPCFailed)
+    }
+
+    pub async fn publish_stream(
+        &mut self,
+        request: eventbus::v1::PublishRequest,
+    ) -> Result<tonic::Response<tonic::codec::Streaming<eventbus::v1::PublishResponse>>, Error>
+    {
+        self.pubsub
+            .publish_stream(
+                tokio_stream::iter(1..usize::MAX)
+                    .map(move |_| request.to_owned())
+                    .throttle(std::time::Duration::from_millis(10)),
+            )
             .await
             .map_err(Error::RPCFailed)
     }
 }
+
 /// Used to store configure PubSub Context.
 pub struct ContextBuilder {
     client: Option<auth::Client>,
