@@ -25,14 +25,14 @@ impl Client {
 }
 
 #[derive(Default)]
-pub struct ClientBuilder {
+pub struct Builder {
     endpoint: Option<String>,
 }
 
-impl ClientBuilder {
+impl Builder {
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> Self {
-        ClientBuilder {
+        Builder {
             ..Default::default()
         }
     }

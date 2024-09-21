@@ -1,4 +1,3 @@
-use flowgen::client::Client;
 use flowgen_google::storage::v2::{storage_client::StorageClient, ListBucketsRequest};
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use std::env;
@@ -13,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("GCP_CREDENTIALS").map_err(|_| "GCP_CREDENTIALS are required.".to_string())?;
 
     // Setup Flowgen client.
-    let flowgen = flowgen::service::ClientBuilder::new()
+    let flowgen = flowgen::service::Builder::new()
         .with_endpoint(format!("{0}:443", flowgen_google::storage::ENDPOINT))
         .build()?
         .connect()

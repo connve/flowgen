@@ -130,21 +130,21 @@ impl Context {
 }
 
 /// Used to store configure PubSub Context.
-pub struct ContextBuilder {
+pub struct Builder {
     client: Option<auth::Client>,
     service: flowgen::service::Client,
 }
 
-impl ContextBuilder {
+impl Builder {
     // Creates a new instance of ContectBuilder.
     pub fn new(service: flowgen::service::Client) -> Self {
-        ContextBuilder {
+        Builder {
             client: None,
             service,
         }
     }
     /// Pass the Salesforce OAuth client.
-    pub fn with_client(&mut self, client: auth::Client) -> &mut ContextBuilder {
+    pub fn with_client(&mut self, client: auth::Client) -> &mut Builder {
         self.client = Some(client);
         self
     }
@@ -194,19 +194,17 @@ mod tests {
 
     use std::{fs, path::PathBuf};
 
-    use auth::ClientBuilder;
-
     use super::*;
 
     #[test]
     fn test_build_missing_client() {
-        let service = flowgen::service::ClientBuilder::new().build().unwrap();
-        let client = ContextBuilder::new(service).build();
+        let service = flowgen::service::Builder::new().build().unwrap();
+        let client = Builder::new(service).build();
         assert!(matches!(client, Err(Error::ClientMissing(..))));
     }
     #[test]
     fn test_build_missing_token() {
-        let service = flowgen::service::ClientBuilder::new().build().unwrap();
+        let service = flowgen::service::Builder::new().build().unwrap();
         let creds: &str = r#"
             {
                 "client_id": "some_client_id",
@@ -217,12 +215,12 @@ mod tests {
         let mut path = PathBuf::new();
         path.push("credentials.json");
         let _ = fs::write(path.clone(), creds);
-        let client = ClientBuilder::new()
+        let client = auth::Builder::new()
             .with_credentials_path(path.clone())
             .build()
             .unwrap();
         let _ = fs::remove_file(path);
-        let pubsub = ContextBuilder::new(service).with_client(client).build();
+        let pubsub = Builder::new(service).with_client(client).build();
         assert!(matches!(pubsub, Err(Error::TokenResponseMissing(..))));
     }
 }

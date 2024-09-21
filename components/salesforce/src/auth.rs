@@ -77,18 +77,18 @@ impl flowgen::client::Client for Client {
 
 #[derive(Default)]
 /// Used to store Salesforce Client configuration.
-pub struct ClientBuilder {
+pub struct Builder {
     credentials_path: PathBuf,
 }
 
-impl ClientBuilder {
+impl Builder {
     #[allow(clippy::new_ret_no_self)]
-    /// Creates a new instance of a ClientBuilder.
-    pub fn new() -> ClientBuilder {
-        ClientBuilder::default()
+    /// Creates a new instance of a Builder.
+    pub fn new() -> Builder {
+        Builder::default()
     }
     /// Pass path to the fail so that credentials can be loaded.
-    pub fn with_credentials_path(&mut self, credentials_path: PathBuf) -> &mut ClientBuilder {
+    pub fn with_credentials_path(&mut self, credentials_path: PathBuf) -> &mut Builder {
         self.credentials_path = credentials_path;
         self
     }
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_build_without_credentials() {
-        let client = ClientBuilder::new().build();
+        let client = Builder::new().build();
         assert!(matches!(client, Err(Error::OpenFile(..))));
     }
 
@@ -144,9 +144,7 @@ mod tests {
         let mut path = PathBuf::new();
         path.push("invalid_credentials.json");
         let _ = fs::write(path.clone(), creds);
-        let client = ClientBuilder::new()
-            .with_credentials_path(path.clone())
-            .build();
+        let client = Builder::new().with_credentials_path(path.clone()).build();
         let _ = fs::remove_file(path);
         assert!(matches!(client, Err(Error::ParseCredentials(..))));
     }
@@ -163,9 +161,7 @@ mod tests {
         let mut path = PathBuf::new();
         path.push("invalid_url_credentials.json");
         let _ = fs::write(path.clone(), creds);
-        let client = ClientBuilder::new()
-            .with_credentials_path(path.clone())
-            .build();
+        let client = Builder::new().with_credentials_path(path.clone()).build();
         let _ = fs::remove_file(path);
         assert!(matches!(client, Err(Error::ParseUrl(..))));
     }
@@ -182,9 +178,7 @@ mod tests {
         let mut path = PathBuf::new();
         path.push("credentials.json");
         let _ = fs::write(path.clone(), creds);
-        let client = ClientBuilder::new()
-            .with_credentials_path(path.clone())
-            .build();
+        let client = Builder::new().with_credentials_path(path.clone()).build();
         let _ = fs::remove_file(path);
         assert!(client.is_ok());
     }

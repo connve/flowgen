@@ -11,21 +11,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sfdc_topic_name = env::var("SALESFORCE_TOPIC_NAME").unwrap();
 
     // Setup Flowgen client.
-    let flowgen = flowgen::service::ClientBuilder::new()
+    let flowgen = flowgen::service::Builder::new()
         .with_endpoint(format!("{0}:443", flowgen_salesforce::eventbus::ENDPOINT))
         .build()?
         .connect()
         .await?;
 
-    // Connect to Salesforce and get token response.
-    let sfdc_client = flowgen_salesforce::auth::ClientBuilder::new()
+    // Connect to Salesforce and authenticate.
+    let sfdc_client = flowgen_salesforce::auth::Builder::new()
         .with_credentials_path(sfdc_credentials.to_string().into())
         .build()?
         .connect()
         .await?;
 
     // Get PubSub context.
-    let mut pubsub = flowgen_salesforce::pubsub::ContextBuilder::new(flowgen)
+    let mut pubsub = flowgen_salesforce::pubsub::Builder::new(flowgen)
         .with_client(sfdc_client)
         .build()?;
 
