@@ -2,7 +2,12 @@
 /// License, v. 2.0. If a copy of the MPL was not distributed with this
 /// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #[derive(thiserror::Error, Debug)]
-pub enum Error {}
+pub enum Error {
+    #[error("An error resulting from a failed attempt to construct a URI")]
+    InvalidUri(#[source] tonic::codegen::http::uri::InvalidUri),
+    #[error("Error that originate from the client or server")]
+    Transport(#[source] tonic::transport::Error),
+}
 
 #[derive(Debug)]
 pub struct Client {
@@ -11,13 +16,16 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn connect(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn connect(mut self) -> Result<Self, Error> {
         if let Some(endpoint) = self.endpoint.take() {
             let tls_config = tonic::transport::ClientTlsConfig::new();
-            let channel = tonic::transport::Channel::from_shared(endpoint)?
-                .tls_config(tls_config)?
+            let channel = tonic::transport::Channel::from_shared(endpoint)
+                .map_err(Error::InvalidUri)?
+                .tls_config(tls_config)
+                .map_err(Error::Transport)?
                 .connect()
-                .await?;
+                .await
+                .map_err(Error::Transport)?;
             self.channel = Some(channel);
         }
         Ok(self)
