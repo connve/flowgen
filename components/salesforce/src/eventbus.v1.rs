@@ -1,5 +1,6 @@
 ///
 /// Contains information about a topic and uniquely identifies it. TopicInfo is returned by the GetTopic RPC method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TopicInfo {
@@ -26,6 +27,7 @@ pub struct TopicInfo {
 ///
 /// A request message for GetTopic. Note that the tenant/org is not directly referenced
 /// in the request, but is implicitly identified by the authentication headers.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TopicRequest {
@@ -84,6 +86,7 @@ pub struct ConsumerEvent {
 }
 ///
 /// Event publish result that the Publish RPC method returns. The result contains replay_id or a publish error.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PublishResult {
@@ -98,6 +101,7 @@ pub struct PublishResult {
     pub correlation_key: ::prost::alloc::string::String,
 }
 /// Contains error information for an error that an RPC method returns.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Error {
@@ -117,6 +121,7 @@ pub struct Error {
 /// If no replay_preset is specified, the subscription starts at LATEST (tip of the stream).
 /// replay_preset and replay_id values are only consumed as part of the first FetchRequest. If
 /// a client needs to start at another point in the stream, it must start a new subscription.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FetchRequest {
@@ -152,6 +157,7 @@ pub struct FetchRequest {
 /// If there are no events to deliver, the server sends an empty batch fetch response with the latest replay ID. The
 /// empty fetch response is sent within 270 seconds. An empty fetch response provides a periodic keepalive from the
 /// server and the latest replay ID.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FetchResponse {
@@ -171,6 +177,7 @@ pub struct FetchResponse {
 }
 ///
 /// Request for the GetSchema RPC method. The schema request is based on the event schema ID.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SchemaRequest {
@@ -180,6 +187,7 @@ pub struct SchemaRequest {
 }
 ///
 /// Response for the GetSchema RPC method. This returns the schema ID and schema of an event.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SchemaInfo {
@@ -194,6 +202,7 @@ pub struct SchemaInfo {
     pub rpc_id: ::prost::alloc::string::String,
 }
 /// Request for the Publish and PublishStream RPC method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PublishRequest {
@@ -213,6 +222,7 @@ pub struct PublishRequest {
 /// publish. PublishResult indicates if publish succeeded or not
 /// for each event. It also returns the schema ID that was used to create
 /// the ProducerEvents in the PublishRequest.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PublishResponse {
@@ -235,6 +245,7 @@ pub struct PublishResponse {
 /// 1. Establish the initial managed subscribe stream.
 /// 2. Request more events from the subscription stream.
 /// 3. Commit a Replay ID using CommitReplayRequest.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ManagedFetchRequest {
@@ -269,6 +280,7 @@ pub struct ManagedFetchRequest {
 ///
 /// Response for the ManagedSubscribe streaming RPC method. This can return
 /// ConsumerEvent(s) or CommitReplayResponse along with other metadata.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ManagedFetchResponse {
@@ -295,6 +307,7 @@ pub struct ManagedFetchResponse {
 ///
 /// Request to commit a Replay ID for the last processed event or for the latest
 /// replay ID received in an empty batch of events.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommitReplayRequest {
@@ -314,6 +327,7 @@ pub struct CommitReplayRequest {
 /// N CommitReplayRequest(s) can get compressed in a batch resulting in a single
 /// CommitReplayResponse which reflects the latest values of last
 /// CommitReplayRequest in that batch.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommitReplayResponse {
@@ -331,7 +345,19 @@ pub struct CommitReplayResponse {
     pub process_time: i64,
 }
 /// Supported error codes
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+)]
 #[repr(i32)]
 pub enum ErrorCode {
     Unknown = 0,
@@ -364,7 +390,19 @@ impl ErrorCode {
 ///
 /// Supported subscription replay start values.
 /// By default, the subscription will start at the tip of the stream if ReplayPreset is not specified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[derive(
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    ::prost::Enumeration,
+)]
 #[repr(i32)]
 pub enum ReplayPreset {
     /// Start the subscription at the tip of the stream.
@@ -399,8 +437,8 @@ impl ReplayPreset {
 /// Generated client implementations.
 pub mod pub_sub_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
-    use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    use tonic::codegen::*;
     ///
     /// The Pub/Sub API provides a single interface for publishing and subscribing to platform events, including real-time
     /// event monitoring events, and change data capture events. The Pub/Sub API is a gRPC API that is based on HTTP/2.
@@ -461,9 +499,8 @@ pub mod pub_sub_client {
                     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
                 >,
             >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::BoxBody>,
-            >>::Error: Into<StdError> + Send + Sync,
+            <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
+                Into<StdError> + Send + Sync,
         {
             PubSubClient::new(InterceptedService::new(inner, interceptor))
         }
@@ -530,19 +567,14 @@ pub mod pub_sub_client {
             tonic::Response<tonic::codec::Streaming<super::FetchResponse>>,
             tonic::Status,
         > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/Subscribe",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/Subscribe");
             let mut req = request.into_streaming_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "Subscribe"));
@@ -553,19 +585,14 @@ pub mod pub_sub_client {
             &mut self,
             request: impl tonic::IntoRequest<super::SchemaRequest>,
         ) -> std::result::Result<tonic::Response<super::SchemaInfo>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/GetSchema",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/GetSchema");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "GetSchema"));
@@ -577,19 +604,14 @@ pub mod pub_sub_client {
             &mut self,
             request: impl tonic::IntoRequest<super::TopicRequest>,
         ) -> std::result::Result<tonic::Response<super::TopicInfo>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/GetTopic",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/GetTopic");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "GetTopic"));
@@ -600,23 +622,15 @@ pub mod pub_sub_client {
         pub async fn publish(
             &mut self,
             request: impl tonic::IntoRequest<super::PublishRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::PublishResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::PublishResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/Publish",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/Publish");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "Publish"));
@@ -651,19 +665,14 @@ pub mod pub_sub_client {
             tonic::Response<tonic::codec::Streaming<super::PublishResponse>>,
             tonic::Status,
         > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/PublishStream",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/PublishStream");
             let mut req = request.into_streaming_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "PublishStream"));
@@ -678,26 +687,19 @@ pub mod pub_sub_client {
         /// This feature is part of an open beta release.
         pub async fn managed_subscribe(
             &mut self,
-            request: impl tonic::IntoStreamingRequest<
-                Message = super::ManagedFetchRequest,
-            >,
+            request: impl tonic::IntoStreamingRequest<Message = super::ManagedFetchRequest>,
         ) -> std::result::Result<
             tonic::Response<tonic::codec::Streaming<super::ManagedFetchResponse>>,
             tonic::Status,
         > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::new(
+                    tonic::Code::Unknown,
+                    format!("Service was not ready: {}", e.into()),
+                )
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/eventbus.v1.PubSub/ManagedSubscribe",
-            );
+            let path = http::uri::PathAndQuery::from_static("/eventbus.v1.PubSub/ManagedSubscribe");
             let mut req = request.into_streaming_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("eventbus.v1.PubSub", "ManagedSubscribe"));

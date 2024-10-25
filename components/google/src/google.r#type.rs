@@ -29,6 +29,7 @@
 /// The exact variables and functions that may be referenced within an expression
 /// are determined by the service that evaluates it. See the service
 /// documentation for additional information.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Expr {
@@ -63,6 +64,7 @@ pub struct Expr {
 ///
 /// Related types are [google.type.TimeOfDay][google.type.TimeOfDay] and
 /// `google.protobuf.Timestamp`.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Date {

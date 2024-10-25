@@ -1,5 +1,6 @@
 /// The launch stage as defined by [Google Cloud Platform
 /// Launch Stages](<https://cloud.google.com/terms/launch-stages>).
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum LaunchStage {
@@ -74,6 +75,7 @@ impl LaunchStage {
     }
 }
 /// Required information for every language.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommonLanguageSettings {
@@ -87,6 +89,7 @@ pub struct CommonLanguageSettings {
     pub destinations: ::prost::alloc::vec::Vec<i32>,
 }
 /// Details about how and where to publish client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientLibrarySettings {
@@ -130,6 +133,7 @@ pub struct ClientLibrarySettings {
 /// This message configures the settings for publishing [Google Cloud Client
 /// libraries](<https://cloud.google.com/apis/docs/cloud-client-libraries>)
 /// generated from the service config.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Publishing {
@@ -179,6 +183,7 @@ pub struct Publishing {
     pub rest_reference_documentation_uri: ::prost::alloc::string::String,
 }
 /// Settings for Java client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JavaSettings {
@@ -219,6 +224,7 @@ pub struct JavaSettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Settings for C++ client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CppSettings {
@@ -227,6 +233,7 @@ pub struct CppSettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Settings for Php client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PhpSettings {
@@ -235,6 +242,7 @@ pub struct PhpSettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Settings for Python client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PythonSettings {
@@ -252,6 +260,7 @@ pub mod python_settings {
     /// Experimental features to be included during client library generation.
     /// These fields will be deprecated once the feature graduates and is enabled
     /// by default.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct ExperimentalFeatures {
@@ -264,6 +273,7 @@ pub mod python_settings {
     }
 }
 /// Settings for Node client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeSettings {
@@ -272,6 +282,7 @@ pub struct NodeSettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Settings for Dotnet client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DotnetSettings {
@@ -318,6 +329,7 @@ pub struct DotnetSettings {
     pub handwritten_signatures: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Settings for Ruby client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RubySettings {
@@ -326,6 +338,7 @@ pub struct RubySettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Settings for Go client libraries.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GoSettings {
@@ -334,6 +347,7 @@ pub struct GoSettings {
     pub common: ::core::option::Option<CommonLanguageSettings>,
 }
 /// Describes the generator configuration for a method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MethodSettings {
@@ -385,13 +399,14 @@ pub mod method_settings {
     /// All default values below are from those used in the client library
     /// generators (e.g.
     /// [Java](<https://github.com/googleapis/gapic-generator-java/blob/04c2faa191a9b5a10b92392fe8482279c4404803/src/main/java/com/google/api/generator/gapic/composer/common/RetrySettingsComposer.java>)).
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct LongRunning {
         /// Initial delay after which the first poll request will be made.
         /// Default value: 5 seconds.
         #[prost(message, optional, tag = "1")]
-        pub initial_poll_delay: ::core::option::Option<::prost_types::Duration>,
+        pub initial_poll_delay: ::core::option::Option<super::super::protobuf::Duration>,
         /// Multiplier to gradually increase delay between subsequent polls until it
         /// reaches max_poll_delay.
         /// Default value: 1.5.
@@ -400,15 +415,16 @@ pub mod method_settings {
         /// Maximum time between two subsequent poll requests.
         /// Default value: 45 seconds.
         #[prost(message, optional, tag = "3")]
-        pub max_poll_delay: ::core::option::Option<::prost_types::Duration>,
+        pub max_poll_delay: ::core::option::Option<super::super::protobuf::Duration>,
         /// Total polling timeout.
         /// Default value: 5 minutes.
         #[prost(message, optional, tag = "4")]
-        pub total_poll_timeout: ::core::option::Option<::prost_types::Duration>,
+        pub total_poll_timeout: ::core::option::Option<super::super::protobuf::Duration>,
     }
 }
 /// The organization for which the client libraries are being published.
 /// Affects the url where generated docs are published, etc.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ClientLibraryOrganization {
@@ -464,6 +480,7 @@ impl ClientLibraryOrganization {
     }
 }
 /// To where should client libraries be published?
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum ClientLibraryDestination {
@@ -506,6 +523,7 @@ impl ClientLibraryDestination {
 /// denotes the behavior and may affect how API tooling handles the field.
 ///
 /// Note: This enum **may** receive new values in the future.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum FieldBehavior {
@@ -637,6 +655,7 @@ impl FieldBehavior {
 ///        pattern: "folders/{folder}/logs/{log}"
 ///        pattern: "organizations/{organization}/logs/{log}"
 ///        pattern: "billingAccounts/{billing_account}/logs/{log}"
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ResourceDescriptor {
@@ -724,6 +743,7 @@ pub struct ResourceDescriptor {
 pub mod resource_descriptor {
     /// A description of the historical or future-looking state of the
     /// resource pattern.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(
         Clone,
         Copy,
@@ -770,6 +790,7 @@ pub mod resource_descriptor {
         }
     }
     /// A flag representing a specific style that a resource claims to conform to.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(
         Clone,
         Copy,
@@ -818,6 +839,7 @@ pub mod resource_descriptor {
 }
 /// Defines a proto annotation that describes a string field that refers to
 /// an API resource.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ResourceReference {
@@ -1216,6 +1238,7 @@ pub struct ResourceReference {
 ///
 ///      x-goog-request-params:
 ///      table_location=instances/instance_bar&routing_id=prof_qux
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoutingRule {
@@ -1229,6 +1252,7 @@ pub struct RoutingRule {
     pub routing_parameters: ::prost::alloc::vec::Vec<RoutingParameter>,
 }
 /// A projection from an input message to the GRPC or REST header.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoutingParameter {
@@ -1295,6 +1319,7 @@ pub struct RoutingParameter {
 /// Defines the HTTP configuration for an API service. It contains a list of
 /// [HttpRule][google.api.HttpRule], each specifying the mapping of an RPC method
 /// to one or more HTTP REST API methods.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Http {
@@ -1576,6 +1601,7 @@ pub struct Http {
 /// If an API needs to use a JSON array for request or response body, it can map
 /// the request or response body to a repeated field. However, some gRPC
 /// Transcoding implementations may not support this feature.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HttpRule {
@@ -1617,6 +1643,7 @@ pub mod http_rule {
     /// Determines the URL pattern is matched by this rules. This pattern can be
     /// used with any of the {get|put|post|delete|patch} methods. A custom method
     /// can be defined using the 'custom' field.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Pattern {
@@ -1645,6 +1672,7 @@ pub mod http_rule {
     }
 }
 /// A custom pattern is used for defining custom HTTP verb.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CustomHttpPattern {

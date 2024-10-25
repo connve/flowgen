@@ -1,4 +1,5 @@
 /// Encapsulates settings provided to GetIamPolicy.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPolicyOptions {
@@ -96,6 +97,7 @@ pub struct GetPolicyOptions {
 ///
 /// For a description of IAM and its features, see the
 /// [IAM documentation](<https://cloud.google.com/iam/docs/>).
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Policy {
@@ -157,6 +159,7 @@ pub struct Policy {
     pub etag: ::prost::alloc::vec::Vec<u8>,
 }
 /// Associates `members`, or principals, with a `role`.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Binding {
@@ -276,6 +279,7 @@ pub struct Binding {
 /// For sampleservice, this policy enables DATA_READ, DATA_WRITE and ADMIN_READ
 /// logging. It also exempts `jose@example.com` from DATA_READ logging, and
 /// `aliya@example.com` from DATA_WRITE logging.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuditConfig {
@@ -307,6 +311,7 @@ pub struct AuditConfig {
 ///
 /// This enables 'DATA_READ' and 'DATA_WRITE' logging, while exempting
 /// jose@example.com from DATA_READ logging.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuditLogConfig {
@@ -324,6 +329,7 @@ pub struct AuditLogConfig {
 pub mod audit_log_config {
     /// The list of valid permission types for which logging can be configured.
     /// Admin writes are always logged, and are not configurable.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(
         Clone,
         Copy,
@@ -372,6 +378,7 @@ pub mod audit_log_config {
     }
 }
 /// The difference delta between two policies.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PolicyDelta {
@@ -384,6 +391,7 @@ pub struct PolicyDelta {
 }
 /// One delta entry for Binding. Each individual change (only one member in each
 /// entry) to a binding will be a separate entry.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BindingDelta {
@@ -408,6 +416,7 @@ pub struct BindingDelta {
 /// Nested message and enum types in `BindingDelta`.
 pub mod binding_delta {
     /// The type of action performed on a Binding in a policy.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(
         Clone,
         Copy,
@@ -453,6 +462,7 @@ pub mod binding_delta {
 }
 /// One delta entry for AuditConfig. Each individual change (only one
 /// exempted_member in each entry) to a AuditConfig will be a separate entry.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuditConfigDelta {
@@ -480,6 +490,7 @@ pub struct AuditConfigDelta {
 /// Nested message and enum types in `AuditConfigDelta`.
 pub mod audit_config_delta {
     /// The type of action performed on an audit configuration in a policy.
+    #[derive(serde::Serialize, serde::Deserialize)]
     #[derive(
         Clone,
         Copy,
@@ -524,6 +535,7 @@ pub mod audit_config_delta {
     }
 }
 /// Request message for `SetIamPolicy` method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetIamPolicyRequest {
@@ -543,9 +555,10 @@ pub struct SetIamPolicyRequest {
     ///
     /// `paths: "bindings, etag"`
     #[prost(message, optional, tag = "3")]
-    pub update_mask: ::core::option::Option<::prost_types::FieldMask>,
+    pub update_mask: ::core::option::Option<super::super::protobuf::FieldMask>,
 }
 /// Request message for `GetIamPolicy` method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetIamPolicyRequest {
@@ -559,6 +572,7 @@ pub struct GetIamPolicyRequest {
     pub options: ::core::option::Option<GetPolicyOptions>,
 }
 /// Request message for `TestIamPermissions` method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TestIamPermissionsRequest {
@@ -574,6 +588,7 @@ pub struct TestIamPermissionsRequest {
     pub permissions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Response message for `TestIamPermissions` method.
+#[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TestIamPermissionsResponse {
