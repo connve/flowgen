@@ -1,17 +1,32 @@
 stages:
-  - build
+  - test
+  - build 
 
-rust-latest:
-  stage: build
+test-rust-latest:
+  stage: test
   image: rust:latest
   script:
     - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
 
-rust-nightly:
-  stage: build
+test-rust-nightly:
+  stage: test
   image: rustlang/rust:nightly
   script:
     - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
   allow_failure: true
+
+build-event-relay:
+  image: docker
+  stage: build
+  services:
+    - docker:dind
+  variables:
+    SERVICE_NAME: flowgen
+  script:
+    - echo "$CI_JOB_TOKEN" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - docker build -t $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest -f docker/Dockerfile . --build-arg SERVICE_NAME=$SERVICE_NAME
+    - docker push $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest
+  rules: 
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

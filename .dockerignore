@@ -1,0 +1,8 @@
+.cargo
+.deploy
+docker
+.gitignore
+.gitlab-ci.yml
+target
+go.mod
+go.sum

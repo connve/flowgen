@@ -58,7 +58,7 @@ pub struct Client {
     pub tenant_id: String,
 }
 
-impl flowgen::client::Client for Client {
+impl flowgen_core::client::Client for Client {
     type Error = Error;
     /// Authorizes to Salesforce based on provided credentials.
     /// It then exchanges them for auth_token and refresh_token or returns error.

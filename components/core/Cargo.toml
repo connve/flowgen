@@ -1,5 +1,5 @@
 [package]
-name = "flowgen"
+name = "flowgen_core"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "flowgen"
+name = "flowgen_core"
 path = "src/lib.rs"
 
 [dependencies]
