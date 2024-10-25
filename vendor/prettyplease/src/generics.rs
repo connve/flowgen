@@ -5,9 +5,9 @@ use crate::INDENT;
 use proc_macro2::TokenStream;
 use std::ptr;
 use syn::{
-    BoundLifetimes, ConstParam, GenericParam, Generics, LifetimeParam, PredicateLifetime,
-    PredicateType, TraitBound, TraitBoundModifier, TypeParam, TypeParamBound, WhereClause,
-    WherePredicate,
+    BoundLifetimes, CapturedParam, ConstParam, GenericParam, Generics, LifetimeParam,
+    PreciseCapture, PredicateLifetime, PredicateType, TraitBound, TraitBoundModifier, TypeParam,
+    TypeParamBound, WhereClause, WherePredicate,
 };
 
 impl Printer {
@@ -103,13 +103,16 @@ impl Printer {
 
     pub fn type_param_bound(&mut self, type_param_bound: &TypeParamBound) {
         match type_param_bound {
+            #![cfg_attr(all(test, exhaustive), deny(non_exhaustive_omitted_patterns))]
             TypeParamBound::Trait(trait_bound) => {
                 let tilde_const = false;
                 self.trait_bound(trait_bound, tilde_const);
             }
             TypeParamBound::Lifetime(lifetime) => self.lifetime(lifetime),
+            TypeParamBound::PreciseCapture(precise_capture) => {
+                self.precise_capture(precise_capture);
+            }
             TypeParamBound::Verbatim(bound) => self.type_param_bound_verbatim(bound),
-            #[cfg_attr(all(test, exhaustive), deny(non_exhaustive_omitted_patterns))]
             _ => unimplemented!("unknown TypeParamBound"),
         }
     }
@@ -289,9 +292,9 @@ impl Printer {
 
     fn where_predicate(&mut self, predicate: &WherePredicate) {
         match predicate {
+            #![cfg_attr(all(test, exhaustive), deny(non_exhaustive_omitted_patterns))]
             WherePredicate::Type(predicate) => self.predicate_type(predicate),
             WherePredicate::Lifetime(predicate) => self.predicate_lifetime(predicate),
-            #[cfg_attr(all(test, exhaustive), deny(non_exhaustive_omitted_patterns))]
             _ => unimplemented!("unknown WherePredicate"),
         }
     }
@@ -333,5 +336,25 @@ impl Printer {
             self.lifetime(&lifetime);
         }
         self.end();
+    }
+
+    fn precise_capture(&mut self, precise_capture: &PreciseCapture) {
+        self.word("use<");
+        for capture in precise_capture.params.iter().delimited() {
+            self.captured_param(&capture);
+            if !capture.is_last {
+                self.word(", ");
+            }
+        }
+        self.word(">");
+    }
+
+    fn captured_param(&mut self, capture: &CapturedParam) {
+        match capture {
+            #![cfg_attr(all(test, exhaustive), deny(non_exhaustive_omitted_patterns))]
+            CapturedParam::Lifetime(lifetime) => self.lifetime(lifetime),
+            CapturedParam::Ident(ident) => self.ident(ident),
+            _ => unimplemented!("unknown CapturedParam"),
+        }
     }
 }

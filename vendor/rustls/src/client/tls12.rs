@@ -13,13 +13,12 @@ use super::hs::ClientContext;
 use crate::check::{inappropriate_handshake_message, inappropriate_message};
 use crate::client::common::{ClientAuthDetails, ServerCertDetails};
 use crate::client::{hs, ClientConfig};
-use crate::common_state::{CommonState, HandshakeKind, Side, State};
+use crate::common_state::{CommonState, HandshakeKind, KxState, Side, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::KeyExchangeAlgorithm;
 use crate::enums::{AlertDescription, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, InvalidMessage, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHash;
-#[cfg(feature = "logging")]
 use crate::log::{debug, trace, warn};
 use crate::msgs::base::{Payload, PayloadU16, PayloadU8};
 use crate::msgs::ccs::ChangeCipherSpecPayload;
@@ -52,7 +51,7 @@ mod server_hello {
     impl CompleteServerHelloHandling {
         pub(in crate::client) fn handle_server_hello(
             mut self,
-            cx: &mut ClientContext,
+            cx: &mut ClientContext<'_>,
             suite: &'static Tls12CipherSuite,
             server_hello: &ServerHelloPayload,
             tls13_supported: bool,
@@ -845,8 +844,9 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
         //    a) generate our kx pair
         //    b) emit a ClientKeyExchange containing it
         //    c) if doing client auth, emit a CertificateVerify
-        //    d) emit a CCS
-        //    e) derive the shared keys, and start encryption
+        //    d) derive the shared keys
+        //    e) emit a CCS
+        //    f) use the derived keys to start encryption
         // 6. emit a Finished, our first encrypted message under the new keys.
 
         // 1.
@@ -920,15 +920,31 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             cx.common,
             &st.server_kx.kx_params,
         )?;
-        let named_group = kx_params
-            .named_group()
-            .ok_or(PeerMisbehaved::SelectedUnofferedKxGroup)?;
-        let skxg = match st.config.find_kx_group(named_group) {
-            Some(skxg) => skxg,
-            None => {
-                return Err(PeerMisbehaved::SelectedUnofferedKxGroup.into());
+        let maybe_skxg = match &kx_params {
+            ServerKeyExchangeParams::Ecdh(ecdh) => st
+                .config
+                .find_kx_group(ecdh.curve_params.named_group, ProtocolVersion::TLSv1_2),
+            ServerKeyExchangeParams::Dh(dh) => {
+                let ffdhe_group = dh.as_ffdhe_group();
+
+                st.config
+                    .provider
+                    .kx_groups
+                    .iter()
+                    .find(|kxg| kxg.ffdhe_group() == Some(ffdhe_group))
+                    .copied()
             }
         };
+        let skxg = match maybe_skxg {
+            Some(skxg) => skxg,
+            None => {
+                return Err(cx.common.send_fatal_alert(
+                    AlertDescription::IllegalParameter,
+                    PeerMisbehaved::SelectedUnofferedKxGroup,
+                ));
+            }
+        };
+        cx.common.kx_state = KxState::Start(skxg);
         let kx = skxg.start()?;
 
         // 5b.
@@ -944,18 +960,26 @@ impl State<ClientConnectionData> for ExpectServerDone<'_> {
             emit_certverify(&mut transcript, signer.as_ref(), cx.common)?;
         }
 
-        // 5d.
-        emit_ccs(cx.common);
-
-        // 5e. Now commit secrets.
+        // 5d. Derive secrets.
+        // An alert at this point will be sent in plaintext.  That must happen
+        // prior to the CCS, or else the peer will try to decrypt it.
         let secrets = ConnectionSecrets::from_key_exchange(
             kx,
             kx_params.pub_key(),
             ems_seed,
             st.randoms,
             suite,
-        )?;
+        )
+        .map_err(|err| {
+            cx.common
+                .send_fatal_alert(AlertDescription::IllegalParameter, err)
+        })?;
+        cx.common.kx_state.complete();
 
+        // 5e. CCS. We are definitely going to switch on encryption.
+        emit_ccs(cx.common);
+
+        // 5f. Now commit secrets.
         st.config.key_log.log(
             "CLIENT_RANDOM",
             &secrets.randoms.client,
@@ -1150,17 +1174,17 @@ impl ExpectFinished {
         // Save a ticket.  If we got a new ticket, save that.  Otherwise, save the
         // original ticket again.
         let (mut ticket, lifetime) = match self.ticket.take() {
-            Some(nst) => (nst.ticket.0, nst.lifetime_hint),
-            None => (Vec::new(), 0),
+            Some(nst) => (nst.ticket, nst.lifetime_hint),
+            None => (Arc::new(PayloadU16::empty()), 0),
         };
 
-        if ticket.is_empty() {
+        if ticket.0.is_empty() {
             if let Some(resuming_session) = &mut self.resuming_session {
-                ticket = resuming_session.take_ticket();
+                ticket = resuming_session.ticket();
             }
         }
 
-        if self.session_id.is_empty() && ticket.is_empty() {
+        if self.session_id.is_empty() && ticket.0.is_empty() {
             debug!("Session not saved: server didn't allocate id or ticket");
             return;
         }

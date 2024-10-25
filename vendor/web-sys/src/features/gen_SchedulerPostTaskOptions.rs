@@ -14,6 +14,64 @@ extern "C" {
     #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
     #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
     pub type SchedulerPostTaskOptions;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Get the `delay` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "delay")]
+    pub fn get_delay(this: &SchedulerPostTaskOptions) -> Option<f64>;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Change the `delay` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "delay")]
+    pub fn set_delay(this: &SchedulerPostTaskOptions, val: f64);
+    #[cfg(web_sys_unstable_apis)]
+    #[cfg(feature = "TaskPriority")]
+    #[doc = "Get the `priority` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`, `TaskPriority`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "priority")]
+    pub fn get_priority(this: &SchedulerPostTaskOptions) -> Option<TaskPriority>;
+    #[cfg(web_sys_unstable_apis)]
+    #[cfg(feature = "TaskPriority")]
+    #[doc = "Change the `priority` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`, `TaskPriority`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "priority")]
+    pub fn set_priority(this: &SchedulerPostTaskOptions, val: TaskPriority);
+    #[cfg(web_sys_unstable_apis)]
+    #[cfg(feature = "AbortSignal")]
+    #[doc = "Get the `signal` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AbortSignal`, `SchedulerPostTaskOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "signal")]
+    pub fn get_signal(this: &SchedulerPostTaskOptions) -> Option<AbortSignal>;
+    #[cfg(web_sys_unstable_apis)]
+    #[cfg(feature = "AbortSignal")]
+    #[doc = "Change the `signal` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AbortSignal`, `SchedulerPostTaskOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "signal")]
+    pub fn set_signal(this: &SchedulerPostTaskOptions, val: &AbortSignal);
 }
 #[cfg(web_sys_unstable_apis)]
 impl SchedulerPostTaskOptions {
@@ -29,61 +87,23 @@ impl SchedulerPostTaskOptions {
         ret
     }
     #[cfg(web_sys_unstable_apis)]
-    #[doc = "Change the `delay` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_delay()` instead."]
     pub fn delay(&mut self, val: f64) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("delay"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_delay(val);
         self
     }
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "TaskPriority")]
-    #[doc = "Change the `priority` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `SchedulerPostTaskOptions`, `TaskPriority`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_priority()` instead."]
     pub fn priority(&mut self, val: TaskPriority) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("priority"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_priority(val);
         self
     }
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "AbortSignal")]
-    #[doc = "Change the `signal` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `AbortSignal`, `SchedulerPostTaskOptions`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_signal()` instead."]
     pub fn signal(&mut self, val: &AbortSignal) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r =
-            ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("signal"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_signal(val);
         self
     }
 }

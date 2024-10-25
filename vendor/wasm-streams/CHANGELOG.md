@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1 (2024-09-28)
+
+* Fixed "closure invoked recursively or after being dropped" when dropping `IntoStream` and `IntoAsyncRead`. ([#24](https://github.com/MattiasBuelens/wasm-streams/issues/24), [#25](https://github.com/MattiasBuelens/wasm-streams/pull/25))
+
+## v0.4.0 (2023-10-31)
+
+* Added `ReadableStream::from(async_iterable)` and `try_from(async_iterable)`. ([#23](https://github.com/MattiasBuelens/wasm-streams/pull/23))
+* Stop calling `byobRequest.respond(0)` on cancel ([#16](https://github.com/MattiasBuelens/wasm-streams/pull/16))
+* ⚠ **Breaking change:** The system modules (`readable::sys`, `writable::sys` and `transform::sys`) now re-export directly from [the `web-sys` crate](https://docs.rs/web-sys/latest/web_sys/). This should make it easier to use `from_raw()`, `as_raw()` and `into_raw()`. ([#22](https://github.com/MattiasBuelens/wasm-streams/pull/22))
+
 ## v0.3.0 (2022-10-16)
 
 * Added support for web workers, by removing usage of [JavaScript snippets](https://rustwasm.github.io/docs/wasm-bindgen/reference/js-snippets.html). ([#13](https://github.com/MattiasBuelens/wasm-streams/issues/13), [#14](https://github.com/MattiasBuelens/wasm-streams/pull/14))

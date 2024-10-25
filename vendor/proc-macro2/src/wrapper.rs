@@ -3,8 +3,11 @@ use crate::detection::inside_proc_macro;
 use crate::location::LineColumn;
 use crate::{fallback, Delimiter, Punct, Spacing, TokenTree};
 use core::fmt::{self, Debug, Display};
+#[cfg(span_locations)]
+use core::ops::Range;
 use core::ops::RangeBounds;
 use core::str::FromStr;
+use std::ffi::CStr;
 use std::panic;
 #[cfg(super_unstable)]
 use std::path::PathBuf;
@@ -461,8 +464,25 @@ impl Span {
     }
 
     #[cfg(span_locations)]
+    pub fn byte_range(&self) -> Range<usize> {
+        match self {
+            #[cfg(proc_macro_span)]
+            Span::Compiler(s) => s.byte_range(),
+            #[cfg(not(proc_macro_span))]
+            Span::Compiler(_) => 0..0,
+            Span::Fallback(s) => s.byte_range(),
+        }
+    }
+
+    #[cfg(span_locations)]
     pub fn start(&self) -> LineColumn {
         match self {
+            #[cfg(proc_macro_span)]
+            Span::Compiler(s) => LineColumn {
+                line: s.line(),
+                column: s.column().saturating_sub(1),
+            },
+            #[cfg(not(proc_macro_span))]
             Span::Compiler(_) => LineColumn { line: 0, column: 0 },
             Span::Fallback(s) => s.start(),
         }
@@ -471,6 +491,15 @@ impl Span {
     #[cfg(span_locations)]
     pub fn end(&self) -> LineColumn {
         match self {
+            #[cfg(proc_macro_span)]
+            Span::Compiler(s) => {
+                let end = s.end();
+                LineColumn {
+                    line: end.line(),
+                    column: end.column().saturating_sub(1),
+                }
+            }
+            #[cfg(not(proc_macro_span))]
             Span::Compiler(_) => LineColumn { line: 0, column: 0 },
             Span::Fallback(s) => s.end(),
         }
@@ -833,19 +862,38 @@ impl Literal {
         }
     }
 
-    pub fn string(t: &str) -> Literal {
+    pub fn string(string: &str) -> Literal {
         if inside_proc_macro() {
-            Literal::Compiler(proc_macro::Literal::string(t))
+            Literal::Compiler(proc_macro::Literal::string(string))
         } else {
-            Literal::Fallback(fallback::Literal::string(t))
+            Literal::Fallback(fallback::Literal::string(string))
         }
     }
 
-    pub fn character(t: char) -> Literal {
+    pub fn character(ch: char) -> Literal {
         if inside_proc_macro() {
-            Literal::Compiler(proc_macro::Literal::character(t))
+            Literal::Compiler(proc_macro::Literal::character(ch))
         } else {
-            Literal::Fallback(fallback::Literal::character(t))
+            Literal::Fallback(fallback::Literal::character(ch))
+        }
+    }
+
+    pub fn byte_character(byte: u8) -> Literal {
+        if inside_proc_macro() {
+            Literal::Compiler({
+                #[cfg(not(no_literal_byte_character))]
+                {
+                    proc_macro::Literal::byte_character(byte)
+                }
+
+                #[cfg(no_literal_byte_character)]
+                {
+                    let fallback = fallback::Literal::byte_character(byte);
+                    fallback.repr.parse::<proc_macro::Literal>().unwrap()
+                }
+            })
+        } else {
+            Literal::Fallback(fallback::Literal::byte_character(byte))
         }
     }
 
@@ -854,6 +902,25 @@ impl Literal {
             Literal::Compiler(proc_macro::Literal::byte_string(bytes))
         } else {
             Literal::Fallback(fallback::Literal::byte_string(bytes))
+        }
+    }
+
+    pub fn c_string(string: &CStr) -> Literal {
+        if inside_proc_macro() {
+            Literal::Compiler({
+                #[cfg(not(no_literal_c_string))]
+                {
+                    proc_macro::Literal::c_string(string)
+                }
+
+                #[cfg(no_literal_c_string)]
+                {
+                    let fallback = fallback::Literal::c_string(string);
+                    fallback.repr.parse::<proc_macro::Literal>().unwrap()
+                }
+            })
+        } else {
+            Literal::Fallback(fallback::Literal::c_string(string))
         }
     }
 
@@ -926,5 +993,16 @@ impl Debug for Literal {
             Literal::Compiler(t) => Debug::fmt(t, f),
             Literal::Fallback(t) => Debug::fmt(t, f),
         }
+    }
+}
+
+#[cfg(span_locations)]
+pub(crate) fn invalidate_current_thread_spans() {
+    if inside_proc_macro() {
+        panic!(
+            "proc_macro2::extra::invalidate_current_thread_spans is not available in procedural macros"
+        );
+    } else {
+        crate::fallback::invalidate_current_thread_spans();
     }
 }

@@ -4,8 +4,8 @@ use crate::msgs::alert::AlertMessagePayload;
 use crate::msgs::base::Payload;
 use crate::msgs::ccs::ChangeCipherSpecPayload;
 use crate::msgs::codec::{Codec, Reader};
-use crate::msgs::enums::AlertLevel;
-use crate::msgs::handshake::HandshakeMessagePayload;
+use crate::msgs::enums::{AlertLevel, KeyUpdateRequest};
+use crate::msgs::handshake::{HandshakeMessagePayload, HandshakePayload};
 
 mod inbound;
 pub use inbound::{BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage};
@@ -13,15 +13,19 @@ pub use inbound::{BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage};
 mod outbound;
 use alloc::vec::Vec;
 
+pub(crate) use outbound::read_opaque_message_header;
 pub use outbound::{OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload};
 
 #[derive(Debug)]
 pub enum MessagePayload<'a> {
     Alert(AlertMessagePayload),
+    // one handshake message, parsed
     Handshake {
         parsed: HandshakeMessagePayload<'a>,
         encoded: Payload<'a>,
     },
+    // (potentially) multiple handshake messages, unparsed
+    HandshakeFlight(Payload<'a>),
     ChangeCipherSpec(ChangeCipherSpecPayload),
     ApplicationData(Payload<'a>),
 }
@@ -31,6 +35,7 @@ impl<'a> MessagePayload<'a> {
         match self {
             Self::Alert(x) => x.encode(bytes),
             Self::Handshake { encoded, .. } => bytes.extend(encoded.bytes()),
+            Self::HandshakeFlight(x) => bytes.extend(x.bytes()),
             Self::ChangeCipherSpec(x) => x.encode(bytes),
             Self::ApplicationData(x) => x.encode(bytes),
         }
@@ -68,7 +73,7 @@ impl<'a> MessagePayload<'a> {
     pub fn content_type(&self) -> ContentType {
         match self {
             Self::Alert(_) => ContentType::Alert,
-            Self::Handshake { .. } => ContentType::Handshake,
+            Self::Handshake { .. } | Self::HandshakeFlight(_) => ContentType::Handshake,
             Self::ChangeCipherSpec(_) => ContentType::ChangeCipherSpec,
             Self::ApplicationData(_) => ContentType::ApplicationData,
         }
@@ -82,6 +87,7 @@ impl<'a> MessagePayload<'a> {
                 parsed: parsed.into_owned(),
                 encoded: encoded.into_owned(),
             },
+            HandshakeFlight(x) => HandshakeFlight(x.into_owned()),
             ChangeCipherSpec(x) => ChangeCipherSpec(x),
             ApplicationData(x) => ApplicationData(x.into_owned()),
         }
@@ -89,7 +95,7 @@ impl<'a> MessagePayload<'a> {
 }
 
 impl From<Message<'_>> for PlainMessage {
-    fn from(msg: Message) -> Self {
+    fn from(msg: Message<'_>) -> Self {
         let typ = msg.payload.content_type();
         let payload = match msg.payload {
             MessagePayload::ApplicationData(payload) => payload.into_owned(),
@@ -175,7 +181,20 @@ impl Message<'_> {
     pub fn build_key_update_notify() -> Self {
         Self {
             version: ProtocolVersion::TLSv1_3,
-            payload: MessagePayload::handshake(HandshakeMessagePayload::build_key_update_notify()),
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::KeyUpdate,
+                payload: HandshakePayload::KeyUpdate(KeyUpdateRequest::UpdateNotRequested),
+            }),
+        }
+    }
+
+    pub fn build_key_update_request() -> Self {
+        Self {
+            version: ProtocolVersion::TLSv1_3,
+            payload: MessagePayload::handshake(HandshakeMessagePayload {
+                typ: HandshakeType::KeyUpdate,
+                payload: HandshakePayload::KeyUpdate(KeyUpdateRequest::UpdateRequested),
+            }),
         }
     }
 

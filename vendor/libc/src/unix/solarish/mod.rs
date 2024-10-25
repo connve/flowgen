@@ -120,6 +120,17 @@ s! {
         pub __sin6_src_id: u32
     }
 
+    pub struct in_pktinfo {
+        pub ipi_ifindex: ::c_uint,
+        pub ipi_spec_dst: ::in_addr,
+        pub ipi_addr: ::in_addr,
+    }
+
+    pub struct in6_pktinfo {
+        pub ipi6_addr: ::in6_addr,
+        pub ipi6_ifindex: ::c_uint,
+    }
+
     pub struct passwd {
         pub pw_name: *mut ::c_char,
         pub pw_passwd: *mut ::c_char,
@@ -135,7 +146,7 @@ s! {
     pub struct ifaddrs {
         pub ifa_next: *mut ifaddrs,
         pub ifa_name: *mut ::c_char,
-        pub ifa_flags: ::c_ulong,
+        pub ifa_flags: u64,
         pub ifa_addr: *mut ::sockaddr,
         pub ifa_netmask: *mut ::sockaddr,
         pub ifa_dstaddr: *mut ::sockaddr,
@@ -1238,14 +1249,20 @@ pub const CLD_STOPPED: ::c_int = 5;
 pub const CLD_CONTINUED: ::c_int = 6;
 
 pub const IP_RECVDSTADDR: ::c_int = 0x7;
+pub const IP_PKTINFO: ::c_int = 0x1a;
+pub const IP_DONTFRAG: ::c_int = 0x1b;
 pub const IP_SEC_OPT: ::c_int = 0x22;
 
 pub const IPV6_UNICAST_HOPS: ::c_int = 0x5;
 pub const IPV6_MULTICAST_IF: ::c_int = 0x6;
 pub const IPV6_MULTICAST_HOPS: ::c_int = 0x7;
 pub const IPV6_MULTICAST_LOOP: ::c_int = 0x8;
+pub const IPV6_PKTINFO: ::c_int = 0xb;
 pub const IPV6_RECVPKTINFO: ::c_int = 0x12;
+pub const IPV6_RECVTCLASS: ::c_int = 0x19;
+pub const IPV6_DONTFRAG: ::c_int = 0x21;
 pub const IPV6_SEC_OPT: ::c_int = 0x22;
+pub const IPV6_TCLASS: ::c_int = 0x26;
 pub const IPV6_V6ONLY: ::c_int = 0x27;
 
 cfg_if! {
@@ -1279,6 +1296,7 @@ pub const FOPEN_MAX: ::c_uint = 20;
 pub const FILENAME_MAX: ::c_uint = 1024;
 pub const L_tmpnam: ::c_uint = 25;
 pub const TMP_MAX: ::c_uint = 17576;
+pub const PIPE_BUF: ::c_int = 5120;
 
 pub const GRND_NONBLOCK: ::c_uint = 0x0001;
 pub const GRND_RANDOM: ::c_uint = 0x0002;
@@ -1289,6 +1307,7 @@ pub const O_RDWR: ::c_int = 2;
 pub const O_NDELAY: ::c_int = 0x04;
 pub const O_APPEND: ::c_int = 8;
 pub const O_DSYNC: ::c_int = 0x40;
+pub const O_RSYNC: ::c_int = 0x8000;
 pub const O_CREAT: ::c_int = 256;
 pub const O_EXCL: ::c_int = 1024;
 pub const O_NOCTTY: ::c_int = 2048;
@@ -1774,8 +1793,9 @@ pub const SOCK_SEQPACKET: ::c_int = 6;
 pub const IP_MULTICAST_IF: ::c_int = 16;
 pub const IP_MULTICAST_TTL: ::c_int = 17;
 pub const IP_MULTICAST_LOOP: ::c_int = 18;
-pub const IP_TTL: ::c_int = 4;
 pub const IP_HDRINCL: ::c_int = 2;
+pub const IP_TOS: ::c_int = 3;
+pub const IP_TTL: ::c_int = 4;
 pub const IP_ADD_MEMBERSHIP: ::c_int = 19;
 pub const IP_DROP_MEMBERSHIP: ::c_int = 20;
 pub const IPV6_JOIN_GROUP: ::c_int = 9;
@@ -1829,6 +1849,7 @@ pub const SO_TYPE: ::c_int = 0x1008;
 pub const SO_PROTOTYPE: ::c_int = 0x1009;
 pub const SO_DOMAIN: ::c_int = 0x100c;
 pub const SO_TIMESTAMP: ::c_int = 0x1013;
+pub const SO_EXCLBIND: ::c_int = 0x1015;
 
 pub const SCM_RIGHTS: ::c_int = 0x1010;
 pub const SCM_UCRED: ::c_int = 0x1012;
@@ -2148,7 +2169,7 @@ pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t {
 pub const PTHREAD_MUTEX_NORMAL: ::c_int = 0;
 pub const PTHREAD_MUTEX_ERRORCHECK: ::c_int = 2;
 pub const PTHREAD_MUTEX_RECURSIVE: ::c_int = 4;
-pub const PTHREAD_MUTEX_DEFAULT: ::c_int = PTHREAD_MUTEX_NORMAL;
+pub const PTHREAD_MUTEX_DEFAULT: ::c_int = ::PTHREAD_MUTEX_NORMAL;
 
 pub const RTLD_NEXT: *mut ::c_void = -1isize as *mut ::c_void;
 pub const RTLD_DEFAULT: *mut ::c_void = -2isize as *mut ::c_void;
@@ -2826,6 +2847,7 @@ extern "C" {
     #[cfg_attr(target_os = "illumos", link_name = "_globfree_ext")]
     pub fn globfree(pglob: *mut ::glob_t);
 
+    pub fn posix_fallocate(fd: ::c_int, offset: ::off_t, len: ::off_t) -> ::c_int;
     pub fn posix_madvise(addr: *mut ::c_void, len: ::size_t, advice: ::c_int) -> ::c_int;
 
     pub fn shmat(shmid: ::c_int, shmaddr: *const ::c_void, shmflg: ::c_int) -> *mut ::c_void;
@@ -2867,15 +2889,15 @@ extern "C" {
     ) -> ::c_int;
     pub fn nl_langinfo(item: ::nl_item) -> *mut ::c_char;
 
-    #[cfg_attr(target_os = "illumos", link_name = "__xnet_bind")]
+    #[link_name = "__xnet_bind"]
     pub fn bind(socket: ::c_int, address: *const ::sockaddr, address_len: ::socklen_t) -> ::c_int;
 
     pub fn writev(fd: ::c_int, iov: *const ::iovec, iovcnt: ::c_int) -> ::ssize_t;
     pub fn readv(fd: ::c_int, iov: *const ::iovec, iovcnt: ::c_int) -> ::ssize_t;
 
-    #[cfg_attr(target_os = "illumos", link_name = "__xnet_sendmsg")]
+    #[link_name = "__xnet_sendmsg"]
     pub fn sendmsg(fd: ::c_int, msg: *const ::msghdr, flags: ::c_int) -> ::ssize_t;
-    #[cfg_attr(target_os = "illumos", link_name = "__xnet_recvmsg")]
+    #[link_name = "__xnet_recvmsg"]
     pub fn recvmsg(fd: ::c_int, msg: *mut ::msghdr, flags: ::c_int) -> ::ssize_t;
     pub fn accept4(
         fd: ::c_int,

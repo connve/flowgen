@@ -70,7 +70,7 @@ extern "C" {
     ) -> GpuComputePassEncoder;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "GpuRenderPassDescriptor", feature = "GpuRenderPassEncoder",))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = beginRenderPass)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = beginRenderPass)]
     #[doc = "The `beginRenderPass()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/beginRenderPass)"]
@@ -82,7 +82,7 @@ extern "C" {
     pub fn begin_render_pass(
         this: &GpuCommandEncoder,
         descriptor: &GpuRenderPassDescriptor,
-    ) -> GpuRenderPassEncoder;
+    ) -> Result<GpuRenderPassEncoder, JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "GpuBuffer")]
     # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = clearBuffer)]
@@ -341,7 +341,7 @@ extern "C" {
     );
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "GpuImageCopyBuffer", feature = "GpuImageCopyTexture",))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyBufferToTexture)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyBufferToTexture)]
     #[doc = "The `copyBufferToTexture()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyBufferToTexture)"]
@@ -355,14 +355,14 @@ extern "C" {
         source: &GpuImageCopyBuffer,
         destination: &GpuImageCopyTexture,
         copy_size: &::wasm_bindgen::JsValue,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(
         feature = "GpuExtent3dDict",
         feature = "GpuImageCopyBuffer",
         feature = "GpuImageCopyTexture",
     ))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyBufferToTexture)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyBufferToTexture)]
     #[doc = "The `copyBufferToTexture()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyBufferToTexture)"]
@@ -376,10 +376,10 @@ extern "C" {
         source: &GpuImageCopyBuffer,
         destination: &GpuImageCopyTexture,
         copy_size: &GpuExtent3dDict,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "GpuImageCopyBuffer", feature = "GpuImageCopyTexture",))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToBuffer)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToBuffer)]
     #[doc = "The `copyTextureToBuffer()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyTextureToBuffer)"]
@@ -393,14 +393,14 @@ extern "C" {
         source: &GpuImageCopyTexture,
         destination: &GpuImageCopyBuffer,
         copy_size: &::wasm_bindgen::JsValue,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(
         feature = "GpuExtent3dDict",
         feature = "GpuImageCopyBuffer",
         feature = "GpuImageCopyTexture",
     ))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToBuffer)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToBuffer)]
     #[doc = "The `copyTextureToBuffer()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyTextureToBuffer)"]
@@ -414,10 +414,10 @@ extern "C" {
         source: &GpuImageCopyTexture,
         destination: &GpuImageCopyBuffer,
         copy_size: &GpuExtent3dDict,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "GpuImageCopyTexture")]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToTexture)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToTexture)]
     #[doc = "The `copyTextureToTexture()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyTextureToTexture)"]
@@ -431,10 +431,10 @@ extern "C" {
         source: &GpuImageCopyTexture,
         destination: &GpuImageCopyTexture,
         copy_size: &::wasm_bindgen::JsValue,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "GpuExtent3dDict", feature = "GpuImageCopyTexture",))]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToTexture)]
+    # [wasm_bindgen (catch , method , structural , js_class = "GPUCommandEncoder" , js_name = copyTextureToTexture)]
     #[doc = "The `copyTextureToTexture()` method."]
     #[doc = ""]
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/copyTextureToTexture)"]
@@ -448,7 +448,7 @@ extern "C" {
         source: &GpuImageCopyTexture,
         destination: &GpuImageCopyTexture,
         copy_size: &GpuExtent3dDict,
-    );
+    ) -> Result<(), JsValue>;
     #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "GpuCommandBuffer")]
     # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = finish)]
@@ -514,18 +514,6 @@ extern "C" {
         destination: &GpuBuffer,
         destination_offset: f64,
     );
-    #[cfg(web_sys_unstable_apis)]
-    #[cfg(feature = "GpuQuerySet")]
-    # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = writeTimestamp)]
-    #[doc = "The `writeTimestamp()` method."]
-    #[doc = ""]
-    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/GPUCommandEncoder/writeTimestamp)"]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `GpuCommandEncoder`, `GpuQuerySet`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
-    pub fn write_timestamp(this: &GpuCommandEncoder, query_set: &GpuQuerySet, query_index: u32);
     #[cfg(web_sys_unstable_apis)]
     # [wasm_bindgen (method , structural , js_class = "GPUCommandEncoder" , js_name = insertDebugMarker)]
     #[doc = "The `insertDebugMarker()` method."]

@@ -1,3 +1,5 @@
+//! Key schedule maintenance for TLS1.3
+
 use alloc::boxed::Box;
 use alloc::string::ToString;
 
@@ -6,10 +8,9 @@ use crate::crypto::cipher::{AeadKey, Iv, MessageDecrypter};
 use crate::crypto::tls13::{expand, Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::crypto::{hash, hmac, SharedSecret};
 use crate::error::Error;
+use crate::msgs::message::Message;
 use crate::suites::PartiallyExtractedSecrets;
 use crate::{quic, KeyLog, Tls13CipherSuite};
-
-/// Key schedule maintenance for TLS1.3
 
 /// The kinds of secret we can extract from `KeySchedule`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -133,7 +134,7 @@ impl KeyScheduleEarly {
 
 /// Pre-handshake key schedule
 ///
-/// The inner `KeySchedule` is either constructed without any secrets based on ths HKDF algorithm
+/// The inner `KeySchedule` is either constructed without any secrets based on the HKDF algorithm
 /// or is extracted from a `KeyScheduleEarly`. This can then be used to derive the `KeyScheduleHandshakeStart`.
 pub(crate) struct KeySchedulePreHandshake {
     ks: KeySchedule,
@@ -496,6 +497,17 @@ impl KeyScheduleTraffic {
         self.ks.set_encrypter(&secret, common);
     }
 
+    pub(crate) fn request_key_update_and_update_encrypter(
+        &mut self,
+        common: &mut CommonState,
+    ) -> Result<(), Error> {
+        common.check_aligned_handshake()?;
+        common.send_msg_encrypt(Message::build_key_update_request().into());
+        let secret = self.next_application_traffic_secret(common.side);
+        self.ks.set_encrypter(&secret, common);
+        Ok(())
+    }
+
     pub(crate) fn update_decrypter(&mut self, common: &mut CommonState) {
         let secret = self.next_application_traffic_secret(common.side.peer());
         self.ks.set_decrypter(&secret, common);
@@ -597,7 +609,10 @@ impl KeySchedule {
 
         common
             .record_layer
-            .set_message_encrypter(self.suite.aead_alg.encrypter(key, iv));
+            .set_message_encrypter(
+                self.suite.aead_alg.encrypter(key, iv),
+                self.suite.common.confidentiality_limit,
+            );
     }
 
     fn set_decrypter(&self, secret: &OkmBlock, common: &mut CommonState) {

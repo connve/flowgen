@@ -1,6 +1,7 @@
 use alloc::collections::BTreeSet;
 #[cfg(feature = "logging")]
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Deref;
@@ -18,7 +19,6 @@ use crate::enums::{
 use crate::error::InvalidMessage;
 #[cfg(feature = "tls12")]
 use crate::ffdhe_groups::FfdheGroup;
-#[cfg(feature = "logging")]
 use crate::log::warn;
 use crate::msgs::base::{Payload, PayloadU16, PayloadU24, PayloadU8};
 use crate::msgs::codec::{self, Codec, LengthPrefixedBuffer, ListLength, Reader, TlsListElement};
@@ -59,7 +59,7 @@ macro_rules! wrapped_payload(
             self.0.encode(bytes);
         }
 
-        fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+        fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
             Ok(Self($inner::read(r)?))
         }
     }
@@ -87,7 +87,7 @@ impl Codec<'_> for Random {
         bytes.extend_from_slice(&self.0);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let bytes = match r.take(32) {
             Some(bytes) => bytes,
             None => return Err(InvalidMessage::MissingData("Random")),
@@ -148,7 +148,7 @@ impl Codec<'_> for SessionId {
         bytes.extend_from_slice(&self.data[..self.len]);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let len = u8::read(r)? as usize;
         if len > 32 {
             return Err(InvalidMessage::TrailingData("SessionID"));
@@ -196,7 +196,7 @@ impl UnknownExtension {
         self.payload.encode(bytes);
     }
 
-    fn read(typ: ExtensionType, r: &mut Reader) -> Self {
+    fn read(typ: ExtensionType, r: &mut Reader<'_>) -> Self {
         let payload = Payload::read(r).into_owned();
         Self { typ, payload }
     }
@@ -226,7 +226,7 @@ impl ServerNamePayload {
         Self::HostName(hostname)
     }
 
-    fn read_hostname(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read_hostname(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         use pki_types::ServerName;
         let raw = PayloadU16::read(r)?;
 
@@ -267,7 +267,7 @@ impl Codec<'_> for ServerName {
         self.payload.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ServerNameType::read(r)?;
 
         let payload = match typ {
@@ -373,7 +373,7 @@ impl Codec<'_> for KeyShareEntry {
         self.payload.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let group = NamedGroup::read(r)?;
         let payload = PayloadU16::read(r)?;
 
@@ -403,7 +403,7 @@ impl Codec<'_> for PresharedKeyIdentity {
         self.obfuscated_ticket_age.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             identity: PayloadU16::read(r)?,
             obfuscated_ticket_age: u32::read(r)?,
@@ -443,7 +443,7 @@ impl Codec<'_> for PresharedKeyOffer {
         self.binders.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             identities: Vec::read(r)?,
             binders: Vec::read(r)?,
@@ -471,7 +471,7 @@ impl Codec<'_> for OcspCertificateStatusRequest {
         self.extensions.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             responder_ids: Vec::read(r)?,
             extensions: PayloadU16::read(r)?,
@@ -496,7 +496,7 @@ impl Codec<'_> for CertificateStatusRequest {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = CertificateStatusType::read(r)?;
 
         match typ {
@@ -624,7 +624,7 @@ impl Codec<'_> for ClientExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -773,7 +773,7 @@ impl Codec<'_> for ServerExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -834,7 +834,7 @@ impl Codec<'_> for ClientHelloPayload {
         self.payload_encode(bytes, Encoding::Standard)
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let mut ret = Self {
             client_version: ProtocolVersion::read(r)?,
             random: Random::read(r)?,
@@ -1154,7 +1154,7 @@ impl Codec<'_> for HelloRetryExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -1191,7 +1191,7 @@ impl Codec<'_> for HelloRetryRequest {
         self.payload_encode(bytes, Encoding::Standard)
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let session_id = SessionId::read(r)?;
         let cipher_suite = CipherSuite::read(r)?;
         let compression = Compression::read(r)?;
@@ -1317,7 +1317,7 @@ impl Codec<'_> for ServerHelloPayload {
     }
 
     // minus version and random, which have already been read.
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let session_id = SessionId::read(r)?;
         let suite = CipherSuite::read(r)?;
         let compression = Compression::read(r)?;
@@ -1447,6 +1447,7 @@ impl<'a> Deref for CertificateChain<'a> {
 impl TlsListElement for CertificateDer<'_> {
     const SIZE_LEN: ListLength = ListLength::U24 {
         max: CERTIFICATE_MAX_SIZE_LIMIT,
+        error: InvalidMessage::CertificatePayloadTooLarge,
     };
 }
 
@@ -1463,7 +1464,7 @@ pub(crate) enum CertificateExtension<'a> {
     Unknown(UnknownExtension),
 }
 
-impl<'a> CertificateExtension<'a> {
+impl CertificateExtension<'_> {
     pub(crate) fn ext_type(&self) -> ExtensionType {
         match *self {
             Self::CertificateStatus(_) => ExtensionType::StatusRequest,
@@ -1515,7 +1516,7 @@ impl<'a> Codec<'a> for CertificateExtension<'a> {
     }
 }
 
-impl<'a> TlsListElement for CertificateExtension<'a> {
+impl TlsListElement for CertificateExtension<'_> {
     const SIZE_LEN: ListLength = ListLength::U16;
 }
 
@@ -1580,9 +1581,10 @@ impl<'a> CertificateEntry<'a> {
     }
 }
 
-impl<'a> TlsListElement for CertificateEntry<'a> {
+impl TlsListElement for CertificateEntry<'_> {
     const SIZE_LEN: ListLength = ListLength::U24 {
         max: CERTIFICATE_MAX_SIZE_LIMIT,
+        error: InvalidMessage::CertificatePayloadTooLarge,
     };
 }
 
@@ -1725,7 +1727,7 @@ impl Codec<'_> for EcParameters {
         self.named_group.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let ct = ECCurveType::read(r)?;
         if ct != ECCurveType::NamedCurve {
             return Err(InvalidMessage::UnsupportedCurveType);
@@ -1772,7 +1774,7 @@ impl ClientKeyExchangeParams {
 
 #[cfg(feature = "tls12")]
 impl KxDecode<'_> for ClientKeyExchangeParams {
-    fn decode(r: &mut Reader, algo: KeyExchangeAlgorithm) -> Result<Self, InvalidMessage> {
+    fn decode(r: &mut Reader<'_>, algo: KeyExchangeAlgorithm) -> Result<Self, InvalidMessage> {
         use KeyExchangeAlgorithm::*;
         Ok(match algo {
             ECDHE => Self::Ecdh(ClientEcdhParams::read(r)?),
@@ -1781,33 +1783,37 @@ impl KxDecode<'_> for ClientKeyExchangeParams {
     }
 }
 
+#[cfg(feature = "tls12")]
 #[derive(Debug)]
 pub(crate) struct ClientEcdhParams {
     pub(crate) public: PayloadU8,
 }
 
+#[cfg(feature = "tls12")]
 impl Codec<'_> for ClientEcdhParams {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.public.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let pb = PayloadU8::read(r)?;
         Ok(Self { public: pb })
     }
 }
 
+#[cfg(feature = "tls12")]
 #[derive(Debug)]
 pub(crate) struct ClientDhParams {
     pub(crate) public: PayloadU16,
 }
 
+#[cfg(feature = "tls12")]
 impl Codec<'_> for ClientDhParams {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.public.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             public: PayloadU16::read(r)?,
         })
@@ -1839,7 +1845,7 @@ impl Codec<'_> for ServerEcdhParams {
         self.public.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let cp = EcParameters::read(r)?;
         let pb = PayloadU8::read(r)?;
 
@@ -1861,7 +1867,7 @@ pub(crate) struct ServerDhParams {
 impl ServerDhParams {
     #[cfg(feature = "tls12")]
     pub(crate) fn new(kx: &dyn ActiveKeyExchange) -> Self {
-        let params = match FfdheGroup::from_named_group(kx.group()) {
+        let params = match kx.ffdhe_group() {
             Some(params) => params,
             None => panic!("invalid NamedGroup for DHE key exchange: {:?}", kx.group()),
         };
@@ -1874,8 +1880,8 @@ impl ServerDhParams {
     }
 
     #[cfg(feature = "tls12")]
-    fn named_group(&self) -> Option<NamedGroup> {
-        FfdheGroup::from_params_trimming_leading_zeros(&self.dh_p.0, &self.dh_g.0).named_group()
+    pub(crate) fn as_ffdhe_group(&self) -> FfdheGroup<'_> {
+        FfdheGroup::from_params_trimming_leading_zeros(&self.dh_p.0, &self.dh_g.0)
     }
 }
 
@@ -1886,7 +1892,7 @@ impl Codec<'_> for ServerDhParams {
         self.dh_Ys.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             dh_p: PayloadU16::read(r)?,
             dh_g: PayloadU16::read(r)?,
@@ -1925,19 +1931,11 @@ impl ServerKeyExchangeParams {
             Self::Dh(dh) => dh.encode(buf),
         }
     }
-
-    #[cfg(feature = "tls12")]
-    pub(crate) fn named_group(&self) -> Option<NamedGroup> {
-        match self {
-            Self::Ecdh(ecdh) => Some(ecdh.curve_params.named_group),
-            Self::Dh(dh) => dh.named_group(),
-        }
-    }
 }
 
 #[cfg(feature = "tls12")]
 impl KxDecode<'_> for ServerKeyExchangeParams {
-    fn decode(r: &mut Reader, algo: KeyExchangeAlgorithm) -> Result<Self, InvalidMessage> {
+    fn decode(r: &mut Reader<'_>, algo: KeyExchangeAlgorithm) -> Result<Self, InvalidMessage> {
         use KeyExchangeAlgorithm::*;
         Ok(match algo {
             ECDHE => Self::Ecdh(ServerEcdhParams::read(r)?),
@@ -1979,7 +1977,7 @@ impl Codec<'_> for ServerKeyExchangePayload {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         // read as Unknown, fully parse when we know the
         // KeyExchangeAlgorithm
         Ok(Self::Unknown(Payload::read(r).into_owned()))
@@ -2123,7 +2121,7 @@ impl Codec<'_> for CertificateRequestPayload {
         self.canames.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let certtypes = Vec::read(r)?;
         let sigschemes = Vec::read(r)?;
         let canames = Vec::read(r)?;
@@ -2173,7 +2171,7 @@ impl Codec<'_> for CertReqExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -2217,7 +2215,7 @@ impl Codec<'_> for CertificateRequestPayloadTls13 {
         self.extensions.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let context = PayloadU8::read(r)?;
         let extensions = Vec::read(r)?;
 
@@ -2266,7 +2264,10 @@ impl CertificateRequestPayloadTls13 {
 #[derive(Debug)]
 pub struct NewSessionTicketPayload {
     pub(crate) lifetime_hint: u32,
-    pub(crate) ticket: PayloadU16,
+    // Tickets can be large (KB), so we deserialise this straight
+    // into an Arc, so it can be passed directly into the client's
+    // session object without copying.
+    pub(crate) ticket: Arc<PayloadU16>,
 }
 
 impl NewSessionTicketPayload {
@@ -2274,7 +2275,7 @@ impl NewSessionTicketPayload {
     pub(crate) fn new(lifetime_hint: u32, ticket: Vec<u8>) -> Self {
         Self {
             lifetime_hint,
-            ticket: PayloadU16::new(ticket),
+            ticket: Arc::new(PayloadU16::new(ticket)),
         }
     }
 }
@@ -2285,9 +2286,9 @@ impl Codec<'_> for NewSessionTicketPayload {
         self.ticket.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let lifetime = u32::read(r)?;
-        let ticket = PayloadU16::read(r)?;
+        let ticket = Arc::new(PayloadU16::read(r)?);
 
         Ok(Self {
             lifetime_hint: lifetime,
@@ -2323,7 +2324,7 @@ impl Codec<'_> for NewSessionTicketExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -2347,7 +2348,7 @@ pub struct NewSessionTicketPayloadTls13 {
     pub(crate) lifetime: u32,
     pub(crate) age_add: u32,
     pub(crate) nonce: PayloadU8,
-    pub(crate) ticket: PayloadU16,
+    pub(crate) ticket: Arc<PayloadU16>,
     pub(crate) exts: Vec<NewSessionTicketExtension>,
 }
 
@@ -2357,7 +2358,7 @@ impl NewSessionTicketPayloadTls13 {
             lifetime,
             age_add,
             nonce: PayloadU8::new(nonce),
-            ticket: PayloadU16::new(ticket),
+            ticket: Arc::new(PayloadU16::new(ticket)),
             exts: vec![],
         }
     }
@@ -2394,11 +2395,11 @@ impl Codec<'_> for NewSessionTicketPayloadTls13 {
         self.exts.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let lifetime = u32::read(r)?;
         let age_add = u32::read(r)?;
         let nonce = PayloadU8::read(r)?;
-        let ticket = PayloadU16::read(r)?;
+        let ticket = Arc::new(PayloadU16::read(r)?);
         let exts = Vec::read(r)?;
 
         Ok(Self {
@@ -2489,7 +2490,7 @@ impl CompressedCertificatePayload<'_> {
         }
     }
 
-    pub(crate) fn as_borrowed(&self) -> CompressedCertificatePayload {
+    pub(crate) fn as_borrowed(&self) -> CompressedCertificatePayload<'_> {
         CompressedCertificatePayload {
             alg: self.alg,
             uncompressed_len: self.uncompressed_len,
@@ -2696,13 +2697,6 @@ impl<'a> HandshakeMessagePayload<'a> {
             .map(|_| Self { typ, payload })
     }
 
-    pub(crate) fn build_key_update_notify() -> Self {
-        Self {
-            typ: HandshakeType::KeyUpdate,
-            payload: HandshakePayload::KeyUpdate(KeyUpdateRequest::UpdateNotRequested),
-        }
-    }
-
     pub(crate) fn encoding_for_binder_signing(&self) -> Vec<u8> {
         let mut ret = self.get_encoding();
 
@@ -2733,7 +2727,13 @@ impl<'a> HandshakeMessagePayload<'a> {
         }
         .encode(bytes);
 
-        let nested = LengthPrefixedBuffer::new(ListLength::U24 { max: usize::MAX }, bytes);
+        let nested = LengthPrefixedBuffer::new(
+            ListLength::U24 {
+                max: usize::MAX,
+                error: InvalidMessage::MessageTooLarge,
+            },
+            bytes,
+        );
 
         match &self.payload {
             // for Server Hello and HelloRetryRequest payloads we need to encode the payload
@@ -2776,7 +2776,7 @@ impl Codec<'_> for HpkeSymmetricCipherSuite {
         self.aead_id.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             kdf_id: HpkeKdf::read(r)?,
             aead_id: HpkeAead::read(r)?,
@@ -2805,7 +2805,7 @@ impl Codec<'_> for HpkeKeyConfig {
             .encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             config_id: u8::read(r)?,
             kem_id: HpkeKem::read(r)?,
@@ -2855,7 +2855,7 @@ impl Codec<'_> for EchConfigContents {
         self.extensions.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             key_config: HpkeKeyConfig::read(r)?,
             maximum_name_length: u8::read(r)?,
@@ -2902,7 +2902,7 @@ impl Codec<'_> for EchConfigPayload {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let version = EchVersion::read(r)?;
         let length = u16::read(r)?;
         let mut contents = r.sub(length as usize)?;
@@ -2944,7 +2944,7 @@ impl Codec<'_> for EchConfigExtension {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let typ = ExtensionType::read(r)?;
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
@@ -2991,7 +2991,7 @@ impl Codec<'_> for EncryptedClientHello {
         }
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match EchClientHelloType::read(r)? {
             EchClientHelloType::ClientHelloOuter => {
                 Ok(Self::Outer(EncryptedClientHelloOuter::read(r)?))
@@ -3028,7 +3028,7 @@ impl Codec<'_> for EncryptedClientHelloOuter {
         self.payload.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             cipher_suite: HpkeSymmetricCipherSuite::read(r)?,
             config_id: u8::read(r)?,
@@ -3052,7 +3052,7 @@ impl Codec<'_> for ServerEncryptedClientHello {
         self.retry_configs.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         Ok(Self {
             retry_configs: Vec::<EchConfigPayload>::read(r)?,
         })

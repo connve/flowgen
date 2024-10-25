@@ -1,5 +1,6 @@
-#![warn(rust_2018_idioms, single_use_lifetimes)]
-#![allow(dead_code)]
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#![allow(dead_code, clippy::items_after_statements)]
 
 // Refs: https://doc.rust-lang.org/reference/attributes.html
 

@@ -8,8 +8,8 @@ pub(super) struct ActiveCertifiedKey<'a> {
     ocsp: Option<&'a [u8]>,
 }
 
-impl<'a> ActiveCertifiedKey<'a> {
-    pub(super) fn from_certified_key(key: &sign::CertifiedKey) -> ActiveCertifiedKey {
+impl ActiveCertifiedKey<'_> {
+    pub(super) fn from_certified_key(key: &sign::CertifiedKey) -> ActiveCertifiedKey<'_> {
         ActiveCertifiedKey {
             key,
             ocsp: key.ocsp.as_deref(),

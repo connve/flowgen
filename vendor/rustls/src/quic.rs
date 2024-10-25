@@ -29,10 +29,11 @@ mod connection {
     use crate::client::{ClientConfig, ClientConnectionData};
     use crate::common_state::{CommonState, Protocol, DEFAULT_BUFFER_LIMIT};
     use crate::conn::{ConnectionCore, SideData};
-    use crate::enums::{AlertDescription, ProtocolVersion};
+    use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
     use crate::error::Error;
-    use crate::msgs::deframer::DeframerVecBuffer;
+    use crate::msgs::deframer::buffers::{DeframerVecBuffer, Locator};
     use crate::msgs::handshake::{ClientExtension, ServerExtension};
+    use crate::msgs::message::InboundPlainMessage;
     use crate::server::{ServerConfig, ServerConnectionData};
     use crate::vecbuf::ChunkVecBuffer;
 
@@ -212,7 +213,7 @@ mod connection {
     }
 
     impl Debug for ClientConnection {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("quic::ClientConnection")
                 .finish()
         }
@@ -312,7 +313,7 @@ mod connection {
     }
 
     impl Debug for ServerConnection {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("quic::ServerConnection")
                 .finish()
         }
@@ -371,13 +372,29 @@ mod connection {
         ///
         /// Handshake data obtained from separate encryption levels should be supplied in separate calls.
         pub fn read_hs(&mut self, plaintext: &[u8]) -> Result<(), Error> {
-            self.core.message_deframer.push(
-                ProtocolVersion::TLSv1_3,
-                plaintext,
-                &mut self.deframer_buffer,
-            )?;
+            let range = self.deframer_buffer.extend(plaintext);
+
+            self.core.hs_deframer.input_message(
+                InboundPlainMessage {
+                    typ: ContentType::Handshake,
+                    version: ProtocolVersion::TLSv1_3,
+                    payload: &self.deframer_buffer.filled()[range.clone()],
+                },
+                &Locator::new(self.deframer_buffer.filled()),
+                range.end,
+            );
+
+            // `core.process_new_packets` should not process any data in `deframer_buffer`;
+            // it is already ready in `hs_deframer`.
+            self.deframer_buffer.processed = range.end;
+
+            self.core
+                .hs_deframer
+                .coalesce(self.deframer_buffer.filled_mut())?;
+
             self.core
                 .process_new_packets(&mut self.deframer_buffer, &mut self.sendable_plaintext)?;
+
             Ok(())
         }
 
@@ -680,7 +697,7 @@ pub trait PacketKey: Send + Sync {
     /// the additional authenticated data; and the `payload`. The authentication tag is returned if
     /// encryption succeeds.
     ///
-    /// Fails iff the payload is longer than allowed by the cipher suite's AEAD algorithm.
+    /// Fails if and only if the payload is longer than allowed by the cipher suite's AEAD algorithm.
     fn encrypt_in_place(
         &self,
         packet_number: u64,

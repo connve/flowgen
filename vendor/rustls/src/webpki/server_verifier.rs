@@ -5,7 +5,6 @@ use pki_types::{CertificateDer, CertificateRevocationListDer, ServerName, UnixTi
 use webpki::{CertRevocationList, ExpirationPolicy, RevocationCheckDepth, UnknownStatusPolicy};
 
 use crate::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
-#[cfg(feature = "logging")]
 use crate::log::trace;
 use crate::verify::{
     DigitallySignedStruct, HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -306,6 +305,7 @@ test_for_each_provider! {
     use std::{vec, println};
     use std::prelude::v1::*;
 
+    use pki_types::pem::PemObject;
     use pki_types::{CertificateDer, CertificateRevocationListDer};
 
     use super::{VerifierBuilderError, WebPkiServerVerifier};
@@ -314,12 +314,7 @@ test_for_each_provider! {
     fn load_crls(crls_der: &[&[u8]]) -> Vec<CertificateRevocationListDer<'static>> {
         crls_der
             .iter()
-            .map(|pem_bytes| {
-                rustls_pemfile::crls(&mut &pem_bytes[..])
-                    .next()
-                    .unwrap()
-                    .unwrap()
-            })
+            .map(|pem_bytes| CertificateRevocationListDer::from_pem_slice(pem_bytes).unwrap())
             .collect()
     }
 

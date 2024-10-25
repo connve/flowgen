@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
 use hyper_util::client::legacy::connect::HttpConnector;
-#[cfg(any(feature = "rustls-native-certs", feature = "webpki-roots"))]
+#[cfg(any(
+    feature = "rustls-native-certs",
+    feature = "rustls-platform-verifier",
+    feature = "webpki-roots"
+))]
 use rustls::crypto::CryptoProvider;
 use rustls::ClientConfig;
 
 use super::{DefaultServerNameResolver, HttpsConnector, ResolveServerName};
-#[cfg(any(feature = "rustls-native-certs", feature = "webpki-roots"))]
+#[cfg(any(
+    feature = "rustls-native-certs",
+    feature = "webpki-roots",
+    feature = "rustls-platform-verifier"
+))]
 use crate::config::ConfigBuilderExt;
 use pki_types::ServerName;
 
@@ -57,7 +65,8 @@ impl ConnectorBuilder<WantsTlsConfig> {
         ConnectorBuilder(WantsSchemes { tls_config: config })
     }
 
-    /// Use rustls' default crypto provider and other defaults, and the platform verifier
+    /// Shorthand for using rustls' default crypto provider and other defaults, and
+    /// the platform verifier.
     ///
     /// See [`ConfigBuilderExt::with_platform_verifier()`].
     #[cfg(all(
@@ -70,6 +79,23 @@ impl ConnectorBuilder<WantsTlsConfig> {
                 .with_platform_verifier()
                 .with_no_client_auth(),
         )
+    }
+
+    /// Shorthand for using a custom [`CryptoProvider`] and the platform verifier.
+    ///
+    /// See [`ConfigBuilderExt::with_platform_verifier()`].
+    #[cfg(feature = "rustls-platform-verifier")]
+    pub fn with_provider_and_platform_verifier(
+        self,
+        provider: impl Into<Arc<CryptoProvider>>,
+    ) -> std::io::Result<ConnectorBuilder<WantsSchemes>> {
+        Ok(self.with_tls_config(
+            ClientConfig::builder_with_provider(provider.into())
+                .with_safe_default_protocol_versions()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                .with_platform_verifier()
+                .with_no_client_auth(),
+        ))
     }
 
     /// Shorthand for using rustls' default crypto provider and safe defaults, with
@@ -94,7 +120,7 @@ impl ConnectorBuilder<WantsTlsConfig> {
     #[cfg(feature = "rustls-native-certs")]
     pub fn with_provider_and_native_roots(
         self,
-        provider: CryptoProvider,
+        provider: impl Into<Arc<CryptoProvider>>,
     ) -> std::io::Result<ConnectorBuilder<WantsSchemes>> {
         Ok(self.with_tls_config(
             ClientConfig::builder_with_provider(provider.into())
@@ -125,7 +151,7 @@ impl ConnectorBuilder<WantsTlsConfig> {
     #[cfg(feature = "webpki-roots")]
     pub fn with_provider_and_webpki_roots(
         self,
-        provider: CryptoProvider,
+        provider: impl Into<Arc<CryptoProvider>>,
     ) -> Result<ConnectorBuilder<WantsSchemes>, rustls::Error> {
         Ok(self.with_tls_config(
             ClientConfig::builder_with_provider(provider.into())

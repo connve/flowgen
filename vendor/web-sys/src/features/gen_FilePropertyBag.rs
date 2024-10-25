@@ -10,6 +10,26 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
     pub type FilePropertyBag;
+    #[doc = "Get the `lastModified` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[wasm_bindgen(method, getter = "lastModified")]
+    pub fn get_last_modified(this: &FilePropertyBag) -> Option<f64>;
+    #[doc = "Change the `lastModified` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[wasm_bindgen(method, setter = "lastModified")]
+    pub fn set_last_modified(this: &FilePropertyBag, val: f64);
+    #[doc = "Get the `type` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[wasm_bindgen(method, getter = "type")]
+    pub fn get_type(this: &FilePropertyBag) -> Option<String>;
+    #[doc = "Change the `type` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[wasm_bindgen(method, setter = "type")]
+    pub fn set_type(this: &FilePropertyBag, val: &str);
 }
 impl FilePropertyBag {
     #[doc = "Construct a new `FilePropertyBag`."]
@@ -20,34 +40,14 @@ impl FilePropertyBag {
         let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
         ret
     }
-    #[doc = "Change the `lastModified` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[deprecated = "Use `set_last_modified()` instead."]
     pub fn last_modified(&mut self, val: f64) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("lastModified"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_last_modified(val);
         self
     }
-    #[doc = "Change the `type` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `FilePropertyBag`*"]
+    #[deprecated = "Use `set_type()` instead."]
     pub fn type_(&mut self, val: &str) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("type"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_type(val);
         self
     }
 }

@@ -1,3 +1,18 @@
+# 0.1.9 (2024-09-24)
+
+- Add support for `client::legacy` DNS resolvers to set non-zero ports on returned addresses.
+- Fix `client::legacy` wrongly retrying pooled connections that were created successfully but failed immediately after, resulting in a retry loop.
+
+
+# 0.1.8 (2024-09-09)
+
+- Add `server::conn::auto::upgrade::downcast()` for use with auto connection upgrades.
+
+# 0.1.7 (2024-08-06)
+
+- Add `Connected::poison()` to `legacy` client, a port from hyper v0.14.x.
+- Add `Error::connect_info()` to `legacy` client, a port from hyper v0.14.x.
+
 # 0.1.6 (2024-07-01)
 
 - Add support for AIX operating system to `legacy` client.

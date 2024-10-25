@@ -13,7 +13,8 @@
 edition = "2021"
 rust-version = "1.63"
 name = "rustls-webpki"
-version = "0.102.5"
+version = "0.102.8"
+build = false
 include = [
     "Cargo.toml",
     "/LICENSE",
@@ -26,6 +27,7 @@ include = [
     "src/der.rs",
     "src/end_entity.rs",
     "src/error.rs",
+    "src/rpk_entity.rs",
     "src/subject_name/dns_name.rs",
     "src/subject_name/ip_address.rs",
     "src/subject_name/mod.rs",
@@ -44,6 +46,10 @@ include = [
     "src/data/**/*",
     "tests/**",
 ]
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Web PKI X.509 Certificate Verification."
 readme = "README.md"
 categories = [
@@ -84,14 +90,50 @@ rpath = false
 
 [lib]
 name = "webpki"
+path = "src/lib.rs"
 
-[[bench]]
-name = "benchmarks"
-path = "benches/benchmark.rs"
-harness = false
+[[test]]
+name = "better_tls"
+path = "tests/better_tls.rs"
+
+[[test]]
+name = "cert_v1_unsupported"
+path = "tests/cert_v1_unsupported.rs"
+
+[[test]]
+name = "cert_without_extensions"
+path = "tests/cert_without_extensions.rs"
+
+[[test]]
+name = "client_auth"
+path = "tests/client_auth.rs"
+
+[[test]]
+name = "client_auth_revocation"
+path = "tests/client_auth_revocation.rs"
+
+[[test]]
+name = "crl_tests"
+path = "tests/crl_tests.rs"
+
+[[test]]
+name = "custom_ekus"
+path = "tests/custom_ekus.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "signatures"
+path = "tests/signatures.rs"
+
+[[test]]
+name = "tls_server_certs"
+path = "tests/tls_server_certs.rs"
 
 [dependencies.aws-lc-rs]
-version = "1"
+version = "1.9"
 features = ["aws-lc-sys"]
 optional = true
 default-features = false

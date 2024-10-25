@@ -97,6 +97,11 @@ pub enum Error {
     /// or too large.
     BadMaxFragmentSize,
 
+    /// Specific failure cases from [`keys_match`].
+    ///
+    /// [`keys_match`]: crate::crypto::signer::CertifiedKey::keys_match
+    InconsistentKeys(InconsistentKeys),
+
     /// Any other error.
     ///
     /// This variant should only be used when the error is not better described by a more
@@ -107,11 +112,37 @@ pub enum Error {
     Other(OtherError),
 }
 
+/// Specific failure cases from [`keys_match`].
+///
+/// [`keys_match`]: crate::crypto::signer::CertifiedKey::keys_match
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InconsistentKeys {
+    /// The public key returned by the [`SigningKey`] does not match the public key information in the certificate.
+    ///
+    /// [`SigningKey`]: crate::crypto::signer::SigningKey
+    KeyMismatch,
+
+    /// The [`SigningKey`] cannot produce its corresponding public key.
+    ///
+    /// [`SigningKey`]: crate::crypto::signer::SigningKey
+    Unknown,
+}
+
+impl From<InconsistentKeys> for Error {
+    #[inline]
+    fn from(e: InconsistentKeys) -> Self {
+        Self::InconsistentKeys(e)
+    }
+}
+
 /// A corrupt TLS message payload that resulted in an error.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 
 pub enum InvalidMessage {
+    /// A certificate payload exceeded rustls's 64KB limit
+    CertificatePayloadTooLarge,
     /// An advertised message was larger then expected.
     HandshakePayloadTooLarge,
     /// The peer sent us a syntactically incorrect ChangeCipherSpec payload.
@@ -514,7 +545,7 @@ fn join<T: fmt::Debug>(items: &[T]) -> String {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::InappropriateMessage {
                 ref expect_types,
@@ -560,6 +591,9 @@ impl fmt::Display for Error {
             Self::FailedToGetRandomBytes => write!(f, "failed to get random bytes"),
             Self::BadMaxFragmentSize => {
                 write!(f, "the supplied max_fragment_size was too small or large")
+            }
+            Self::InconsistentKeys(ref why) => {
+                write!(f, "keys may not be consistent: {:?}", why)
             }
             Self::General(ref err) => write!(f, "unexpected error: {}", err),
             Self::Other(ref err) => write!(f, "other error: {}", err),
@@ -615,7 +649,7 @@ mod other_error {
     }
 
     impl fmt::Display for OtherError {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             #[cfg(feature = "std")]
             {
                 write!(f, "{}", self.0)
@@ -642,7 +676,7 @@ mod tests {
     use std::prelude::v1::*;
     use std::{println, vec};
 
-    use super::{Error, InvalidMessage};
+    use super::{Error, InconsistentKeys, InvalidMessage};
     use crate::error::{CertRevocationListError, OtherError};
 
     #[test]
@@ -729,6 +763,8 @@ mod tests {
             Error::PeerSentOversizedRecord,
             Error::NoApplicationProtocol,
             Error::BadMaxFragmentSize,
+            Error::InconsistentKeys(InconsistentKeys::KeyMismatch),
+            Error::InconsistentKeys(InconsistentKeys::Unknown),
             Error::InvalidCertRevocationList(CertRevocationListError::BadSignature),
             Error::Other(OtherError(
                 #[cfg(feature = "std")]

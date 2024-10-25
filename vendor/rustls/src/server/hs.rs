@@ -8,7 +8,7 @@ use pki_types::DnsName;
 use super::server_conn::ServerConnectionData;
 #[cfg(feature = "tls12")]
 use super::tls12;
-use crate::common_state::{Protocol, State};
+use crate::common_state::{KxState, Protocol, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::SupportedKxGroup;
 use crate::enums::{
@@ -17,7 +17,6 @@ use crate::enums::{
 };
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-#[cfg(feature = "logging")]
 use crate::log::{debug, trace};
 use crate::msgs::enums::{Compression, ExtensionType, NamedGroup};
 #[cfg(feature = "tls12")]
@@ -38,7 +37,7 @@ pub(super) type ServerContext<'a> = crate::common_state::Context<'a, ServerConne
 
 pub(super) fn can_resume(
     suite: SupportedCipherSuite,
-    sni: &Option<DnsName>,
+    sni: &Option<DnsName<'_>>,
     using_ems: bool,
     resumedata: &persist::ServerSessionValue,
 ) -> bool {
@@ -109,7 +108,7 @@ impl ExtensionProcessing {
             // QUIC has strict ALPN, unlike TLS's more backwards-compatible behavior. RFC 9001
             // says: "The server MUST treat the inability to select a compatible application
             // protocol as a connection error of type 0x0178". We judge that ALPN was desired
-            // (rather than some out-of-band protocol negotiation mechanism) iff any ALPN
+            // (rather than some out-of-band protocol negotiation mechanism) if and only if any ALPN
             // protocols were configured locally or offered by the client. This helps prevent
             // successful establishment of connections between peers that can't understand
             // each other.
@@ -242,7 +241,7 @@ impl ExpectClientHello {
         self,
         mut sig_schemes: Vec<SignatureScheme>,
         client_hello: &ClientHelloPayload,
-        m: &Message,
+        m: &Message<'_>,
         cx: &mut ServerContext<'_>,
     ) -> NextStateOrError<'static> {
         let tls13_enabled = self
@@ -352,6 +351,7 @@ impl ExpectClientHello {
 
         debug!("decided upon suite {:?}", suite);
         cx.common.suite = Some(suite);
+        cx.common.kx_state = KxState::Start(skxg);
 
         // Start handshake hash.
         let starting_hash = suite.hash_provider();
@@ -430,7 +430,9 @@ impl ExpectClientHello {
                 .provider
                 .kx_groups
                 .iter()
-                .find(|skxg| skxg.name() == *offered_group);
+                .find(|skxg| {
+                    skxg.usable_for_version(selected_version) && skxg.name() == *offered_group
+                });
 
             match offered_group.key_exchange_algorithm() {
                 KeyExchangeAlgorithm::DHE => {
@@ -563,11 +565,11 @@ impl State<ServerConnectionData> for ExpectClientHello {
 /// Note that this will modify `data.sni` even if config or certificate resolution fail.
 ///
 /// [`ResolvesServerCert`]: crate::server::ResolvesServerCert
-pub(super) fn process_client_hello<'a>(
-    m: &'a Message,
+pub(super) fn process_client_hello<'m>(
+    m: &'m Message<'m>,
     done_retry: bool,
-    cx: &mut ServerContext,
-) -> Result<(&'a ClientHelloPayload, Vec<SignatureScheme>), Error> {
+    cx: &mut ServerContext<'_>,
+) -> Result<(&'m ClientHelloPayload, Vec<SignatureScheme>), Error> {
     let client_hello =
         require_handshake_msg!(m, HandshakeType::ClientHello, HandshakePayload::ClientHello)?;
     trace!("we got a clienthello {:?}", client_hello);
@@ -597,7 +599,7 @@ pub(super) fn process_client_hello<'a>(
     // send an Illegal Parameter alert instead of the Internal Error alert
     // (or whatever) that we'd send if this were checked later or in a
     // different way.
-    let sni: Option<DnsName> = match client_hello.sni_extension() {
+    let sni: Option<DnsName<'_>> = match client_hello.sni_extension() {
         Some(sni) => {
             if sni.has_duplicate_names_for_type() {
                 return Err(cx.common.send_fatal_alert(

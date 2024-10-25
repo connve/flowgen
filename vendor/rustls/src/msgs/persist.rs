@@ -1,7 +1,6 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp;
-#[cfg(feature = "tls12")]
-use core::mem;
 
 use pki_types::{DnsName, UnixTime};
 use zeroize::Zeroizing;
@@ -80,7 +79,7 @@ pub struct Tls13ClientSessionValue {
 impl Tls13ClientSessionValue {
     pub(crate) fn new(
         suite: &'static Tls13CipherSuite,
-        ticket: Vec<u8>,
+        ticket: Arc<PayloadU16>,
         secret: &[u8],
         server_cert_chain: CertificateChain<'static>,
         time_now: UnixTime,
@@ -115,6 +114,12 @@ impl Tls13ClientSessionValue {
     /// Test only: rewind epoch by `delta` seconds.
     pub fn rewind_epoch(&mut self, delta: u32) {
         self.common.epoch -= delta as u64;
+    }
+
+    #[doc(hidden)]
+    /// Test only: replace `max_early_data_size` with `new`
+    pub fn _private_set_max_early_data_size(&mut self, new: u32) {
+        self.max_early_data_size = new;
     }
 
     pub fn set_quic_params(&mut self, quic_params: &[u8]) {
@@ -152,7 +157,7 @@ impl Tls12ClientSessionValue {
     pub(crate) fn new(
         suite: &'static Tls12CipherSuite,
         session_id: SessionId,
-        ticket: Vec<u8>,
+        ticket: Arc<PayloadU16>,
         master_secret: &[u8],
         server_cert_chain: CertificateChain<'static>,
         time_now: UnixTime,
@@ -173,8 +178,8 @@ impl Tls12ClientSessionValue {
         }
     }
 
-    pub(crate) fn take_ticket(&mut self) -> Vec<u8> {
-        mem::take(&mut self.common.ticket.0)
+    pub(crate) fn ticket(&mut self) -> Arc<PayloadU16> {
+        Arc::clone(&self.common.ticket)
     }
 
     pub(crate) fn extended_ms(&self) -> bool {
@@ -203,27 +208,27 @@ impl core::ops::Deref for Tls12ClientSessionValue {
 
 #[derive(Debug, Clone)]
 pub struct ClientSessionCommon {
-    ticket: PayloadU16,
+    ticket: Arc<PayloadU16>,
     secret: Zeroizing<PayloadU8>,
     epoch: u64,
     lifetime_secs: u32,
-    server_cert_chain: CertificateChain<'static>,
+    server_cert_chain: Arc<CertificateChain<'static>>,
 }
 
 impl ClientSessionCommon {
     fn new(
-        ticket: Vec<u8>,
+        ticket: Arc<PayloadU16>,
         secret: &[u8],
         time_now: UnixTime,
         lifetime_secs: u32,
         server_cert_chain: CertificateChain<'static>,
     ) -> Self {
         Self {
-            ticket: PayloadU16(ticket),
+            ticket,
             secret: Zeroizing::new(PayloadU8(secret.to_vec())),
             epoch: time_now.as_secs(),
             lifetime_secs: cmp::min(lifetime_secs, MAX_TICKET_LIFETIME),
-            server_cert_chain,
+            server_cert_chain: Arc::new(server_cert_chain),
         }
     }
 
@@ -295,7 +300,7 @@ impl Codec<'_> for ServerSessionValue {
             .encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let has_sni = u8::read(r)?;
         let sni = if has_sni == 1 {
             let dns_name = PayloadU8::read(r)?;

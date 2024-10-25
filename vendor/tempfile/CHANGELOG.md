@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.13.0
+
+- Add `with_suffix` constructors for easily creating new temporary files with a specific suffix (e.g., a specific file extension). Thanks to @Borgerr.
+- Update dependencies (fastrand & rustix).
+
+## 3.12.0
+
+- Add a `keep(keep: bool)` function to builder that suppresses delete-on-drop behavior (thanks to @RalfJung).
+- Update `windows-sys` from 0.52 to 0.59.
+
+## 3.11.0
+
+- Add the ability to override the default temporary directory. This API shouldn't be used in general, but there are some cases where it's unavoidable.
+
+## 3.10.1
+
+- Handle potential integer overflows in 32-bit systems when seeking/truncating "spooled" temporary files past 4GiB (2³²).
+- Handle a theoretical 32-bit overflow when generating a temporary file name larger than 4GiB. Now it'll panic (on allocation failure) rather than silently succeeding due to wraparound.
+
+Thanks to @stoeckmann for finding and fixing both of these issues.
+
+## 3.10.0
+
+- Drop `redox_syscall` dependency, we now use `rustix` for Redox.
+- Add `Builder::permissions` for setting the permissions on temporary files and directories (thanks to @Byron).
+- Update rustix to 0.38.31.
+- Update fastrand to 2.0.1.
+
 ## 3.9.0
 
 - Updates windows-sys to 0.52

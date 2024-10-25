@@ -1,14 +1,10 @@
 use alloc::boxed::Box;
-use core::num::NonZeroU64;
+use core::cmp::min;
 
 use crate::crypto::cipher::{InboundOpaqueMessage, MessageDecrypter, MessageEncrypter};
 use crate::error::Error;
-#[cfg(feature = "logging")]
 use crate::log::trace;
 use crate::msgs::message::{InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage};
-
-static SEQ_SOFT_LIMIT: u64 = 0xffff_ffff_ffff_0000u64;
-static SEQ_HARD_LIMIT: u64 = 0xffff_ffff_ffff_fffeu64;
 
 #[derive(PartialEq)]
 enum DirectionState {
@@ -23,9 +19,10 @@ enum DirectionState {
 }
 
 /// Record layer that tracks decryption and encryption keys.
-pub struct RecordLayer {
+pub(crate) struct RecordLayer {
     message_encrypter: Box<dyn MessageEncrypter>,
     message_decrypter: Box<dyn MessageDecrypter>,
+    write_seq_max: u64,
     write_seq: u64,
     read_seq: u64,
     has_decrypted: bool,
@@ -40,10 +37,11 @@ pub struct RecordLayer {
 
 impl RecordLayer {
     /// Create new record layer with no keys.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             message_encrypter: <dyn MessageEncrypter>::invalid(),
             message_decrypter: <dyn MessageDecrypter>::invalid(),
+            write_seq_max: 0,
             write_seq: 0,
             read_seq: 0,
             has_decrypted: false,
@@ -108,10 +106,10 @@ impl RecordLayer {
     /// panics if the requisite keying material hasn't been established yet.
     pub(crate) fn encrypt_outgoing(
         &mut self,
-        plain: OutboundPlainMessage,
+        plain: OutboundPlainMessage<'_>,
     ) -> OutboundOpaqueMessage {
         debug_assert!(self.encrypt_state == DirectionState::Active);
-        assert!(!self.encrypt_exhausted());
+        assert!(self.next_pre_encrypt_action() != PreEncryptAction::Refuse);
         let seq = self.write_seq;
         self.write_seq += 1;
         self.message_encrypter
@@ -121,9 +119,14 @@ impl RecordLayer {
 
     /// Prepare to use the given `MessageEncrypter` for future message encryption.
     /// It is not used until you call `start_encrypting`.
-    pub(crate) fn prepare_message_encrypter(&mut self, cipher: Box<dyn MessageEncrypter>) {
+    pub(crate) fn prepare_message_encrypter(
+        &mut self,
+        cipher: Box<dyn MessageEncrypter>,
+        max_messages: u64,
+    ) {
         self.message_encrypter = cipher;
         self.write_seq = 0;
+        self.write_seq_max = min(SEQ_SOFT_LIMIT, max_messages);
         self.encrypt_state = DirectionState::Prepared;
     }
 
@@ -151,8 +154,12 @@ impl RecordLayer {
 
     /// Set and start using the given `MessageEncrypter` for future outgoing
     /// message encryption.
-    pub(crate) fn set_message_encrypter(&mut self, cipher: Box<dyn MessageEncrypter>) {
-        self.prepare_message_encrypter(cipher);
+    pub(crate) fn set_message_encrypter(
+        &mut self,
+        cipher: Box<dyn MessageEncrypter>,
+        max_messages: u64,
+    ) {
+        self.prepare_message_encrypter(cipher, max_messages);
         self.start_encrypting();
     }
 
@@ -181,16 +188,20 @@ impl RecordLayer {
         self.trial_decryption_len = None;
     }
 
-    /// Return true if we are getting close to encrypting too many
-    /// messages with our encryption key.
-    pub(crate) fn wants_close_before_encrypt(&self) -> bool {
-        self.write_seq == SEQ_SOFT_LIMIT
+    pub(crate) fn next_pre_encrypt_action(&self) -> PreEncryptAction {
+        self.pre_encrypt_action(0)
     }
 
-    /// Return true if we outright refuse to do anything with the
-    /// encryption key.
-    pub(crate) fn encrypt_exhausted(&self) -> bool {
-        self.write_seq >= SEQ_HARD_LIMIT
+    /// Return a remedial action when we are near to encrypting too many messages.
+    ///
+    /// `add` is added to the current sequence number.  `add` as `0` means
+    /// "the next message processed by `encrypt_outgoing`"
+    pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
+        match self.write_seq.saturating_add(add) {
+            v if v == self.write_seq_max => PreEncryptAction::RefreshOrClose,
+            SEQ_HARD_LIMIT.. => PreEncryptAction::Refuse,
+            _ => PreEncryptAction::Nothing,
+        }
     }
 
     pub(crate) fn is_encrypting(&self) -> bool {
@@ -205,13 +216,6 @@ impl RecordLayer {
 
     pub(crate) fn write_seq(&self) -> u64 {
         self.write_seq
-    }
-
-    /// Returns the number of remaining write sequences
-    pub(crate) fn remaining_write_seq(&self) -> Option<NonZeroU64> {
-        SEQ_SOFT_LIMIT
-            .checked_sub(self.write_seq)
-            .and_then(NonZeroU64::new)
     }
 
     pub(crate) fn read_seq(&self) -> u64 {
@@ -245,6 +249,25 @@ pub(crate) struct Decrypted<'a> {
     /// The decrypted message.
     pub(crate) plaintext: InboundPlainMessage<'a>,
 }
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum PreEncryptAction {
+    /// No action is needed before calling `encrypt_outgoing`
+    Nothing,
+
+    /// A `key_update` request should be sent ASAP.
+    ///
+    /// If that is not possible (for example, the connection is TLS1.2), a `close_notify`
+    /// alert should be sent instead.
+    RefreshOrClose,
+
+    /// Do not call `encrypt_outgoing` further, it will panic rather than
+    /// over-use the key.
+    Refuse,
+}
+
+const SEQ_SOFT_LIMIT: u64 = 0xffff_ffff_ffff_0000u64;
+const SEQ_HARD_LIMIT: u64 = 0xffff_ffff_ffff_fffeu64;
 
 #[cfg(test)]
 mod tests {

@@ -75,7 +75,7 @@ pub trait ServerCertVerifier: Debug + Send + Sync {
     /// same order that the server sent them and may be empty.
     ///
     /// Note that none of the certificates have been parsed yet, so it is the responsibility of
-    /// the implementor to handle invalid data. It is recommended that the implementor returns
+    /// the implementer to handle invalid data. It is recommended that the implementer returns
     /// [`Error::InvalidCertificate(CertificateError::BadEncoding)`] when these cases are encountered.
     ///
     /// [Certificate]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
@@ -194,7 +194,7 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     /// order that the peer sent them and may be empty.
     ///
     /// Note that none of the certificates have been parsed yet, so it is the responsibility of
-    /// the implementor to handle invalid data. It is recommended that the implementor returns
+    /// the implementer to handle invalid data. It is recommended that the implementer returns
     /// an [InvalidCertificate] error with the [BadEncoding] variant when these cases are encountered.
     ///
     /// [InvalidCertificate]: Error#variant.InvalidCertificate
@@ -251,7 +251,9 @@ pub trait ClientCertVerifier: Debug + Send + Sync {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme>;
 }
 
-/// Turns off client authentication. In contrast to using
+/// Turns off client authentication.
+///
+/// In contrast to using
 /// `WebPkiClientVerifier::builder(roots).allow_unauthenticated().build()`, the `NoClientAuth`
 /// `ClientCertVerifier` will not offer client authentication at all, vs offering but not
 /// requiring it.
@@ -327,7 +329,7 @@ impl Codec<'_> for DigitallySignedStruct {
         self.sig.encode(bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let scheme = SignatureScheme::read(r)?;
         let sig = PayloadU16::read(r)?;
 

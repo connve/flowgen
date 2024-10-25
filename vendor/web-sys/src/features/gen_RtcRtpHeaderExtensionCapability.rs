@@ -10,6 +10,16 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `RtcRtpHeaderExtensionCapability`*"]
     pub type RtcRtpHeaderExtensionCapability;
+    #[doc = "Get the `uri` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpHeaderExtensionCapability`*"]
+    #[wasm_bindgen(method, getter = "uri")]
+    pub fn get_uri(this: &RtcRtpHeaderExtensionCapability) -> String;
+    #[doc = "Change the `uri` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpHeaderExtensionCapability`*"]
+    #[wasm_bindgen(method, setter = "uri")]
+    pub fn set_uri(this: &RtcRtpHeaderExtensionCapability, val: &str);
 }
 impl RtcRtpHeaderExtensionCapability {
     #[doc = "Construct a new `RtcRtpHeaderExtensionCapability`."]
@@ -21,17 +31,9 @@ impl RtcRtpHeaderExtensionCapability {
         ret.uri(uri);
         ret
     }
-    #[doc = "Change the `uri` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `RtcRtpHeaderExtensionCapability`*"]
+    #[deprecated = "Use `set_uri()` instead."]
     pub fn uri(&mut self, val: &str) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("uri"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_uri(val);
         self
     }
 }

@@ -25,14 +25,17 @@ pub(crate) static TLS13_CHACHA20_POLY1305_SHA256_INTERNAL: &Tls13CipherSuite = &
     common: CipherSuiteCommon {
         suite: CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
         hash_provider: &super::hash::SHA256,
+        // ref: <https://www.ietf.org/archive/id/draft-irtf-cfrg-aead-limits-08.html#section-5.2.1>
         confidentiality_limit: u64::MAX,
     },
-    hkdf_provider: &RingHkdf(hkdf::HKDF_SHA256, hmac::HMAC_SHA256),
+    hkdf_provider: &AwsLcHkdf(hkdf::HKDF_SHA256, hmac::HMAC_SHA256),
     aead_alg: &Chacha20Poly1305Aead(AeadAlgorithm(&aead::CHACHA20_POLY1305)),
     quic: Some(&super::quic::KeyBuilder {
         packet_alg: &aead::CHACHA20_POLY1305,
         header_alg: &aead::quic::CHACHA20,
+        // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-6.6>
         confidentiality_limit: u64::MAX,
+        // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-6.6>
         integrity_limit: 1 << 36,
     }),
 };
@@ -43,14 +46,16 @@ pub static TLS13_AES_256_GCM_SHA384: SupportedCipherSuite =
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS13_AES_256_GCM_SHA384,
             hash_provider: &super::hash::SHA384,
-            confidentiality_limit: 1 << 23,
+            confidentiality_limit: 1 << 24,
         },
-        hkdf_provider: &RingHkdf(hkdf::HKDF_SHA384, hmac::HMAC_SHA384),
+        hkdf_provider: &AwsLcHkdf(hkdf::HKDF_SHA384, hmac::HMAC_SHA384),
         aead_alg: &Aes256GcmAead(AeadAlgorithm(&aead::AES_256_GCM)),
         quic: Some(&super::quic::KeyBuilder {
             packet_alg: &aead::AES_256_GCM,
             header_alg: &aead::quic::AES_256,
+            // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-b.1.1>
             confidentiality_limit: 1 << 23,
+            // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-b.1.2>
             integrity_limit: 1 << 52,
         }),
     });
@@ -63,14 +68,16 @@ pub(crate) static TLS13_AES_128_GCM_SHA256_INTERNAL: &Tls13CipherSuite = &Tls13C
     common: CipherSuiteCommon {
         suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
         hash_provider: &super::hash::SHA256,
-        confidentiality_limit: 1 << 23,
+        confidentiality_limit: 1 << 24,
     },
-    hkdf_provider: &RingHkdf(hkdf::HKDF_SHA256, hmac::HMAC_SHA256),
+    hkdf_provider: &AwsLcHkdf(hkdf::HKDF_SHA256, hmac::HMAC_SHA256),
     aead_alg: &Aes128GcmAead(AeadAlgorithm(&aead::AES_128_GCM)),
     quic: Some(&super::quic::KeyBuilder {
         packet_alg: &aead::AES_128_GCM,
         header_alg: &aead::quic::AES_128,
+        // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-b.1.1>
         confidentiality_limit: 1 << 23,
+        // ref: <https://datatracker.ietf.org/doc/html/rfc9001#section-b.1.2>
         integrity_limit: 1 << 52,
     }),
 };
@@ -225,7 +232,7 @@ struct AeadMessageDecrypter {
 impl MessageEncrypter for AeadMessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: OutboundPlainMessage,
+        msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
@@ -286,7 +293,7 @@ struct GcmMessageEncrypter {
 impl MessageEncrypter for GcmMessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: OutboundPlainMessage,
+        msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
@@ -342,16 +349,16 @@ impl MessageDecrypter for GcmMessageDecrypter {
     }
 }
 
-struct RingHkdf(hkdf::Algorithm, hmac::Algorithm);
+struct AwsLcHkdf(hkdf::Algorithm, hmac::Algorithm);
 
-impl Hkdf for RingHkdf {
+impl Hkdf for AwsLcHkdf {
     fn extract_from_zero_ikm(&self, salt: Option<&[u8]>) -> Box<dyn HkdfExpander> {
         let zeroes = [0u8; OkmBlock::MAX_LEN];
         let salt = match salt {
             Some(salt) => salt,
             None => &zeroes[..self.0.len()],
         };
-        Box::new(RingHkdfExpander {
+        Box::new(AwsLcHkdfExpander {
             alg: self.0,
             prk: hkdf::Salt::new(self.0, salt).extract(&zeroes[..self.0.len()]),
         })
@@ -363,14 +370,14 @@ impl Hkdf for RingHkdf {
             Some(salt) => salt,
             None => &zeroes[..self.0.len()],
         };
-        Box::new(RingHkdfExpander {
+        Box::new(AwsLcHkdfExpander {
             alg: self.0,
             prk: hkdf::Salt::new(self.0, salt).extract(secret),
         })
     }
 
     fn expander_for_okm(&self, okm: &OkmBlock) -> Box<dyn HkdfExpander> {
-        Box::new(RingHkdfExpander {
+        Box::new(AwsLcHkdfExpander {
             alg: self.0,
             prk: hkdf::Prk::new_less_safe(self.0, okm.as_ref()),
         })
@@ -385,12 +392,12 @@ impl Hkdf for RingHkdf {
     }
 }
 
-struct RingHkdfExpander {
+struct AwsLcHkdfExpander {
     alg: hkdf::Algorithm,
     prk: hkdf::Prk,
 }
 
-impl HkdfExpander for RingHkdfExpander {
+impl HkdfExpander for AwsLcHkdfExpander {
     fn expand_slice(&self, info: &[&[u8]], output: &mut [u8]) -> Result<(), OutputLengthError> {
         self.prk
             .expand(info, Len(output.len()))

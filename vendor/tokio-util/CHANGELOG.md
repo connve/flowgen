@@ -1,3 +1,60 @@
+# 0.7.12 (September 5th, 2024)
+
+This release bumps the MSRV to 1.70. ([#6645])
+
+### Added
+- sync: Add `run_until_cancelled` to `tokio_util::sync::CancellationToken` ([#6618])
+- task: add `AbortOnDropHandle` type ([#6786])
+
+### Changed
+- deps: no default features for hashbrown ([#6541])
+- time: wake `DelayQueue` when removing last item ([#6752])
+- deps: enable the full feature when compiled for the playground ([#6818])
+
+### Documented
+- task: fix typo in `TaskTracker` docs ([#6792])
+
+[#6645]: https://github.com/tokio-rs/tokio/pull/6645
+[#6541]: https://github.com/tokio-rs/tokio/pull/6541
+[#6618]: https://github.com/tokio-rs/tokio/pull/6618
+[#6752]: https://github.com/tokio-rs/tokio/pull/6752
+[#6786]: https://github.com/tokio-rs/tokio/pull/6786
+[#6792]: https://github.com/tokio-rs/tokio/pull/6792
+[#6818]: https://github.com/tokio-rs/tokio/pull/6818
+
+# 0.7.11 (May 4th, 2024)
+
+This release updates the MSRV to 1.63. ([#6126])
+
+### Added
+
+- either: implement `Sink` for `Either` ([#6239])
+- time: add `DelayQueue::deadline` ([#6163])
+- time: add `FutureExt::timeout` ([#6276])
+
+### Changed
+
+- codec: assert compatibility between `LengthDelimitedCodec` options ([#6414])
+- codec: make tracing feature optional for codecs ([#6434])
+- io: add `T: ?Sized` to `tokio_util::io::poll_read_buf` ([#6441])
+- sync: remove `'static` bound on `impl Sink for PollSender` ([#6397])
+
+### Documented
+
+- codec: add examples for `FramedRead` and `FramedWrite` ([#6310])
+- codec: document cancel safety of `SinkExt::send` and `StreamExt::next` ([#6417])
+
+[#6126]: https://github.com/tokio-rs/tokio/pull/6126
+[#6163]: https://github.com/tokio-rs/tokio/pull/6163
+[#6239]: https://github.com/tokio-rs/tokio/pull/6239
+[#6276]: https://github.com/tokio-rs/tokio/pull/6276
+[#6310]: https://github.com/tokio-rs/tokio/pull/6310
+[#6397]: https://github.com/tokio-rs/tokio/pull/6397
+[#6414]: https://github.com/tokio-rs/tokio/pull/6414
+[#6417]: https://github.com/tokio-rs/tokio/pull/6417
+[#6434]: https://github.com/tokio-rs/tokio/pull/6434
+[#6441]: https://github.com/tokio-rs/tokio/pull/6441
+
 # 0.7.10 (October 24th, 2023)
 
 ### Added

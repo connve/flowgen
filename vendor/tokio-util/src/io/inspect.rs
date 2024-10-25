@@ -1,8 +1,7 @@
-use futures_core::ready;
 use pin_project_lite::pin_project;
 use std::io::{IoSlice, Result};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -18,7 +17,7 @@ pin_project! {
 }
 
 impl<R, F> InspectReader<R, F> {
-    /// Create a new InspectReader, wrapping `reader` and calling `f` for the
+    /// Create a new `InspectReader`, wrapping `reader` and calling `f` for the
     /// new data supplied by each read call.
     ///
     /// The closure will only be called with an empty slice if the inner reader
@@ -100,7 +99,7 @@ pin_project! {
 }
 
 impl<W, F> InspectWriter<W, F> {
-    /// Create a new InspectWriter, wrapping `write` and calling `f` for the
+    /// Create a new `InspectWriter`, wrapping `write` and calling `f` for the
     /// data successfully written by each write call.
     ///
     /// The closure `f` will never be called with an empty slice. A vectored

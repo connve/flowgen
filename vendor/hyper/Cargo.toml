@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.63"
 name = "hyper"
-version = "1.4.0"
+version = "1.5.0"
 authors = ["Sean McArthur <sean@seanmonstar.com>"]
 build = false
 include = [
@@ -21,6 +21,7 @@ include = [
     "LICENSE",
     "src/**/*",
 ]
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false

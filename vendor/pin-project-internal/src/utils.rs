@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use std::mem;
 
 use proc_macro2::{Group, Spacing, Span, TokenStream, TokenTree};
@@ -14,21 +16,6 @@ use syn::{
 };
 
 pub(crate) type Variants = Punctuated<Variant, Token![,]>;
-
-macro_rules! format_err {
-    ($span:expr, $msg:expr $(,)?) => {
-        syn::Error::new_spanned(&$span as &dyn quote::ToTokens, &$msg as &dyn std::fmt::Display)
-    };
-    ($span:expr, $($tt:tt)*) => {
-        format_err!($span, format!($($tt)*))
-    };
-}
-
-macro_rules! bail {
-    ($($tt:tt)*) => {
-        return Err(format_err!($($tt)*))
-    };
-}
 
 macro_rules! parse_quote_spanned {
     ($span:expr => $($tt:tt)*) => {
@@ -49,7 +36,7 @@ pub(crate) fn determine_lifetime_name(lifetime_name: &mut String, generics: &mut
 
     debug_assert!(lifetime_name.starts_with('\''));
 
-    let mut lifetimes = CollectLifetimes(Vec::new());
+    let mut lifetimes = CollectLifetimes(vec![]);
     lifetimes.visit_generics_mut(generics);
 
     while lifetimes.0.iter().any(|name| name.starts_with(&**lifetime_name)) {
@@ -118,7 +105,7 @@ fn respan_tokens(tokens: TokenStream, span: Span) -> TokenStream {
         .collect()
 }
 
-// =================================================================================================
+// -----------------------------------------------------------------------------
 // extension traits
 
 pub(crate) trait SliceExt {
@@ -170,7 +157,7 @@ impl<'a> ParseBufferExt<'a> for ParseBuffer<'a> {
     }
 }
 
-// =================================================================================================
+// -----------------------------------------------------------------------------
 // visitors
 
 // Replace `self`/`Self` with `__self`/`self_ty`.
@@ -211,7 +198,7 @@ impl ReplaceReceiver<'_> {
 
         path.leading_colon = Some(**path.segments.pairs().next().unwrap().punct().unwrap());
 
-        let segments = mem::replace(&mut path.segments, Punctuated::new());
+        let segments = mem::take(&mut path.segments);
         path.segments = segments.into_pairs().skip(1).collect();
     }
 
@@ -241,7 +228,7 @@ impl ReplaceReceiver<'_> {
     }
 
     fn visit_token_stream(&self, tokens: &mut TokenStream) -> bool {
-        let mut out = Vec::new();
+        let mut out = vec![];
         let mut modified = false;
         let mut iter = tokens.clone().into_iter().peekable();
         while let Some(tt) = iter.next() {

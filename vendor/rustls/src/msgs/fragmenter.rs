@@ -96,7 +96,7 @@ impl<'a> Iterator for Chunker<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for Chunker<'a> {
+impl ExactSizeIterator for Chunker<'_> {
     fn len(&self) -> usize {
         (self.payload.len() + self.limit - 1) / self.limit
     }
@@ -113,7 +113,7 @@ mod tests {
     use crate::msgs::message::{OutboundChunks, OutboundPlainMessage, PlainMessage};
 
     fn msg_eq(
-        m: &OutboundPlainMessage,
+        m: &OutboundPlainMessage<'_>,
         total_len: usize,
         typ: &ContentType,
         version: &ProtocolVersion,

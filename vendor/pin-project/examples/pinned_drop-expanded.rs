@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 // Original code (./pinned_drop.rs):
 //
-// ```rust
+// ```
 // #![allow(dead_code)]
 //
 // use std::pin::Pin;
@@ -22,8 +24,17 @@
 // fn main() {}
 // ```
 
-#![allow(dead_code, unused_imports, unused_parens, unknown_lints, renamed_and_removed_lints)]
-#![allow(clippy::needless_lifetimes, clippy::mut_mut)]
+#![allow(
+    dead_code,
+    single_use_lifetimes,
+    unused_imports,
+    unused_parens,
+    unknown_lints,
+    renamed_and_removed_lints,
+    clippy::mut_mut,
+    clippy::needless_lifetimes,
+    clippy::undocumented_unsafe_blocks
+)]
 
 use std::pin::Pin;
 
@@ -112,13 +123,15 @@ const _: () = {
         __lifetime0: &'a (),
     }
     impl<'pin, 'a, T> ::pin_project::__private::Unpin for Struct<'a, T> where
-        __Struct<'pin, 'a, T>: ::pin_project::__private::Unpin
+        ::pin_project::__private::PinnedFieldsOf<__Struct<'pin, 'a, T>>:
+            ::pin_project::__private::Unpin
     {
     }
     // A dummy impl of `UnsafeUnpin`, to ensure that the user cannot implement it.
     #[doc(hidden)]
     unsafe impl<'pin, 'a, T> ::pin_project::UnsafeUnpin for Struct<'a, T> where
-        __Struct<'pin, 'a, T>: ::pin_project::__private::Unpin
+        ::pin_project::__private::PinnedFieldsOf<__Struct<'pin, 'a, T>>:
+            ::pin_project::__private::Unpin
     {
     }
 };

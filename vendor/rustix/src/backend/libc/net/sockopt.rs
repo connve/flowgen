@@ -369,6 +369,7 @@ pub(crate) fn get_socket_send_buffer_size(fd: BorrowedFd<'_>) -> io::Result<usiz
     target_os = "emscripten",
     target_os = "espidf",
     target_os = "haiku",
+    target_os = "hurd",
     target_os = "netbsd",
     target_os = "nto",
     target_os = "vita",
@@ -914,9 +915,10 @@ pub(crate) fn set_tcp_congestion(fd: BorrowedFd<'_>, value: &str) -> io::Result<
 ))]
 #[inline]
 pub(crate) fn get_tcp_congestion(fd: BorrowedFd<'_>) -> io::Result<String> {
+    const OPTLEN: c::socklen_t = 16;
+
     let level = c::IPPROTO_TCP;
     let optname = c::TCP_CONGESTION;
-    const OPTLEN: c::socklen_t = 16;
     let mut value = MaybeUninit::<[MaybeUninit<u8>; OPTLEN as usize]>::uninit();
     let mut optlen = OPTLEN;
     getsockopt_raw(fd, level, optname, &mut value, &mut optlen)?;
@@ -1000,11 +1002,13 @@ pub(crate) fn set_xdp_rx_ring_size(fd: BorrowedFd<'_>, value: u32) -> io::Result
 #[cfg(target_os = "linux")]
 #[inline]
 pub(crate) fn get_xdp_mmap_offsets(fd: BorrowedFd<'_>) -> io::Result<XdpMmapOffsets> {
-    // The kernel will write `xdp_mmap_offsets` or `xdp_mmap_offsets_v1` to the supplied pointer,
-    // depending on the kernel version. Both structs only contain u64 values.
-    // By using the larger of both as the parameter, we can shuffle the values to the non-v1 version
-    // returned by `get_xdp_mmap_offsets` while keeping the return type unaffected by the kernel
-    // version. This works because C will layout all struct members one after the other.
+    // The kernel will write `xdp_mmap_offsets` or `xdp_mmap_offsets_v1` to the
+    // supplied pointer, depending on the kernel version. Both structs only
+    // contain u64 values. By using the larger of both as the parameter, we can
+    // shuffle the values to the non-v1 version returned by
+    // `get_xdp_mmap_offsets` while keeping the return type unaffected by the
+    // kernel version. This works because C will layout all struct members one
+    // after the other.
 
     let mut optlen = core::mem::size_of::<xdp_mmap_offsets>().try_into().unwrap();
     debug_assert!(
@@ -1015,8 +1019,8 @@ pub(crate) fn get_xdp_mmap_offsets(fd: BorrowedFd<'_>) -> io::Result<XdpMmapOffs
     getsockopt_raw(fd, c::SOL_XDP, c::XDP_MMAP_OFFSETS, &mut value, &mut optlen)?;
 
     if optlen as usize == core::mem::size_of::<c::xdp_mmap_offsets_v1>() {
-        // Safety: All members of xdp_mmap_offsets are u64 and thus are correctly initialized
-        // by `MaybeUninit::<xdp_statistics>::zeroed()`
+        // Safety: All members of xdp_mmap_offsets are u64 and thus are correctly
+        // initialized by `MaybeUninit::<xdp_statistics>::zeroed()`
         let xpd_mmap_offsets = unsafe { value.assume_init() };
         Ok(XdpMmapOffsets {
             rx: XdpRingOffset {
@@ -1050,8 +1054,8 @@ pub(crate) fn get_xdp_mmap_offsets(fd: BorrowedFd<'_>) -> io::Result<XdpMmapOffs
             core::mem::size_of::<xdp_mmap_offsets>(),
             "unexpected getsockopt size"
         );
-        // Safety: All members of xdp_mmap_offsets are u64 and thus are correctly initialized
-        // by `MaybeUninit::<xdp_statistics>::zeroed()`
+        // Safety: All members of xdp_mmap_offsets are u64 and thus are correctly
+        // initialized by `MaybeUninit::<xdp_statistics>::zeroed()`
         let xpd_mmap_offsets = unsafe { value.assume_init() };
         Ok(XdpMmapOffsets {
             rx: XdpRingOffset {
@@ -1094,8 +1098,8 @@ pub(crate) fn get_xdp_statistics(fd: BorrowedFd<'_>) -> io::Result<XdpStatistics
     getsockopt_raw(fd, c::SOL_XDP, c::XDP_STATISTICS, &mut value, &mut optlen)?;
 
     if optlen as usize == core::mem::size_of::<xdp_statistics_v1>() {
-        // Safety: All members of xdp_statistics are u64 and thus are correctly initialized
-        // by `MaybeUninit::<xdp_statistics>::zeroed()`
+        // Safety: All members of xdp_statistics are u64 and thus are correctly
+        // initialized by `MaybeUninit::<xdp_statistics>::zeroed()`
         let xdp_statistics = unsafe { value.assume_init() };
         Ok(XdpStatistics {
             rx_dropped: xdp_statistics.rx_dropped,
@@ -1111,8 +1115,8 @@ pub(crate) fn get_xdp_statistics(fd: BorrowedFd<'_>) -> io::Result<XdpStatistics
             core::mem::size_of::<xdp_statistics>(),
             "unexpected getsockopt size"
         );
-        // Safety: All members of xdp_statistics are u64 and thus are correctly initialized
-        // by `MaybeUninit::<xdp_statistics>::zeroed()`
+        // Safety: All members of xdp_statistics are u64 and thus are correctly
+        // initialized by `MaybeUninit::<xdp_statistics>::zeroed()`
         let xdp_statistics = unsafe { value.assume_init() };
         Ok(XdpStatistics {
             rx_dropped: xdp_statistics.rx_dropped,

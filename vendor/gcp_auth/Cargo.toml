@@ -13,7 +13,12 @@
 edition = "2021"
 rust-version = "1.70"
 name = "gcp_auth"
-version = "0.12.2"
+version = "0.12.3"
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Google cloud platform (GCP) authentication using default and custom service accounts"
 documentation = "https://docs.rs/gcp_auth/"
 readme = "README.md"
@@ -28,6 +33,14 @@ categories = [
 ]
 license = "MIT"
 repository = "https://github.com/hrvolapeter/gcp_auth"
+
+[lib]
+name = "gcp_auth"
+path = "src/lib.rs"
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
 
 [dependencies.async-trait]
 version = "0.1"

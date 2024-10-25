@@ -10,6 +10,26 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
     pub type AesDerivedKeyParams;
+    #[doc = "Get the `name` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[wasm_bindgen(method, getter = "name")]
+    pub fn get_name(this: &AesDerivedKeyParams) -> String;
+    #[doc = "Change the `name` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[wasm_bindgen(method, setter = "name")]
+    pub fn set_name(this: &AesDerivedKeyParams, val: &str);
+    #[doc = "Get the `length` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[wasm_bindgen(method, getter = "length")]
+    pub fn get_length(this: &AesDerivedKeyParams) -> u32;
+    #[doc = "Change the `length` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[wasm_bindgen(method, setter = "length")]
+    pub fn set_length(this: &AesDerivedKeyParams, val: u32);
 }
 impl AesDerivedKeyParams {
     #[doc = "Construct a new `AesDerivedKeyParams`."]
@@ -22,31 +42,14 @@ impl AesDerivedKeyParams {
         ret.length(length);
         ret
     }
-    #[doc = "Change the `name` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[deprecated = "Use `set_name()` instead."]
     pub fn name(&mut self, val: &str) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("name"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_name(val);
         self
     }
-    #[doc = "Change the `length` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `AesDerivedKeyParams`*"]
+    #[deprecated = "Use `set_length()` instead."]
     pub fn length(&mut self, val: u32) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r =
-            ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("length"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_length(val);
         self
     }
 }

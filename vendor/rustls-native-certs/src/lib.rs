@@ -21,6 +21,15 @@
 // Enable documentation for all features on docs.rs
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+use std::error::Error as StdError;
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{self, BufReader};
+use std::path::{Path, PathBuf};
+use std::{env, fmt};
+
+use pki_types::CertificateDer;
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod unix;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -35,15 +44,6 @@ use windows as platform;
 mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
-
-use std::env;
-use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::BufReader;
-use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
-
-use pki_types::CertificateDer;
 
 /// Load root certificates found in the platform's native certificate store.
 ///
@@ -117,10 +117,59 @@ use pki_types::CertificateDer;
 /// this sparingly.
 ///
 /// [c_rehash]: https://www.openssl.org/docs/manmaster/man1/c_rehash.html
-pub fn load_native_certs() -> Result<Vec<CertificateDer<'static>>, Error> {
-    match CertPaths::from_env().load()? {
-        Some(certs) => Ok(certs),
-        None => platform::load_native_certs(),
+pub fn load_native_certs() -> CertificateResult {
+    match CertPaths::from_env().load() {
+        out if !out.certs.is_empty() => out,
+        _ => platform::load_native_certs(),
+    }
+}
+
+/// Results from trying to load certificates from the platform's native store.
+#[non_exhaustive]
+#[derive(Debug, Default)]
+pub struct CertificateResult {
+    /// Any certificates that were successfully loaded.
+    pub certs: Vec<CertificateDer<'static>>,
+    /// Any errors encountered while loading certificates.
+    pub errors: Vec<Error>,
+}
+
+impl CertificateResult {
+    /// Return the found certificates if no error occurred, otherwise panic.
+    pub fn expect(self, msg: &str) -> Vec<CertificateDer<'static>> {
+        match self.errors.is_empty() {
+            true => self.certs,
+            false => panic!("{msg}: {:?}", self.errors),
+        }
+    }
+
+    /// Return the found certificates if no error occurred, otherwise panic.
+    pub fn unwrap(self) -> Vec<CertificateDer<'static>> {
+        match self.errors.is_empty() {
+            true => self.certs,
+            false => panic!(
+                "errors occurred while loading certificates: {:?}",
+                self.errors
+            ),
+        }
+    }
+
+    fn io_error(&mut self, err: io::Error, path: &Path, context: &'static str) {
+        self.errors.push(Error {
+            context,
+            kind: ErrorKind::Io {
+                inner: err,
+                path: path.to_owned(),
+            },
+        });
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    fn os_error(&mut self, err: Box<dyn StdError + Send + Sync + 'static>, context: &'static str) {
+        self.errors.push(Error {
+            context,
+            kind: ErrorKind::Os(err),
+        });
     }
 }
 
@@ -152,24 +201,24 @@ impl CertPaths {
     /// [hash files](`is_hash_file_name()`) contained in it must be loaded successfully,
     /// subject to the rules outlined above for `self.file`. The directory is not
     /// scanned recursively and may be empty.
-    fn load(&self) -> Result<Option<Vec<CertificateDer<'static>>>, Error> {
+    fn load(&self) -> CertificateResult {
+        let mut out = CertificateResult::default();
         if self.file.is_none() && self.dir.is_none() {
-            return Ok(None);
+            return out;
         }
 
-        let mut certs = match &self.file {
-            Some(cert_file) => load_pem_certs(cert_file)?,
-            None => Vec::new(),
-        };
+        if let Some(cert_file) = &self.file {
+            load_pem_certs(cert_file, &mut out);
+        }
 
         if let Some(cert_dir) = &self.dir {
-            certs.append(&mut load_pem_certs_from_dir(cert_dir)?);
+            load_pem_certs_from_dir(cert_dir, &mut out);
         }
 
-        certs.sort_unstable_by(|a, b| a.cmp(b));
-        certs.dedup();
-
-        Ok(Some(certs))
+        out.certs
+            .sort_unstable_by(|a, b| a.cmp(b));
+        out.certs.dedup();
+        out
     }
 }
 
@@ -180,11 +229,24 @@ impl CertPaths {
 /// isn't a valid certificate, we limit ourselves to loading those files
 /// that have a hash-based file name matching the pattern used by OpenSSL.
 /// The hash is not verified, however.
-fn load_pem_certs_from_dir(dir: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let dir_reader = fs::read_dir(dir)?;
-    let mut certs = Vec::new();
+fn load_pem_certs_from_dir(dir: &Path, out: &mut CertificateResult) {
+    let dir_reader = match fs::read_dir(dir) {
+        Ok(reader) => reader,
+        Err(err) => {
+            out.io_error(err, dir, "opening directory");
+            return;
+        }
+    };
+
     for entry in dir_reader {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                out.io_error(err, dir, "reading directory entries");
+                continue;
+            }
+        };
+
         let path = entry.path();
         let file_name = path
             .file_name()
@@ -197,30 +259,37 @@ fn load_pem_certs_from_dir(dir: &Path) -> Result<Vec<CertificateDer<'static>>, E
         // make sure we resolve them.
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // Dangling symlink
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                out.io_error(e, &path, "failed to open file");
+                continue;
+            }
         };
+
         if metadata.is_file() && is_hash_file_name(file_name) {
-            certs.append(&mut load_pem_certs(&path)?);
+            load_pem_certs(&path, out);
         }
     }
-    Ok(certs)
 }
 
-fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let mut f = BufReader::new(File::open(path)?);
-    rustls_pemfile::certs(&mut f)
-        .map(|result| match result {
-            Ok(der) => Ok(der),
-            Err(err) => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("could not load PEM file {path:?}: {err}"),
-            )),
-        })
-        .collect()
+fn load_pem_certs(path: &Path, out: &mut CertificateResult) {
+    let reader = match File::open(path) {
+        Ok(file) => BufReader::new(file),
+        Err(err) => {
+            out.io_error(err, path, "failed to open file");
+            return;
+        }
+    };
+
+    for result in rustls_pemfile::certs(&mut BufReader::new(reader)) {
+        match result {
+            Ok(cert) => out.certs.push(cert),
+            Err(err) => out.io_error(err, path, "failed to parse PEM"),
+        }
+    }
 }
 
 /// Check if this is a hash-based file name for a certificate
@@ -252,6 +321,41 @@ fn is_hash_file_name(file_name: &OsStr) -> bool {
         && matches!(iter.next(), Some(c) if c.is_ascii_digit())
 }
 
+#[derive(Debug)]
+pub struct Error {
+    pub context: &'static str,
+    pub kind: ErrorKind,
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(match &self.kind {
+            ErrorKind::Io { inner, .. } => inner,
+            ErrorKind::Os(err) => &**err,
+        })
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.context)?;
+        f.write_str(": ")?;
+        match &self.kind {
+            ErrorKind::Io { inner, path } => {
+                write!(f, "{inner} in {}", path.display())
+            }
+            ErrorKind::Os(err) => err.fmt(f),
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum ErrorKind {
+    Io { inner: io::Error, path: PathBuf },
+    Os(Box<dyn StdError + Send + Sync + 'static>),
+}
+
 const ENV_CERT_FILE: &str = "SSL_CERT_FILE";
 const ENV_CERT_DIR: &str = "SSL_CERT_DIR";
 
@@ -259,7 +363,11 @@ const ENV_CERT_DIR: &str = "SSL_CERT_DIR";
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::fs::Permissions;
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn valid_hash_file_name() {
@@ -317,63 +425,116 @@ mod tests {
             write!(file, "{}", &cert2).unwrap();
         }
 
-        let certs_from_file = CertPaths {
+        let result = CertPaths {
             file: Some(file_path.clone()),
             dir: None,
         }
-        .load()
-        .unwrap();
-        assert_eq!(certs_from_file.unwrap().len(), 2);
+        .load();
+        assert_eq!(result.certs.len(), 2);
 
-        let certs_from_dir = CertPaths {
+        let result = CertPaths {
             file: None,
             dir: Some(dir_path.clone()),
         }
-        .load()
-        .unwrap();
-        assert_eq!(certs_from_dir.unwrap().len(), 2);
+        .load();
+        assert_eq!(result.certs.len(), 2);
 
-        let certs_from_both = CertPaths {
+        let result = CertPaths {
             file: Some(file_path),
             dir: Some(dir_path),
         }
-        .load()
-        .unwrap();
-        assert_eq!(certs_from_both.unwrap().len(), 2);
+        .load();
+        assert_eq!(result.certs.len(), 2);
     }
 
     #[test]
     fn malformed_file_from_env() {
         // Certificate parser tries to extract certs from file ignoring
         // invalid sections.
-        let certs = load_pem_certs(Path::new(file!())).unwrap();
-        assert_eq!(certs.len(), 0);
+        let mut result = CertificateResult::default();
+        load_pem_certs(Path::new(file!()), &mut result);
+        assert_eq!(result.certs.len(), 0);
+        assert!(result.errors.is_empty());
     }
 
     #[test]
     fn from_env_missing_file() {
-        assert_eq!(
-            load_pem_certs(Path::new("no/such/file"))
-                .unwrap_err()
-                .kind(),
-            ErrorKind::NotFound
-        );
+        let mut result = CertificateResult::default();
+        load_pem_certs(Path::new("no/such/file"), &mut result);
+        match &first_error(&result).kind {
+            ErrorKind::Io { inner, .. } => assert_eq!(inner.kind(), io::ErrorKind::NotFound),
+            _ => panic!("unexpected error {:?}", result.errors),
+        }
     }
 
     #[test]
     fn from_env_missing_dir() {
-        assert_eq!(
-            load_pem_certs_from_dir(Path::new("no/such/directory"))
-                .unwrap_err()
-                .kind(),
-            ErrorKind::NotFound
-        );
+        let mut result = CertificateResult::default();
+        load_pem_certs_from_dir(Path::new("no/such/directory"), &mut result);
+        match &first_error(&result).kind {
+            ErrorKind::Io { inner, .. } => assert_eq!(inner.kind(), io::ErrorKind::NotFound),
+            _ => panic!("unexpected error {:?}", result.errors),
+        }
     }
 
     #[test]
     #[cfg(unix)]
     fn from_env_with_non_regular_and_empty_file() {
-        let certs = load_pem_certs(Path::new("/dev/null")).unwrap();
-        assert_eq!(certs.len(), 0);
+        let mut result = CertificateResult::default();
+        load_pem_certs(Path::new("/dev/null"), &mut result);
+        assert_eq!(result.certs.len(), 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn from_env_bad_dir_perms() {
+        // Create a temp dir that we can't read from.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        fs::set_permissions(temp_dir.path(), Permissions::from_mode(0o000)).unwrap();
+
+        test_cert_paths_bad_perms(CertPaths {
+            file: None,
+            dir: Some(temp_dir.path().into()),
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn from_env_bad_file_perms() {
+        // Create a tmp dir with a file inside that we can't read from.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("unreadable.pem");
+        let cert_file = File::create(&file_path).unwrap();
+        cert_file
+            .set_permissions(Permissions::from_mode(0o000))
+            .unwrap();
+
+        test_cert_paths_bad_perms(CertPaths {
+            file: Some(file_path.clone()),
+            dir: None,
+        });
+    }
+
+    #[cfg(unix)]
+    fn test_cert_paths_bad_perms(cert_paths: CertPaths) {
+        let result = cert_paths.load();
+
+        if let (None, None) = (cert_paths.file, cert_paths.dir) {
+            panic!("only one of file or dir should be set");
+        };
+
+        let error = first_error(&result);
+        match &error.kind {
+            ErrorKind::Io { inner, .. } => {
+                assert_eq!(inner.kind(), io::ErrorKind::PermissionDenied);
+                inner
+            }
+            _ => panic!("unexpected error {:?}", result.errors),
+        };
+    }
+
+    fn first_error(result: &CertificateResult) -> &Error {
+        result.errors.first().unwrap()
     }
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 /*!
 <!-- tidy:crate-doc:start -->
 A lightweight version of [pin-project] written with declarative macros.
@@ -10,8 +12,6 @@ Add this to your `Cargo.toml`:
 [dependencies]
 pin-project-lite = "0.2"
 ```
-
-*Compiler support: requires rustc 1.37+*
 
 ## Examples
 
@@ -104,12 +104,13 @@ pin-project supports this by [`UnsafeUnpin`][unsafe-unpin]. (`!Unpin` is support
 
 pin-project supports this.
 
-[not-unpin]: https://docs.rs/pin-project/1/pin_project/attr.pin_project.html#unpin
-[not-unpin-lite]: https://docs.rs/pin-project-lite/0.2/pin_project_lite/macro.pin_project.html#unpin
+[not-unpin]: https://docs.rs/pin-project/latest/pin_project/attr.pin_project.html#unpin
 [pin-project]: https://github.com/taiki-e/pin-project
-[unsafe-unpin]: https://docs.rs/pin-project/1/pin_project/attr.pin_project.html#unsafeunpin
+[unsafe-unpin]: https://docs.rs/pin-project/latest/pin_project/attr.pin_project.html#unsafeunpin
 
 <!-- tidy:crate-doc:end -->
+
+[not-unpin-lite]: pin_project#unpin
 */
 
 #![no_std]
@@ -120,21 +121,18 @@ pin-project supports this.
         allow(dead_code, unused_variables)
     )
 ))]
-#![warn(rust_2018_idioms, single_use_lifetimes, unreachable_pub)]
+// #![warn(unsafe_op_in_unsafe_fn)] // requires Rust 1.52
 #![warn(
-    clippy::pedantic,
-    // lints for public library
+    // Lints that may help when writing public library.
+    missing_debug_implementations,
+    missing_docs,
     clippy::alloc_instead_of_core,
     clippy::exhaustive_enums,
     clippy::exhaustive_structs,
+    clippy::impl_trait_in_params,
+    // clippy::missing_inline_in_public_items,
     clippy::std_instead_of_alloc,
     clippy::std_instead_of_core,
-    // lints that help writing unsafe code
-    clippy::as_ptr_cast_mut,
-    clippy::default_union_representation,
-    clippy::trailing_empty_array,
-    clippy::transmute_undefined_repr,
-    clippy::undocumented_unsafe_blocks,
 )]
 
 /// A macro that creates a projection type covering all the fields of struct.
@@ -146,7 +144,7 @@ pin-project supports this.
 ///
 /// And the following methods are implemented on the original type:
 ///
-/// ```rust
+/// ```
 /// # use std::pin::Pin;
 /// # type Projection<'a> = &'a ();
 /// # type ProjectionRef<'a> = &'a ();
@@ -160,7 +158,7 @@ pin-project supports this.
 /// you can name the projection type returned from the method. This allows you
 /// to use pattern matching on the projected types.
 ///
-/// ```rust
+/// ```
 /// # use pin_project_lite::pin_project;
 /// # use std::pin::Pin;
 /// pin_project! {
@@ -186,7 +184,7 @@ pin-project supports this.
 /// method which allows the contents of `Pin<&mut Self>` to be replaced while simultaneously moving
 /// out all unpinned fields in `Self`.
 ///
-/// ```rust
+/// ```
 /// # use std::pin::Pin;
 /// # type MyProjReplace = ();
 /// # trait Dox {
@@ -216,7 +214,7 @@ pin-project supports this.
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```
 /// use std::pin::Pin;
 ///
 /// use pin_project_lite::pin_project;
@@ -241,7 +239,7 @@ pin-project supports this.
 /// To use `pin_project!` on enums, you need to name the projection type
 /// returned from the method.
 ///
-/// ```rust
+/// ```
 /// use std::pin::Pin;
 ///
 /// use pin_project_lite::pin_project;
@@ -273,7 +271,7 @@ pin-project supports this.
 /// original [`Pin`] type, it needs to use [`.as_mut()`][`Pin::as_mut`] to avoid
 /// consuming the [`Pin`].
 ///
-/// ```rust
+/// ```
 /// use std::pin::Pin;
 ///
 /// use pin_project_lite::pin_project;
@@ -313,7 +311,7 @@ pin-project supports this.
 ///
 /// This is equivalent to using `#[pin]` attribute for a [`PhantomPinned`] field.
 ///
-/// ```rust
+/// ```
 /// use std::marker::PhantomPinned;
 ///
 /// use pin_project_lite::pin_project;
@@ -329,6 +327,52 @@ pin-project supports this.
 ///
 /// Note that using [`PhantomPinned`] without `#[pin]` or `#[project(!Unpin)]`
 /// attribute has no effect.
+///
+/// # Pinned Drop
+///
+/// In order to correctly implement pin projections, a type’s [`Drop`] impl must not move out of any
+/// structurally pinned fields. Unfortunately, [`Drop::drop`] takes `&mut Self`, not `Pin<&mut
+/// Self>`.
+///
+/// To implement [`Drop`] for type that has pin, add an `impl PinnedDrop` block at the end of the
+/// [`pin_project`] macro block. PinnedDrop has the following interface:
+///
+/// ```rust
+/// # use std::pin::Pin;
+/// trait PinnedDrop {
+///     fn drop(this: Pin<&mut Self>);
+/// }
+/// ```
+///
+/// Note that the argument to `PinnedDrop::drop` cannot be named `self`.
+///
+/// `pin_project!` implements the actual [`Drop`] trait via PinnedDrop you implemented. To
+/// explicitly drop a type that implements PinnedDrop, use the [drop] function just like dropping a
+/// type that directly implements [`Drop`].
+///
+/// `PinnedDrop::drop` will never be called more than once, just like [`Drop::drop`].
+///
+/// ```rust
+/// use pin_project_lite::pin_project;
+///
+/// pin_project! {
+///     pub struct Struct<'a> {
+///         was_dropped: &'a mut bool,
+///         #[pin]
+///         field: u8,
+///     }
+///
+///     impl PinnedDrop for Struct<'_> {
+///         fn drop(this: Pin<&mut Self>) { // <----- NOTE: this is not `self`
+///             **this.project().was_dropped = true;
+///         }
+///     }
+/// }
+///
+/// let mut was_dropped = false;
+/// drop(Struct { was_dropped: &mut was_dropped, field: 42 });
+/// assert!(was_dropped);
+/// ```
 ///
 /// [`PhantomPinned`]: core::marker::PhantomPinned
 /// [`Pin::as_mut`]: core::pin::Pin::as_mut
@@ -1154,7 +1198,7 @@ macro_rules! __pin_project_make_unpin_impl {
         // Automatically create the appropriate conditional `Unpin` implementation.
         //
         // Basically this is equivalent to the following code:
-        // ```rust
+        // ```
         // impl<T, U> Unpin for Struct<T, U> where T: Unpin {}
         // ```
         //
@@ -1162,7 +1206,7 @@ macro_rules! __pin_project_make_unpin_impl {
         // this would cause an E0446 (private type in public interface).
         //
         // When RFC 2145 is implemented (rust-lang/rust#48054),
-        // this will become a lint, rather then a hard error.
+        // this will become a lint, rather than a hard error.
         //
         // As a workaround for this, we generate a new struct, containing all of the pinned
         // fields from our #[pin_project] type. This struct is declared within
@@ -1177,7 +1221,7 @@ macro_rules! __pin_project_make_unpin_impl {
         //
         // See also https://github.com/taiki-e/pin-project/pull/53.
         #[allow(non_snake_case)]
-        $vis struct __Origin <'__pin, $($impl_generics)*>
+        $vis struct __Origin<'__pin, $($impl_generics)*>
         $(where
             $($where_clause)*)?
         {
@@ -1186,7 +1230,8 @@ macro_rules! __pin_project_make_unpin_impl {
         }
         impl <'__pin, $($impl_generics)*> $crate::__private::Unpin for $ident <$($ty_generics)*>
         where
-            __Origin <'__pin, $($ty_generics)*>: $crate::__private::Unpin
+            $crate::__private::PinnedFieldsOf<__Origin<'__pin, $($ty_generics)*>>:
+                $crate::__private::Unpin
             $(, $($where_clause)*)?
         {
         }
@@ -1617,7 +1662,9 @@ macro_rules! __pin_project_parse_generics {
     };
 }
 
+// Not public API.
 #[doc(hidden)]
+#[allow(missing_debug_implementations)]
 pub mod __private {
     use core::mem::ManuallyDrop;
     #[doc(hidden)]
@@ -1628,23 +1675,37 @@ pub mod __private {
         ptr,
     };
 
+    // Workaround for issue on unstable negative_impls feature that allows unsound overlapping Unpin
+    // implementations and rustc bug that leaks unstable negative_impls into stable.
+    // See https://github.com/taiki-e/pin-project/issues/340#issuecomment-2432146009 for details.
+    #[doc(hidden)]
+    pub type PinnedFieldsOf<T> =
+        <PinnedFieldsOfHelperStruct<T> as PinnedFieldsOfHelperTrait>::Actual;
+    // We cannot use <Option<T> as IntoIterator>::Item or similar since we should allow ?Sized in T.
+    #[doc(hidden)]
+    pub trait PinnedFieldsOfHelperTrait {
+        type Actual: ?Sized;
+    }
+    #[doc(hidden)]
+    pub struct PinnedFieldsOfHelperStruct<T: ?Sized>(T);
+    impl<T: ?Sized> PinnedFieldsOfHelperTrait for PinnedFieldsOfHelperStruct<T> {
+        type Actual = T;
+    }
+
     // This is an internal helper struct used by `pin_project!`.
     #[doc(hidden)]
     pub struct AlwaysUnpin<T: ?Sized>(PhantomData<T>);
-
     impl<T: ?Sized> Unpin for AlwaysUnpin<T> {}
 
     // This is an internal helper used to ensure a value is dropped.
     #[doc(hidden)]
     pub struct UnsafeDropInPlaceGuard<T: ?Sized>(*mut T);
-
     impl<T: ?Sized> UnsafeDropInPlaceGuard<T> {
         #[doc(hidden)]
         pub unsafe fn new(ptr: *mut T) -> Self {
             Self(ptr)
         }
     }
-
     impl<T: ?Sized> Drop for UnsafeDropInPlaceGuard<T> {
         fn drop(&mut self) {
             // SAFETY: the caller of `UnsafeDropInPlaceGuard::new` must guarantee
@@ -1662,14 +1723,12 @@ pub mod __private {
         target: *mut T,
         value: ManuallyDrop<T>,
     }
-
     impl<T> UnsafeOverwriteGuard<T> {
         #[doc(hidden)]
         pub unsafe fn new(target: *mut T, value: T) -> Self {
             Self { target, value: ManuallyDrop::new(value) }
         }
     }
-
     impl<T> Drop for UnsafeOverwriteGuard<T> {
         fn drop(&mut self) {
             // SAFETY: the caller of `UnsafeOverwriteGuard::new` must guarantee

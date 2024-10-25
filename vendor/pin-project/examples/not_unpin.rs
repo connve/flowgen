@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 // See ./not_unpin-expanded.rs for generated code.
 
 #![allow(dead_code)]
@@ -5,7 +7,7 @@
 use pin_project::pin_project;
 
 #[pin_project(!Unpin)]
-pub struct Struct<T, U> {
+struct Struct<T, U> {
     #[pin]
     pinned: T,
     unpinned: U,

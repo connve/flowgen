@@ -43,6 +43,23 @@ should only be used when the compiler supports it.
 
 ## Release Notes
 
+- 1.4.0 (2024-09-26)
+
+  - Add `emit_possibility` for Rust 1.80's [checked cfgs], and call that
+    automatically for methods that conditionally `emit`, by @Techcable.
+
+[checked cfgs]: https://blog.rust-lang.org/2024/05/06/check-cfg.html
+
+- 1.3.0 (2024-05-03)
+
+  - Add `probe_raw` for direct control of the code that will be test-compiled.
+  - Use wrappers when querying the `rustc` version information too.
+
+- 1.2.0 (2024-03-25)
+
+  - Add `no_std` and `set_no_std` to control the use of `#![no_std]` in probes.
+  - Use `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` when they are set.
+
 - 1.1.0 (2022-02-07)
   - Use `CARGO_ENCODED_RUSTFLAGS` when it is set.
 
@@ -88,8 +105,8 @@ treated as a major breaking change for semver purposes.
 This project is licensed under either of
 
  * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   http://www.apache.org/licenses/LICENSE-2.0)
+   https://www.apache.org/licenses/LICENSE-2.0)
  * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   http://opensource.org/licenses/MIT)
+   https://opensource.org/licenses/MIT)
 
 at your option.

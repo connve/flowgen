@@ -17,13 +17,12 @@ use crate::client::client_conn::ClientConnectionData;
 use crate::client::common::ClientHelloDetails;
 use crate::client::ech::EchState;
 use crate::client::{tls13, ClientConfig, EchMode, EchStatus};
-use crate::common_state::{CommonState, HandshakeKind, State};
+use crate::common_state::{CommonState, HandshakeKind, KxState, State};
 use crate::conn::ConnectionRandoms;
 use crate::crypto::{ActiveKeyExchange, KeyExchangeAlgorithm};
 use crate::enums::{AlertDescription, CipherSuite, ContentType, HandshakeType, ProtocolVersion};
 use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
 use crate::hash_hs::HandshakeHashBuffer;
-#[cfg(feature = "logging")]
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::enums::{Compression, ECPointFormat, ExtensionType, PSKKeyExchangeMode};
@@ -109,7 +108,11 @@ pub(super) fn start_handshake(
     let mut resuming = find_session(&server_name, &config, cx);
 
     let key_share = if config.supports_version(ProtocolVersion::TLSv1_3) {
-        Some(tls13::initial_key_share(&config, &server_name)?)
+        Some(tls13::initial_key_share(
+            &config,
+            &server_name,
+            &mut cx.common.kx_state,
+        )?)
     } else {
         None
     };
@@ -123,7 +126,7 @@ pub(super) fn start_handshake(
                 // If we have a ticket, we use the sessionid as a signal that
                 // we're  doing an abbreviated handshake.  See section 3.4 in
                 // RFC5077.
-                if !inner.ticket().is_empty() {
+                if !inner.ticket().0.is_empty() {
                     inner.session_id = SessionId::random(config.provider.secure_random)?;
                 }
                 Some(inner.session_id)
@@ -239,16 +242,22 @@ fn emit_client_hello_for_retry(
     // should be unreachable thanks to config builder
     assert!(!supported_versions.is_empty());
 
+    // offer groups which are usable for any offered version
+    let offered_groups = config
+        .provider
+        .kx_groups
+        .iter()
+        .filter(|skxg| {
+            supported_versions
+                .iter()
+                .any(|v| skxg.usable_for_version(*v))
+        })
+        .map(|skxg| skxg.name())
+        .collect();
+
     let mut exts = vec![
         ClientExtension::SupportedVersions(supported_versions),
-        ClientExtension::NamedGroups(
-            config
-                .provider
-                .kx_groups
-                .iter()
-                .map(|skxg| skxg.name())
-                .collect(),
-        ),
+        ClientExtension::NamedGroups(offered_groups),
         ClientExtension::SignatureAlgorithms(
             config
                 .verifier
@@ -621,7 +630,7 @@ pub(super) fn process_alpn_protocol(
     // RFC 9001 says: "While ALPN only specifies that servers use this alert, QUIC clients MUST
     // use error 0x0178 to terminate a connection when ALPN negotiation fails." We judge that
     // the user intended to use ALPN (rather than some out-of-band protocol negotiation
-    // mechanism) iff any ALPN protocols were configured. This defends against badly-behaved
+    // mechanism) if and only if any ALPN protocols were configured. This defends against badly-behaved
     // servers which accept a connection that requires an application-layer protocol they do not
     // understand.
     if common.is_quic() && common.alpn_protocol.is_none() && !config.alpn_protocols.is_empty() {
@@ -855,7 +864,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
     fn handle_hello_retry_request(
         mut self,
         cx: &mut ClientContext<'_>,
-        m: Message,
+        m: Message<'_>,
     ) -> NextStateOrError<'static> {
         let hrr = require_handshake_msg!(
             m,
@@ -1025,7 +1034,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
 
         let key_share = match req_group {
             Some(group) if group != offered_key_share.group() => {
-                let skxg = match config.find_kx_group(group) {
+                let skxg = match config.find_kx_group(group, ProtocolVersion::TLSv1_3) {
                     Some(skxg) => skxg,
                     None => {
                         return Err(cx.common.send_fatal_alert(
@@ -1035,6 +1044,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
                     }
                 };
 
+                cx.common.kx_state = KxState::Start(skxg);
                 skxg.start()?
             }
             _ => offered_key_share,

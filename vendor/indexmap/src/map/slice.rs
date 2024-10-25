@@ -11,13 +11,13 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::{self, Bound, Index, IndexMut, RangeBounds};
 
-/// A dynamically-sized slice of key-value pairs in an `IndexMap`.
+/// A dynamically-sized slice of key-value pairs in an [`IndexMap`].
 ///
 /// This supports indexed operations much like a `[(K, V)]` slice,
 /// but not any hashed operations on the map keys.
 ///
-/// Unlike `IndexMap`, `Slice` does consider the order for `PartialEq`
-/// and `Eq`, and it also implements `PartialOrd`, `Ord`, and `Hash`.
+/// Unlike `IndexMap`, `Slice` does consider the order for [`PartialEq`]
+/// and [`Eq`], and it also implements [`PartialOrd`], [`Ord`], and [`Hash`].
 #[repr(transparent)]
 pub struct Slice<K, V> {
     pub(crate) entries: [Bucket<K, V>],
@@ -73,21 +73,21 @@ impl<K, V> Slice<K, V> {
 
     /// Get a key-value pair by index.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_index(&self, index: usize) -> Option<(&K, &V)> {
         self.entries.get(index).map(Bucket::refs)
     }
 
     /// Get a key-value pair by index, with mutable access to the value.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_index_mut(&mut self, index: usize) -> Option<(&K, &mut V)> {
         self.entries.get_mut(index).map(Bucket::ref_mut)
     }
 
     /// Returns a slice of key-value pairs in the given range of indices.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_range<R: RangeBounds<usize>>(&self, range: R) -> Option<&Self> {
         let range = try_simplify_range(range, self.entries.len())?;
         self.entries.get(range).map(Slice::from_slice)
@@ -95,7 +95,7 @@ impl<K, V> Slice<K, V> {
 
     /// Returns a mutable slice of key-value pairs in the given range of indices.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_range_mut<R: RangeBounds<usize>>(&mut self, range: R) -> Option<&mut Self> {
         let range = try_simplify_range(range, self.entries.len())?;
         self.entries.get_mut(range).map(Slice::from_mut_slice)
@@ -426,7 +426,6 @@ impl_index!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn slice_index() {

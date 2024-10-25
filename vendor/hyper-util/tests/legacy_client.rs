@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::task::Poll;
 use std::thread;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use futures_util::stream::StreamExt;
 use futures_util::{self, Stream};
 use http_body_util::BodyExt;
 use http_body_util::{Empty, Full, StreamBody};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use hyper::body::Bytes;
 use hyper::body::Frame;
@@ -88,33 +90,30 @@ fn drop_body_before_eof_closes_connection() {
 async fn drop_client_closes_idle_connections() {
     let _ = pretty_env_logger::try_init();
 
-    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = server.local_addr().unwrap();
     let (closes_tx, mut closes) = mpsc::channel(10);
 
     let (tx1, rx1) = oneshot::channel();
-    let (_client_drop_tx, client_drop_rx) = oneshot::channel::<()>();
 
-    thread::spawn(move || {
-        let mut sock = server.accept().unwrap().0;
-        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        sock.set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+    let t1 = tokio::spawn(async move {
+        let mut sock = server.accept().await.unwrap().0;
         let mut buf = [0; 4096];
-        sock.read(&mut buf).expect("read 1");
+        sock.read(&mut buf).await.expect("read 1");
         let body = [b'x'; 64];
-        write!(
-            sock,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        )
-        .expect("write head");
-        let _ = sock.write_all(&body);
+        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+        sock.write_all(headers.as_bytes())
+            .await
+            .expect("write head");
+        sock.write_all(&body).await.expect("write body");
         let _ = tx1.send(());
 
         // prevent this thread from closing until end of test, so the connection
         // stays open and idle until Client is dropped
-        runtime().block_on(client_drop_rx.into_future())
+        match sock.read(&mut buf).await {
+            Ok(n) => assert_eq!(n, 0),
+            Err(_) => (),
+        }
     });
 
     let client = Client::builder(TokioExecutor::new()).build(DebugConnector::with_http_and_closes(
@@ -148,6 +147,7 @@ async fn drop_client_closes_idle_connections() {
     futures_util::pin_mut!(t);
     let close = closes.into_future().map(|(opt, _)| opt.expect("closes"));
     future::select(t, close).await;
+    t1.await.unwrap();
 }
 
 #[cfg(not(miri))]
@@ -891,7 +891,6 @@ fn capture_connection_on_client() {
     let addr = server.local_addr().unwrap();
     thread::spawn(move || {
         let mut sock = server.accept().unwrap().0;
-        //drop(server);
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         sock.set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -907,4 +906,75 @@ fn capture_connection_on_client() {
     let captured_conn = capture_connection(&mut req);
     rt.block_on(client.request(req)).expect("200 OK");
     assert!(captured_conn.connection_metadata().is_some());
+}
+
+#[cfg(not(miri))]
+#[test]
+fn connection_poisoning() {
+    use std::sync::atomic::AtomicUsize;
+
+    let _ = pretty_env_logger::try_init();
+
+    let rt = runtime();
+    let connector = DebugConnector::new();
+
+    let client = Client::builder(TokioExecutor::new()).build(connector);
+
+    let server = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = server.local_addr().unwrap();
+    let num_conns: Arc<AtomicUsize> = Default::default();
+    let num_requests: Arc<AtomicUsize> = Default::default();
+    let num_requests_tracker = num_requests.clone();
+    let num_conns_tracker = num_conns.clone();
+    thread::spawn(move || loop {
+        let mut sock = server.accept().unwrap().0;
+        num_conns_tracker.fetch_add(1, Ordering::Relaxed);
+        let num_requests_tracker = num_requests_tracker.clone();
+        thread::spawn(move || {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut buf = [0; 4096];
+            loop {
+                if sock.read(&mut buf).expect("read 1") > 0 {
+                    num_requests_tracker.fetch_add(1, Ordering::Relaxed);
+                    sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .expect("write 1");
+                }
+            }
+        });
+    });
+    let make_request = || {
+        Request::builder()
+            .uri(&*format!("http://{}/a", addr))
+            .body(Empty::<Bytes>::new())
+            .unwrap()
+    };
+    let mut req = make_request();
+    let captured_conn = capture_connection(&mut req);
+    rt.block_on(client.request(req)).expect("200 OK");
+    assert_eq!(num_conns.load(Ordering::SeqCst), 1);
+    assert_eq!(num_requests.load(Ordering::SeqCst), 1);
+
+    rt.block_on(client.request(make_request())).expect("200 OK");
+    rt.block_on(client.request(make_request())).expect("200 OK");
+    // Before poisoning the connection is reused
+    assert_eq!(num_conns.load(Ordering::SeqCst), 1);
+    assert_eq!(num_requests.load(Ordering::SeqCst), 3);
+    captured_conn
+        .connection_metadata()
+        .as_ref()
+        .unwrap()
+        .poison();
+
+    rt.block_on(client.request(make_request())).expect("200 OK");
+
+    // After poisoning, a new connection is established
+    assert_eq!(num_conns.load(Ordering::SeqCst), 2);
+    assert_eq!(num_requests.load(Ordering::SeqCst), 4);
+
+    rt.block_on(client.request(make_request())).expect("200 OK");
+    // another request can still reuse:
+    assert_eq!(num_conns.load(Ordering::SeqCst), 2);
+    assert_eq!(num_requests.load(Ordering::SeqCst), 5);
 }

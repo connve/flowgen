@@ -14,6 +14,60 @@ extern "C" {
     #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
     #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
     pub type MemoryBreakdownEntry;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Get the `attribution` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "attribution")]
+    pub fn get_attribution(this: &MemoryBreakdownEntry) -> Option<::js_sys::Array>;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Change the `attribution` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "attribution")]
+    pub fn set_attribution(this: &MemoryBreakdownEntry, val: &::wasm_bindgen::JsValue);
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Get the `bytes` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "bytes")]
+    pub fn get_bytes(this: &MemoryBreakdownEntry) -> Option<f64>;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Change the `bytes` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "bytes")]
+    pub fn set_bytes(this: &MemoryBreakdownEntry, val: f64);
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Get the `types` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "types")]
+    pub fn get_types(this: &MemoryBreakdownEntry) -> Option<::js_sys::Array>;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Change the `types` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "types")]
+    pub fn set_types(this: &MemoryBreakdownEntry, val: &::wasm_bindgen::JsValue);
 }
 #[cfg(web_sys_unstable_apis)]
 impl MemoryBreakdownEntry {
@@ -29,58 +83,21 @@ impl MemoryBreakdownEntry {
         ret
     }
     #[cfg(web_sys_unstable_apis)]
-    #[doc = "Change the `attribution` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_attribution()` instead."]
     pub fn attribution(&mut self, val: &::wasm_bindgen::JsValue) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("attribution"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_attribution(val);
         self
     }
     #[cfg(web_sys_unstable_apis)]
-    #[doc = "Change the `bytes` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_bytes()` instead."]
     pub fn bytes(&mut self, val: f64) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("bytes"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_bytes(val);
         self
     }
     #[cfg(web_sys_unstable_apis)]
-    #[doc = "Change the `types` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `MemoryBreakdownEntry`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_types()` instead."]
     pub fn types(&mut self, val: &::wasm_bindgen::JsValue) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("types"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_types(val);
         self
     }
 }

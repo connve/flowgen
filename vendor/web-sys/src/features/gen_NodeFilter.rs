@@ -10,6 +10,16 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `NodeFilter`*"]
     pub type NodeFilter;
+    #[doc = "Get the `acceptNode` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `NodeFilter`*"]
+    #[wasm_bindgen(method, getter = "acceptNode")]
+    pub fn get_accept_node(this: &NodeFilter) -> Option<::js_sys::Function>;
+    #[doc = "Change the `acceptNode` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `NodeFilter`*"]
+    #[wasm_bindgen(method, setter = "acceptNode")]
+    pub fn set_accept_node(this: &NodeFilter, val: &::js_sys::Function);
 }
 impl NodeFilter {
     #[doc = "Construct a new `NodeFilter`."]
@@ -20,21 +30,9 @@ impl NodeFilter {
         let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
         ret
     }
-    #[doc = "Change the `acceptNode` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `NodeFilter`*"]
+    #[deprecated = "Use `set_accept_node()` instead."]
     pub fn accept_node(&mut self, val: &::js_sys::Function) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("acceptNode"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_accept_node(val);
         self
     }
 }

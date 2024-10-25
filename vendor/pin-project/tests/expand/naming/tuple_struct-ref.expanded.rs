@@ -13,6 +13,7 @@ struct TupleStruct<T, U>(#[pin] T, U);
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
 #[allow(clippy::ref_option_ref)]
+#[allow(clippy::missing_docs_in_private_items)]
 struct ProjRef<'pin, T, U>(
     ::pin_project::__private::Pin<&'pin (T)>,
     &'pin (U),
@@ -30,6 +31,7 @@ where
 #[allow(clippy::redundant_pub_crate)]
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(unused_qualifications)]
+#[allow(clippy::needless_lifetimes)]
 #[allow(clippy::semicolon_if_nothing_returned)]
 #[allow(clippy::use_self)]
 #[allow(clippy::used_underscore_binding)]
@@ -38,6 +40,7 @@ const _: () = {
     extern crate pin_project as _pin_project;
     #[allow(dead_code)]
     #[allow(clippy::mut_mut)]
+    #[allow(clippy::missing_docs_in_private_items)]
     struct __TupleStructProjection<'pin, T, U>(
         ::pin_project::__private::Pin<&'pin mut (T)>,
         &'pin mut (U),
@@ -88,12 +91,16 @@ const _: () = {
     }
     impl<'pin, T, U> _pin_project::__private::Unpin for TupleStruct<T, U>
     where
-        __TupleStruct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __TupleStruct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     #[doc(hidden)]
     unsafe impl<'pin, T, U> _pin_project::UnsafeUnpin for TupleStruct<T, U>
     where
-        __TupleStruct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __TupleStruct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     trait TupleStructMustNotImplDrop {}
     #[allow(clippy::drop_bounds, drop_bounds)]

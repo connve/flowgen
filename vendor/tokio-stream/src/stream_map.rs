@@ -1,9 +1,10 @@
 use crate::Stream;
 
 use std::borrow::Borrow;
+use std::future::poll_fn;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 /// Combine many streams into one, indexing each source stream with a unique
 /// key.
@@ -209,7 +210,7 @@ pub struct StreamMap<K, V> {
 impl<K, V> StreamMap<K, V> {
     /// An iterator visiting all key-value pairs in arbitrary order.
     ///
-    /// The iterator element type is &'a (K, V).
+    /// The iterator element type is `&'a (K, V)`.
     ///
     /// # Examples
     ///
@@ -232,7 +233,7 @@ impl<K, V> StreamMap<K, V> {
 
     /// An iterator visiting all key-value pairs mutably in arbitrary order.
     ///
-    /// The iterator element type is &'a mut (K, V).
+    /// The iterator element type is `&'a mut (K, V)`.
     ///
     /// # Examples
     ///
@@ -289,7 +290,7 @@ impl<K, V> StreamMap<K, V> {
 
     /// Returns an iterator visiting all keys in arbitrary order.
     ///
-    /// The iterator element type is &'a K.
+    /// The iterator element type is `&'a K`.
     ///
     /// # Examples
     ///
@@ -312,7 +313,7 @@ impl<K, V> StreamMap<K, V> {
 
     /// An iterator visiting all values in arbitrary order.
     ///
-    /// The iterator element type is &'a V.
+    /// The iterator element type is `&'a V`.
     ///
     /// # Examples
     ///
@@ -335,7 +336,7 @@ impl<K, V> StreamMap<K, V> {
 
     /// An iterator visiting all values mutably in arbitrary order.
     ///
-    /// The iterator element type is &'a mut V.
+    /// The iterator element type is `&'a mut V`.
     ///
     /// # Examples
     ///
@@ -467,10 +468,10 @@ impl<K, V> StreamMap<K, V> {
     /// assert!(map.remove(&1).is_some());
     /// assert!(map.remove(&1).is_none());
     /// ```
-    pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> Option<V>
+    pub fn remove<Q>(&mut self, k: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Eq + ?Sized,
     {
         for i in 0..self.entries.len() {
             if self.entries[i].0.borrow() == k {
@@ -496,10 +497,10 @@ impl<K, V> StreamMap<K, V> {
     /// assert_eq!(map.contains_key(&1), true);
     /// assert_eq!(map.contains_key(&2), false);
     /// ```
-    pub fn contains_key<Q: ?Sized>(&self, k: &Q) -> bool
+    pub fn contains_key<Q>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
-        Q: Hash + Eq,
+        Q: Hash + Eq + ?Sized,
     {
         for i in 0..self.entries.len() {
             if self.entries[i].0.borrow() == k {
@@ -518,8 +519,6 @@ where
 {
     /// Polls the next value, includes the vec entry index
     fn poll_next_entry(&mut self, cx: &mut Context<'_>) -> Poll<Option<(usize, V::Item)>> {
-        use Poll::*;
-
         let start = self::rand::thread_rng_n(self.entries.len() as u32) as usize;
         let mut idx = start;
 
@@ -527,8 +526,8 @@ where
             let (_, stream) = &mut self.entries[idx];
 
             match Pin::new(stream).poll_next(cx) {
-                Ready(Some(val)) => return Ready(Some((idx, val))),
-                Ready(None) => {
+                Poll::Ready(Some(val)) => return Poll::Ready(Some((idx, val))),
+                Poll::Ready(None) => {
                     // Remove the entry
                     self.entries.swap_remove(idx);
 
@@ -542,7 +541,7 @@ where
                         idx = idx.wrapping_add(1) % self.entries.len();
                     }
                 }
-                Pending => {
+                Poll::Pending => {
                     idx = idx.wrapping_add(1) % self.entries.len();
                 }
             }
@@ -550,9 +549,9 @@ where
 
         // If the map is empty, then the stream is complete.
         if self.entries.is_empty() {
-            Ready(None)
+            Poll::Ready(None)
         } else {
-            Pending
+            Poll::Pending
         }
     }
 }
@@ -560,6 +559,110 @@ where
 impl<K, V> Default for StreamMap<K, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K, V> StreamMap<K, V>
+where
+    K: Clone + Unpin,
+    V: Stream + Unpin,
+{
+    /// Receives multiple items on this [`StreamMap`], extending the provided `buffer`.
+    ///
+    /// This method returns the number of items that is appended to the `buffer`.
+    ///
+    /// Note that this method does not guarantee that exactly `limit` items
+    /// are received. Rather, if at least one item is available, it returns
+    /// as many items as it can up to the given limit. This method returns
+    /// zero only if the `StreamMap` is empty (or if `limit` is zero).
+    ///
+    /// # Cancel safety
+    ///
+    /// This method is cancel safe. If `next_many` is used as the event in a
+    /// [`tokio::select!`](tokio::select) statement and some other branch
+    /// completes first, it is guaranteed that no items were received on any of
+    /// the underlying streams.
+    pub async fn next_many(&mut self, buffer: &mut Vec<(K, V::Item)>, limit: usize) -> usize {
+        poll_fn(|cx| self.poll_next_many(cx, buffer, limit)).await
+    }
+
+    /// Polls to receive multiple items on this `StreamMap`, extending the provided `buffer`.
+    ///
+    /// This method returns:
+    /// * `Poll::Pending` if no items are available but the `StreamMap` is not empty.
+    /// * `Poll::Ready(count)` where `count` is the number of items successfully received and
+    ///   stored in `buffer`. This can be less than, or equal to, `limit`.
+    /// * `Poll::Ready(0)` if `limit` is set to zero or when the `StreamMap` is empty.
+    ///
+    /// Note that this method does not guarantee that exactly `limit` items
+    /// are received. Rather, if at least one item is available, it returns
+    /// as many items as it can up to the given limit. This method returns
+    /// zero only if the `StreamMap` is empty (or if `limit` is zero).
+    pub fn poll_next_many(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut Vec<(K, V::Item)>,
+        limit: usize,
+    ) -> Poll<usize> {
+        if limit == 0 || self.entries.is_empty() {
+            return Poll::Ready(0);
+        }
+
+        let mut added = 0;
+
+        let start = self::rand::thread_rng_n(self.entries.len() as u32) as usize;
+        let mut idx = start;
+
+        while added < limit {
+            // Indicates whether at least one stream returned a value when polled or not
+            let mut should_loop = false;
+
+            for _ in 0..self.entries.len() {
+                let (_, stream) = &mut self.entries[idx];
+
+                match Pin::new(stream).poll_next(cx) {
+                    Poll::Ready(Some(val)) => {
+                        added += 1;
+
+                        let key = self.entries[idx].0.clone();
+                        buffer.push((key, val));
+
+                        should_loop = true;
+
+                        idx = idx.wrapping_add(1) % self.entries.len();
+                    }
+                    Poll::Ready(None) => {
+                        // Remove the entry
+                        self.entries.swap_remove(idx);
+
+                        // Check if this was the last entry, if so the cursor needs
+                        // to wrap
+                        if idx == self.entries.len() {
+                            idx = 0;
+                        } else if idx < start && start <= self.entries.len() {
+                            // The stream being swapped into the current index has
+                            // already been polled, so skip it.
+                            idx = idx.wrapping_add(1) % self.entries.len();
+                        }
+                    }
+                    Poll::Pending => {
+                        idx = idx.wrapping_add(1) % self.entries.len();
+                    }
+                }
+            }
+
+            if !should_loop {
+                break;
+            }
+        }
+
+        if added > 0 {
+            Poll::Ready(added)
+        } else if self.entries.is_empty() {
+            Poll::Ready(0)
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -660,9 +763,9 @@ mod rand {
 
     /// Fast random number generate
     ///
-    /// Implement xorshift64+: 2 32-bit xorshift sequences added together.
+    /// Implement `xorshift64+`: 2 32-bit `xorshift` sequences added together.
     /// Shift triplet `[17,7,16]` was calculated as indicated in Marsaglia's
-    /// Xorshift paper: <https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf>
+    /// `Xorshift` paper: <https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf>
     /// This generator passes the SmallCrush suite, part of TestU01 framework:
     /// <http://simul.iro.umontreal.ca/testu01/tu01.html>
     #[derive(Debug)]

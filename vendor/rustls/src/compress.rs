@@ -320,7 +320,7 @@ impl CompressionCache {
     pub(crate) fn compression_for(
         &self,
         compressor: &dyn CertCompressor,
-        original: &CertificatePayloadTls13,
+        original: &CertificatePayloadTls13<'_>,
     ) -> Result<Arc<CompressionCacheEntry>, CompressionFailed> {
         match self {
             Self::Disabled => Self::uncached_compression(compressor, original),
@@ -334,7 +334,7 @@ impl CompressionCache {
     fn compression_for_impl(
         &self,
         compressor: &dyn CertCompressor,
-        original: &CertificatePayloadTls13,
+        original: &CertificatePayloadTls13<'_>,
     ) -> Result<Arc<CompressionCacheEntry>, CompressionFailed> {
         let (max_size, entries) = match self {
             Self::Enabled(CompressionCacheInner { size, entries }) => (*size, entries),
@@ -391,7 +391,7 @@ impl CompressionCache {
     /// Compress `original` using `compressor` at `Interactive` level.
     fn uncached_compression(
         compressor: &dyn CertCompressor,
-        original: &CertificatePayloadTls13,
+        original: &CertificatePayloadTls13<'_>,
     ) -> Result<Arc<CompressionCacheEntry>, CompressionFailed> {
         let algorithm = compressor.algorithm();
         let encoding = original.get_encoding();
@@ -439,13 +439,13 @@ pub(crate) struct CompressionCacheEntry {
 }
 
 impl CompressionCacheEntry {
-    pub(crate) fn compressed_cert_payload(&self) -> CompressedCertificatePayload {
+    pub(crate) fn compressed_cert_payload(&self) -> CompressedCertificatePayload<'_> {
         self.compressed.as_borrowed()
     }
 }
 
 #[cfg(all(test, any(feature = "brotli", feature = "zlib")))]
-pub mod tests {
+mod tests {
     use std::{println, vec};
 
     use super::*;

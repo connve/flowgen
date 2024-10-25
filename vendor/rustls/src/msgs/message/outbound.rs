@@ -2,9 +2,9 @@ use alloc::vec::Vec;
 
 use super::{MessageError, PlainMessage, HEADER_SIZE, MAX_PAYLOAD};
 use crate::enums::{ContentType, ProtocolVersion};
-use crate::internal::record_layer::RecordLayer;
 use crate::msgs::base::Payload;
 use crate::msgs::codec::{Codec, Reader};
+use crate::record_layer::RecordLayer;
 
 /// A TLS frame, named `TLSPlaintext` in the standard.
 ///
@@ -94,7 +94,7 @@ impl<'a> OutboundChunks<'a> {
                     if size <= start || psize >= end {
                         continue;
                     }
-                    let start = if psize < start { start - psize } else { 0 };
+                    let start = start.saturating_sub(psize);
                     let end = if end - psize < len { end - psize } else { len };
                     vec.extend_from_slice(&chunk[start..end]);
                 }
@@ -175,7 +175,7 @@ impl OutboundOpaqueMessage {
     ///
     /// `MessageError` allows callers to distinguish between valid prefixes (might
     /// become valid if we read more data) and invalid data.
-    pub fn read(r: &mut Reader) -> Result<Self, MessageError> {
+    pub fn read(r: &mut Reader<'_>) -> Result<Self, MessageError> {
         let (typ, version, len) = read_opaque_message_header(r)?;
 
         let content = r
@@ -225,7 +225,7 @@ impl PrefixedPayload {
         self.0.extend_from_slice(slice)
     }
 
-    pub fn extend_from_chunks(&mut self, chunks: &OutboundChunks) {
+    pub fn extend_from_chunks(&mut self, chunks: &OutboundChunks<'_>) {
         chunks.copy_to_vec(&mut self.0)
     }
 

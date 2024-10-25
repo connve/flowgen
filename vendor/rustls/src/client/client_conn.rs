@@ -15,7 +15,6 @@ use crate::conn::{ConnectionCore, UnbufferedConnectionCommon};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
 use crate::enums::{CipherSuite, ProtocolVersion, SignatureScheme};
 use crate::error::Error;
-#[cfg(feature = "logging")]
 use crate::log::trace;
 use crate::msgs::enums::NamedGroup;
 use crate::msgs::handshake::ClientExtension;
@@ -404,12 +403,16 @@ impl ClientConfig {
             .find(|&scs| scs.suite() == suite)
     }
 
-    pub(super) fn find_kx_group(&self, group: NamedGroup) -> Option<&'static dyn SupportedKxGroup> {
+    pub(super) fn find_kx_group(
+        &self,
+        group: NamedGroup,
+        version: ProtocolVersion,
+    ) -> Option<&'static dyn SupportedKxGroup> {
         self.provider
             .kx_groups
             .iter()
             .copied()
-            .find(|skxg| skxg.name() == group)
+            .find(|skxg| skxg.usable_for_version(version) && skxg.name() == group)
     }
 
     pub(super) fn current_time(&self) -> Result<UnixTime, Error> {
@@ -515,7 +518,7 @@ pub(super) mod danger {
         pub cfg: &'a mut ClientConfig,
     }
 
-    impl<'a> DangerousClientConfig<'a> {
+    impl DangerousClientConfig<'_> {
         /// Overrides the default `ServerCertVerifier` with something else.
         pub fn set_certificate_verifier(&mut self, verifier: Arc<dyn ServerCertVerifier>) {
             self.cfg.verifier = verifier;
@@ -641,7 +644,7 @@ mod connection {
         }
     }
 
-    impl<'a> io::Write for WriteEarlyData<'a> {
+    impl io::Write for WriteEarlyData<'_> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.sess.write_early_data(buf)
         }
@@ -668,7 +671,7 @@ mod connection {
     }
 
     impl fmt::Debug for ClientConnection {
-        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("ClientConnection")
                 .finish()
         }
@@ -702,7 +705,7 @@ mod connection {
         /// The server can choose not to accept any sent early data --
         /// in this case the data is lost but the connection continues.  You
         /// can tell this happened using `is_early_data_accepted`.
-        pub fn early_data(&mut self) -> Option<WriteEarlyData> {
+        pub fn early_data(&mut self) -> Option<WriteEarlyData<'_>> {
             if self
                 .inner
                 .core
@@ -861,7 +864,7 @@ impl TransmitTlsData<'_, ClientConnectionData> {
     /// already encoded TLS data
     ///
     /// IF allowed by the protocol
-    pub fn may_encrypt_early_data(&mut self) -> Option<MayEncryptEarlyData> {
+    pub fn may_encrypt_early_data(&mut self) -> Option<MayEncryptEarlyData<'_>> {
         if self
             .conn
             .core

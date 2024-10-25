@@ -10,6 +10,26 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
     pub type RtcRtpCapabilities;
+    #[doc = "Get the `codecs` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[wasm_bindgen(method, getter = "codecs")]
+    pub fn get_codecs(this: &RtcRtpCapabilities) -> ::js_sys::Array;
+    #[doc = "Change the `codecs` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[wasm_bindgen(method, setter = "codecs")]
+    pub fn set_codecs(this: &RtcRtpCapabilities, val: &::wasm_bindgen::JsValue);
+    #[doc = "Get the `headerExtensions` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[wasm_bindgen(method, getter = "headerExtensions")]
+    pub fn get_header_extensions(this: &RtcRtpCapabilities) -> ::js_sys::Array;
+    #[doc = "Change the `headerExtensions` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[wasm_bindgen(method, setter = "headerExtensions")]
+    pub fn set_header_extensions(this: &RtcRtpCapabilities, val: &::wasm_bindgen::JsValue);
 }
 impl RtcRtpCapabilities {
     #[doc = "Construct a new `RtcRtpCapabilities`."]
@@ -25,35 +45,14 @@ impl RtcRtpCapabilities {
         ret.header_extensions(header_extensions);
         ret
     }
-    #[doc = "Change the `codecs` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[deprecated = "Use `set_codecs()` instead."]
     pub fn codecs(&mut self, val: &::wasm_bindgen::JsValue) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r =
-            ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("codecs"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_codecs(val);
         self
     }
-    #[doc = "Change the `headerExtensions` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `RtcRtpCapabilities`*"]
+    #[deprecated = "Use `set_header_extensions()` instead."]
     pub fn header_extensions(&mut self, val: &::wasm_bindgen::JsValue) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("headerExtensions"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_header_extensions(val);
         self
     }
 }

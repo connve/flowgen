@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.60"
 name = "rustls-pki-types"
-version = "1.7.0"
+version = "1.10.0"
 build = false
 autobins = false
 autoexamples = false
@@ -43,10 +43,6 @@ name = "rustls_pki_types"
 path = "src/lib.rs"
 
 [[test]]
-name = "server_name"
-path = "tests/server_name.rs"
-
-[[test]]
 name = "dns_name"
 path = "tests/dns_name.rs"
 
@@ -54,12 +50,23 @@ path = "tests/dns_name.rs"
 name = "key_type"
 path = "tests/key_type.rs"
 
+[[test]]
+name = "pem"
+path = "tests/pem.rs"
+
+[[test]]
+name = "server_name"
+path = "tests/server_name.rs"
+
 [features]
 alloc = []
 default = ["alloc"]
 std = ["alloc"]
 web = ["web-time"]
 
-[target."cfg(all(target_family = \"wasm\", target_os = \"unknown\"))".dependencies.web-time]
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.web-time]
 version = "1"
 optional = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies.crabgrind]
+version = "=0.1.9"

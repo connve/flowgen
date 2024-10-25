@@ -109,6 +109,61 @@ fn insert_order() {
 }
 
 #[test]
+fn shift_insert() {
+    let insert = [0, 4, 2, 12, 8, 7, 11, 5, 3, 17, 19, 22, 23];
+    let mut map = IndexMap::new();
+
+    for &elt in &insert {
+        map.shift_insert(0, elt, ());
+    }
+
+    assert_eq!(map.keys().count(), map.len());
+    assert_eq!(map.keys().count(), insert.len());
+    for (a, b) in insert.iter().rev().zip(map.keys()) {
+        assert_eq!(a, b);
+    }
+    for (i, k) in (0..insert.len()).zip(map.keys()) {
+        assert_eq!(map.get_index(i).unwrap().0, k);
+    }
+
+    // "insert" that moves an existing entry
+    map.shift_insert(0, insert[0], ());
+    assert_eq!(map.keys().count(), insert.len());
+    assert_eq!(insert[0], map.keys()[0]);
+    for (a, b) in insert[1..].iter().rev().zip(map.keys().skip(1)) {
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn insert_sorted_bad() {
+    let mut map = IndexMap::new();
+    map.insert(10, ());
+    for i in 0..10 {
+        map.insert(i, ());
+    }
+
+    // The binary search will want to insert this at the end (index == len()),
+    // but that's only possible for *new* inserts. It should still be handled
+    // without panicking though, and in this case it's simple enough that we
+    // know the exact result. (But don't read this as an API guarantee!)
+    assert_eq!(map.first(), Some((&10, &())));
+    map.insert_sorted(10, ());
+    assert_eq!(map.last(), Some((&10, &())));
+    assert!(map.keys().copied().eq(0..=10));
+
+    // Other out-of-order entries can also "insert" to a binary-searched
+    // position, moving in either direction.
+    map.move_index(5, 0);
+    map.move_index(6, 10);
+    assert_eq!(map.first(), Some((&5, &())));
+    assert_eq!(map.last(), Some((&6, &())));
+    map.insert_sorted(5, ()); // moves back up
+    map.insert_sorted(6, ()); // moves back down
+    assert!(map.keys().copied().eq(0..=10));
+}
+
+#[test]
 fn grow() {
     let insert = [0, 4, 2, 12, 8, 7, 11];
     let not_present = [1, 3, 6, 9, 10];
@@ -360,6 +415,75 @@ fn occupied_entry_key() {
 }
 
 #[test]
+fn get_index_entry() {
+    let mut map = IndexMap::new();
+
+    assert!(map.get_index_entry(0).is_none());
+    assert!(map.first_entry().is_none());
+    assert!(map.last_entry().is_none());
+
+    map.insert(0, "0");
+    map.insert(1, "1");
+    map.insert(2, "2");
+    map.insert(3, "3");
+
+    assert!(map.get_index_entry(4).is_none());
+
+    {
+        let e = map.get_index_entry(1).unwrap();
+        assert_eq!(*e.key(), 1);
+        assert_eq!(*e.get(), "1");
+        assert_eq!(e.swap_remove(), "1");
+    }
+
+    {
+        let mut e = map.get_index_entry(1).unwrap();
+        assert_eq!(*e.key(), 3);
+        assert_eq!(*e.get(), "3");
+        assert_eq!(e.insert("4"), "3");
+    }
+
+    assert_eq!(*map.get(&3).unwrap(), "4");
+
+    {
+        let e = map.first_entry().unwrap();
+        assert_eq!(*e.key(), 0);
+        assert_eq!(*e.get(), "0");
+    }
+
+    {
+        let e = map.last_entry().unwrap();
+        assert_eq!(*e.key(), 2);
+        assert_eq!(*e.get(), "2");
+    }
+}
+
+#[test]
+fn from_entries() {
+    let mut map = IndexMap::from([(1, "1"), (2, "2"), (3, "3")]);
+
+    {
+        let e = match map.entry(1) {
+            Entry::Occupied(e) => IndexedEntry::from(e),
+            Entry::Vacant(_) => panic!(),
+        };
+        assert_eq!(e.index(), 0);
+        assert_eq!(*e.key(), 1);
+        assert_eq!(*e.get(), "1");
+    }
+
+    {
+        let e = match map.get_index_entry(1) {
+            Some(e) => OccupiedEntry::from(e),
+            None => panic!(),
+        };
+        assert_eq!(e.index(), 1);
+        assert_eq!(*e.key(), 2);
+        assert_eq!(*e.get(), "2");
+    }
+}
+
+#[test]
 fn keys() {
     let vec = vec![(1, 'a'), (2, 'b'), (3, 'c')];
     let map: IndexMap<_, _> = vec.into_iter().collect();
@@ -418,6 +542,26 @@ fn into_values() {
 }
 
 #[test]
+fn drain_range() {
+    // Test the various heuristics of `erase_indices`
+    for range in [
+        0..0,   // nothing erased
+        10..90, // reinsert the few kept (..10 and 90..)
+        80..90, // update the few to adjust (80..)
+        20..30, // sweep everything
+    ] {
+        let mut vec = Vec::from_iter(0..100);
+        let mut map: IndexMap<i32, ()> = (0..100).map(|i| (i, ())).collect();
+        drop(vec.drain(range.clone()));
+        drop(map.drain(range));
+        assert!(vec.iter().eq(map.keys()));
+        for (i, x) in vec.iter().enumerate() {
+            assert_eq!(map.get_index_of(x), Some(i));
+        }
+    }
+}
+
+#[test]
 #[cfg(feature = "std")]
 fn from_array() {
     let map = IndexMap::from([(1, 2), (3, 4)]);
@@ -440,6 +584,7 @@ fn iter_default() {
     }
     assert_default::<Iter<'static, K, V>>();
     assert_default::<IterMut<'static, K, V>>();
+    assert_default::<IterMut2<'static, K, V>>();
     assert_default::<IntoIter<K, V>>();
     assert_default::<Keys<'static, K, V>>();
     assert_default::<IntoKeys<K, V>>();
@@ -668,3 +813,18 @@ fn test_partition_point() {
     assert_eq!(b.partition_point(|_, &x| x < 7), 4);
     assert_eq!(b.partition_point(|_, &x| x < 8), 5);
 }
+
+macro_rules! move_index_oob {
+    ($test:ident, $from:expr, $to:expr) => {
+        #[test]
+        #[should_panic(expected = "index out of bounds")]
+        fn $test() {
+            let mut map: IndexMap<i32, ()> = (0..10).map(|k| (k, ())).collect();
+            map.move_index($from, $to);
+        }
+    };
+}
+move_index_oob!(test_move_index_out_of_bounds_0_10, 0, 10);
+move_index_oob!(test_move_index_out_of_bounds_0_max, 0, usize::MAX);
+move_index_oob!(test_move_index_out_of_bounds_10_0, 10, 0);
+move_index_oob!(test_move_index_out_of_bounds_max_0, usize::MAX, 0);

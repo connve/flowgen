@@ -10,6 +10,18 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ShadowRootInit`*"]
     pub type ShadowRootInit;
+    #[cfg(feature = "ShadowRootMode")]
+    #[doc = "Get the `mode` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ShadowRootInit`, `ShadowRootMode`*"]
+    #[wasm_bindgen(method, getter = "mode")]
+    pub fn get_mode(this: &ShadowRootInit) -> ShadowRootMode;
+    #[cfg(feature = "ShadowRootMode")]
+    #[doc = "Change the `mode` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ShadowRootInit`, `ShadowRootMode`*"]
+    #[wasm_bindgen(method, setter = "mode")]
+    pub fn set_mode(this: &ShadowRootInit, val: ShadowRootMode);
 }
 impl ShadowRootInit {
     #[cfg(feature = "ShadowRootMode")]
@@ -23,17 +35,9 @@ impl ShadowRootInit {
         ret
     }
     #[cfg(feature = "ShadowRootMode")]
-    #[doc = "Change the `mode` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `ShadowRootInit`, `ShadowRootMode`*"]
+    #[deprecated = "Use `set_mode()` instead."]
     pub fn mode(&mut self, val: ShadowRootMode) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("mode"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_mode(val);
         self
     }
 }

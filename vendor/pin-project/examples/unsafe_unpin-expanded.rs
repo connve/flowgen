@@ -1,12 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 // Original code (./unsafe_unpin.rs):
 //
-// ```rust
+// ```
 // #![allow(dead_code)]
 //
 // use pin_project::{pin_project, UnsafeUnpin};
 //
 // #[pin_project(UnsafeUnpin)]
-// pub struct Struct<T, U> {
+// struct Struct<T, U> {
 //     #[pin]
 //     pinned: T,
 //     unpinned: U,
@@ -17,27 +19,34 @@
 // fn main() {}
 // ```
 
-#![allow(dead_code, unused_imports, unused_parens, unknown_lints, renamed_and_removed_lints)]
-#![allow(clippy::needless_lifetimes)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_parens,
+    unknown_lints,
+    renamed_and_removed_lints,
+    clippy::needless_lifetimes,
+    clippy::undocumented_unsafe_blocks
+)]
 
 use pin_project::{pin_project, UnsafeUnpin};
 
 // #[pin_project(UnsafeUnpin)]
-pub struct Struct<T, U> {
+struct Struct<T, U> {
     // #[pin]
     pinned: T,
     unpinned: U,
 }
 
 const _: () = {
-    pub(crate) struct __StructProjection<'pin, T, U>
+    struct __StructProjection<'pin, T, U>
     where
         Struct<T, U>: 'pin,
     {
         pinned: ::pin_project::__private::Pin<&'pin mut (T)>,
         unpinned: &'pin mut (U),
     }
-    pub(crate) struct __StructProjectionRef<'pin, T, U>
+    struct __StructProjectionRef<'pin, T, U>
     where
         Struct<T, U>: 'pin,
     {
@@ -46,7 +55,7 @@ const _: () = {
     }
 
     impl<T, U> Struct<T, U> {
-        pub(crate) fn project<'pin>(
+        fn project<'pin>(
             self: ::pin_project::__private::Pin<&'pin mut Self>,
         ) -> __StructProjection<'pin, T, U> {
             unsafe {
@@ -57,7 +66,7 @@ const _: () = {
                 }
             }
         }
-        pub(crate) fn project_ref<'pin>(
+        fn project_ref<'pin>(
             self: ::pin_project::__private::Pin<&'pin Self>,
         ) -> __StructProjectionRef<'pin, T, U> {
             unsafe {
@@ -83,7 +92,8 @@ const _: () = {
 
     // Implement `Unpin` via `UnsafeUnpin`.
     impl<'pin, T, U> ::pin_project::__private::Unpin for Struct<T, U> where
-        ::pin_project::__private::Wrapper<'pin, Self>: ::pin_project::UnsafeUnpin
+        ::pin_project::__private::PinnedFieldsOf<::pin_project::__private::Wrapper<'pin, Self>>:
+            ::pin_project::UnsafeUnpin
     {
     }
 

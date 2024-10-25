@@ -10,6 +10,26 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
     pub type AesCbcParams;
+    #[doc = "Get the `name` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[wasm_bindgen(method, getter = "name")]
+    pub fn get_name(this: &AesCbcParams) -> String;
+    #[doc = "Change the `name` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[wasm_bindgen(method, setter = "name")]
+    pub fn set_name(this: &AesCbcParams, val: &str);
+    #[doc = "Get the `iv` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[wasm_bindgen(method, getter = "iv")]
+    pub fn get_iv(this: &AesCbcParams) -> ::js_sys::Object;
+    #[doc = "Change the `iv` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[wasm_bindgen(method, setter = "iv")]
+    pub fn set_iv(this: &AesCbcParams, val: &::js_sys::Object);
 }
 impl AesCbcParams {
     #[doc = "Construct a new `AesCbcParams`."]
@@ -22,30 +42,14 @@ impl AesCbcParams {
         ret.iv(iv);
         ret
     }
-    #[doc = "Change the `name` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[deprecated = "Use `set_name()` instead."]
     pub fn name(&mut self, val: &str) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("name"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_name(val);
         self
     }
-    #[doc = "Change the `iv` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `AesCbcParams`*"]
+    #[deprecated = "Use `set_iv()` instead."]
     pub fn iv(&mut self, val: &::js_sys::Object) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("iv"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_iv(val);
         self
     }
 }

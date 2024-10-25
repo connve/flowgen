@@ -381,6 +381,28 @@ extern "C" {
     #[wasm_bindgen(method, js_name = findIndex)]
     pub fn find_index(this: &Array, predicate: &mut dyn FnMut(JsValue, u32, Array) -> bool) -> i32;
 
+    /// The `findLast()` method of Array instances iterates the array in reverse order
+    /// and returns the value of the first element that satisfies the provided testing function.
+    /// If no elements satisfy the testing function, undefined is returned.
+    ///
+    /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findLast)
+    #[wasm_bindgen(method, js_name = findLast)]
+    pub fn find_last(
+        this: &Array,
+        predicate: &mut dyn FnMut(JsValue, u32, Array) -> bool,
+    ) -> JsValue;
+
+    /// The `findLastIndex()` method of Array instances iterates the array in reverse order
+    /// and returns the index of the first element that satisfies the provided testing function.
+    /// If no elements satisfy the testing function, -1 is returned.
+    ///
+    /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findLastIndex)
+    #[wasm_bindgen(method, js_name = findLastIndex)]
+    pub fn find_last_index(
+        this: &Array,
+        predicate: &mut dyn FnMut(JsValue, u32, Array) -> bool,
+    ) -> i32;
+
     /// The `flat()` method creates a new array with all sub-array elements concatenated into it
     /// recursively up to the specified depth.
     ///
@@ -1365,6 +1387,16 @@ impl BigInt {
             .pow(JsValue::as_ref(rhs))
             .unchecked_into()
     }
+
+    /// Returns a tuple of this [`BigInt`]'s absolute value along with a
+    /// [`bool`] indicating whether the [`BigInt`] was negative.
+    fn abs(&self) -> (Self, bool) {
+        if self < &BigInt::from(0) {
+            (-self, true)
+        } else {
+            (self.clone(), false)
+        }
+    }
 }
 
 macro_rules! bigint_from {
@@ -1471,41 +1503,42 @@ impl fmt::Debug for BigInt {
 impl fmt::Display for BigInt {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad_integral(self >= &BigInt::from(0), "", &self.to_string_unchecked(10))
+        let (abs, is_neg) = self.abs();
+        f.pad_integral(!is_neg, "", &abs.to_string_unchecked(10))
     }
 }
 
 impl fmt::Binary for BigInt {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad_integral(self >= &BigInt::from(0), "0b", &self.to_string_unchecked(2))
+        let (abs, is_neg) = self.abs();
+        f.pad_integral(!is_neg, "0b", &abs.to_string_unchecked(2))
     }
 }
 
 impl fmt::Octal for BigInt {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad_integral(self >= &BigInt::from(0), "0o", &self.to_string_unchecked(8))
+        let (abs, is_neg) = self.abs();
+        f.pad_integral(!is_neg, "0o", &abs.to_string_unchecked(8))
     }
 }
 
 impl fmt::LowerHex for BigInt {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad_integral(
-            self >= &BigInt::from(0),
-            "0x",
-            &self.to_string_unchecked(16),
-        )
+        let (abs, is_neg) = self.abs();
+        f.pad_integral(!is_neg, "0x", &abs.to_string_unchecked(16))
     }
 }
 
 impl fmt::UpperHex for BigInt {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s: String = self.to_string_unchecked(16);
+        let (abs, is_neg) = self.abs();
+        let mut s: String = abs.to_string_unchecked(16);
         s.make_ascii_uppercase();
-        f.pad_integral(self >= &BigInt::from(0), "0x", &s)
+        f.pad_integral(!is_neg, "0x", &s)
     }
 }
 
@@ -2740,7 +2773,7 @@ impl Number {
     /// (without actually being zero).
     ///
     /// [MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MIN_VALUE)
-    // Cannot use f64::MIN_POSITIVE since that is the smallest **normal** postitive number.
+    // Cannot use f64::MIN_POSITIVE since that is the smallest **normal** positive number.
     pub const MIN_VALUE: f64 = 5E-324;
     /// Special "Not a Number" value.
     ///
@@ -2792,6 +2825,37 @@ macro_rules! number_from {
     )*)
 }
 number_from!(i8 u8 i16 u16 i32 u32 f32 f64);
+
+/// The error type returned when a checked integral type conversion fails.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct TryFromIntError(());
+
+impl fmt::Display for TryFromIntError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str("out of range integral type conversion attempted")
+    }
+}
+
+impl std::error::Error for TryFromIntError {}
+
+macro_rules! number_try_from {
+    ($($x:ident)*) => ($(
+        impl TryFrom<$x> for Number {
+            type Error = TryFromIntError;
+
+            #[inline]
+            fn try_from(x: $x) -> Result<Number, Self::Error> {
+                let x_f64 = x as f64;
+                if (Number::MIN_SAFE_INTEGER..=Number::MAX_SAFE_INTEGER).contains(&x_f64) {
+                    Ok(Number::from(x_f64))
+                } else {
+                    Err(TryFromIntError(()))
+                }
+            }
+        }
+    )*)
+}
+number_try_from!(i64 u64 i128 u128);
 
 // TODO: add this on the next major version, when blanket impl is removed
 /*
@@ -4342,7 +4406,7 @@ pub mod WebAssembly {
         /// The `WebAssembly.instantiateStreaming()` function compiles and
         /// instantiates a WebAssembly module directly from a streamed
         /// underlying source. This is the most efficient, optimized way to load
-        /// wasm code.
+        /// Wasm code.
         ///
         /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/instantiateStreaming)
         #[wasm_bindgen(js_namespace = WebAssembly, js_name = instantiateStreaming)]
@@ -4350,7 +4414,7 @@ pub mod WebAssembly {
 
         /// The `WebAssembly.validate()` function validates a given typed
         /// array of WebAssembly binary code, returning whether the bytes
-        /// form a valid wasm module (`true`) or not (`false`).
+        /// form a valid Wasm module (`true`) or not (`false`).
         ///
         /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WebAssembly/validate)
         #[wasm_bindgen(js_namespace = WebAssembly, catch)]
@@ -6143,6 +6207,13 @@ macro_rules! arrays {
             #[wasm_bindgen(method)]
             pub fn at(this: &$name, idx: i32) -> Option<$ty>;
 
+            /// The `copyWithin()` method shallow copies part of a typed array to another
+            /// location in the same typed array and returns it, without modifying its size.
+            ///
+            /// [MDN documentation](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/copyWithin)
+            #[wasm_bindgen(method, js_name = copyWithin)]
+            pub fn copy_within(this: &$name, target: i32, start: i32, end: i32) -> $name;
+
             /// Gets the value at `idx`, equivalent to the javascript `my_var = arr[idx]`.
             #[wasm_bindgen(method, structural, indexing_getter)]
             pub fn get_index(this: &$name, idx: u32) -> $ty;
@@ -6212,7 +6283,7 @@ macro_rules! arrays {
             /// Rust pointer.
             ///
             /// This function will efficiently copy the memory from a typed
-            /// array into this wasm module's own linear memory, initializing
+            /// array into this Wasm module's own linear memory, initializing
             /// the memory destination provided.
             ///
             /// # Unsafety
@@ -6231,7 +6302,7 @@ macro_rules! arrays {
             /// Rust slice.
             ///
             /// This function will efficiently copy the memory from a typed
-            /// array into this wasm module's own linear memory, initializing
+            /// array into this Wasm module's own linear memory, initializing
             /// the memory destination provided.
             ///
             /// # Panics
@@ -6247,7 +6318,7 @@ macro_rules! arrays {
             /// JS typed array.
             ///
             /// This function will efficiently copy the memory from within
-            /// the wasm module's own linear memory to this typed array.
+            /// the Wasm module's own linear memory to this typed array.
             ///
             /// # Panics
             ///

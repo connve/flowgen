@@ -18,7 +18,9 @@ use crate::{
     compute_bidi_info_for_para, compute_initial_info, level, para_direction, reorder_levels,
     reorder_visual, visual_runs_for_line,
 };
-use crate::{BidiClass, BidiDataSource, Direction, Level, LevelRun, ParagraphInfo};
+use crate::{
+    BidiClass, BidiDataSource, Direction, Level, LevelRun, ParagraphInfo, ParagraphInfoFlags,
+};
 
 #[cfg(feature = "hardcoded-data")]
 use crate::HardcodedBidiData;
@@ -83,7 +85,7 @@ struct InitialInfoExt<'text> {
     /// Parallel to base.paragraphs, records whether each paragraph is "pure LTR" that
     /// requires no further bidi processing (i.e. there are no RTL characters or bidi
     /// control codes present).
-    pure_ltr: Vec<bool>,
+    flags: Vec<ParagraphInfoFlags>,
 }
 
 impl<'text> InitialInfoExt<'text> {
@@ -103,12 +105,12 @@ impl<'text> InitialInfoExt<'text> {
         default_para_level: Option<Level>,
     ) -> InitialInfoExt<'a> {
         let mut paragraphs = Vec::<ParagraphInfo>::new();
-        let mut pure_ltr = Vec::<bool>::new();
-        let (original_classes, _, _) = compute_initial_info(
+        let mut flags = Vec::<ParagraphInfoFlags>::new();
+        let (original_classes, _, _, _) = compute_initial_info(
             data_source,
             text,
             default_para_level,
-            Some((&mut paragraphs, &mut pure_ltr)),
+            Some((&mut paragraphs, &mut flags)),
         );
 
         InitialInfoExt {
@@ -117,7 +119,7 @@ impl<'text> InitialInfoExt<'text> {
                 original_classes,
                 paragraphs,
             },
-            pure_ltr,
+            flags,
         }
     }
 }
@@ -177,20 +179,21 @@ impl<'text> BidiInfo<'text> {
         text: &'a [u16],
         default_para_level: Option<Level>,
     ) -> BidiInfo<'a> {
-        let InitialInfoExt { base, pure_ltr, .. } =
+        let InitialInfoExt { base, flags, .. } =
             InitialInfoExt::new_with_data_source(data_source, text, default_para_level);
 
         let mut levels = Vec::<Level>::with_capacity(text.len());
         let mut processing_classes = base.original_classes.clone();
 
-        for (para, is_pure_ltr) in base.paragraphs.iter().zip(pure_ltr.iter()) {
+        for (para, flags) in base.paragraphs.iter().zip(flags.iter()) {
             let text = &text[para.range.clone()];
             let original_classes = &base.original_classes[para.range.clone()];
 
             compute_bidi_info_for_para(
                 data_source,
                 para,
-                *is_pure_ltr,
+                flags.is_pure_ltr,
+                flags.has_isolate_controls,
                 text,
                 original_classes,
                 &mut processing_classes,
@@ -411,7 +414,7 @@ impl<'text> ParagraphBidiInfo<'text> {
     ) -> ParagraphBidiInfo<'a> {
         // Here we could create a ParagraphInitialInfo struct to parallel the one
         // used by BidiInfo, but there doesn't seem any compelling reason for it.
-        let (original_classes, paragraph_level, is_pure_ltr) =
+        let (original_classes, paragraph_level, is_pure_ltr, has_isolate_controls) =
             compute_initial_info(data_source, text, default_para_level, None);
 
         let mut levels = Vec::<Level>::with_capacity(text.len());
@@ -429,6 +432,7 @@ impl<'text> ParagraphBidiInfo<'text> {
             data_source,
             &para_info,
             is_pure_ltr,
+            has_isolate_controls,
             text,
             &original_classes,
             &mut processing_classes,
@@ -551,12 +555,12 @@ impl<'text> ParagraphBidiInfo<'text> {
 ///
 /// [Rule L3]: https://www.unicode.org/reports/tr9/#L3
 /// [Rule L4]: https://www.unicode.org/reports/tr9/#L4
-fn reorder_line<'text>(
-    text: &'text [u16],
+fn reorder_line(
+    text: &[u16],
     line: Range<usize>,
     levels: Vec<Level>,
     runs: Vec<LevelRun>,
-) -> Cow<'text, [u16]> {
+) -> Cow<'_, [u16]> {
     // If all isolating run sequences are LTR, no reordering is needed
     if runs.iter().all(|run| levels[run.start].is_ltr()) {
         return text[line].into();
@@ -668,15 +672,15 @@ impl<'text> TextSource<'text> for [u16] {
     }
     #[inline]
     fn chars(&'text self) -> Self::CharIter {
-        Utf16CharIter::new(&self)
+        Utf16CharIter::new(self)
     }
     #[inline]
     fn char_indices(&'text self) -> Self::CharIndexIter {
-        Utf16CharIndexIter::new(&self)
+        Utf16CharIndexIter::new(self)
     }
     #[inline]
     fn indices_lengths(&'text self) -> Self::IndexLenIter {
-        Utf16IndexLenIter::new(&self)
+        Utf16IndexLenIter::new(self)
     }
     #[inline]
     fn char_len(ch: char) -> usize {

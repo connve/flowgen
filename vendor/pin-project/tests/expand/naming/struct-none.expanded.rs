@@ -16,6 +16,7 @@ struct Struct<T, U> {
 #[allow(clippy::redundant_pub_crate)]
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(unused_qualifications)]
+#[allow(clippy::needless_lifetimes)]
 #[allow(clippy::semicolon_if_nothing_returned)]
 #[allow(clippy::use_self)]
 #[allow(clippy::used_underscore_binding)]
@@ -24,6 +25,7 @@ const _: () = {
     extern crate pin_project as _pin_project;
     #[allow(dead_code)]
     #[allow(clippy::mut_mut)]
+    #[allow(clippy::missing_docs_in_private_items)]
     struct __StructProjection<'pin, T, U>
     where
         Struct<T, U>: 'pin,
@@ -33,6 +35,7 @@ const _: () = {
     }
     #[allow(dead_code)]
     #[allow(clippy::ref_option_ref)]
+    #[allow(clippy::missing_docs_in_private_items)]
     struct __StructProjectionRef<'pin, T, U>
     where
         Struct<T, U>: 'pin,
@@ -87,12 +90,16 @@ const _: () = {
     }
     impl<'pin, T, U> _pin_project::__private::Unpin for Struct<T, U>
     where
-        __Struct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __Struct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     #[doc(hidden)]
     unsafe impl<'pin, T, U> _pin_project::UnsafeUnpin for Struct<T, U>
     where
-        __Struct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __Struct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     trait StructMustNotImplDrop {}
     #[allow(clippy::drop_bounds, drop_bounds)]

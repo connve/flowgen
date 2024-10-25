@@ -2,6 +2,9 @@
 // `std::env::current_exe` will return the path of *that* program, and not
 // the Rust program itself.
 
+// This behavior is only known to be supported on Linux and FreeBSD, see
+// https://mail-index.netbsd.org/tech-toolchain/2024/07/27/msg004469.html
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,6 +12,13 @@ use std::process::Command;
 mod common;
 
 fn main() {
+    if cfg!(target_os = "netbsd") {
+        // NetBSD doesn't support this silliness, so because this is an fn main test,
+        // just pass it on there. If we used ui-test or something we'd use
+        //@ ignore-netbsd
+        return;
+    }
+
     if std::env::var(VAR).is_err() {
         // the parent waits for the child; then we then handle either printing
         // "test result: ok", "test result: ignored", or panicking.
@@ -16,11 +26,11 @@ fn main() {
             Ok(()) => {
                 println!("test result: ok");
             }
-            Err(EarlyExit::IgnoreTest(_)) => {
+            Err(EarlyExit::IgnoreTest) => {
                 println!("test result: ignored");
             }
             Err(EarlyExit::IoError(e)) => {
-                println!("{} parent encoutered IoError: {:?}", file!(), e);
+                println!("{} parent encountered IoError: {:?}", file!(), e);
                 panic!();
             }
         }
@@ -34,7 +44,7 @@ const VAR: &str = "__THE_TEST_YOU_ARE_LUKE";
 
 #[derive(Debug)]
 enum EarlyExit {
-    IgnoreTest(String),
+    IgnoreTest,
     IoError(std::io::Error),
 }
 
@@ -47,7 +57,7 @@ impl From<std::io::Error> for EarlyExit {
 fn parent() -> Result<(), EarlyExit> {
     // If we cannot re-exec this test, there's no point in trying to do it.
     if common::cannot_reexec_the_test() {
-        return Err(EarlyExit::IgnoreTest("(cannot reexec)".into()));
+        return Err(EarlyExit::IgnoreTest);
     }
 
     let me = std::env::current_exe().unwrap();
@@ -74,7 +84,7 @@ fn parent() -> Result<(), EarlyExit> {
 
 fn child() -> Result<(), EarlyExit> {
     let bt = backtrace::Backtrace::new();
-    println!("{:?}", bt);
+    println!("{bt:?}");
 
     let mut found_my_name = false;
 
@@ -111,7 +121,7 @@ fn find_interpreter(me: &Path) -> Result<PathBuf, EarlyExit> {
         .arg("-l")
         .arg(me)
         .output()
-        .map_err(|_err| EarlyExit::IgnoreTest("readelf invocation failed".into()))?;
+        .map_err(|_| EarlyExit::IgnoreTest)?;
     if result.status.success() {
         let r = BufReader::new(&result.stdout[..]);
         for line in r.lines() {
@@ -124,11 +134,6 @@ fn find_interpreter(me: &Path) -> Result<PathBuf, EarlyExit> {
                 }
             }
         }
-
-        Err(EarlyExit::IgnoreTest(
-            "could not find interpreter from readelf output".into(),
-        ))
-    } else {
-        Err(EarlyExit::IgnoreTest("readelf returned non-success".into()))
     }
+    Err(EarlyExit::IgnoreTest)
 }

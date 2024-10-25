@@ -1,20 +1,20 @@
 use alloc::boxed::Box;
 use core::fmt::Debug;
 use core::mem;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, Range};
 #[cfg(feature = "std")]
 use std::io;
 
 use crate::common_state::{CommonState, Context, IoState, State, DEFAULT_BUFFER_LIMIT};
-use crate::enums::{AlertDescription, ContentType};
+use crate::enums::{AlertDescription, ContentType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
-#[cfg(feature = "logging")]
 use crate::log::trace;
-use crate::msgs::deframer::{
-    Deframed, DeframerSliceBuffer, DeframerVecBuffer, FilledDeframerBuffer, MessageDeframer,
-};
+use crate::msgs::deframer::buffers::{BufferProgress, DeframerVecBuffer, Delocator, Locator};
+use crate::msgs::deframer::handshake::HandshakeDeframer;
+use crate::msgs::deframer::DeframerIter;
 use crate::msgs::handshake::Random;
 use crate::msgs::message::{InboundPlainMessage, Message, MessagePayload};
+use crate::record_layer::Decrypted;
 use crate::suites::{ExtractedSecrets, PartiallyExtractedSecrets};
 use crate::vecbuf::ChunkVecBuffer;
 
@@ -62,7 +62,7 @@ mod connection {
         }
 
         /// Returns an object that allows reading plaintext.
-        pub fn reader(&mut self) -> Reader {
+        pub fn reader(&mut self) -> Reader<'_> {
             match self {
                 Self::Client(conn) => conn.reader(),
                 Self::Server(conn) => conn.reader(),
@@ -70,7 +70,7 @@ mod connection {
         }
 
         /// Returns an object that allows writing plaintext.
-        pub fn writer(&mut self) -> Writer {
+        pub fn writer(&mut self) -> Writer<'_> {
             match self {
                 Self::Client(conn) => Writer::new(&mut **conn),
                 Self::Server(conn) => Writer::new(&mut **conn),
@@ -134,6 +134,16 @@ mod connection {
                 Self::Server(server) => server.set_buffer_limit(limit),
             }
         }
+
+        /// Sends a TLS1.3 `key_update` message to refresh a connection's keys
+        ///
+        /// See [`ConnectionCommon::refresh_traffic_keys()`] for more information.
+        pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
+            match self {
+                Self::Client(client) => client.refresh_traffic_keys(),
+                Self::Server(server) => server.refresh_traffic_keys(),
+            }
+        }
     }
 
     impl Deref for Connection {
@@ -163,7 +173,7 @@ mod connection {
         pub(super) has_seen_eof: bool,
     }
 
-    impl<'a> Reader<'a> {
+    impl Reader<'_> {
         /// Check the connection's state if no bytes are available for reading.
         fn check_no_bytes_state(&self) -> io::Result<()> {
             match (self.has_received_close_notify, self.has_seen_eof) {
@@ -181,7 +191,7 @@ mod connection {
         }
     }
 
-    impl<'a> io::Read for Reader<'a> {
+    impl io::Read for Reader<'_> {
         /// Obtain plaintext data received from the peer over this TLS connection.
         ///
         /// If the peer closes the TLS session cleanly, this returns `Ok(0)`  once all
@@ -266,7 +276,7 @@ https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
         }
     }
 
-    impl<'a> io::Write for Writer<'a> {
+    impl io::Write for Writer<'_> {
         /// Send the plaintext `buf` to the peer, encrypting
         /// and authenticating it.  Once this function succeeds
         /// you should call [`Connection::write_tls`] which will output the
@@ -302,10 +312,12 @@ https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
 
     impl<T> PlaintextSink for ConnectionCommon<T> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            Ok(self
+            let len = self
                 .core
                 .common_state
-                .buffer_plaintext(buf.into(), &mut self.sendable_plaintext))
+                .buffer_plaintext(buf.into(), &mut self.sendable_plaintext);
+            self.core.maybe_refresh_traffic_keys();
+            Ok(len)
         }
 
         fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
@@ -322,10 +334,12 @@ https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
                     OutboundChunks::new(&payload_owner)
                 }
             };
-            Ok(self
+            let len = self
                 .core
                 .common_state
-                .buffer_plaintext(payload, &mut self.sendable_plaintext))
+                .buffer_plaintext(payload, &mut self.sendable_plaintext);
+            self.core.maybe_refresh_traffic_keys();
+            Ok(len)
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -342,11 +356,6 @@ pub(crate) struct ConnectionRandoms {
     pub(crate) client: [u8; 32],
     pub(crate) server: [u8; 32],
 }
-
-/// How many ChangeCipherSpec messages we accept and drop in TLS1.3 handshakes.
-/// The spec says 1, but implementations (namely the boringssl test suite) get
-/// this wrong.  BoringSSL itself accepts up to 32.
-static TLS13_MAX_DROPPED_CCS: u8 = 2u8;
 
 impl ConnectionRandoms {
     pub(crate) fn new(client: Random, server: Random) -> Self {
@@ -481,12 +490,42 @@ impl<Data> ConnectionCommon<Data> {
         self.sendable_plaintext.set_limit(limit);
         self.sendable_tls.set_limit(limit);
     }
+
+    /// Sends a TLS1.3 `key_update` message to refresh a connection's keys.
+    ///
+    /// This call refreshes our encryption keys. Once the peer receives the message,
+    /// it refreshes _its_ encryption and decryption keys and sends a response.
+    /// Once we receive that response, we refresh our decryption keys to match.
+    /// At the end of this process, keys in both directions have been refreshed.
+    ///
+    /// Note that this process does not happen synchronously: this call just
+    /// arranges that the `key_update` message will be included in the next
+    /// `write_tls` output.
+    ///
+    /// This fails with `Error::HandshakeNotComplete` if called before the initial
+    /// handshake is complete, or if a version prior to TLS1.3 is negotiated.
+    ///
+    /// # Usage advice
+    /// Note that other implementations (including rustls) may enforce limits on
+    /// the number of `key_update` messages allowed on a given connection to prevent
+    /// denial of service.  Therefore, this should be called sparingly.
+    ///
+    /// rustls implicitly and automatically refreshes traffic keys when needed
+    /// according to the selected cipher suite's cryptographic constraints.  There
+    /// is therefore no need to call this manually to avoid cryptographic keys
+    /// "wearing out".
+    ///
+    /// The main reason to call this manually is to roll keys when it is known
+    /// a connection will be idle for a long period.
+    pub fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
+        self.core.refresh_traffic_keys()
+    }
 }
 
 #[cfg(feature = "std")]
 impl<Data> ConnectionCommon<Data> {
     /// Returns an object that allows reading plaintext.
-    pub fn reader(&mut self) -> Reader {
+    pub fn reader(&mut self) -> Reader<'_> {
         let common = &mut self.core.common_state;
         Reader {
             received_plaintext: &mut common.received_plaintext,
@@ -498,7 +537,7 @@ impl<Data> ConnectionCommon<Data> {
     }
 
     /// Returns an object that allows writing plaintext.
-    pub fn writer(&mut self) -> Writer {
+    pub fn writer(&mut self) -> Writer<'_> {
         Writer::new(self)
     }
 
@@ -549,7 +588,13 @@ impl<Data> ConnectionCommon<Data> {
             }
 
             while self.wants_write() {
-                wrlen += self.write_tls(io)?;
+                match self.write_tls(io)? {
+                    0 => {
+                        io.flush()?;
+                        return Ok((rdlen, wrlen)); // EOF.
+                    }
+                    n => wrlen += n,
+                }
             }
             io.flush()?;
 
@@ -609,16 +654,23 @@ impl<Data> ConnectionCommon<Data> {
     /// This is a shortcut to the `process_new_packets()` -> `process_msg()` ->
     /// `process_handshake_messages()` path, specialized for the first handshake message.
     pub(crate) fn first_handshake_message(&mut self) -> Result<Option<Message<'static>>, Error> {
-        let mut deframer_buffer = self.deframer_buffer.borrow();
+        let mut buffer_progress = BufferProgress::default();
+
         let res = self
             .core
-            .deframe(None, &mut deframer_buffer)
+            .deframe(
+                None,
+                self.deframer_buffer.filled_mut(),
+                &mut buffer_progress,
+            )
             .map(|opt| opt.map(|pm| Message::try_from(pm).map(|m| m.into_owned())));
-        let discard = deframer_buffer.pending_discard();
-        self.deframer_buffer.discard(discard);
 
         match res? {
-            Some(Ok(msg)) => Ok(Some(msg)),
+            Some(Ok(msg)) => {
+                self.deframer_buffer
+                    .discard(buffer_progress.take_discard());
+                Ok(Some(msg))
+            }
             Some(Err(err)) => Err(self.send_fatal_alert(AlertDescription::DecodeError, err)),
             None => Ok(None),
         }
@@ -663,9 +715,8 @@ impl<Data> ConnectionCommon<Data> {
         }
 
         let res = self
-            .core
-            .message_deframer
-            .read(rd, &mut self.deframer_buffer);
+            .deframer_buffer
+            .read(rd, self.core.hs_deframer.is_active());
         if let Ok(0) = res {
             self.has_seen_eof = true;
         }
@@ -733,11 +784,23 @@ impl<Data> From<ConnectionCore<Data>> for UnbufferedConnectionCommon<Data> {
     }
 }
 
+impl<T> Deref for UnbufferedConnectionCommon<T> {
+    type Target = CommonState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core.common_state
+    }
+}
+
 pub(crate) struct ConnectionCore<Data> {
     pub(crate) state: Result<Box<dyn State<Data>>, Error>,
     pub(crate) data: Data,
     pub(crate) common_state: CommonState,
-    pub(crate) message_deframer: MessageDeframer,
+    pub(crate) hs_deframer: HandshakeDeframer,
+
+    /// We limit consecutive empty fragments to avoid a route for the peer to send
+    /// us significant but fruitless traffic.
+    seen_consecutive_empty_fragments: u8,
 }
 
 impl<Data> ConnectionCore<Data> {
@@ -746,7 +809,8 @@ impl<Data> ConnectionCore<Data> {
             state: Ok(state),
             data,
             common_state,
-            message_deframer: MessageDeframer::default(),
+            hs_deframer: HandshakeDeframer::default(),
+            seen_consecutive_empty_fragments: 0,
         }
     }
 
@@ -763,19 +827,21 @@ impl<Data> ConnectionCore<Data> {
             }
         };
 
-        let mut discard = 0;
-        loop {
-            let mut borrowed_buffer = deframer_buffer.borrow();
-            borrowed_buffer.queue_discard(discard);
+        let mut buffer_progress = BufferProgress::default();
+        buffer_progress.add_processed(deframer_buffer.processed);
 
-            let res = self.deframe(Some(&*state), &mut borrowed_buffer);
-            discard = borrowed_buffer.pending_discard();
+        loop {
+            let res = self.deframe(
+                Some(&*state),
+                deframer_buffer.filled_mut(),
+                &mut buffer_progress,
+            );
 
             let opt_msg = match res {
                 Ok(opt_msg) => opt_msg,
                 Err(e) => {
                     self.state = Err(e.clone());
-                    deframer_buffer.discard(discard);
+                    deframer_buffer.discard(buffer_progress.take_discard());
                     return Err(e);
                 }
             };
@@ -789,7 +855,7 @@ impl<Data> ConnectionCore<Data> {
                 Ok(new) => state = new,
                 Err(e) => {
                     self.state = Err(e.clone());
-                    deframer_buffer.discard(discard);
+                    deframer_buffer.discard(buffer_progress.take_discard());
                     return Err(e);
                 }
             }
@@ -801,12 +867,15 @@ impl<Data> ConnectionCore<Data> {
                 // "Any data received after a closure alert has been received MUST be ignored."
                 // -- <https://datatracker.ietf.org/doc/html/rfc8446#section-6.1>
                 // This is data that has already been accepted in `read_tls`.
-                discard += borrowed_buffer.filled().len();
+                buffer_progress.add_discard(deframer_buffer.filled().len());
                 break;
             }
+
+            deframer_buffer.discard(buffer_progress.take_discard());
         }
 
-        deframer_buffer.discard(discard);
+        deframer_buffer.processed = buffer_progress.processed();
+        deframer_buffer.discard(buffer_progress.take_discard());
         self.state = Ok(state);
         Ok(self.common_state.current_io_state())
     }
@@ -815,63 +884,200 @@ impl<Data> ConnectionCore<Data> {
     fn deframe<'b>(
         &mut self,
         state: Option<&dyn State<Data>>,
-        deframer_buffer: &mut DeframerSliceBuffer<'b>,
+        buffer: &'b mut [u8],
+        buffer_progress: &mut BufferProgress,
     ) -> Result<Option<InboundPlainMessage<'b>>, Error> {
-        match self.message_deframer.pop(
-            &mut self.common_state.record_layer,
+        // before processing any more of `buffer`, return any extant messages from `hs_deframer`
+        if self.hs_deframer.has_message_ready() {
+            Ok(self.take_handshake_message(buffer, buffer_progress))
+        } else {
+            self.process_more_input(state, buffer, buffer_progress)
+        }
+    }
+
+    fn take_handshake_message<'b>(
+        &mut self,
+        buffer: &'b mut [u8],
+        buffer_progress: &mut BufferProgress,
+    ) -> Option<InboundPlainMessage<'b>> {
+        self.hs_deframer
+            .iter(buffer)
+            .next()
+            .map(|(message, discard)| {
+                buffer_progress.add_discard(discard);
+                message
+            })
+    }
+
+    fn process_more_input<'b>(
+        &mut self,
+        state: Option<&dyn State<Data>>,
+        buffer: &'b mut [u8],
+        buffer_progress: &mut BufferProgress,
+    ) -> Result<Option<InboundPlainMessage<'b>>, Error> {
+        let version_is_tls13 = matches!(
             self.common_state.negotiated_version,
-            deframer_buffer,
-        ) {
-            Ok(Some(Deframed {
-                want_close_before_decrypt,
-                aligned,
-                trial_decryption_finished,
-                message,
-            })) => {
+            Some(ProtocolVersion::TLSv1_3)
+        );
+
+        let locator = Locator::new(buffer);
+
+        loop {
+            let mut iter = DeframerIter::new(&mut buffer[buffer_progress.processed()..]);
+
+            let (message, processed) = loop {
+                let message = match iter.next().transpose() {
+                    Ok(Some(message)) => message,
+                    Ok(None) => return Ok(None),
+                    Err(err) => return Err(self.handle_deframe_error(err, state)),
+                };
+
+                let allowed_plaintext = match message.typ {
+                    // CCS messages are always plaintext.
+                    ContentType::ChangeCipherSpec => true,
+                    // Alerts are allowed to be plaintext if-and-only-if:
+                    // * The negotiated protocol version is TLS 1.3. - In TLS 1.2 it is unambiguous when
+                    //   keying changes based on the CCS message. Only TLS 1.3 requires these heuristics.
+                    // * We have not yet decrypted any messages from the peer - if we have we don't
+                    //   expect any plaintext.
+                    // * The payload size is indicative of a plaintext alert message.
+                    ContentType::Alert
+                        if version_is_tls13
+                            && !self
+                                .common_state
+                                .record_layer
+                                .has_decrypted()
+                            && message.payload.len() <= 2 =>
+                    {
+                        true
+                    }
+                    // In other circumstances, we expect all messages to be encrypted.
+                    _ => false,
+                };
+
+                if allowed_plaintext && !self.hs_deframer.is_active() {
+                    break (message.into_plain_message(), iter.bytes_consumed());
+                }
+
+                let message = match self
+                    .common_state
+                    .record_layer
+                    .decrypt_incoming(message)
+                {
+                    // failed decryption during trial decryption is not allowed to be
+                    // interleaved with partial handshake data.
+                    Ok(None) if !self.hs_deframer.is_aligned() => {
+                        return Err(
+                            PeerMisbehaved::RejectedEarlyDataInterleavedWithHandshakeMessage.into(),
+                        )
+                    }
+
+                    // failed decryption during trial decryption.
+                    Ok(None) => continue,
+
+                    Ok(Some(message)) => message,
+
+                    Err(err) => return Err(self.handle_deframe_error(err, state)),
+                };
+
+                let Decrypted {
+                    want_close_before_decrypt,
+                    plaintext,
+                } = message;
+
                 if want_close_before_decrypt {
                     self.common_state.send_close_notify();
                 }
 
-                if trial_decryption_finished {
-                    self.common_state
-                        .record_layer
-                        .finish_trial_decryption();
-                }
+                break (plaintext, iter.bytes_consumed());
+            };
 
-                self.common_state.aligned_handshake = aligned;
-                Ok(Some(message))
+            if !self.hs_deframer.is_aligned() && message.typ != ContentType::Handshake {
+                // "Handshake messages MUST NOT be interleaved with other record
+                // types.  That is, if a handshake message is split over two or more
+                // records, there MUST NOT be any other records between them."
+                // https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+                return Err(PeerMisbehaved::MessageInterleavedWithHandshakeMessage.into());
             }
-            Ok(None) => Ok(None),
-            Err(err @ Error::InvalidMessage(_)) => {
+
+            match message.payload.len() {
+                0 => {
+                    if self.seen_consecutive_empty_fragments
+                        == ALLOWED_CONSECUTIVE_EMPTY_FRAGMENTS_MAX
+                    {
+                        return Err(PeerMisbehaved::TooManyEmptyFragments.into());
+                    }
+                    self.seen_consecutive_empty_fragments += 1;
+                }
+                _ => {
+                    self.seen_consecutive_empty_fragments = 0;
+                }
+            };
+
+            buffer_progress.add_processed(processed);
+
+            // do an end-run around the borrow checker, converting `message` (containing
+            // a borrowed slice) to an unborrowed one (containing a `Range` into the
+            // same buffer).  the reborrow happens inside the branch that returns the
+            // message.
+            //
+            // is fixed by -Zpolonius
+            // https://github.com/rust-lang/rfcs/blob/master/text/2094-nll.md#problem-case-3-conditional-control-flow-across-functions
+            let unborrowed = InboundUnborrowedMessage::unborrow(&locator, message);
+
+            if unborrowed.typ != ContentType::Handshake {
+                let message = unborrowed.reborrow(&Delocator::new(buffer));
+                buffer_progress.add_discard(processed);
+                return Ok(Some(message));
+            }
+
+            let message = unborrowed.reborrow(&Delocator::new(buffer));
+            self.hs_deframer
+                .input_message(message, &locator, buffer_progress.processed());
+            self.hs_deframer.coalesce(buffer)?;
+
+            self.common_state.aligned_handshake = self.hs_deframer.is_aligned();
+
+            if self.hs_deframer.has_message_ready() {
+                // trial decryption finishes with the first handshake message after it started.
+                self.common_state
+                    .record_layer
+                    .finish_trial_decryption();
+
+                return Ok(self.take_handshake_message(buffer, buffer_progress));
+            }
+        }
+    }
+
+    fn handle_deframe_error(&mut self, error: Error, state: Option<&dyn State<Data>>) -> Error {
+        match error {
+            error @ Error::InvalidMessage(_) => {
                 if self.common_state.is_quic() {
                     self.common_state.quic.alert = Some(AlertDescription::DecodeError);
-                }
-
-                Err(if !self.common_state.is_quic() {
-                    self.common_state
-                        .send_fatal_alert(AlertDescription::DecodeError, err)
+                    error
                 } else {
-                    err
-                })
+                    self.common_state
+                        .send_fatal_alert(AlertDescription::DecodeError, error)
+                }
             }
-            Err(err @ Error::PeerSentOversizedRecord) => Err(self
+            Error::PeerSentOversizedRecord => self
                 .common_state
-                .send_fatal_alert(AlertDescription::RecordOverflow, err)),
-            Err(err @ Error::DecryptError) => {
+                .send_fatal_alert(AlertDescription::RecordOverflow, error),
+            Error::DecryptError => {
                 if let Some(state) = state {
                     state.handle_decrypt_error();
                 }
-                Err(self
-                    .common_state
-                    .send_fatal_alert(AlertDescription::BadRecordMac, err))
+                self.common_state
+                    .send_fatal_alert(AlertDescription::BadRecordMac, error)
             }
-            Err(e) => Err(e),
+
+            error => error,
         }
     }
 
     fn process_msg(
         &mut self,
-        msg: InboundPlainMessage,
+        msg: InboundPlainMessage<'_>,
         state: Box<dyn State<Data>>,
         sendable_plaintext: Option<&mut ChunkVecBuffer>,
     ) -> Result<Box<dyn State<Data>>, Error> {
@@ -882,9 +1088,7 @@ impl<Data> ConnectionCore<Data> {
                 .may_receive_application_data
             && self.common_state.is_tls13()
         {
-            if !msg.is_valid_ccs()
-                || self.common_state.received_middlebox_ccs > TLS13_MAX_DROPPED_CCS
-            {
+            if !msg.is_valid_ccs() {
                 // "An implementation which receives any other change_cipher_spec value or
                 //  which receives a protected change_cipher_spec record MUST abort the
                 //  handshake with an "unexpected_message" alert."
@@ -892,11 +1096,12 @@ impl<Data> ConnectionCore<Data> {
                     AlertDescription::UnexpectedMessage,
                     PeerMisbehaved::IllegalMiddleboxChangeCipherSpec,
                 ));
-            } else {
-                self.common_state.received_middlebox_ccs += 1;
-                trace!("Dropping CCS");
-                return Ok(state);
             }
+
+            self.common_state
+                .received_tls13_change_cipher_spec()?;
+            trace!("Dropping CCS");
+            return Ok(state);
         }
 
         // Now we can fully parse the message payload.
@@ -938,7 +1143,55 @@ impl<Data> ConnectionCore<Data> {
             Err(e) => Err(e.clone()),
         }
     }
+
+    /// Trigger a `refresh_traffic_keys` if required by `CommonState`.
+    fn maybe_refresh_traffic_keys(&mut self) {
+        if mem::take(
+            &mut self
+                .common_state
+                .refresh_traffic_keys_pending,
+        ) {
+            let _ = self.refresh_traffic_keys();
+        }
+    }
+
+    fn refresh_traffic_keys(&mut self) -> Result<(), Error> {
+        match &mut self.state {
+            Ok(st) => st.send_key_update_request(&mut self.common_state),
+            Err(e) => Err(e.clone()),
+        }
+    }
 }
 
 /// Data specific to the peer's side (client or server).
 pub trait SideData: Debug {}
+
+/// An InboundPlainMessage which does not borrow its payload, but
+/// references a range that can later be borrowed.
+struct InboundUnborrowedMessage {
+    typ: ContentType,
+    version: ProtocolVersion,
+    bounds: Range<usize>,
+}
+
+impl InboundUnborrowedMessage {
+    fn unborrow(locator: &Locator, msg: InboundPlainMessage<'_>) -> Self {
+        Self {
+            typ: msg.typ,
+            version: msg.version,
+            bounds: locator.locate(msg.payload),
+        }
+    }
+
+    fn reborrow<'b>(self, delocator: &Delocator<'b>) -> InboundPlainMessage<'b> {
+        InboundPlainMessage {
+            typ: self.typ,
+            version: self.version,
+            payload: delocator.slice_from_range(&self.bounds),
+        }
+    }
+}
+
+/// cf. BoringSSL's `kMaxEmptyRecords`
+/// <https://github.com/google/boringssl/blob/dec5989b793c56ad4dd32173bd2d8595ca78b398/ssl/tls_record.cc#L124-L128>
+const ALLOWED_CONSECUTIVE_EMPTY_FRAGMENTS_MAX: u8 = 32;

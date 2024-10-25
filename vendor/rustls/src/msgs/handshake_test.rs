@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use std::prelude::v1::*;
 use std::{format, println, vec};
 
@@ -7,6 +8,7 @@ use super::handshake::{ServerDhParams, ServerKeyExchange, ServerKeyExchangeParam
 use crate::enums::{
     CertificateCompressionAlgorithm, CipherSuite, HandshakeType, ProtocolVersion, SignatureScheme,
 };
+use crate::error::InvalidMessage;
 use crate::msgs::base::{Payload, PayloadU16, PayloadU24, PayloadU8};
 use crate::msgs::codec::{put_u16, Codec, Reader};
 use crate::msgs::enums::{
@@ -685,7 +687,7 @@ fn cert_entry_ocsp_response() {
     });
 }
 
-fn test_cert_extension_getter(typ: ExtensionType, getter: fn(&CertificateEntry) -> bool) {
+fn test_cert_extension_getter(typ: ExtensionType, getter: fn(&CertificateEntry<'_>) -> bool) {
     let mut ce = sample_certificate_payload_tls13()
         .entries
         .remove(0);
@@ -872,7 +874,7 @@ fn cannot_decode_huge_certificate() {
     buf[7] = 0x00;
     buf[8] = 0xff;
     buf[9] = 0xfd;
-    HandshakeMessagePayload::read_bytes(&buf).unwrap();
+    HandshakeMessagePayload::read_bytes(&buf[..0x10000 + 7]).unwrap();
 
     // however 64KB + 1 byte does not
     buf[1] = 0x01;
@@ -881,12 +883,15 @@ fn cannot_decode_huge_certificate() {
     buf[4] = 0x01;
     buf[5] = 0x00;
     buf[6] = 0x01;
-    assert!(HandshakeMessagePayload::read_bytes(&buf).is_err());
+    assert_eq!(
+        HandshakeMessagePayload::read_bytes(&buf[..0x10001 + 7]).unwrap_err(),
+        InvalidMessage::CertificatePayloadTooLarge
+    );
 }
 
 #[test]
 fn can_decode_server_hello_from_api_devicecheck_apple_com() {
-    let data = include_bytes!("hello-api.devicecheck.apple.com.bin");
+    let data = include_bytes!("../testdata/hello-api.devicecheck.apple.com.bin");
     let mut r = Reader::init(data);
     let hm = HandshakeMessagePayload::read(&mut r).unwrap();
     println!("msg: {:?}", hm);
@@ -1244,7 +1249,7 @@ fn sample_certificate_request_payload_tls13() -> CertificateRequestPayloadTls13 
 fn sample_new_session_ticket_payload() -> NewSessionTicketPayload {
     NewSessionTicketPayload {
         lifetime_hint: 1234,
-        ticket: PayloadU16(vec![1, 2, 3]),
+        ticket: Arc::new(PayloadU16(vec![1, 2, 3])),
     }
 }
 
@@ -1253,7 +1258,7 @@ fn sample_new_session_ticket_payload_tls13() -> NewSessionTicketPayloadTls13 {
         lifetime: 123,
         age_add: 1234,
         nonce: PayloadU8(vec![1, 2, 3]),
-        ticket: PayloadU16(vec![4, 5, 6]),
+        ticket: Arc::new(PayloadU16(vec![4, 5, 6])),
         exts: vec![NewSessionTicketExtension::Unknown(UnknownExtension {
             typ: ExtensionType::Unknown(12345),
             payload: Payload::Borrowed(&[1, 2, 3]),

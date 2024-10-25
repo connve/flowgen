@@ -11,9 +11,11 @@
 
 [package]
 edition = "2018"
+rust-version = "1.47.0"
 name = "unicode-bidi"
-version = "0.3.14"
+version = "0.3.17"
 authors = ["The Servo Project Developers"]
+build = false
 exclude = [
     "benches/**",
     "data/**",
@@ -21,6 +23,10 @@ exclude = [
     "tests/**",
     "tools/**",
 ]
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Implementation of the Unicode Bidirectional Algorithm"
 documentation = "https://docs.rs/unicode-bidi/"
 readme = "README.md"
@@ -41,11 +47,7 @@ repository = "https://github.com/servo/unicode-bidi"
 
 [lib]
 name = "unicode_bidi"
-
-[[test]]
-name = "conformance_tests"
-path = "tests/conformance_tests.rs"
-required-features = ["hardcoded-data"]
+path = "src/lib.rs"
 
 [dependencies.flame]
 version = "0.2"
@@ -60,6 +62,11 @@ version = ">=0.8, <2.0"
 features = ["derive"]
 optional = true
 default-features = false
+
+[dependencies.smallvec]
+version = ">=1.13"
+features = ["union"]
+optional = true
 
 [dev-dependencies.serde_test]
 version = ">=0.8, <2.0"

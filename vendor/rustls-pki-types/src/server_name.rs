@@ -127,13 +127,52 @@ impl<'a> TryFrom<&'a str> for ServerName<'a> {
     }
 }
 
+impl From<IpAddr> for ServerName<'_> {
+    fn from(addr: IpAddr) -> Self {
+        Self::IpAddress(addr)
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::net::IpAddr> for ServerName<'_> {
+    fn from(addr: std::net::IpAddr) -> Self {
+        Self::IpAddress(addr.into())
+    }
+}
+
+impl From<Ipv4Addr> for ServerName<'_> {
+    fn from(v4: Ipv4Addr) -> Self {
+        Self::IpAddress(IpAddr::V4(v4))
+    }
+}
+
+impl From<Ipv6Addr> for ServerName<'_> {
+    fn from(v6: Ipv6Addr) -> Self {
+        Self::IpAddress(IpAddr::V6(v6))
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::net::Ipv4Addr> for ServerName<'_> {
+    fn from(v4: std::net::Ipv4Addr) -> Self {
+        Self::IpAddress(IpAddr::V4(v4.into()))
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::net::Ipv6Addr> for ServerName<'_> {
+    fn from(v6: std::net::Ipv6Addr) -> Self {
+        Self::IpAddress(IpAddr::V6(v6.into()))
+    }
+}
+
 /// A type which encapsulates a string (borrowed or owned) that is a syntactically valid DNS name.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DnsName<'a>(DnsNameInner<'a>);
 
 impl<'a> DnsName<'a> {
     /// Produce a borrowed `DnsName` from this owned `DnsName`.
-    pub fn borrow(&'a self) -> DnsName<'_> {
+    pub fn borrow(&'a self) -> Self {
         Self(match self {
             Self(DnsNameInner::Borrowed(s)) => DnsNameInner::Borrowed(s),
             #[cfg(feature = "alloc")]
@@ -179,7 +218,7 @@ impl TryFrom<String> for DnsName<'static> {
 impl<'a> TryFrom<&'a str> for DnsName<'a> {
     type Error = InvalidDnsNameError;
 
-    fn try_from(value: &'a str) -> Result<DnsName<'a>, Self::Error> {
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
         validate(value.as_bytes())?;
         Ok(Self(DnsNameInner::Borrowed(value)))
     }
@@ -188,7 +227,7 @@ impl<'a> TryFrom<&'a str> for DnsName<'a> {
 impl<'a> TryFrom<&'a [u8]> for DnsName<'a> {
     type Error = InvalidDnsNameError;
 
-    fn try_from(value: &'a [u8]) -> Result<DnsName<'a>, Self::Error> {
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
         validate(value)?;
         Ok(Self(DnsNameInner::Borrowed(str::from_utf8(value).unwrap())))
     }
@@ -211,8 +250,8 @@ enum DnsNameInner<'a> {
     Owned(String),
 }
 
-impl<'a> PartialEq<DnsNameInner<'a>> for DnsNameInner<'a> {
-    fn eq(&self, other: &DnsNameInner<'a>) -> bool {
+impl<'a> PartialEq<Self> for DnsNameInner<'a> {
+    fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Borrowed(s), Self::Borrowed(o)) => s.eq_ignore_ascii_case(o),
             #[cfg(feature = "alloc")]
@@ -369,6 +408,20 @@ impl From<IpAddr> for std::net::IpAddr {
     }
 }
 
+#[cfg(feature = "std")]
+impl From<std::net::Ipv4Addr> for IpAddr {
+    fn from(v4: std::net::Ipv4Addr) -> Self {
+        Self::V4(v4.into())
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::net::Ipv6Addr> for IpAddr {
+    fn from(v6: std::net::Ipv6Addr) -> Self {
+        Self::V6(v6.into())
+    }
+}
+
 /// `no_std` implementation of `std::net::Ipv4Addr`.
 ///
 /// Note: because we intend to replace this type with `core::net::Ipv4Addr` as soon as it is
@@ -442,7 +495,7 @@ impl From<[u16; 8]> for Ipv6Addr {
         Self(
             // All elements in `addr16` are big endian.
             // SAFETY: `[u16; 8]` is always safe to transmute to `[u8; 16]`.
-            unsafe { mem::transmute::<_, [u8; 16]>(addr16) },
+            unsafe { mem::transmute::<[u16; 8], [u8; 16]>(addr16) },
         )
     }
 }
@@ -479,7 +532,7 @@ mod parser {
     }
 
     impl<'a> Parser<'a> {
-        pub(super) fn new(input: &'a [u8]) -> Parser<'a> {
+        pub(super) fn new(input: &'a [u8]) -> Self {
             Parser { state: input }
         }
 

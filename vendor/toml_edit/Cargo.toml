@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.65"
 name = "toml_edit"
-version = "0.22.20"
+version = "0.22.22"
 authors = [
     "Andronik Ordian <write@reusable.software>",
     "Ed Page <eopage@gmail.com>",
@@ -140,7 +140,7 @@ required-features = [
 ]
 
 [dependencies.indexmap]
-version = "2.0.0"
+version = "2.3.0"
 features = ["std"]
 
 [dependencies.kstring]

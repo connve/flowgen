@@ -11,18 +11,23 @@
 
 [package]
 edition = "2021"
-rust-version = "1.56"
+rust-version = "1.70"
 name = "tokio-stream"
-version = "0.1.14"
+version = "0.1.16"
 authors = ["Tokio Contributors <team@tokio.rs>"]
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Utilities to work with `Stream` and `tokio`.
 """
 homepage = "https://tokio.rs"
+readme = "README.md"
 categories = ["asynchronous"]
 license = "MIT"
 repository = "https://github.com/tokio-rs/tokio"
-resolver = "1"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -35,11 +40,79 @@ rustdoc-args = [
     "docsrs",
 ]
 
+[lib]
+name = "tokio_stream"
+path = "src/lib.rs"
+
+[[test]]
+name = "async_send_sync"
+path = "tests/async_send_sync.rs"
+
+[[test]]
+name = "chunks_timeout"
+path = "tests/chunks_timeout.rs"
+
+[[test]]
+name = "stream_chain"
+path = "tests/stream_chain.rs"
+
+[[test]]
+name = "stream_close"
+path = "tests/stream_close.rs"
+
+[[test]]
+name = "stream_collect"
+path = "tests/stream_collect.rs"
+
+[[test]]
+name = "stream_empty"
+path = "tests/stream_empty.rs"
+
+[[test]]
+name = "stream_fuse"
+path = "tests/stream_fuse.rs"
+
+[[test]]
+name = "stream_iter"
+path = "tests/stream_iter.rs"
+
+[[test]]
+name = "stream_merge"
+path = "tests/stream_merge.rs"
+
+[[test]]
+name = "stream_once"
+path = "tests/stream_once.rs"
+
+[[test]]
+name = "stream_panic"
+path = "tests/stream_panic.rs"
+
+[[test]]
+name = "stream_pending"
+path = "tests/stream_pending.rs"
+
+[[test]]
+name = "stream_stream_map"
+path = "tests/stream_stream_map.rs"
+
+[[test]]
+name = "stream_timeout"
+path = "tests/stream_timeout.rs"
+
+[[test]]
+name = "time_throttle"
+path = "tests/time_throttle.rs"
+
+[[test]]
+name = "watch"
+path = "tests/watch.rs"
+
 [dependencies.futures-core]
 version = "0.3.0"
 
 [dependencies.pin-project-lite]
-version = "0.2.0"
+version = "0.2.11"
 
 [dependencies.tokio]
 version = "1.15.0"

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
@@ -45,6 +47,7 @@ pub(crate) fn attribute(args: &TokenStream, mut input: ItemImpl) -> TokenStream 
         }
         tokens
     } else {
+        input.attrs.push(parse_quote!(#[allow(unused_qualifications)])); // https://github.com/rust-lang/rust/issues/122519
         input.into_token_stream()
     }
 }
@@ -114,7 +117,7 @@ fn validate_sig(sig: &Signature) -> Result<()> {
     const INVALID_ARGUMENT: &str = "method `drop` must take an argument `self: Pin<&mut Self>`";
 
     if sig.ident != "drop" {
-        bail!(sig.ident, "method `{}` is not a member of trait `PinnedDrop", sig.ident,);
+        bail!(sig.ident, "method `{}` is not a member of trait `PinnedDrop", sig.ident);
     }
 
     if let ReturnType::Type(_, ty) = &sig.output {
@@ -199,7 +202,7 @@ fn expand_impl(item: &mut ItemImpl) {
         drop_inner.sig.generics = item.generics.clone();
         let receiver = drop_inner.sig.receiver().expect("drop() should have a receiver").clone();
         let pat = Box::new(Pat::Ident(PatIdent {
-            attrs: Vec::new(),
+            attrs: vec![],
             by_ref: None,
             mutability: receiver.mutability,
             ident: Ident::new("__self", receiver.self_token.span()),

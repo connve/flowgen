@@ -56,6 +56,8 @@ struct Config {
 pub struct Error {
     kind: ErrorKind,
     source: Option<Box<dyn StdError + Send + Sync>>,
+    #[cfg(any(feature = "http1", feature = "http2"))]
+    connect_info: Option<Connected>,
 }
 
 #[derive(Debug)]
@@ -74,12 +76,14 @@ macro_rules! e {
         Error {
             kind: ErrorKind::$kind,
             source: None,
+            connect_info: None,
         }
     };
     ($kind:ident, $src:expr) => {
         Error {
             kind: ErrorKind::$kind,
             source: Some($src.into()),
+            connect_info: None,
         }
     };
 }
@@ -88,7 +92,11 @@ macro_rules! e {
 type PoolKey = (http::uri::Scheme, http::uri::Authority);
 
 enum TrySendError<B> {
-    Retryable { error: Error, req: Request<B> },
+    Retryable {
+        error: Error,
+        req: Request<B>,
+        connection_reused: bool,
+    },
     Nope(Error),
 }
 
@@ -240,8 +248,12 @@ where
             req = match self.try_send_request(req, pool_key.clone()).await {
                 Ok(resp) => return Ok(resp),
                 Err(TrySendError::Nope(err)) => return Err(err),
-                Err(TrySendError::Retryable { mut req, error }) => {
-                    if !self.config.retry_canceled_requests {
+                Err(TrySendError::Retryable {
+                    mut req,
+                    error,
+                    connection_reused,
+                }) => {
+                    if !self.config.retry_canceled_requests || !connection_reused {
                         // if client disabled, don't retry
                         // a fresh connection means we definitely can't retry
                         return Err(error);
@@ -277,7 +289,9 @@ where
         if pooled.is_http1() {
             if req.version() == Version::HTTP_2 {
                 warn!("Connection is HTTP/1, but request requires HTTP/2");
-                return Err(TrySendError::Nope(e!(UserUnsupportedVersion)));
+                return Err(TrySendError::Nope(
+                    e!(UserUnsupportedVersion).with_connect_info(pooled.conn_info.clone()),
+                ));
             }
 
             if self.config.set_host {
@@ -311,16 +325,19 @@ where
             Err(mut err) => {
                 return if let Some(req) = err.take_message() {
                     Err(TrySendError::Retryable {
-                        error: e!(Canceled, err.into_error()),
+                        connection_reused: pooled.is_reused(),
+                        error: e!(Canceled, err.into_error())
+                            .with_connect_info(pooled.conn_info.clone()),
                         req,
                     })
                 } else {
-                    Err(TrySendError::Nope(e!(SendRequest, err.into_error())))
+                    Err(TrySendError::Nope(
+                        e!(SendRequest, err.into_error())
+                            .with_connect_info(pooled.conn_info.clone()),
+                    ))
                 }
             }
         };
-        //.send_request_retryable(req)
-        //.map_err(ClientError::map_with_reused(pooled.is_reused()));
 
         // If the Connector included 'extra' info, add to Response...
         if let Some(extra) = &pooled.conn_info.extra {
@@ -740,6 +757,10 @@ impl<B> PoolClient<B> {
         }
     }
 
+    fn is_poisoned(&self) -> bool {
+        self.conn_info.poisoned.poisoned()
+    }
+
     fn is_ready(&self) -> bool {
         match self.tx {
             #[cfg(feature = "http1")]
@@ -789,25 +810,6 @@ impl<B: Body + 'static> PoolClient<B> {
             PoolTx::Http2(ref mut tx) => tx.try_send_request(req),
         };
     }
-    /*
-    //TODO: can we re-introduce this somehow? Or must people use tower::retry?
-    fn send_request_retryable(
-        &mut self,
-        req: Request<B>,
-    ) -> impl Future<Output = Result<Response<hyper::body::Incoming>, (Error, Option<Request<B>>)>>
-    where
-        B: Send,
-    {
-        match self.tx {
-            #[cfg(not(feature = "http2"))]
-            PoolTx::Http1(ref mut tx) => tx.send_request_retryable(req),
-            #[cfg(feature = "http1")]
-            PoolTx::Http1(ref mut tx) => Either::Left(tx.send_request_retryable(req)),
-            #[cfg(feature = "http2")]
-            PoolTx::Http2(ref mut tx) => Either::Right(tx.send_request_retryable(req)),
-        }
-    }
-    */
 }
 
 impl<B> pool::Poolable for PoolClient<B>
@@ -815,7 +817,7 @@ where
     B: Send + 'static,
 {
     fn is_open(&self) -> bool {
-        self.is_ready()
+        !self.is_poisoned() && self.is_ready()
     }
 
     fn reserve(self) -> pool::Reservation<Self> {
@@ -1602,6 +1604,19 @@ impl Error {
         matches!(self.kind, ErrorKind::Connect)
     }
 
+    /// Returns the info of the client connection on which this error occurred.
+    #[cfg(any(feature = "http1", feature = "http2"))]
+    pub fn connect_info(&self) -> Option<&Connected> {
+        self.connect_info.as_ref()
+    }
+
+    #[cfg(any(feature = "http1", feature = "http2"))]
+    fn with_connect_info(self, connect_info: Connected) -> Self {
+        Self {
+            connect_info: Some(connect_info),
+            ..self
+        }
+    }
     fn is_canceled(&self) -> bool {
         matches!(self.kind, ErrorKind::Canceled)
     }

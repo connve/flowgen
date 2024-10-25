@@ -19,7 +19,18 @@
 //! base64-encoded DER, PEM objects are delimited by header and footer lines which indicate the type
 //! of object contained in the PEM blob.
 //!
-//! The [rustls-pemfile](https://docs.rs/rustls-pemfile) crate can be used to parse PEM files.
+//! Types here can be created from:
+//!
+//! - DER using (for example) [`PrivatePkcs8KeyDer::from()`].
+//! - PEM using (for example) [`pem::PemObject::from_pem_slice()`].
+//!
+//! The [`pem::PemObject`] trait contains the full selection of ways to construct
+//! these types from PEM encodings.  That includes ways to open and read from a file,
+//! from a slice, or from an `std::io` stream.
+//!
+//! There is also a lower-level API that allows a given PEM file to be fully consumed
+//! in one pass, even if it contains different data types: see the implementation of
+//! the [`pem::PemObject`] trait on the `(pem::SectionKind, Vec<u8>)` tuple.
 //!
 //! ## Creating new certificates and keys
 //!
@@ -62,6 +73,8 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::ops::Deref;
 use core::time::Duration;
+#[cfg(feature = "alloc")]
+use pem::{PemObject, PemObjectFilter, SectionKind};
 #[cfg(all(
     feature = "std",
     not(all(target_family = "wasm", target_os = "unknown"))
@@ -70,7 +83,17 @@ use std::time::SystemTime;
 #[cfg(all(target_family = "wasm", target_os = "unknown", feature = "web"))]
 use web_time::SystemTime;
 
+mod base64;
 mod server_name;
+
+/// Low-level PEM decoding APIs.
+///
+/// These APIs allow decoding PEM format in an iterator, which means you
+/// can load multiple different types of PEM section from a file in a single
+/// pass.
+#[cfg(feature = "alloc")]
+pub mod pem;
+
 pub use server_name::{
     AddrParseError, DnsName, InvalidDnsNameError, IpAddr, Ipv4Addr, Ipv6Addr, ServerName,
 };
@@ -78,6 +101,24 @@ pub use server_name::{
 /// A DER-encoded X.509 private key, in one of several formats
 ///
 /// See variant inner types for more detailed information.
+///
+/// This can load several types of PEM-encoded private key, and then reveal
+/// which types were found:
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{PrivateKeyDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// let pkcs8 = PrivateKeyDer::from_pem_file("tests/data/nistp256key.pkcs8.pem").unwrap();
+/// let pkcs1 = PrivateKeyDer::from_pem_file("tests/data/rsa1024.pkcs1.pem").unwrap();
+/// let sec1 = PrivateKeyDer::from_pem_file("tests/data/nistp256key.pem").unwrap();
+/// assert!(matches!(pkcs8, PrivateKeyDer::Pkcs8(_)));
+/// assert!(matches!(pkcs1, PrivateKeyDer::Pkcs1(_)));
+/// assert!(matches!(sec1, PrivateKeyDer::Sec1(_)));
+/// # }
+/// ```
+
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub enum PrivateKeyDer<'a> {
@@ -107,6 +148,18 @@ impl<'a> PrivateKeyDer<'a> {
             PrivateKeyDer::Pkcs1(key) => key.secret_pkcs1_der(),
             PrivateKeyDer::Sec1(key) => key.secret_sec1_der(),
             PrivateKeyDer::Pkcs8(key) => key.secret_pkcs8_der(),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObject for PrivateKeyDer<'static> {
+    fn from_pem(kind: SectionKind, value: Vec<u8>) -> Option<Self> {
+        match kind {
+            SectionKind::RsaPrivateKey => Some(Self::Pkcs1(value.into())),
+            SectionKind::EcPrivateKey => Some(Self::Sec1(value.into())),
+            SectionKind::PrivateKey => Some(Self::Pkcs8(value.into())),
+            _ => None,
         }
     }
 }
@@ -229,8 +282,20 @@ impl<'a> TryFrom<Vec<u8>> for PrivateKeyDer<'a> {
 /// A DER-encoded plaintext RSA private key; as specified in PKCS#1/RFC 3447
 ///
 /// RSA private keys are identified in PEM context as `RSA PRIVATE KEY` and when stored in a
-/// file usually use a `.pem` or `.key` extension. For more on PEM files, refer to the crate
-/// documentation.
+/// file usually use a `.pem` or `.key` extension.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{PrivatePkcs1KeyDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// PrivatePkcs1KeyDer::from_pem_file("tests/data/rsa1024.pkcs1.pem").unwrap();
+///
+/// // or from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/rsa1024.pkcs1.pem");
+/// PrivatePkcs1KeyDer::from_pem_slice(byte_slice).unwrap();
+/// # }
+/// ```
 #[derive(PartialEq, Eq)]
 pub struct PrivatePkcs1KeyDer<'a>(Der<'a>);
 
@@ -245,6 +310,11 @@ impl PrivatePkcs1KeyDer<'_> {
     pub fn secret_pkcs1_der(&self) -> &[u8] {
         self.0.as_ref()
     }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for PrivatePkcs1KeyDer<'static> {
+    const KIND: SectionKind = SectionKind::RsaPrivateKey;
 }
 
 impl<'a> From<&'a [u8]> for PrivatePkcs1KeyDer<'a> {
@@ -273,6 +343,19 @@ impl fmt::Debug for PrivatePkcs1KeyDer<'_> {
 /// Sec1 private keys are identified in PEM context as `EC PRIVATE KEY` and when stored in a
 /// file usually use a `.pem` or `.key` extension. For more on PEM files, refer to the crate
 /// documentation.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{PrivateSec1KeyDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// PrivateSec1KeyDer::from_pem_file("tests/data/nistp256key.pem").unwrap();
+///
+/// // or from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/nistp256key.pem");
+/// PrivateSec1KeyDer::from_pem_slice(byte_slice).unwrap();
+/// # }
+/// ```
 #[derive(PartialEq, Eq)]
 pub struct PrivateSec1KeyDer<'a>(Der<'a>);
 
@@ -287,6 +370,11 @@ impl PrivateSec1KeyDer<'_> {
     pub fn secret_sec1_der(&self) -> &[u8] {
         self.0.as_ref()
     }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for PrivateSec1KeyDer<'static> {
+    const KIND: SectionKind = SectionKind::EcPrivateKey;
 }
 
 impl<'a> From<&'a [u8]> for PrivateSec1KeyDer<'a> {
@@ -315,6 +403,20 @@ impl fmt::Debug for PrivateSec1KeyDer<'_> {
 /// PKCS#8 private keys are identified in PEM context as `PRIVATE KEY` and when stored in a
 /// file usually use a `.pem` or `.key` extension. For more on PEM files, refer to the crate
 /// documentation.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{PrivatePkcs8KeyDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// PrivatePkcs8KeyDer::from_pem_file("tests/data/nistp256key.pkcs8.pem").unwrap();
+/// PrivatePkcs8KeyDer::from_pem_file("tests/data/rsa1024.pkcs8.pem").unwrap();
+///
+/// // or from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/nistp256key.pkcs8.pem");
+/// PrivatePkcs8KeyDer::from_pem_slice(byte_slice).unwrap();
+/// # }
+/// ```
 #[derive(PartialEq, Eq)]
 pub struct PrivatePkcs8KeyDer<'a>(Der<'a>);
 
@@ -329,6 +431,11 @@ impl PrivatePkcs8KeyDer<'_> {
     pub fn secret_pkcs8_der(&self) -> &[u8] {
         self.0.as_ref()
     }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for PrivatePkcs8KeyDer<'static> {
+    const KIND: SectionKind = SectionKind::PrivateKey;
 }
 
 impl<'a> From<&'a [u8]> for PrivatePkcs8KeyDer<'a> {
@@ -393,8 +500,35 @@ impl TrustAnchor<'_> {
 ///
 /// Certificate revocation lists are identified in PEM context as `X509 CRL` and when stored in a
 /// file usually use a `.crl` extension. For more on PEM files, refer to the crate documentation.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{CertificateRevocationListDer, pem::PemObject};
+///
+/// // load several from a PEM file
+/// let crls: Vec<_> = CertificateRevocationListDer::pem_file_iter("tests/data/crl.pem")
+///     .unwrap()
+///     .collect();
+/// assert!(crls.len() >= 1);
+///
+/// // or one from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/crl.pem");
+/// CertificateRevocationListDer::from_pem_slice(byte_slice).unwrap();
+///
+/// // or several from a PEM byte slice
+/// let crls: Vec<_> = CertificateRevocationListDer::pem_slice_iter(byte_slice)
+///     .collect();
+/// assert!(crls.len() >= 1);
+/// # }
+/// ```
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificateRevocationListDer<'a>(Der<'a>);
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for CertificateRevocationListDer<'static> {
+    const KIND: SectionKind = SectionKind::Crl;
+}
 
 impl AsRef<[u8]> for CertificateRevocationListDer<'_> {
     fn as_ref(&self) -> &[u8] {
@@ -427,8 +561,26 @@ impl<'a> From<Vec<u8>> for CertificateRevocationListDer<'a> {
 ///
 /// Certificate signing requests are identified in PEM context as `CERTIFICATE REQUEST` and when stored in a
 /// file usually use a `.csr` extension. For more on PEM files, refer to the crate documentation.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{CertificateSigningRequestDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// CertificateSigningRequestDer::from_pem_file("tests/data/csr.pem").unwrap();
+///
+/// // or from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/csr.pem");
+/// CertificateSigningRequestDer::from_pem_slice(byte_slice).unwrap();
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificateSigningRequestDer<'a>(Der<'a>);
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for CertificateSigningRequestDer<'static> {
+    const KIND: SectionKind = SectionKind::Csr;
+}
 
 impl AsRef<[u8]> for CertificateSigningRequestDer<'_> {
     fn as_ref(&self) -> &[u8] {
@@ -462,8 +614,41 @@ impl<'a> From<Vec<u8>> for CertificateSigningRequestDer<'a> {
 /// Certificates are identified in PEM context as `CERTIFICATE` and when stored in a
 /// file usually use a `.pem`, `.cer` or `.crt` extension. For more on PEM files, refer to the
 /// crate documentation.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{CertificateDer, pem::PemObject};
+///
+/// // load several from a PEM file
+/// let certs: Vec<_> = CertificateDer::pem_file_iter("tests/data/certificate.chain.pem")
+///     .unwrap()
+///     .collect();
+/// assert_eq!(certs.len(), 3);
+///
+/// // or one from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/certificate.chain.pem");
+/// CertificateDer::from_pem_slice(byte_slice).unwrap();
+///
+/// // or several from a PEM byte slice
+/// let certs: Vec<_> = CertificateDer::pem_slice_iter(byte_slice)
+///     .collect();
+/// assert_eq!(certs.len(), 3);
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertificateDer<'a>(Der<'a>);
+
+impl<'a> CertificateDer<'a> {
+    /// A const constructor to create a `CertificateDer` from a slice of DER.
+    pub const fn from_slice(bytes: &'a [u8]) -> Self {
+        Self(Der::from_slice(bytes))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for CertificateDer<'static> {
+    const KIND: SectionKind = SectionKind::Certificate;
+}
 
 impl AsRef<[u8]> for CertificateDer<'_> {
     fn as_ref(&self) -> &[u8] {
@@ -505,8 +690,28 @@ impl CertificateDer<'_> {
 pub type SubjectPublicKeyInfo<'a> = SubjectPublicKeyInfoDer<'a>;
 
 /// A DER-encoded SubjectPublicKeyInfo (SPKI), as specified in RFC 5280.
+///
+/// Public keys are identified in PEM context as a `PUBLIC KEY`.
+///
+/// ```rust
+/// # #[cfg(all(feature = "alloc", feature = "std"))] {
+/// use rustls_pki_types::{SubjectPublicKeyInfoDer, pem::PemObject};
+///
+/// // load from a PEM file
+/// SubjectPublicKeyInfoDer::from_pem_file("tests/data/spki.pem").unwrap();
+///
+/// // or from a PEM byte slice...
+/// # let byte_slice = include_bytes!("../tests/data/spki.pem");
+/// SubjectPublicKeyInfoDer::from_pem_slice(byte_slice).unwrap();
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubjectPublicKeyInfoDer<'a>(Der<'a>);
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for SubjectPublicKeyInfoDer<'static> {
+    const KIND: SectionKind = SectionKind::PublicKey;
+}
 
 impl AsRef<[u8]> for SubjectPublicKeyInfoDer<'_> {
     fn as_ref(&self) -> &[u8] {
@@ -554,6 +759,55 @@ impl EchConfigListBytes<'_> {
     pub fn into_owned(self) -> EchConfigListBytes<'static> {
         EchConfigListBytes(self.0.into_owned())
     }
+}
+
+#[cfg(feature = "alloc")]
+impl EchConfigListBytes<'static> {
+    /// Convert an iterator over PEM items into an `EchConfigListBytes` and private key.
+    ///
+    /// This handles the "ECHConfig file" format specified in
+    /// <https://www.ietf.org/archive/id/draft-farrell-tls-pemesni-05.html#name-echconfig-file>
+    ///
+    /// Use it like:
+    ///
+    /// ```rust
+    /// # #[cfg(all(feature = "alloc", feature = "std"))] {
+    /// # use rustls_pki_types::{EchConfigListBytes, pem::PemObject};
+    /// let (config, key) = EchConfigListBytes::config_and_key_from_iter(
+    ///     PemObject::pem_file_iter("tests/data/ech.pem").unwrap()
+    /// ).unwrap();
+    /// # }
+    /// ```
+    pub fn config_and_key_from_iter(
+        iter: impl Iterator<Item = Result<(SectionKind, Vec<u8>), pem::Error>>,
+    ) -> Result<(Self, PrivatePkcs8KeyDer<'static>), pem::Error> {
+        let mut key = None;
+        let mut config = None;
+
+        for item in iter {
+            let (kind, data) = item?;
+            match kind {
+                SectionKind::PrivateKey => {
+                    key = PrivatePkcs8KeyDer::from_pem(kind, data);
+                }
+                SectionKind::EchConfigList => {
+                    config = Self::from_pem(kind, data);
+                }
+                _ => continue,
+            };
+
+            if let (Some(_key), Some(_config)) = (&key, &config) {
+                return Ok((config.take().unwrap(), key.take().unwrap()));
+            }
+        }
+
+        Err(pem::Error::NoItemsFound)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl PemObjectFilter for EchConfigListBytes<'static> {
+    const KIND: SectionKind = SectionKind::EchConfigList;
 }
 
 impl fmt::Debug for EchConfigListBytes<'_> {
@@ -708,7 +962,7 @@ impl Deref for AlgorithmIdentifier {
 /// A timestamp, tracking the number of non-leap seconds since the Unix epoch.
 ///
 /// The Unix epoch is defined January 1, 1970 00:00:00 UTC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UnixTime(u64);
 
 impl UnixTime {

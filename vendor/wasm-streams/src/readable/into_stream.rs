@@ -16,7 +16,7 @@ use super::ReadableStreamDefaultReader;
 /// When this `Stream` is dropped, it also drops its reader which in turn
 /// [releases its lock](https://streams.spec.whatwg.org/#release-a-lock).
 ///
-/// [`Stream`]: https://docs.rs/futures/0.3.18/futures/stream/trait.Stream.html
+/// [`Stream`]: https://docs.rs/futures/0.3.28/futures/stream/trait.Stream.html
 #[must_use = "streams do nothing unless polled"]
 #[derive(Debug)]
 pub struct IntoStream<'reader> {
@@ -109,7 +109,9 @@ impl<'reader> Drop for IntoStream<'reader> {
     fn drop(&mut self) {
         if self.cancel_on_drop {
             if let Some(reader) = self.reader.take() {
-                let _ = reader.as_raw().cancel().catch(&Closure::once(|_| {}));
+                let on_rejected = Closure::once(|_| {});
+                let _ = reader.as_raw().cancel().catch(&on_rejected);
+                on_rejected.forget();
             }
         }
     }

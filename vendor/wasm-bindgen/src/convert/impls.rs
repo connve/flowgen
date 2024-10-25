@@ -1,17 +1,15 @@
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::char;
+use core::fmt::Debug;
 use core::mem::{self, ManuallyDrop};
+use core::ptr::NonNull;
 
 use crate::convert::traits::{WasmAbi, WasmPrimitive};
 use crate::convert::TryFromJsValue;
 use crate::convert::{FromWasmAbi, IntoWasmAbi, LongRefFromWasmAbi, RefFromWasmAbi};
 use crate::convert::{OptionFromWasmAbi, OptionIntoWasmAbi, ReturnWasmAbi};
 use crate::{Clamped, JsError, JsValue, UnwrapThrowExt};
-
-if_std! {
-    use std::boxed::Box;
-    use std::fmt::Debug;
-    use std::vec::Vec;
-}
 
 // Primitive types can always be passed over the ABI.
 impl<T: WasmPrimitive> WasmAbi for T {
@@ -187,6 +185,7 @@ impl FromWasmAbi for char {
 
     #[inline]
     unsafe fn from_abi(js: u32) -> char {
+        // SAFETY: Checked in bindings.
         char::from_u32_unchecked(js)
     }
 }
@@ -223,6 +222,24 @@ impl<T> FromWasmAbi for *const T {
     }
 }
 
+impl<T> IntoWasmAbi for Option<*const T> {
+    type Abi = Option<u32>;
+
+    #[inline]
+    fn into_abi(self) -> Option<u32> {
+        self.map(|ptr| ptr as u32)
+    }
+}
+
+impl<T> FromWasmAbi for Option<*const T> {
+    type Abi = Option<u32>;
+
+    #[inline]
+    unsafe fn from_abi(js: Option<u32>) -> Option<*const T> {
+        js.map(|ptr| ptr as *const T)
+    }
+}
+
 impl<T> IntoWasmAbi for *mut T {
     type Abi = u32;
 
@@ -238,6 +255,57 @@ impl<T> FromWasmAbi for *mut T {
     #[inline]
     unsafe fn from_abi(js: u32) -> *mut T {
         js as *mut T
+    }
+}
+
+impl<T> IntoWasmAbi for Option<*mut T> {
+    type Abi = Option<u32>;
+
+    #[inline]
+    fn into_abi(self) -> Option<u32> {
+        self.map(|ptr| ptr as u32)
+    }
+}
+
+impl<T> FromWasmAbi for Option<*mut T> {
+    type Abi = Option<u32>;
+
+    #[inline]
+    unsafe fn from_abi(js: Option<u32>) -> Option<*mut T> {
+        js.map(|ptr| ptr as *mut T)
+    }
+}
+
+impl<T> IntoWasmAbi for NonNull<T> {
+    type Abi = u32;
+
+    #[inline]
+    fn into_abi(self) -> u32 {
+        self.as_ptr() as u32
+    }
+}
+
+impl<T> OptionIntoWasmAbi for NonNull<T> {
+    #[inline]
+    fn none() -> u32 {
+        0
+    }
+}
+
+impl<T> FromWasmAbi for NonNull<T> {
+    type Abi = u32;
+
+    #[inline]
+    unsafe fn from_abi(js: Self::Abi) -> Self {
+        // SAFETY: Checked in bindings.
+        NonNull::new_unchecked(js as *mut T)
+    }
+}
+
+impl<T> OptionFromWasmAbi for NonNull<T> {
+    #[inline]
+    fn is_none(js: &u32) -> bool {
+        *js == 0
     }
 }
 
@@ -402,36 +470,49 @@ impl IntoWasmAbi for JsError {
     }
 }
 
-if_std! {
-    // Note: this can't take `&[T]` because the `Into<JsValue>` impl needs
-    // ownership of `T`.
-    pub fn js_value_vector_into_abi<T: Into<JsValue>>(vector: Box<[T]>) -> <Box<[JsValue]> as IntoWasmAbi>::Abi {
-        let js_vals: Box<[JsValue]> = vector
-            .into_vec()
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
+/// # ⚠️ Unstable
+///
+/// This is part of the internal [`convert`](crate::convert) module, **no
+/// stability guarantees** are provided. Use at your own risk. See its
+/// documentation for more details.
+// Note: this can't take `&[T]` because the `Into<JsValue>` impl needs
+// ownership of `T`.
+pub fn js_value_vector_into_abi<T: Into<JsValue>>(
+    vector: Box<[T]>,
+) -> <Box<[JsValue]> as IntoWasmAbi>::Abi {
+    let js_vals: Box<[JsValue]> = vector.into_vec().into_iter().map(|x| x.into()).collect();
 
-        js_vals.into_abi()
+    js_vals.into_abi()
+}
+
+/// # ⚠️ Unstable
+///
+/// This is part of the internal [`convert`](crate::convert) module, **no
+/// stability guarantees** are provided. Use at your own risk. See its
+/// documentation for more details.
+pub unsafe fn js_value_vector_from_abi<T: TryFromJsValue>(
+    js: <Box<[JsValue]> as FromWasmAbi>::Abi,
+) -> Box<[T]>
+where
+    T::Error: Debug,
+{
+    let js_vals = <Vec<JsValue> as FromWasmAbi>::from_abi(js);
+
+    let mut result = Vec::with_capacity(js_vals.len());
+    for value in js_vals {
+        // We push elements one-by-one instead of using `collect` in order to improve
+        // error messages. When using `collect`, this `expect_throw` is buried in a
+        // giant chain of internal iterator functions, which results in the actual
+        // function that takes this `Vec` falling off the end of the call stack.
+        // So instead, make sure to call it directly within this function.
+        //
+        // This is only a problem in debug mode. Since this is the browser's error stack
+        // we're talking about, it can only see functions that actually make it to the
+        // final Wasm binary (i.e., not inlined functions). All of those internal
+        // iterator functions get inlined in release mode, and so they don't show up.
+        result.push(
+            T::try_from_js_value(value).expect_throw("array contains a value of the wrong type"),
+        );
     }
-
-    pub unsafe fn js_value_vector_from_abi<T: TryFromJsValue>(js: <Box<[JsValue]> as FromWasmAbi>::Abi) -> Box<[T]> where T::Error: Debug {
-        let js_vals = <Vec<JsValue> as FromWasmAbi>::from_abi(js);
-
-        let mut result = Vec::with_capacity(js_vals.len());
-        for value in js_vals {
-            // We push elements one-by-one instead of using `collect` in order to improve
-            // error messages. When using `collect`, this `expect_throw` is buried in a
-            // giant chain of internal iterator functions, which results in the actual
-            // function that takes this `Vec` falling off the end of the call stack.
-            // So instead, make sure to call it directly within this function.
-            //
-            // This is only a problem in debug mode. Since this is the browser's error stack
-            // we're talking about, it can only see functions that actually make it to the
-            // final wasm binary (i.e., not inlined functions). All of those internal
-            // iterator functions get inlined in release mode, and so they don't show up.
-            result.push(T::try_from_js_value(value).expect_throw("array contains a value of the wrong type"));
-        }
-        result.into_boxed_slice()
-    }
+    result.into_boxed_slice()
 }

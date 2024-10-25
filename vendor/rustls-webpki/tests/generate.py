@@ -7,6 +7,7 @@ name-related parts of webpki.
 Run this script from tests/.  It edits the bottom part of some .rs files and
 drops testcase data into subdirectories as required.
 """
+
 import argparse
 import enum
 import os
@@ -16,7 +17,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, padding
-from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 import ipaddress
@@ -209,7 +210,7 @@ def generate_tls_server_cert_test(
 
     - `test_name`: name of the test, must be a rust identifier.
     - `expected_error`: item in `webpki::Error` enum, expected error from
-      webpki `verify_is_valid_tls_server_cert` function.  Leave absent to
+      webpki `verify_for_usage()` function.  Leave absent to
       expect success.
     - `subject_common_name`: optional string to put in end-entity certificate
       subject common name.
@@ -560,6 +561,8 @@ def signatures(force: bool) -> None:
     }
 
     feature_gates = {
+        "ECDSA_P521_SHA256": 'all(not(feature = "ring"), feature = "aws_lc_rs")',
+        "ECDSA_P521_SHA384": 'all(not(feature = "ring"), feature = "aws_lc_rs")',
         "ECDSA_P521_SHA512": 'all(not(feature = "ring"), feature = "aws_lc_rs")',
     }
 
@@ -576,7 +579,7 @@ def signatures(force: bool) -> None:
         "ed25519": ["ED25519"],
         "ecdsa_p256": ["ECDSA_P256_SHA384", "ECDSA_P256_SHA256"],
         "ecdsa_p384": ["ECDSA_P384_SHA384", "ECDSA_P384_SHA256"],
-        "ecdsa_p521": ["ECDSA_P521_SHA512"],
+        "ecdsa_p521": ["ECDSA_P521_SHA512", "ECDSA_P521_SHA256", "ECDSA_P521_SHA384"],
         "rsa_2048": rsa_types,
         "rsa_3072": rsa_types + ["RSA_PKCS1_3072_8192_SHA384"],
         "rsa_4096": rsa_types + ["RSA_PKCS1_3072_8192_SHA384"],
@@ -604,6 +607,12 @@ def signatures(force: bool) -> None:
             message, ec.ECDSA(hashes.SHA256())
         ),
         "ECDSA_P384_SHA384": lambda key, message: key.sign(
+            message, ec.ECDSA(hashes.SHA384())
+        ),
+        "ECDSA_P521_SHA256": lambda key, message: key.sign(
+            message, ec.ECDSA(hashes.SHA256())
+        ),
+        "ECDSA_P521_SHA384": lambda key, message: key.sign(
             message, ec.ECDSA(hashes.SHA384())
         ),
         "ECDSA_P521_SHA512": lambda key, message: key.sign(
@@ -643,6 +652,9 @@ def signatures(force: bool) -> None:
     def _cert_path(cert_type: str) -> str:
         return os.path.join(output_dir, f"{cert_type}.ee.der")
 
+    def _rpk_path(rpk_type: str) -> str:
+        return os.path.join(output_dir, f"{rpk_type}.spki.der")
+
     for name, private_key in all_key_types.items():
         ee_subject = x509.Name(
             [x509.NameAttribute(NameOID.ORGANIZATION_NAME, name + " test")]
@@ -656,6 +668,10 @@ def signatures(force: bool) -> None:
             issuer_name=issuer_subject,
         )
 
+        rpk_pub_key = private_key.public_key().public_bytes(
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+        )
+        write_der(_rpk_path(name), rpk_pub_key, force)
         write_der(_cert_path(name), certificate.public_bytes(Encoding.DER), force)
 
     def _test(
@@ -663,6 +679,7 @@ def signatures(force: bool) -> None:
     ) -> None:
         nonlocal message_path
         cert_path: str = _cert_path(cert_type)
+        rpk_path: str = _rpk_path(cert_type)
         lower_test_name: str = test_name.lower()
 
         sig_path: str = os.path.join(output_dir, f"{lower_test_name}.sig.bin")
@@ -679,6 +696,23 @@ fn %(lower_test_name)s() {
     let signature = include_bytes!("%(sig_path)s");
     assert_eq!(
         check_sig(ee, %(algorithm)s, message, signature),
+        %(expected)s
+    );
+}"""
+            % locals(),
+            file=output,
+        )
+
+        print(
+            """
+#[test]
+#[cfg(%(feature_gate)s)]
+fn %(lower_test_name)s_rpk() {
+    let rpk = include_bytes!("%(rpk_path)s");
+    let message = include_bytes!("%(message_path)s");
+    let signature = include_bytes!("%(sig_path)s");
+    assert_eq!(
+        check_sig_rpk(rpk, %(algorithm)s, message, signature),
         %(expected)s
     );
 }"""
@@ -1814,12 +1848,13 @@ def client_auth_revocation(force: bool) -> None:
             expected_error=None,
         )
 
-    def _ee_crl_no_idp_unknown_status() -> None:
-        test_name = "ee_crl_no_idp_unknown_status"
+    def _ee_not_revoked_crl_no_idp() -> None:
+        test_name = "ee_not_revoked_crl_no_idp"
         # Use the chain that has a CRL distribution point in each cert.
         ee_cert = dp_chain[0][0]
         int_a_key = dp_chain[1][2]
-        # Generate a CRL that has a matching issuer, but no issuing distribution point.
+        # Generate a CRL that has a matching issuer, but no issuing distribution point,
+        # that does not include the ee cert's serial.
         ee_no_idp_crl = _crl(
             serials=[0xFFFF],
             issuer_name=ee_cert.issuer,
@@ -1828,8 +1863,10 @@ def client_auth_revocation(force: bool) -> None:
         ee_no_idp_crl_path = os.path.join(output_dir, f"{test_name}.crl.der")
         write_der(ee_no_idp_crl_path, ee_no_idp_crl.public_bytes(Encoding.DER), force)
 
-        # Checking revocation and not allowing unknown status should error - the CRL
-        # isn't relevant because it's missing a CRL IDP to match the cert DP.
+        # Checking revocation and not allowing unknown status should be OK - the CRL
+        # is considered to have a scope of "everything" since it does not
+        # explicitly set a scope with a CRL IDP extension.
+        # See https://github.com/rustls/webpki/issues/228
         _revocation_test(
             test_name=test_name,
             chain=dp_chain,
@@ -1837,7 +1874,36 @@ def client_auth_revocation(force: bool) -> None:
             depth=ChainDepth.END_ENTITY,
             policy=StatusRequirement.FORBID_UNKNOWN,
             expiration=ExpirationPolicy.IGNORE,
-            expected_error="UnknownRevocationStatus",
+            expected_error=None,
+        )
+
+    def _ee_revoked_crl_no_idp() -> None:
+        test_name = "ee_revoked_crl_no_idp"
+        # Use the chain that has a CRL distribution point in each cert.
+        ee_cert = dp_chain[0][0]
+        int_a_key = dp_chain[1][2]
+        # Generate a CRL that has a matching issuer, but no issuing distribution point,
+        # and that _does_ include the ee cert's serial.
+        ee_no_idp_crl = _crl(
+            serials=[ee_cert.serial_number],
+            issuer_name=ee_cert.issuer,
+            issuer_key=int_a_key,
+        )
+        ee_no_idp_crl_path = os.path.join(output_dir, f"{test_name}.crl.der")
+        write_der(ee_no_idp_crl_path, ee_no_idp_crl.public_bytes(Encoding.DER), force)
+
+        # Checking revocation and not allowing unknown status should return a revoked
+        # status - the CRL is considered to have a scope of "everything" since
+        # it does not explicitly set a scope with a CRL IDP extension.
+        # See https://github.com/rustls/webpki/issues/228
+        _revocation_test(
+            test_name=test_name,
+            chain=dp_chain,
+            crl_paths=[ee_no_idp_crl_path],
+            depth=ChainDepth.END_ENTITY,
+            policy=StatusRequirement.FORBID_UNKNOWN,
+            expiration=ExpirationPolicy.IGNORE,
+            expected_error="CertRevoked",
         )
 
     def _ee_crl_mismatched_idp_unknown_status() -> None:
@@ -2203,7 +2269,8 @@ def client_auth_revocation(force: bool) -> None:
         _int_revoked_crl_ku_chain_depth()
         _ee_with_top_bit_set_serial_revoked()
         _ee_no_dp_crl_idp()
-        _ee_crl_no_idp_unknown_status()
+        _ee_not_revoked_crl_no_idp()
+        _ee_revoked_crl_no_idp()
         _ee_crl_mismatched_idp_unknown_status()
         _ee_indirect_dp_unknown_status()
         _ee_reasons_dp_unknown_status()

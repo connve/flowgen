@@ -1,3 +1,31 @@
+# 0.1.16 (September 5th, 2024)
+
+This release bumps the MSRV of tokio-stream to 1.70.
+
+- stream: add `next_many` and `poll_next_many` to `StreamMap` ([#6409])
+- stream: make stream adapters public ([#6658])
+- readme: add readme for tokio-stream ([#6456])
+
+[#6409]: https://github.com/tokio-rs/tokio/pull/6409
+[#6658]: https://github.com/tokio-rs/tokio/pull/6658
+[#6456]: https://github.com/tokio-rs/tokio/pull/6456
+
+# 0.1.15 (March 14th, 2024)
+
+This release bumps the MSRV of tokio-stream to 1.63.
+
+- docs: fix typo in argument name ([#6389])
+- docs: fix typo in peekable docs ([#6130])
+- docs: link to latest version of tokio-util docs ([#5694])
+- docs: typographic improvements ([#6262])
+- stream: add `StreamExt::peekable` ([#6095])
+
+[#5694]: https://github.com/tokio-rs/tokio/pull/5694
+[#6095]: https://github.com/tokio-rs/tokio/pull/6095
+[#6130]: https://github.com/tokio-rs/tokio/pull/6130
+[#6262]: https://github.com/tokio-rs/tokio/pull/6262
+[#6389]: https://github.com/tokio-rs/tokio/pull/6389
+
 # 0.1.14 (April 26th, 2023)
 
 This bugfix release bumps the minimum version of Tokio to 1.15, which is

@@ -14,6 +14,24 @@ extern "C" {
     #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
     #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
     pub type IsInputPendingOptions;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Get the `includeContinuous` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `IsInputPendingOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, getter = "includeContinuous")]
+    pub fn get_include_continuous(this: &IsInputPendingOptions) -> Option<bool>;
+    #[cfg(web_sys_unstable_apis)]
+    #[doc = "Change the `includeContinuous` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `IsInputPendingOptions`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[wasm_bindgen(method, setter = "includeContinuous")]
+    pub fn set_include_continuous(this: &IsInputPendingOptions, val: bool);
 }
 #[cfg(web_sys_unstable_apis)]
 impl IsInputPendingOptions {
@@ -29,24 +47,9 @@ impl IsInputPendingOptions {
         ret
     }
     #[cfg(web_sys_unstable_apis)]
-    #[doc = "Change the `includeContinuous` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `IsInputPendingOptions`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    #[deprecated = "Use `set_include_continuous()` instead."]
     pub fn include_continuous(&mut self, val: bool) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("includeContinuous"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_include_continuous(val);
         self
     }
 }

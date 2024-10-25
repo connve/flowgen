@@ -17,6 +17,7 @@ struct Struct<T, U> {
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
 #[allow(clippy::mut_mut)]
+#[allow(clippy::missing_docs_in_private_items)]
 struct Proj<'pin, T, U>
 where
     Struct<T, U>: 'pin,
@@ -36,6 +37,7 @@ where
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
 #[allow(clippy::ref_option_ref)]
+#[allow(clippy::missing_docs_in_private_items)]
 struct ProjRef<'pin, T, U>
 where
     Struct<T, U>: 'pin,
@@ -54,6 +56,7 @@ where
 #[allow(clippy::redundant_pub_crate)]
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
+#[allow(clippy::missing_docs_in_private_items)]
 struct ProjOwn<T, U> {
     pinned: ::pin_project::__private::PhantomData<T>,
     unpinned: U,
@@ -69,6 +72,7 @@ struct ProjOwn<T, U> {
 #[allow(clippy::redundant_pub_crate)]
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(unused_qualifications)]
+#[allow(clippy::needless_lifetimes)]
 #[allow(clippy::semicolon_if_nothing_returned)]
 #[allow(clippy::use_self)]
 #[allow(clippy::used_underscore_binding)]
@@ -147,12 +151,16 @@ const _: () = {
     }
     impl<'pin, T, U> _pin_project::__private::Unpin for Struct<T, U>
     where
-        __Struct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __Struct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     #[doc(hidden)]
     unsafe impl<'pin, T, U> _pin_project::UnsafeUnpin for Struct<T, U>
     where
-        __Struct<'pin, T, U>: _pin_project::__private::Unpin,
+        ::pin_project::__private::PinnedFieldsOf<
+            __Struct<'pin, T, U>,
+        >: _pin_project::__private::Unpin,
     {}
     trait StructMustNotImplDrop {}
     #[allow(clippy::drop_bounds, drop_bounds)]

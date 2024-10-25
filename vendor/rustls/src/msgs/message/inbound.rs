@@ -1,15 +1,12 @@
 use core::ops::{Deref, DerefMut};
 
-use super::outbound::read_opaque_message_header;
-use super::MessageError;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::{Error, PeerMisbehaved};
-use crate::msgs::codec::ReaderMut;
 use crate::msgs::fragmenter::MAX_FRAGMENT_LEN;
 
 /// A TLS frame, named TLSPlaintext in the standard.
 ///
-/// This inbound type borrows its encrypted payload from a `[MessageDeframer]`.
+/// This inbound type borrows its encrypted payload from a buffer elsewhere.
 /// It is used for joining and is consumed by decryption.
 pub struct InboundOpaqueMessage<'a> {
     pub typ: ContentType,
@@ -64,21 +61,6 @@ impl<'a> InboundOpaqueMessage<'a> {
         self.version = ProtocolVersion::TLSv1_3;
         Ok(self.into_plain_message())
     }
-
-    pub(crate) fn read(r: &mut ReaderMut<'a>) -> Result<Self, MessageError> {
-        let (typ, version, len) = r.as_reader(read_opaque_message_header)?;
-
-        let mut sub = r
-            .sub(len as usize)
-            .map_err(|_| MessageError::TooShortForLength)?;
-        let payload = BorrowedPayload::read(&mut sub);
-
-        Ok(Self {
-            typ,
-            version,
-            payload,
-        })
-    }
 }
 
 pub struct BorrowedPayload<'a>(&'a mut [u8]);
@@ -91,7 +73,7 @@ impl Deref for BorrowedPayload<'_> {
     }
 }
 
-impl<'a> DerefMut for BorrowedPayload<'a> {
+impl DerefMut for BorrowedPayload<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
@@ -106,10 +88,6 @@ impl<'a> BorrowedPayload<'a> {
         self.0 = core::mem::take(&mut self.0)
             .split_at_mut(len)
             .0;
-    }
-
-    pub(crate) fn read(r: &mut ReaderMut<'a>) -> Self {
-        Self(r.rest())
     }
 
     pub(crate) fn into_inner(self) -> &'a mut [u8] {
@@ -130,10 +108,8 @@ impl<'a> BorrowedPayload<'a> {
 
 /// A TLS frame, named `TLSPlaintext` in the standard.
 ///
-/// This inbound type borrows its decrypted payload from a [`MessageDeframer`].
+/// This inbound type borrows its decrypted payload from the original buffer.
 /// It results from decryption.
-///
-/// [`MessageDeframer`]: crate::msgs::deframer::MessageDeframer
 #[derive(Debug)]
 pub struct InboundPlainMessage<'a> {
     pub typ: ContentType,
@@ -150,15 +126,6 @@ impl InboundPlainMessage<'_> {
     pub(crate) fn is_valid_ccs(&self) -> bool {
         self.typ == ContentType::ChangeCipherSpec && self.payload == [0x01]
     }
-
-    #[cfg(all(test, feature = "std"))]
-    pub(crate) fn into_owned(self) -> super::PlainMessage {
-        super::PlainMessage {
-            version: self.version,
-            typ: self.typ,
-            payload: crate::msgs::base::Payload::Owned(self.payload.to_vec()),
-        }
-    }
 }
 
 /// Decode a TLS1.3 `TLSInnerPlaintext` encoding.
@@ -168,7 +135,7 @@ impl InboundPlainMessage<'_> {
 /// the content type, which is returned.  See RFC8446 s5.2.
 ///
 /// ContentType(0) is returned if the message payload is empty or all zeroes.
-fn unpad_tls13_payload(p: &mut BorrowedPayload) -> ContentType {
+fn unpad_tls13_payload(p: &mut BorrowedPayload<'_>) -> ContentType {
     loop {
         match p.pop() {
             Some(0) => {}

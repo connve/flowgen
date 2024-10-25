@@ -22,7 +22,8 @@ use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicPtr, AtomicUsize};
 use linux_raw_sys::elf::*;
 use linux_raw_sys::general::{
-    AT_BASE, AT_CLKTCK, AT_EXECFN, AT_HWCAP, AT_HWCAP2, AT_NULL, AT_PAGESZ, AT_SYSINFO_EHDR,
+    AT_BASE, AT_CLKTCK, AT_EXECFN, AT_HWCAP, AT_HWCAP2, AT_MINSIGSTKSZ, AT_NULL, AT_PAGESZ,
+    AT_SYSINFO_EHDR,
 };
 #[cfg(feature = "runtime")]
 use linux_raw_sys::general::{
@@ -70,6 +71,19 @@ pub(crate) fn linux_hwcap() -> (usize, usize) {
     }
 
     (hwcap, hwcap2)
+}
+
+#[cfg(feature = "param")]
+#[inline]
+pub(crate) fn linux_minsigstksz() -> usize {
+    let mut minsigstksz = MINSIGSTKSZ.load(Relaxed);
+
+    if minsigstksz == 0 {
+        init_auxv();
+        minsigstksz = MINSIGSTKSZ.load(Relaxed);
+    }
+
+    minsigstksz
 }
 
 #[cfg(feature = "param")]
@@ -131,7 +145,7 @@ pub(in super::super) fn sysinfo_ehdr() -> *const Elf_Ehdr {
     let mut ehdr = SYSINFO_EHDR.load(Relaxed);
 
     if ehdr.is_null() {
-        // Use `maybe_init_auxv` to to read the aux vectors if it can, but do
+        // Use `maybe_init_auxv` to read the aux vectors if it can, but do
         // nothing if it can't. If it can't, then we'll get a null pointer
         // here, which our callers are prepared to deal with.
         maybe_init_auxv();
@@ -172,6 +186,7 @@ static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
 static CLOCK_TICKS_PER_SECOND: AtomicUsize = AtomicUsize::new(0);
 static HWCAP: AtomicUsize = AtomicUsize::new(0);
 static HWCAP2: AtomicUsize = AtomicUsize::new(0);
+static MINSIGSTKSZ: AtomicUsize = AtomicUsize::new(0);
 static EXECFN: AtomicPtr<c::c_char> = AtomicPtr::new(null_mut());
 static SYSINFO_EHDR: AtomicPtr<Elf_Ehdr> = AtomicPtr::new(null_mut());
 #[cfg(feature = "runtime")]
@@ -189,9 +204,9 @@ static RANDOM: AtomicPtr<[u8; 16]> = AtomicPtr::new(null_mut());
 
 const PR_GET_AUXV: c::c_int = 0x4155_5856;
 
-/// Use Linux >= 6.4's `PR_GET_AUXV` to read the aux records, into a provided
+/// Use Linux ≥ 6.4's `PR_GET_AUXV` to read the aux records, into a provided
 /// statically-sized buffer. Return:
-///  - `Ok(...)` if the buffer is big enough.
+///  - `Ok(…)` if the buffer is big enough.
 ///  - `Err(Ok(len))` if we need a buffer of length `len`.
 ///  - `Err(Err(err))` if we failed with `err`.
 #[cold]
@@ -213,10 +228,10 @@ fn pr_get_auxv_static(buffer: &mut [u8; 512]) -> Result<&mut [u8], crate::io::Re
     Err(Ok(len))
 }
 
-/// Use Linux >= 6.4's `PR_GET_AUXV` to read the aux records, using a provided
+/// Use Linux ≥ 6.4's `PR_GET_AUXV` to read the aux records, using a provided
 /// statically-sized buffer if possible, or a dynamically allocated buffer
 /// otherwise. Return:
-///  - Ok(...) on success.
+///  - Ok(…) on success.
 ///  - Err(err) on failure.
 #[cfg(feature = "alloc")]
 #[cold]
@@ -255,9 +270,7 @@ fn init_auxv() {
 /// must be prepared for initialization to be skipped.
 #[cold]
 fn maybe_init_auxv() {
-    if let Ok(()) = init_auxv_impl() {
-        return;
-    }
+    let _ = init_auxv_impl();
 }
 
 /// If we don't have "use-explicitly-provided-auxv" or "use-libc-auxv", we
@@ -351,6 +364,7 @@ unsafe fn init_from_aux_iter(aux_iter: impl Iterator<Item = Elf_auxv_t>) -> Opti
     let mut clktck = 0;
     let mut hwcap = 0;
     let mut hwcap2 = 0;
+    let mut minsigstksz = 0;
     let mut execfn = null_mut();
     let mut sysinfo_ehdr = null_mut();
     #[cfg(feature = "runtime")]
@@ -380,6 +394,7 @@ unsafe fn init_from_aux_iter(aux_iter: impl Iterator<Item = Elf_auxv_t>) -> Opti
             AT_CLKTCK => clktck = a_val as usize,
             AT_HWCAP => hwcap = a_val as usize,
             AT_HWCAP2 => hwcap2 = a_val as usize,
+            AT_MINSIGSTKSZ => minsigstksz = a_val as usize,
             AT_EXECFN => execfn = check_raw_pointer::<c::c_char>(a_val as *mut _)?.as_ptr(),
             AT_SYSINFO_EHDR => sysinfo_ehdr = check_elf_base(a_val as *mut _)?.as_ptr(),
 
@@ -434,6 +449,7 @@ unsafe fn init_from_aux_iter(aux_iter: impl Iterator<Item = Elf_auxv_t>) -> Opti
     CLOCK_TICKS_PER_SECOND.store(clktck, Relaxed);
     HWCAP.store(hwcap, Relaxed);
     HWCAP2.store(hwcap2, Relaxed);
+    MINSIGSTKSZ.store(minsigstksz, Relaxed);
     EXECFN.store(execfn, Relaxed);
     SYSINFO_EHDR.store(sysinfo_ehdr, Relaxed);
     #[cfg(feature = "runtime")]

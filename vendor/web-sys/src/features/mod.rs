@@ -502,6 +502,13 @@ mod gen_AuthenticationExtensionsClientInputs;
 #[allow(unused_imports)]
 pub use gen_AuthenticationExtensionsClientInputs::*;
 
+#[cfg(feature = "AuthenticationExtensionsClientInputsJson")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsClientInputsJson;
+#[cfg(feature = "AuthenticationExtensionsClientInputsJson")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsClientInputsJson::*;
+
 #[cfg(feature = "AuthenticationExtensionsClientOutputs")]
 #[allow(non_snake_case)]
 mod gen_AuthenticationExtensionsClientOutputs;
@@ -509,12 +516,82 @@ mod gen_AuthenticationExtensionsClientOutputs;
 #[allow(unused_imports)]
 pub use gen_AuthenticationExtensionsClientOutputs::*;
 
+#[cfg(feature = "AuthenticationExtensionsClientOutputsJson")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsClientOutputsJson;
+#[cfg(feature = "AuthenticationExtensionsClientOutputsJson")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsClientOutputsJson::*;
+
+#[cfg(feature = "AuthenticationExtensionsDevicePublicKeyInputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsDevicePublicKeyInputs;
+#[cfg(feature = "AuthenticationExtensionsDevicePublicKeyInputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsDevicePublicKeyInputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsDevicePublicKeyOutputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsDevicePublicKeyOutputs;
+#[cfg(feature = "AuthenticationExtensionsDevicePublicKeyOutputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsDevicePublicKeyOutputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsLargeBlobInputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsLargeBlobInputs;
+#[cfg(feature = "AuthenticationExtensionsLargeBlobInputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsLargeBlobInputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsLargeBlobOutputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsLargeBlobOutputs;
+#[cfg(feature = "AuthenticationExtensionsLargeBlobOutputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsLargeBlobOutputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsPrfInputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsPrfInputs;
+#[cfg(feature = "AuthenticationExtensionsPrfInputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsPrfInputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsPrfOutputs")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsPrfOutputs;
+#[cfg(feature = "AuthenticationExtensionsPrfOutputs")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsPrfOutputs::*;
+
+#[cfg(feature = "AuthenticationExtensionsPrfValues")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationExtensionsPrfValues;
+#[cfg(feature = "AuthenticationExtensionsPrfValues")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationExtensionsPrfValues::*;
+
+#[cfg(feature = "AuthenticationResponseJson")]
+#[allow(non_snake_case)]
+mod gen_AuthenticationResponseJson;
+#[cfg(feature = "AuthenticationResponseJson")]
+#[allow(unused_imports)]
+pub use gen_AuthenticationResponseJson::*;
+
 #[cfg(feature = "AuthenticatorAssertionResponse")]
 #[allow(non_snake_case)]
 mod gen_AuthenticatorAssertionResponse;
 #[cfg(feature = "AuthenticatorAssertionResponse")]
 #[allow(unused_imports)]
 pub use gen_AuthenticatorAssertionResponse::*;
+
+#[cfg(feature = "AuthenticatorAssertionResponseJson")]
+#[allow(non_snake_case)]
+mod gen_AuthenticatorAssertionResponseJson;
+#[cfg(feature = "AuthenticatorAssertionResponseJson")]
+#[allow(unused_imports)]
+pub use gen_AuthenticatorAssertionResponseJson::*;
 
 #[cfg(feature = "AuthenticatorAttachment")]
 #[allow(non_snake_case)]
@@ -529,6 +606,13 @@ mod gen_AuthenticatorAttestationResponse;
 #[cfg(feature = "AuthenticatorAttestationResponse")]
 #[allow(unused_imports)]
 pub use gen_AuthenticatorAttestationResponse::*;
+
+#[cfg(feature = "AuthenticatorAttestationResponseJson")]
+#[allow(non_snake_case)]
+mod gen_AuthenticatorAttestationResponseJson;
+#[cfg(feature = "AuthenticatorAttestationResponseJson")]
+#[allow(unused_imports)]
+pub use gen_AuthenticatorAttestationResponseJson::*;
 
 #[cfg(feature = "AuthenticatorResponse")]
 #[allow(non_snake_case)]
@@ -1139,6 +1223,13 @@ mod gen_ClipboardPermissionDescriptor;
 #[allow(unused_imports)]
 pub use gen_ClipboardPermissionDescriptor::*;
 
+#[cfg(feature = "ClipboardUnsanitizedFormats")]
+#[allow(non_snake_case)]
+mod gen_ClipboardUnsanitizedFormats;
+#[cfg(feature = "ClipboardUnsanitizedFormats")]
+#[allow(unused_imports)]
+pub use gen_ClipboardUnsanitizedFormats::*;
+
 #[cfg(feature = "CloseEvent")]
 #[allow(non_snake_case)]
 mod gen_CloseEvent;
@@ -1418,6 +1509,13 @@ mod gen_CredentialCreationOptions;
 #[cfg(feature = "CredentialCreationOptions")]
 #[allow(unused_imports)]
 pub use gen_CredentialCreationOptions::*;
+
+#[cfg(feature = "CredentialPropertiesOutput")]
+#[allow(non_snake_case)]
+mod gen_CredentialPropertiesOutput;
+#[cfg(feature = "CredentialPropertiesOutput")]
+#[allow(unused_imports)]
+pub use gen_CredentialPropertiesOutput::*;
 
 #[cfg(feature = "CredentialRequestOptions")]
 #[allow(non_snake_case)]
@@ -1804,6 +1902,13 @@ mod gen_Directory;
 #[allow(unused_imports)]
 pub use gen_Directory::*;
 
+#[cfg(feature = "DirectoryPickerOptions")]
+#[allow(non_snake_case)]
+mod gen_DirectoryPickerOptions;
+#[cfg(feature = "DirectoryPickerOptions")]
+#[allow(unused_imports)]
+pub use gen_DirectoryPickerOptions::*;
+
 #[cfg(feature = "DisplayMediaStreamConstraints")]
 #[allow(non_snake_case)]
 mod gen_DisplayMediaStreamConstraints;
@@ -2055,6 +2160,13 @@ mod gen_DomWindowResizeEventDetail;
 #[cfg(feature = "DomWindowResizeEventDetail")]
 #[allow(unused_imports)]
 pub use gen_DomWindowResizeEventDetail::*;
+
+#[cfg(feature = "DoubleRange")]
+#[allow(non_snake_case)]
+mod gen_DoubleRange;
+#[cfg(feature = "DoubleRange")]
+#[allow(unused_imports)]
+pub use gen_DoubleRange::*;
 
 #[cfg(feature = "DragEvent")]
 #[allow(non_snake_case)]
@@ -2469,6 +2581,20 @@ mod gen_FileList;
 #[allow(unused_imports)]
 pub use gen_FileList::*;
 
+#[cfg(feature = "FilePickerAcceptType")]
+#[allow(non_snake_case)]
+mod gen_FilePickerAcceptType;
+#[cfg(feature = "FilePickerAcceptType")]
+#[allow(unused_imports)]
+pub use gen_FilePickerAcceptType::*;
+
+#[cfg(feature = "FilePickerOptions")]
+#[allow(non_snake_case)]
+mod gen_FilePickerOptions;
+#[cfg(feature = "FilePickerOptions")]
+#[allow(unused_imports)]
+pub use gen_FilePickerOptions::*;
+
 #[cfg(feature = "FilePropertyBag")]
 #[allow(non_snake_case)]
 mod gen_FilePropertyBag;
@@ -2595,6 +2721,27 @@ mod gen_FileSystemHandleKind;
 #[allow(unused_imports)]
 pub use gen_FileSystemHandleKind::*;
 
+#[cfg(feature = "FileSystemHandlePermissionDescriptor")]
+#[allow(non_snake_case)]
+mod gen_FileSystemHandlePermissionDescriptor;
+#[cfg(feature = "FileSystemHandlePermissionDescriptor")]
+#[allow(unused_imports)]
+pub use gen_FileSystemHandlePermissionDescriptor::*;
+
+#[cfg(feature = "FileSystemPermissionDescriptor")]
+#[allow(non_snake_case)]
+mod gen_FileSystemPermissionDescriptor;
+#[cfg(feature = "FileSystemPermissionDescriptor")]
+#[allow(unused_imports)]
+pub use gen_FileSystemPermissionDescriptor::*;
+
+#[cfg(feature = "FileSystemPermissionMode")]
+#[allow(non_snake_case)]
+mod gen_FileSystemPermissionMode;
+#[cfg(feature = "FileSystemPermissionMode")]
+#[allow(unused_imports)]
+pub use gen_FileSystemPermissionMode::*;
+
 #[cfg(feature = "FileSystemReadWriteOptions")]
 #[allow(non_snake_case)]
 mod gen_FileSystemReadWriteOptions;
@@ -2657,6 +2804,13 @@ mod gen_FocusEventInit;
 #[cfg(feature = "FocusEventInit")]
 #[allow(unused_imports)]
 pub use gen_FocusEventInit::*;
+
+#[cfg(feature = "FocusOptions")]
+#[allow(non_snake_case)]
+mod gen_FocusOptions;
+#[cfg(feature = "FocusOptions")]
+#[allow(unused_imports)]
+pub use gen_FocusOptions::*;
 
 #[cfg(feature = "FontData")]
 #[allow(non_snake_case)]
@@ -2770,20 +2924,6 @@ mod gen_Gamepad;
 #[allow(unused_imports)]
 pub use gen_Gamepad::*;
 
-#[cfg(feature = "GamepadAxisMoveEvent")]
-#[allow(non_snake_case)]
-mod gen_GamepadAxisMoveEvent;
-#[cfg(feature = "GamepadAxisMoveEvent")]
-#[allow(unused_imports)]
-pub use gen_GamepadAxisMoveEvent::*;
-
-#[cfg(feature = "GamepadAxisMoveEventInit")]
-#[allow(non_snake_case)]
-mod gen_GamepadAxisMoveEventInit;
-#[cfg(feature = "GamepadAxisMoveEventInit")]
-#[allow(unused_imports)]
-pub use gen_GamepadAxisMoveEventInit::*;
-
 #[cfg(feature = "GamepadButton")]
 #[allow(non_snake_case)]
 mod gen_GamepadButton;
@@ -2791,19 +2931,12 @@ mod gen_GamepadButton;
 #[allow(unused_imports)]
 pub use gen_GamepadButton::*;
 
-#[cfg(feature = "GamepadButtonEvent")]
+#[cfg(feature = "GamepadEffectParameters")]
 #[allow(non_snake_case)]
-mod gen_GamepadButtonEvent;
-#[cfg(feature = "GamepadButtonEvent")]
+mod gen_GamepadEffectParameters;
+#[cfg(feature = "GamepadEffectParameters")]
 #[allow(unused_imports)]
-pub use gen_GamepadButtonEvent::*;
-
-#[cfg(feature = "GamepadButtonEventInit")]
-#[allow(non_snake_case)]
-mod gen_GamepadButtonEventInit;
-#[cfg(feature = "GamepadButtonEventInit")]
-#[allow(unused_imports)]
-pub use gen_GamepadButtonEventInit::*;
+pub use gen_GamepadEffectParameters::*;
 
 #[cfg(feature = "GamepadEvent")]
 #[allow(non_snake_case)]
@@ -2840,6 +2973,20 @@ mod gen_GamepadHapticActuatorType;
 #[allow(unused_imports)]
 pub use gen_GamepadHapticActuatorType::*;
 
+#[cfg(feature = "GamepadHapticEffectType")]
+#[allow(non_snake_case)]
+mod gen_GamepadHapticEffectType;
+#[cfg(feature = "GamepadHapticEffectType")]
+#[allow(unused_imports)]
+pub use gen_GamepadHapticEffectType::*;
+
+#[cfg(feature = "GamepadHapticsResult")]
+#[allow(non_snake_case)]
+mod gen_GamepadHapticsResult;
+#[cfg(feature = "GamepadHapticsResult")]
+#[allow(unused_imports)]
+pub use gen_GamepadHapticsResult::*;
+
 #[cfg(feature = "GamepadMappingType")]
 #[allow(non_snake_case)]
 mod gen_GamepadMappingType;
@@ -2854,12 +3001,12 @@ mod gen_GamepadPose;
 #[allow(unused_imports)]
 pub use gen_GamepadPose::*;
 
-#[cfg(feature = "GamepadServiceTest")]
+#[cfg(feature = "GamepadTouch")]
 #[allow(non_snake_case)]
-mod gen_GamepadServiceTest;
-#[cfg(feature = "GamepadServiceTest")]
+mod gen_GamepadTouch;
+#[cfg(feature = "GamepadTouch")]
 #[allow(unused_imports)]
-pub use gen_GamepadServiceTest::*;
+pub use gen_GamepadTouch::*;
 
 #[cfg(feature = "Geolocation")]
 #[allow(non_snake_case)]
@@ -3056,6 +3203,20 @@ mod gen_GpuCanvasContext;
 #[cfg(feature = "GpuCanvasContext")]
 #[allow(unused_imports)]
 pub use gen_GpuCanvasContext::*;
+
+#[cfg(feature = "GpuCanvasToneMapping")]
+#[allow(non_snake_case)]
+mod gen_GpuCanvasToneMapping;
+#[cfg(feature = "GpuCanvasToneMapping")]
+#[allow(unused_imports)]
+pub use gen_GpuCanvasToneMapping::*;
+
+#[cfg(feature = "GpuCanvasToneMappingMode")]
+#[allow(non_snake_case)]
+mod gen_GpuCanvasToneMappingMode;
+#[cfg(feature = "GpuCanvasToneMappingMode")]
+#[allow(unused_imports)]
+pub use gen_GpuCanvasToneMappingMode::*;
 
 #[cfg(feature = "GpuColorDict")]
 #[allow(non_snake_case)]
@@ -4674,12 +4835,26 @@ mod gen_IdbTransaction;
 #[allow(unused_imports)]
 pub use gen_IdbTransaction::*;
 
+#[cfg(feature = "IdbTransactionDurability")]
+#[allow(non_snake_case)]
+mod gen_IdbTransactionDurability;
+#[cfg(feature = "IdbTransactionDurability")]
+#[allow(unused_imports)]
+pub use gen_IdbTransactionDurability::*;
+
 #[cfg(feature = "IdbTransactionMode")]
 #[allow(non_snake_case)]
 mod gen_IdbTransactionMode;
 #[cfg(feature = "IdbTransactionMode")]
 #[allow(unused_imports)]
 pub use gen_IdbTransactionMode::*;
+
+#[cfg(feature = "IdbTransactionOptions")]
+#[allow(non_snake_case)]
+mod gen_IdbTransactionOptions;
+#[cfg(feature = "IdbTransactionOptions")]
+#[allow(unused_imports)]
+pub use gen_IdbTransactionOptions::*;
 
 #[cfg(feature = "IdbVersionChangeEvent")]
 #[allow(non_snake_case)]
@@ -4835,6 +5010,13 @@ mod gen_ImageTrackList;
 #[allow(unused_imports)]
 pub use gen_ImageTrackList::*;
 
+#[cfg(feature = "InputDeviceInfo")]
+#[allow(non_snake_case)]
+mod gen_InputDeviceInfo;
+#[cfg(feature = "InputDeviceInfo")]
+#[allow(unused_imports)]
+pub use gen_InputDeviceInfo::*;
+
 #[cfg(feature = "InputEvent")]
 #[allow(non_snake_case)]
 mod gen_InputEvent;
@@ -4933,6 +5115,13 @@ mod gen_KeyEvent;
 #[allow(unused_imports)]
 pub use gen_KeyEvent::*;
 
+#[cfg(feature = "KeyFrameRequestEvent")]
+#[allow(non_snake_case)]
+mod gen_KeyFrameRequestEvent;
+#[cfg(feature = "KeyFrameRequestEvent")]
+#[allow(unused_imports)]
+pub use gen_KeyFrameRequestEvent::*;
+
 #[cfg(feature = "KeyIdsInitData")]
 #[allow(non_snake_case)]
 mod gen_KeyIdsInitData;
@@ -4988,6 +5177,13 @@ mod gen_L10nValue;
 #[cfg(feature = "L10nValue")]
 #[allow(unused_imports)]
 pub use gen_L10nValue::*;
+
+#[cfg(feature = "LargeBlobSupport")]
+#[allow(non_snake_case)]
+mod gen_LargeBlobSupport;
+#[cfg(feature = "LargeBlobSupport")]
+#[allow(unused_imports)]
+pub use gen_LargeBlobSupport::*;
 
 #[cfg(feature = "LatencyMode")]
 #[allow(non_snake_case)]
@@ -5542,6 +5738,13 @@ mod gen_MediaStreamTrackState;
 #[allow(unused_imports)]
 pub use gen_MediaStreamTrackState::*;
 
+#[cfg(feature = "MediaTrackCapabilities")]
+#[allow(non_snake_case)]
+mod gen_MediaTrackCapabilities;
+#[cfg(feature = "MediaTrackCapabilities")]
+#[allow(unused_imports)]
+pub use gen_MediaTrackCapabilities::*;
+
 #[cfg(feature = "MediaTrackConstraintSet")]
 #[allow(non_snake_case)]
 mod gen_MediaTrackConstraintSet;
@@ -5843,6 +6046,20 @@ mod gen_NavigatorAutomationInformation;
 #[allow(unused_imports)]
 pub use gen_NavigatorAutomationInformation::*;
 
+#[cfg(feature = "NavigatorUaBrandVersion")]
+#[allow(non_snake_case)]
+mod gen_NavigatorUaBrandVersion;
+#[cfg(feature = "NavigatorUaBrandVersion")]
+#[allow(unused_imports)]
+pub use gen_NavigatorUaBrandVersion::*;
+
+#[cfg(feature = "NavigatorUaData")]
+#[allow(non_snake_case)]
+mod gen_NavigatorUaData;
+#[cfg(feature = "NavigatorUaData")]
+#[allow(unused_imports)]
+pub use gen_NavigatorUaData::*;
+
 #[cfg(feature = "NetworkCommandOptions")]
 #[allow(non_snake_case)]
 mod gen_NetworkCommandOptions;
@@ -6045,6 +6262,13 @@ mod gen_OffscreenCanvasRenderingContext2d;
 #[cfg(feature = "OffscreenCanvasRenderingContext2d")]
 #[allow(unused_imports)]
 pub use gen_OffscreenCanvasRenderingContext2d::*;
+
+#[cfg(feature = "OpenFilePickerOptions")]
+#[allow(non_snake_case)]
+mod gen_OpenFilePickerOptions;
+#[cfg(feature = "OpenFilePickerOptions")]
+#[allow(unused_imports)]
+pub use gen_OpenFilePickerOptions::*;
 
 #[cfg(feature = "OpenWindowEventDetail")]
 #[allow(non_snake_case)]
@@ -6718,6 +6942,13 @@ mod gen_PublicKeyCredentialCreationOptions;
 #[allow(unused_imports)]
 pub use gen_PublicKeyCredentialCreationOptions::*;
 
+#[cfg(feature = "PublicKeyCredentialCreationOptionsJson")]
+#[allow(non_snake_case)]
+mod gen_PublicKeyCredentialCreationOptionsJson;
+#[cfg(feature = "PublicKeyCredentialCreationOptionsJson")]
+#[allow(unused_imports)]
+pub use gen_PublicKeyCredentialCreationOptionsJson::*;
+
 #[cfg(feature = "PublicKeyCredentialDescriptor")]
 #[allow(non_snake_case)]
 mod gen_PublicKeyCredentialDescriptor;
@@ -6725,12 +6956,26 @@ mod gen_PublicKeyCredentialDescriptor;
 #[allow(unused_imports)]
 pub use gen_PublicKeyCredentialDescriptor::*;
 
+#[cfg(feature = "PublicKeyCredentialDescriptorJson")]
+#[allow(non_snake_case)]
+mod gen_PublicKeyCredentialDescriptorJson;
+#[cfg(feature = "PublicKeyCredentialDescriptorJson")]
+#[allow(unused_imports)]
+pub use gen_PublicKeyCredentialDescriptorJson::*;
+
 #[cfg(feature = "PublicKeyCredentialEntity")]
 #[allow(non_snake_case)]
 mod gen_PublicKeyCredentialEntity;
 #[cfg(feature = "PublicKeyCredentialEntity")]
 #[allow(unused_imports)]
 pub use gen_PublicKeyCredentialEntity::*;
+
+#[cfg(feature = "PublicKeyCredentialHints")]
+#[allow(non_snake_case)]
+mod gen_PublicKeyCredentialHints;
+#[cfg(feature = "PublicKeyCredentialHints")]
+#[allow(unused_imports)]
+pub use gen_PublicKeyCredentialHints::*;
 
 #[cfg(feature = "PublicKeyCredentialParameters")]
 #[allow(non_snake_case)]
@@ -6745,6 +6990,13 @@ mod gen_PublicKeyCredentialRequestOptions;
 #[cfg(feature = "PublicKeyCredentialRequestOptions")]
 #[allow(unused_imports)]
 pub use gen_PublicKeyCredentialRequestOptions::*;
+
+#[cfg(feature = "PublicKeyCredentialRequestOptionsJson")]
+#[allow(non_snake_case)]
+mod gen_PublicKeyCredentialRequestOptionsJson;
+#[cfg(feature = "PublicKeyCredentialRequestOptionsJson")]
+#[allow(unused_imports)]
+pub use gen_PublicKeyCredentialRequestOptionsJson::*;
 
 #[cfg(feature = "PublicKeyCredentialRpEntity")]
 #[allow(non_snake_case)]
@@ -6766,6 +7018,13 @@ mod gen_PublicKeyCredentialUserEntity;
 #[cfg(feature = "PublicKeyCredentialUserEntity")]
 #[allow(unused_imports)]
 pub use gen_PublicKeyCredentialUserEntity::*;
+
+#[cfg(feature = "PublicKeyCredentialUserEntityJson")]
+#[allow(non_snake_case)]
+mod gen_PublicKeyCredentialUserEntityJson;
+#[cfg(feature = "PublicKeyCredentialUserEntityJson")]
+#[allow(unused_imports)]
+pub use gen_PublicKeyCredentialUserEntityJson::*;
 
 #[cfg(feature = "PushEncryptionKeyName")]
 #[allow(non_snake_case)]
@@ -7026,6 +7285,13 @@ mod gen_RegistrationOptions;
 #[allow(unused_imports)]
 pub use gen_RegistrationOptions::*;
 
+#[cfg(feature = "RegistrationResponseJson")]
+#[allow(non_snake_case)]
+mod gen_RegistrationResponseJson;
+#[cfg(feature = "RegistrationResponseJson")]
+#[allow(unused_imports)]
+pub use gen_RegistrationResponseJson::*;
+
 #[cfg(feature = "Request")]
 #[allow(non_snake_case)]
 mod gen_Request;
@@ -7088,6 +7354,13 @@ mod gen_RequestRedirect;
 #[cfg(feature = "RequestRedirect")]
 #[allow(unused_imports)]
 pub use gen_RequestRedirect::*;
+
+#[cfg(feature = "ResidentKeyRequirement")]
+#[allow(non_snake_case)]
+mod gen_ResidentKeyRequirement;
+#[cfg(feature = "ResidentKeyRequirement")]
+#[allow(unused_imports)]
+pub use gen_ResidentKeyRequirement::*;
 
 #[cfg(feature = "ResizeObserver")]
 #[allow(non_snake_case)]
@@ -7271,6 +7544,55 @@ mod gen_RtcDegradationPreference;
 #[allow(unused_imports)]
 pub use gen_RtcDegradationPreference::*;
 
+#[cfg(feature = "RtcEncodedAudioFrame")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedAudioFrame;
+#[cfg(feature = "RtcEncodedAudioFrame")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedAudioFrame::*;
+
+#[cfg(feature = "RtcEncodedAudioFrameMetadata")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedAudioFrameMetadata;
+#[cfg(feature = "RtcEncodedAudioFrameMetadata")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedAudioFrameMetadata::*;
+
+#[cfg(feature = "RtcEncodedAudioFrameOptions")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedAudioFrameOptions;
+#[cfg(feature = "RtcEncodedAudioFrameOptions")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedAudioFrameOptions::*;
+
+#[cfg(feature = "RtcEncodedVideoFrame")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedVideoFrame;
+#[cfg(feature = "RtcEncodedVideoFrame")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedVideoFrame::*;
+
+#[cfg(feature = "RtcEncodedVideoFrameMetadata")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedVideoFrameMetadata;
+#[cfg(feature = "RtcEncodedVideoFrameMetadata")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedVideoFrameMetadata::*;
+
+#[cfg(feature = "RtcEncodedVideoFrameOptions")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedVideoFrameOptions;
+#[cfg(feature = "RtcEncodedVideoFrameOptions")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedVideoFrameOptions::*;
+
+#[cfg(feature = "RtcEncodedVideoFrameType")]
+#[allow(non_snake_case)]
+mod gen_RtcEncodedVideoFrameType;
+#[cfg(feature = "RtcEncodedVideoFrameType")]
+#[allow(unused_imports)]
+pub use gen_RtcEncodedVideoFrameType::*;
+
 #[cfg(feature = "RtcFecParameters")]
 #[allow(non_snake_case)]
 mod gen_RtcFecParameters;
@@ -7446,6 +7768,13 @@ mod gen_RtcPeerConnection;
 #[allow(unused_imports)]
 pub use gen_RtcPeerConnection::*;
 
+#[cfg(feature = "RtcPeerConnectionIceErrorEvent")]
+#[allow(non_snake_case)]
+mod gen_RtcPeerConnectionIceErrorEvent;
+#[cfg(feature = "RtcPeerConnectionIceErrorEvent")]
+#[allow(unused_imports)]
+pub use gen_RtcPeerConnectionIceErrorEvent::*;
+
 #[cfg(feature = "RtcPeerConnectionIceEvent")]
 #[allow(non_snake_case)]
 mod gen_RtcPeerConnectionIceEvent;
@@ -7543,6 +7872,20 @@ mod gen_RtcRtpReceiver;
 #[cfg(feature = "RtcRtpReceiver")]
 #[allow(unused_imports)]
 pub use gen_RtcRtpReceiver::*;
+
+#[cfg(feature = "RtcRtpScriptTransform")]
+#[allow(non_snake_case)]
+mod gen_RtcRtpScriptTransform;
+#[cfg(feature = "RtcRtpScriptTransform")]
+#[allow(unused_imports)]
+pub use gen_RtcRtpScriptTransform::*;
+
+#[cfg(feature = "RtcRtpScriptTransformer")]
+#[allow(non_snake_case)]
+mod gen_RtcRtpScriptTransformer;
+#[cfg(feature = "RtcRtpScriptTransformer")]
+#[allow(unused_imports)]
+pub use gen_RtcRtpScriptTransformer::*;
 
 #[cfg(feature = "RtcRtpSender")]
 #[allow(non_snake_case)]
@@ -7684,6 +8027,13 @@ mod gen_RtcTrackEventInit;
 #[allow(unused_imports)]
 pub use gen_RtcTrackEventInit::*;
 
+#[cfg(feature = "RtcTransformEvent")]
+#[allow(non_snake_case)]
+mod gen_RtcTransformEvent;
+#[cfg(feature = "RtcTransformEvent")]
+#[allow(unused_imports)]
+pub use gen_RtcTransformEvent::*;
+
 #[cfg(feature = "RtcTransportStats")]
 #[allow(non_snake_case)]
 mod gen_RtcTransportStats;
@@ -7725,6 +8075,55 @@ mod gen_RtcrtpStreamStats;
 #[cfg(feature = "RtcrtpStreamStats")]
 #[allow(unused_imports)]
 pub use gen_RtcrtpStreamStats::*;
+
+#[cfg(feature = "SFrameTransform")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransform;
+#[cfg(feature = "SFrameTransform")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransform::*;
+
+#[cfg(feature = "SFrameTransformErrorEvent")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransformErrorEvent;
+#[cfg(feature = "SFrameTransformErrorEvent")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransformErrorEvent::*;
+
+#[cfg(feature = "SFrameTransformErrorEventInit")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransformErrorEventInit;
+#[cfg(feature = "SFrameTransformErrorEventInit")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransformErrorEventInit::*;
+
+#[cfg(feature = "SFrameTransformErrorEventType")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransformErrorEventType;
+#[cfg(feature = "SFrameTransformErrorEventType")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransformErrorEventType::*;
+
+#[cfg(feature = "SFrameTransformOptions")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransformOptions;
+#[cfg(feature = "SFrameTransformOptions")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransformOptions::*;
+
+#[cfg(feature = "SFrameTransformRole")]
+#[allow(non_snake_case)]
+mod gen_SFrameTransformRole;
+#[cfg(feature = "SFrameTransformRole")]
+#[allow(unused_imports)]
+pub use gen_SFrameTransformRole::*;
+
+#[cfg(feature = "SaveFilePickerOptions")]
+#[allow(non_snake_case)]
+mod gen_SaveFilePickerOptions;
+#[cfg(feature = "SaveFilePickerOptions")]
+#[allow(unused_imports)]
+pub use gen_SaveFilePickerOptions::*;
 
 #[cfg(feature = "Scheduler")]
 #[allow(non_snake_case)]
@@ -9420,6 +9819,34 @@ mod gen_TimeRanges;
 #[allow(unused_imports)]
 pub use gen_TimeRanges::*;
 
+#[cfg(feature = "ToggleEvent")]
+#[allow(non_snake_case)]
+mod gen_ToggleEvent;
+#[cfg(feature = "ToggleEvent")]
+#[allow(unused_imports)]
+pub use gen_ToggleEvent::*;
+
+#[cfg(feature = "ToggleEventInit")]
+#[allow(non_snake_case)]
+mod gen_ToggleEventInit;
+#[cfg(feature = "ToggleEventInit")]
+#[allow(unused_imports)]
+pub use gen_ToggleEventInit::*;
+
+#[cfg(feature = "TokenBinding")]
+#[allow(non_snake_case)]
+mod gen_TokenBinding;
+#[cfg(feature = "TokenBinding")]
+#[allow(unused_imports)]
+pub use gen_TokenBinding::*;
+
+#[cfg(feature = "TokenBindingStatus")]
+#[allow(non_snake_case)]
+mod gen_TokenBindingStatus;
+#[cfg(feature = "TokenBindingStatus")]
+#[allow(unused_imports)]
+pub use gen_TokenBindingStatus::*;
+
 #[cfg(feature = "Touch")]
 #[allow(non_snake_case)]
 mod gen_Touch;
@@ -9552,6 +9979,27 @@ mod gen_U2fClientData;
 #[cfg(feature = "U2fClientData")]
 #[allow(unused_imports)]
 pub use gen_U2fClientData::*;
+
+#[cfg(feature = "ULongRange")]
+#[allow(non_snake_case)]
+mod gen_ULongRange;
+#[cfg(feature = "ULongRange")]
+#[allow(unused_imports)]
+pub use gen_ULongRange::*;
+
+#[cfg(feature = "UaDataValues")]
+#[allow(non_snake_case)]
+mod gen_UaDataValues;
+#[cfg(feature = "UaDataValues")]
+#[allow(unused_imports)]
+pub use gen_UaDataValues::*;
+
+#[cfg(feature = "UaLowEntropyJson")]
+#[allow(non_snake_case)]
+mod gen_UaLowEntropyJson;
+#[cfg(feature = "UaLowEntropyJson")]
+#[allow(unused_imports)]
+pub use gen_UaLowEntropyJson::*;
 
 #[cfg(feature = "UdpMessageEventInit")]
 #[allow(non_snake_case)]
@@ -10021,6 +10469,13 @@ mod gen_VisibilityState;
 #[cfg(feature = "VisibilityState")]
 #[allow(unused_imports)]
 pub use gen_VisibilityState::*;
+
+#[cfg(feature = "VisualViewport")]
+#[allow(non_snake_case)]
+mod gen_VisualViewport;
+#[cfg(feature = "VisualViewport")]
+#[allow(unused_imports)]
+pub use gen_VisualViewport::*;
 
 #[cfg(feature = "VoidCallback")]
 #[allow(non_snake_case)]
@@ -10567,6 +11022,13 @@ mod gen_WebglMultiDraw;
 #[cfg(feature = "WebglMultiDraw")]
 #[allow(unused_imports)]
 pub use gen_WebglMultiDraw::*;
+
+#[cfg(feature = "WellKnownDirectory")]
+#[allow(non_snake_case)]
+mod gen_WellKnownDirectory;
+#[cfg(feature = "WellKnownDirectory")]
+#[allow(unused_imports)]
+pub use gen_WellKnownDirectory::*;
 
 #[cfg(feature = "WgslLanguageFeatures")]
 #[allow(non_snake_case)]

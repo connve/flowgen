@@ -10,6 +10,18 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ResizeObserverOptions`*"]
     pub type ResizeObserverOptions;
+    #[cfg(feature = "ResizeObserverBoxOptions")]
+    #[doc = "Get the `box` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResizeObserverBoxOptions`, `ResizeObserverOptions`*"]
+    #[wasm_bindgen(method, getter = "box")]
+    pub fn get_box(this: &ResizeObserverOptions) -> Option<ResizeObserverBoxOptions>;
+    #[cfg(feature = "ResizeObserverBoxOptions")]
+    #[doc = "Change the `box` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResizeObserverBoxOptions`, `ResizeObserverOptions`*"]
+    #[wasm_bindgen(method, setter = "box")]
+    pub fn set_box(this: &ResizeObserverOptions, val: ResizeObserverBoxOptions);
 }
 impl ResizeObserverOptions {
     #[doc = "Construct a new `ResizeObserverOptions`."]
@@ -21,17 +33,9 @@ impl ResizeObserverOptions {
         ret
     }
     #[cfg(feature = "ResizeObserverBoxOptions")]
-    #[doc = "Change the `box` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `ResizeObserverBoxOptions`, `ResizeObserverOptions`*"]
+    #[deprecated = "Use `set_box()` instead."]
     pub fn box_(&mut self, val: ResizeObserverBoxOptions) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("box"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_box(val);
         self
     }
 }

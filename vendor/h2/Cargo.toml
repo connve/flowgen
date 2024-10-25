@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.63"
 name = "h2"
-version = "0.4.5"
+version = "0.4.6"
 authors = [
     "Carl Lerche <me@carllerche.com>",
     "Sean McArthur <sean@seanmonstar.com>",
@@ -51,16 +51,16 @@ name = "h2"
 path = "src/lib.rs"
 
 [[example]]
-name = "server"
-path = "examples/server.rs"
+name = "akamai"
+path = "examples/akamai.rs"
 
 [[example]]
 name = "client"
 path = "examples/client.rs"
 
 [[example]]
-name = "akamai"
-path = "examples/akamai.rs"
+name = "server"
+path = "examples/server.rs"
 
 [[bench]]
 name = "main"
@@ -151,3 +151,8 @@ version = "0.26"
 [features]
 stream = []
 unstable = []
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ["cfg(fuzzing)"]

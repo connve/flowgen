@@ -10,6 +10,36 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
     pub type ResponseInit;
+    #[doc = "Get the `headers` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, getter = "headers")]
+    pub fn get_headers(this: &ResponseInit) -> ::wasm_bindgen::JsValue;
+    #[doc = "Change the `headers` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, setter = "headers")]
+    pub fn set_headers(this: &ResponseInit, val: &::wasm_bindgen::JsValue);
+    #[doc = "Get the `status` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, getter = "status")]
+    pub fn get_status(this: &ResponseInit) -> Option<u16>;
+    #[doc = "Change the `status` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, setter = "status")]
+    pub fn set_status(this: &ResponseInit, val: u16);
+    #[doc = "Get the `statusText` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, getter = "statusText")]
+    pub fn get_status_text(this: &ResponseInit) -> Option<String>;
+    #[doc = "Change the `statusText` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[wasm_bindgen(method, setter = "statusText")]
+    pub fn set_status_text(this: &ResponseInit, val: &str);
 }
 impl ResponseInit {
     #[doc = "Construct a new `ResponseInit`."]
@@ -20,52 +50,19 @@ impl ResponseInit {
         let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
         ret
     }
-    #[doc = "Change the `headers` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[deprecated = "Use `set_headers()` instead."]
     pub fn headers(&mut self, val: &::wasm_bindgen::JsValue) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("headers"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_headers(val);
         self
     }
-    #[doc = "Change the `status` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[deprecated = "Use `set_status()` instead."]
     pub fn status(&mut self, val: u16) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r =
-            ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("status"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_status(val);
         self
     }
-    #[doc = "Change the `statusText` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `ResponseInit`*"]
+    #[deprecated = "Use `set_status_text()` instead."]
     pub fn status_text(&mut self, val: &str) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(
-            self.as_ref(),
-            &JsValue::from("statusText"),
-            &JsValue::from(val),
-        );
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_status_text(val);
         self
     }
 }

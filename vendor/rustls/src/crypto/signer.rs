@@ -3,10 +3,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use pki_types::CertificateDer;
+use pki_types::{AlgorithmIdentifier, CertificateDer, SubjectPublicKeyInfoDer};
 
 use crate::enums::{SignatureAlgorithm, SignatureScheme};
-use crate::error::Error;
+use crate::error::{Error, InconsistentKeys};
+use crate::server::ParsedCertificate;
+use crate::x509;
 
 /// An abstract signing key.
 ///
@@ -59,6 +61,12 @@ pub trait SigningKey: Debug + Send + Sync {
     /// using the chosen scheme.
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>>;
 
+    /// Get the RFC 5280-compliant SubjectPublicKeyInfo (SPKI) of this [`SigningKey`] if available.
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        // Opt-out by default
+        None
+    }
+
     /// What kind of key we have.
     fn algorithm(&self) -> SignatureAlgorithm;
 }
@@ -105,10 +113,50 @@ impl CertifiedKey {
         }
     }
 
+    /// Verify the consistency of this [`CertifiedKey`]'s public and private keys.
+    /// This is done by performing a comparison of SubjectPublicKeyInfo bytes.
+    pub fn keys_match(&self) -> Result<(), Error> {
+        let key_spki = match self.key.public_key() {
+            Some(key) => key,
+            None => return Err(InconsistentKeys::Unknown.into()),
+        };
+
+        let cert = ParsedCertificate::try_from(self.end_entity_cert()?)?;
+        match key_spki == cert.subject_public_key_info() {
+            true => Ok(()),
+            false => Err(InconsistentKeys::KeyMismatch.into()),
+        }
+    }
+
     /// The end-entity certificate.
     pub fn end_entity_cert(&self) -> Result<&CertificateDer<'_>, Error> {
         self.cert
             .first()
             .ok_or(Error::NoCertificatesPresented)
     }
+}
+
+#[cfg_attr(not(any(feature = "aws_lc_rs", feature = "ring")), allow(dead_code))]
+pub(crate) fn public_key_to_spki(
+    alg_id: &AlgorithmIdentifier,
+    public_key: impl AsRef<[u8]>,
+) -> SubjectPublicKeyInfoDer<'static> {
+    // SubjectPublicKeyInfo  ::=  SEQUENCE  {
+    //    algorithm            AlgorithmIdentifier,
+    //    subjectPublicKey     BIT STRING  }
+    //
+    // AlgorithmIdentifier  ::=  SEQUENCE  {
+    //    algorithm               OBJECT IDENTIFIER,
+    //    parameters              ANY DEFINED BY algorithm OPTIONAL  }
+    //
+    // note that the `pki_types::AlgorithmIdentifier` type is the
+    // concatenation of `algorithm` and `parameters`, but misses the
+    // outer `Sequence`.
+
+    let mut spki_inner = x509::wrap_in_sequence(alg_id.as_ref());
+    spki_inner.extend(&x509::wrap_in_bit_string(public_key.as_ref()));
+
+    let spki = x509::wrap_in_sequence(&spki_inner);
+
+    SubjectPublicKeyInfoDer::from(spki)
 }

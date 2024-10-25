@@ -27,18 +27,21 @@ pub const kTLSProtocol1Only: SSLProtocol = 5;
 pub const kSSLProtocolAll: SSLProtocol = 6;
 
 pub type SSLSessionOption = c_int;
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionBreakOnServerAuth: SSLSessionOption = 0;
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionBreakOnCertRequested: SSLSessionOption = 1;
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionBreakOnClientAuth: SSLSessionOption = 2;
-#[cfg(any(feature = "OSX_10_9", target_os = "ios"))]
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionFalseStart: SSLSessionOption = 3;
-#[cfg(any(feature = "OSX_10_9", target_os = "ios"))]
 pub const kSSLSessionOptionSendOneByteRecord: SSLSessionOption = 4;
-#[cfg(all(feature = "OSX_10_11", not(target_os = "ios")))]
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionAllowServerIdentityChange: SSLSessionOption = 5;
-#[cfg(all(feature = "OSX_10_10", not(target_os = "ios")))]
+#[cfg(target_os = "macos")]
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionFallback: SSLSessionOption = 6;
-#[cfg(all(feature = "OSX_10_11", not(target_os = "ios")))]
+#[deprecated(note = "deprecated by Apple")]
 pub const kSSLSessionOptionBreakOnClientHello: SSLSessionOption = 7;
 
 pub type SSLSessionState = c_int;

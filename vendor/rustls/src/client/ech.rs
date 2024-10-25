@@ -10,7 +10,6 @@ use crate::crypto::hash::Hash;
 use crate::crypto::hpke::{EncapsulatedSecret, Hpke, HpkePublicKey, HpkeSealer, HpkeSuite};
 use crate::crypto::SecureRandom;
 use crate::hash_hs::{HandshakeHash, HandshakeHashBuffer};
-#[cfg(feature = "logging")]
 use crate::log::{debug, trace, warn};
 use crate::msgs::base::{Payload, PayloadU16};
 use crate::msgs::codec::{Codec, Reader};
@@ -144,8 +143,8 @@ impl EchConfig {
                     .find(|hpke| hpke.suite() == suite)
                 {
                     debug!(
-                        "selected ECH config ID {:?} suite {:?}",
-                        key_config.config_id, suite
+                        "selected ECH config ID {:?} suite {:?} public_name {:?}",
+                        key_config.config_id, suite, contents.public_name
                     );
                     return Ok(Self {
                         config: config.clone(),
@@ -537,7 +536,7 @@ impl EchState {
     ///
     /// This will start the in-progress transcript using the given `hash`, convert it into an HRR
     /// buffer, and then add the hello retry message `m`.
-    pub(crate) fn transcript_hrr_update(&mut self, hash: &'static dyn Hash, m: &Message) {
+    pub(crate) fn transcript_hrr_update(&mut self, hash: &'static dyn Hash, m: &Message<'_>) {
         trace!("Updating ECH inner transcript for HRR");
 
         let inner_transcript = self
@@ -779,21 +778,21 @@ impl EchState {
         Ok(())
     }
 
-    fn server_hello_conf(server_hello: &ServerHelloPayload) -> Message {
+    fn server_hello_conf(server_hello: &ServerHelloPayload) -> Message<'_> {
         Self::ech_conf_message(HandshakeMessagePayload {
             typ: HandshakeType::ServerHello,
             payload: HandshakePayload::ServerHello(server_hello.clone()),
         })
     }
 
-    fn hello_retry_request_conf(retry_req: &HelloRetryRequest) -> Message {
+    fn hello_retry_request_conf(retry_req: &HelloRetryRequest) -> Message<'_> {
         Self::ech_conf_message(HandshakeMessagePayload {
             typ: HandshakeType::HelloRetryRequest,
             payload: HandshakePayload::HelloRetryRequest(retry_req.clone()),
         })
     }
 
-    fn ech_conf_message(hmp: HandshakeMessagePayload) -> Message {
+    fn ech_conf_message(hmp: HandshakeMessagePayload<'_>) -> Message<'_> {
         let mut hmp_encoded = Vec::new();
         hmp.payload_encode(&mut hmp_encoded, Encoding::EchConfirmation);
         Message {

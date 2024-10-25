@@ -1,8 +1,8 @@
 // Copyright (c) 2016 multimap developers
 //
 // Licensed under the Apache License, Version 2.0
-// <LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0> or the MIT
-// license <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// <LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0> or the MIT
+// license <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. All files in the project carrying such notice may not be copied,
 // modified, or distributed except according to those terms.
 
@@ -32,8 +32,12 @@ pub enum Entry<'a, K: 'a, V: 'a> {
 
 impl<'a, K: 'a, V: 'a> OccupiedEntry<'a, K, V> {
     /// Gets a reference to the first item in value in the vector corresponding to entry.
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if the key has zero values.
     pub fn get(&self) -> &V {
-        &self.inner.get()[0]
+        self.inner.get().first().expect("no values in entry")
     }
 
     /// Gets a reference to the values (vector) corresponding to entry.
@@ -42,8 +46,15 @@ impl<'a, K: 'a, V: 'a> OccupiedEntry<'a, K, V> {
     }
 
     /// Gets a mut reference to the first item in value in the vector corresponding to entry.
+    ///
+    /// # Panics
+    ///
+    /// This method will panic if the key has zero values.
     pub fn get_mut(&mut self) -> &mut V {
-        &mut self.inner.get_mut()[0]
+        self.inner
+            .get_mut()
+            .first_mut()
+            .expect("no values in entry")
     }
 
     /// Gets a mut reference to the values (vector) corresponding to entry.
@@ -92,7 +103,6 @@ impl<'a, K: 'a, V: 'a> VacantEntry<'a, K, V> {
         self.inner.insert(values)
     }
 }
-
 
 impl<'a, K: 'a, V: 'a> Entry<'a, K, V> {
     /// Ensures a value is in the entry by inserting the default if empty, and returns

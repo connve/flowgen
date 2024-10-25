@@ -10,6 +10,16 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `FileSystemGetFileOptions`*"]
     pub type FileSystemGetFileOptions;
+    #[doc = "Get the `create` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FileSystemGetFileOptions`*"]
+    #[wasm_bindgen(method, getter = "create")]
+    pub fn get_create(this: &FileSystemGetFileOptions) -> Option<bool>;
+    #[doc = "Change the `create` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `FileSystemGetFileOptions`*"]
+    #[wasm_bindgen(method, setter = "create")]
+    pub fn set_create(this: &FileSystemGetFileOptions, val: bool);
 }
 impl FileSystemGetFileOptions {
     #[doc = "Construct a new `FileSystemGetFileOptions`."]
@@ -20,18 +30,9 @@ impl FileSystemGetFileOptions {
         let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
         ret
     }
-    #[doc = "Change the `create` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `FileSystemGetFileOptions`*"]
+    #[deprecated = "Use `set_create()` instead."]
     pub fn create(&mut self, val: bool) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r =
-            ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("create"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_create(val);
         self
     }
 }

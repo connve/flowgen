@@ -52,7 +52,7 @@ pub static TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: SupportedCipherSuite =
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
             hash_provider: &super::hash::SHA256,
-            confidentiality_limit: 1 << 23,
+            confidentiality_limit: 1 << 24,
         },
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_RSA_SCHEMES,
@@ -66,7 +66,7 @@ pub static TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: SupportedCipherSuite =
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
             hash_provider: &super::hash::SHA384,
-            confidentiality_limit: 1 << 23,
+            confidentiality_limit: 1 << 24,
         },
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_RSA_SCHEMES,
@@ -80,7 +80,7 @@ pub static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SupportedCipherSuite =
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
             hash_provider: &super::hash::SHA256,
-            confidentiality_limit: 1 << 23,
+            confidentiality_limit: 1 << 24,
         },
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_ECDSA_SCHEMES,
@@ -94,7 +94,7 @@ pub static TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: SupportedCipherSuite =
         common: CipherSuiteCommon {
             suite: CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
             hash_provider: &super::hash::SHA384,
-            confidentiality_limit: 1 << 23,
+            confidentiality_limit: 1 << 24,
         },
         kx: KeyExchangeAlgorithm::ECDHE,
         sign: TLS12_ECDSA_SCHEMES,
@@ -301,7 +301,7 @@ impl MessageDecrypter for GcmMessageDecrypter {
 impl MessageEncrypter for GcmMessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: OutboundPlainMessage,
+        msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());
@@ -382,7 +382,7 @@ impl MessageDecrypter for ChaCha20Poly1305MessageDecrypter {
 impl MessageEncrypter for ChaCha20Poly1305MessageEncrypter {
     fn encrypt(
         &mut self,
-        msg: OutboundPlainMessage,
+        msg: OutboundPlainMessage<'_>,
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error> {
         let total_len = self.encrypted_payload_len(msg.payload.len());

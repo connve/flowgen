@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.63"
 name = "hyper-util"
-version = "0.1.6"
+version = "0.1.9"
 authors = ["Sean McArthur <sean@seanmonstar.com>"]
 build = false
 autobins = false
@@ -80,7 +80,7 @@ name = "legacy_client"
 path = "tests/legacy_client.rs"
 
 [dependencies.bytes]
-version = "1"
+version = "1.7.1"
 
 [dependencies.futures-channel]
 version = "0.3"
@@ -109,15 +109,6 @@ optional = true
 
 [dependencies.tokio]
 version = "1"
-optional = true
-default-features = false
-
-[dependencies.tower]
-version = "0.4.1"
-features = [
-    "make",
-    "util",
-]
 optional = true
 default-features = false
 
@@ -161,7 +152,6 @@ client = [
     "hyper/client",
     "dep:tracing",
     "dep:futures-channel",
-    "dep:tower",
     "dep:tower-service",
 ]
 client-legacy = [
@@ -192,11 +182,9 @@ server-auto = [
 server-graceful = [
     "server",
     "tokio/sync",
+    "futures-util/alloc",
 ]
-service = [
-    "dep:tower",
-    "dep:tower-service",
-]
+service = ["dep:tower-service"]
 tokio = [
     "dep:tokio",
     "tokio/net",

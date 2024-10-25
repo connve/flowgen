@@ -1,5 +1,9 @@
-/// Only named projected types can be imported.
-/// See import_unnamed.rs for unnamed projected types.
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// Only named projected types can be imported.
+// See import_unnamed.rs for unnamed projected types.
+
+#![allow(unused_imports)]
 
 mod pub_ {
     use pin_project::pin_project;
@@ -27,7 +31,6 @@ pub mod pub_use {
 }
 pub mod pub_use2 {
     // Ok
-    #[allow(unused_imports)]
     pub(crate) use crate::pub_::{DProj, DProjRef, RProj, RProjOwn, RProjRef};
 }
 
@@ -42,7 +45,6 @@ mod pub_crate {
 }
 pub mod pub_crate_use {
     // Ok
-    #[allow(unused_imports)]
     pub(crate) use crate::pub_crate::{DProj, DProjRef, RProj, RProjOwn, RProjRef};
 }
 

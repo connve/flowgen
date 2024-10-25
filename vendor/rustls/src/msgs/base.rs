@@ -83,7 +83,7 @@ impl fmt::Debug for Payload<'_> {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct PayloadU24<'a>(pub(crate) Payload<'a>);
 
-impl<'a> PayloadU24<'a> {
+impl PayloadU24<'_> {
     pub(crate) fn into_owned(self) -> PayloadU24<'static> {
         PayloadU24(self.0.into_owned())
     }
@@ -103,7 +103,7 @@ impl<'a> Codec<'a> for PayloadU24<'a> {
     }
 }
 
-impl<'a> fmt::Debug for PayloadU24<'a> {
+impl fmt::Debug for PayloadU24<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -133,7 +133,7 @@ impl Codec<'_> for PayloadU16 {
         Self::encode_slice(&self.0, bytes);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let len = u16::read(r)? as usize;
         let mut sub = r.sub(len)?;
         let body = sub.rest().to_vec();
@@ -172,7 +172,7 @@ impl Codec<'_> for PayloadU8 {
         bytes.extend_from_slice(&self.0);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         let len = u8::read(r)? as usize;
         let mut sub = r.sub(len)?;
         let body = sub.rest().to_vec();

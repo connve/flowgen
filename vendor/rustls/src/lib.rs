@@ -63,6 +63,7 @@
 //!     from [`RustCrypto`] for cryptography.
 //!   * [`rustls-post-quantum`]: an experimental provider that adds support for post-quantum
 //!     key exchange to the default aws-lc-rs provider.
+//!   * [`rustls-wolfcrypt-provider`] - a work-in-progress provider that uses [`wolfCrypt`] for cryptography.
 //!
 //! [`rustls-mbedtls-provider`]: https://github.com/fortanix/rustls-mbedtls-provider
 //! [`mbedtls`]: https://github.com/Mbed-TLS/mbedtls
@@ -71,6 +72,8 @@
 //! [`rustls-rustcrypto`]: https://github.com/RustCrypto/rustls-rustcrypto
 //! [`RustCrypto`]: https://github.com/RustCrypto
 //! [`rustls-post-quantum`]: https://crates.io/crates/rustls-post-quantum
+//! [`rustls-wolfcrypt-provider`]: https://github.com/wolfSSL/rustls-wolfcrypt-provider
+//! [`wolfCrypt`]: https://www.wolfssl.com/products/wolfcrypt
 //!
 //! #### Custom provider
 //!
@@ -284,6 +287,9 @@
 //!
 //!   See [manual::_06_fips] for more details.
 //!
+//! - `custom-provider`: disables implicit use of built-in providers (`aws-lc-rs` or `ring`). This forces
+//!    applications to manually install one, for instance, when using a custom `CryptoProvider`.
+//!
 //! - `tls12` (enabled by default): enable support for TLS version 1.2. Note that, due to the
 //!   additive nature of Cargo features and because it is enabled by default, other crates
 //!   in your dependency graph could re-enable it for your application. If you want to disable
@@ -313,9 +319,10 @@
     clippy::std_instead_of_core,
     clippy::use_self,
     clippy::upper_case_acronyms,
+    elided_lifetimes_in_paths,
+    missing_docs,
     trivial_casts,
     trivial_numeric_casts,
-    missing_docs,
     unreachable_pub,
     unused_import_braces,
     unused_extern_crates,
@@ -362,6 +369,9 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+#[cfg(doc)]
+use crate::crypto::CryptoProvider;
+
 // Import `test` sysroot crate for `Bencher` definitions.
 #[cfg(bench)]
 #[allow(unused_extern_crates)]
@@ -371,15 +381,13 @@ extern crate test;
 #[cfg(feature = "logging")]
 use log;
 
-#[cfg(doc)]
-use crate::crypto::CryptoProvider;
-
 #[cfg(not(feature = "logging"))]
-#[macro_use]
 mod log {
     macro_rules! trace    ( ($($tt:tt)*) => {{}} );
     macro_rules! debug    ( ($($tt:tt)*) => {{}} );
-    macro_rules! warn     ( ($($tt:tt)*) => {{}} );
+    macro_rules! error    ( ($($tt:tt)*) => {{}} );
+    macro_rules! _warn    ( ($($tt:tt)*) => {{}} );
+    pub(crate) use {_warn as warn, debug, error, trace};
 }
 
 #[macro_use]
@@ -434,9 +442,6 @@ pub mod internal {
         pub mod codec {
             pub use crate::msgs::codec::{Codec, Reader};
         }
-        pub mod deframer {
-            pub use crate::msgs::deframer::{DeframerVecBuffer, MessageDeframer};
-        }
         pub mod enums {
             pub use crate::msgs::enums::{
                 AlertLevel, Compression, EchVersion, HpkeAead, HpkeKdf, HpkeKem, NamedGroup,
@@ -463,8 +468,8 @@ pub mod internal {
         }
     }
 
-    pub mod record_layer {
-        pub use crate::record_layer::RecordLayer;
+    pub mod fuzzing {
+        pub use crate::msgs::deframer::fuzz_deframer;
     }
 }
 
@@ -514,8 +519,8 @@ pub use crate::enums::{
     ProtocolVersion, SignatureAlgorithm, SignatureScheme,
 };
 pub use crate::error::{
-    CertRevocationListError, CertificateError, EncryptedClientHelloError, Error, InvalidMessage,
-    OtherError, PeerIncompatible, PeerMisbehaved,
+    CertRevocationListError, CertificateError, EncryptedClientHelloError, Error, InconsistentKeys,
+    InvalidMessage, OtherError, PeerIncompatible, PeerMisbehaved,
 };
 pub use crate::key_log::{KeyLog, NoKeyLog};
 #[cfg(feature = "std")]
@@ -650,6 +655,9 @@ pub mod time_provider;
 
 /// APIs abstracting over locking primitives.
 pub mod lock;
+
+/// Polyfills for features that are not yet stabilized or available with current MSRV.
+pub(crate) mod polyfill;
 
 #[cfg(any(feature = "std", feature = "hashbrown"))]
 mod hash_map {

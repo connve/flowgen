@@ -17,6 +17,7 @@ enum Enum<T, U> {
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
 #[allow(clippy::mut_mut)]
+#[allow(clippy::missing_docs_in_private_items)]
 enum EnumProj<'pin, T, U>
 where
     Enum<T, U>: 'pin,
@@ -40,6 +41,7 @@ where
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(dead_code)]
 #[allow(clippy::ref_option_ref)]
+#[allow(clippy::missing_docs_in_private_items)]
 enum EnumProjRef<'pin, T, U>
 where
     Enum<T, U>: 'pin,
@@ -59,6 +61,7 @@ where
 #[allow(clippy::redundant_pub_crate)]
 #[allow(clippy::type_repetition_in_bounds)]
 #[allow(unused_qualifications)]
+#[allow(clippy::needless_lifetimes)]
 #[allow(clippy::semicolon_if_nothing_returned)]
 #[allow(clippy::use_self)]
 #[allow(clippy::used_underscore_binding)]
@@ -117,17 +120,21 @@ const _: () = {
     #[doc(hidden)]
     impl<'pin, T, U> _pin_project::__private::Unpin for Enum<T, U>
     where
-        _pin_project::__private::Wrapper<
-            'pin,
-            _pin_project::__private::PhantomPinned,
+        ::pin_project::__private::PinnedFieldsOf<
+            _pin_project::__private::Wrapper<
+                'pin,
+                _pin_project::__private::PhantomPinned,
+            >,
         >: _pin_project::__private::Unpin,
     {}
     #[doc(hidden)]
     unsafe impl<'pin, T, U> _pin_project::UnsafeUnpin for Enum<T, U>
     where
-        _pin_project::__private::Wrapper<
-            'pin,
-            _pin_project::__private::PhantomPinned,
+        ::pin_project::__private::PinnedFieldsOf<
+            _pin_project::__private::Wrapper<
+                'pin,
+                _pin_project::__private::PhantomPinned,
+            >,
         >: _pin_project::__private::Unpin,
     {}
     trait EnumMustNotImplDrop {}

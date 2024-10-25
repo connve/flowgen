@@ -8,13 +8,13 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::{self, Bound, Index, RangeBounds};
 
-/// A dynamically-sized slice of values in an `IndexSet`.
+/// A dynamically-sized slice of values in an [`IndexSet`].
 ///
 /// This supports indexed operations much like a `[T]` slice,
 /// but not any hashed operations on the values.
 ///
-/// Unlike `IndexSet`, `Slice` does consider the order for `PartialEq`
-/// and `Eq`, and it also implements `PartialOrd`, `Ord`, and `Hash`.
+/// Unlike `IndexSet`, `Slice` does consider the order for [`PartialEq`]
+/// and [`Eq`], and it also implements [`PartialOrd`], [`Ord`], and [`Hash`].
 #[repr(transparent)]
 pub struct Slice<T> {
     pub(crate) entries: [Bucket<T>],
@@ -59,14 +59,14 @@ impl<T> Slice<T> {
 
     /// Get a value by index.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_index(&self, index: usize) -> Option<&T> {
         self.entries.get(index).map(Bucket::key_ref)
     }
 
     /// Returns a slice of values in the given range of indices.
     ///
-    /// Valid indices are *0 <= index < self.len()*
+    /// Valid indices are `0 <= index < self.len()`.
     pub fn get_range<R: RangeBounds<usize>>(&self, range: R) -> Option<&Self> {
         let range = try_simplify_range(range, self.entries.len())?;
         self.entries.get(range).map(Self::from_slice)
@@ -293,7 +293,6 @@ impl_index!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn slice_index() {

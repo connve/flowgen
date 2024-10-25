@@ -1,13 +1,12 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use core::mem;
 
 use crate::error::InvalidMessage;
 
 /// Wrapper over a slice of bytes that allows reading chunks from
 /// with the current position state held using a cursor.
 ///
-/// A new reader for a sub section of the the buffer can be created
+/// A new reader for a sub section of the buffer can be created
 /// using the `sub` function or a section of a certain length can
 /// be obtained using the `take` function
 pub struct Reader<'a> {
@@ -86,67 +85,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// A version of [`Reader`] that operates on mutable slices
-pub(crate) struct ReaderMut<'a> {
-    /// The underlying buffer storing the readers content
-    buffer: &'a mut [u8],
-    used: usize,
-}
-
-impl<'a> ReaderMut<'a> {
-    pub(crate) fn init(bytes: &'a mut [u8]) -> Self {
-        Self {
-            buffer: bytes,
-            used: 0,
-        }
-    }
-
-    pub(crate) fn sub(&mut self, length: usize) -> Result<Self, InvalidMessage> {
-        match self.take(length) {
-            Some(bytes) => Ok(ReaderMut::init(bytes)),
-            None => Err(InvalidMessage::MessageTooShort),
-        }
-    }
-
-    pub(crate) fn rest(&mut self) -> &'a mut [u8] {
-        let rest = mem::take(&mut self.buffer);
-        self.used += rest.len();
-        rest
-    }
-
-    pub(crate) fn take(&mut self, length: usize) -> Option<&'a mut [u8]> {
-        if self.left() < length {
-            return None;
-        }
-        let (taken, rest) = mem::take(&mut self.buffer).split_at_mut(length);
-        self.used += taken.len();
-        self.buffer = rest;
-        Some(taken)
-    }
-
-    pub(crate) fn used(&self) -> usize {
-        self.used
-    }
-
-    pub(crate) fn left(&self) -> usize {
-        self.buffer.len()
-    }
-
-    pub(crate) fn as_reader<T>(&mut self, f: impl FnOnce(&mut Reader) -> T) -> T {
-        let mut r = Reader {
-            buffer: self.buffer,
-            cursor: 0,
-        };
-        let ret = f(&mut r);
-        let cursor = r.cursor;
-        self.used += cursor;
-        let (_used, rest) = mem::take(&mut self.buffer).split_at_mut(cursor);
-        self.buffer = rest;
-
-        ret
-    }
-}
-
 /// Trait for implementing encoding and decoding functionality
 /// on something.
 pub trait Codec<'a>: Debug + Sized {
@@ -169,9 +107,15 @@ pub trait Codec<'a>: Debug + Sized {
 
     /// Function for wrapping a call to the read function in
     /// a Reader for the slice of bytes provided
+    ///
+    /// Returns `Err(InvalidMessage::ExcessData(_))` if
+    /// `Self::read` does not read the entirety of `bytes`.
     fn read_bytes(bytes: &'a [u8]) -> Result<Self, InvalidMessage> {
         let mut reader = Reader::init(bytes);
-        Self::read(&mut reader)
+        Self::read(&mut reader).and_then(|r| {
+            reader.expect_empty("read_bytes")?;
+            Ok(r)
+        })
     }
 }
 
@@ -180,7 +124,7 @@ impl Codec<'_> for u8 {
         bytes.push(*self);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match r.take(1) {
             Some(&[byte]) => Ok(byte),
             _ => Err(InvalidMessage::MissingData("u8")),
@@ -200,7 +144,7 @@ impl Codec<'_> for u16 {
         bytes.extend_from_slice(&b16);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match r.take(2) {
             Some(&[b1, b2]) => Ok(Self::from_be_bytes([b1, b2])),
             _ => Err(InvalidMessage::MissingData("u16")),
@@ -227,7 +171,7 @@ impl Codec<'_> for u24 {
         bytes.extend_from_slice(&be_bytes[1..]);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match r.take(3) {
             Some(&[a, b, c]) => Ok(Self(u32::from_be_bytes([0, a, b, c]))),
             _ => Err(InvalidMessage::MissingData("u24")),
@@ -240,7 +184,7 @@ impl Codec<'_> for u32 {
         bytes.extend(Self::to_be_bytes(*self));
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match r.take(4) {
             Some(&[a, b, c, d]) => Ok(Self::from_be_bytes([a, b, c, d])),
             _ => Err(InvalidMessage::MissingData("u32")),
@@ -260,7 +204,7 @@ impl Codec<'_> for u64 {
         bytes.extend_from_slice(&b64);
     }
 
-    fn read(r: &mut Reader) -> Result<Self, InvalidMessage> {
+    fn read(r: &mut Reader<'_>) -> Result<Self, InvalidMessage> {
         match r.take(8) {
             Some(&[a, b, c, d, e, f, g, h]) => Ok(Self::from_be_bytes([a, b, c, d, e, f, g, h])),
             _ => Err(InvalidMessage::MissingData("u64")),
@@ -284,7 +228,10 @@ impl<'a, T: Codec<'a> + TlsListElement + Debug> Codec<'a> for Vec<T> {
         let len = match T::SIZE_LEN {
             ListLength::U8 => usize::from(u8::read(r)?),
             ListLength::U16 => usize::from(u16::read(r)?),
-            ListLength::U24 { max } => Ord::min(usize::from(u24::read(r)?), max),
+            ListLength::U24 { max, error } => match usize::from(u24::read(r)?) {
+                len if len > max => return Err(error),
+                len => len,
+            },
         };
 
         let mut sub = r.sub(len)?;
@@ -311,11 +258,11 @@ pub(crate) trait TlsListElement {
 ///
 /// The types that appear in lists are limited to three kinds of length prefixes:
 /// 1, 2, and 3 bytes. For the latter kind, we require a `TlsListElement` implementer
-/// to specify a maximum length.
+/// to specify a maximum length and error if the actual length is larger.
 pub(crate) enum ListLength {
     U8,
     U16,
-    U24 { max: usize },
+    U24 { max: usize, error: InvalidMessage },
 }
 
 /// Tracks encoding a length-delimited structure in a single pass.
@@ -346,7 +293,7 @@ impl<'a> LengthPrefixedBuffer<'a> {
     }
 }
 
-impl<'a> Drop for LengthPrefixedBuffer<'a> {
+impl Drop for LengthPrefixedBuffer<'_> {
     /// Goes back and corrects the length previously inserted at the start of the structure.
     fn drop(&mut self) {
         match self.size_len {
@@ -389,8 +336,8 @@ mod tests {
         let nested = LengthPrefixedBuffer::new(ListLength::U16, &mut buf);
         nested.buf.push(0xaa);
         assert_eq!(nested.buf, &vec![0xff, 0xff, 0xaa]);
-        // <- if the buffer is accidentally read here, there is no possiblity
-        //    that the contents of the length-prefixed buffer are interpretted
+        // <- if the buffer is accidentally read here, there is no possibility
+        //    that the contents of the length-prefixed buffer are interpreted
         //    as a subsequent encoding (perhaps allowing injection of a different
         //    extension)
         drop(nested);

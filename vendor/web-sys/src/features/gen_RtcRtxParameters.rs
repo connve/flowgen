@@ -10,6 +10,16 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `RtcRtxParameters`*"]
     pub type RtcRtxParameters;
+    #[doc = "Get the `ssrc` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtxParameters`*"]
+    #[wasm_bindgen(method, getter = "ssrc")]
+    pub fn get_ssrc(this: &RtcRtxParameters) -> Option<u32>;
+    #[doc = "Change the `ssrc` field of this object."]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `RtcRtxParameters`*"]
+    #[wasm_bindgen(method, setter = "ssrc")]
+    pub fn set_ssrc(this: &RtcRtxParameters, val: u32);
 }
 impl RtcRtxParameters {
     #[doc = "Construct a new `RtcRtxParameters`."]
@@ -20,17 +30,9 @@ impl RtcRtxParameters {
         let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
         ret
     }
-    #[doc = "Change the `ssrc` field of this object."]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `RtcRtxParameters`*"]
+    #[deprecated = "Use `set_ssrc()` instead."]
     pub fn ssrc(&mut self, val: u32) -> &mut Self {
-        use wasm_bindgen::JsValue;
-        let r = ::js_sys::Reflect::set(self.as_ref(), &JsValue::from("ssrc"), &JsValue::from(val));
-        debug_assert!(
-            r.is_ok(),
-            "setting properties should never fail on our dictionary objects"
-        );
-        let _ = r;
+        self.set_ssrc(val);
         self
     }
 }

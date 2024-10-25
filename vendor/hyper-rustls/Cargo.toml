@@ -11,9 +11,14 @@
 
 [package]
 edition = "2021"
-rust-version = "1.64"
+rust-version = "1.70"
 name = "hyper-rustls"
-version = "0.27.2"
+version = "0.27.3"
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Rustls+hyper integration for pure rust HTTPS"
 homepage = "https://github.com/rustls/hyper-rustls"
 documentation = "https://docs.rs/hyper-rustls/"
@@ -25,17 +30,22 @@ repository = "https://github.com/rustls/hyper-rustls"
 features = [
     "http1",
     "http2",
-    "webpki-tokio",
+    "logging",
     "native-tokio",
     "ring",
+    "rustls-platform-verifier",
     "tls12",
-    "logging",
+    "webpki-tokio",
 ]
 no-default-features = true
 rustdoc-args = [
     "--cfg",
     "docsrs",
 ]
+
+[lib]
+name = "hyper_rustls"
+path = "src/lib.rs"
 
 [[example]]
 name = "client"
@@ -49,6 +59,10 @@ required-features = [
 name = "server"
 path = "examples/server.rs"
 required-features = ["aws-lc-rs"]
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"
 
 [dependencies.futures-util]
 version = "0.3"
@@ -82,7 +96,7 @@ version = "0.23"
 default-features = false
 
 [dependencies.rustls-native-certs]
-version = "0.7"
+version = "0.8"
 optional = true
 
 [dependencies.rustls-platform-verifier]
