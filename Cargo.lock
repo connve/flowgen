@@ -626,7 +626,7 @@ dependencies = [
 [[package]]
 name = "flowgen_core"
 version = "0.0.1"
-source = "git+https://gitlab.com/connve/platform/flowgen.git#8df177fc4f2444c60799eb01e54279f1847f2aa0"
+source = "git+https://gitlab.com/connve/platform/flowgen.git#549aace8ea50e06cf81811dd6c8aa5611df1b9c7"
 dependencies = [
  "thiserror",
  "tonic",
@@ -673,7 +673,7 @@ dependencies = [
 [[package]]
 name = "flowgen_salesforce"
 version = "0.0.1"
-source = "git+https://gitlab.com/connve/platform/flowgen.git#8df177fc4f2444c60799eb01e54279f1847f2aa0"
+source = "git+https://gitlab.com/connve/platform/flowgen.git#549aace8ea50e06cf81811dd6c8aa5611df1b9c7"
 dependencies = [
  "bytes",
  "flowgen_core 0.0.1 (git+https://gitlab.com/connve/platform/flowgen.git)",
