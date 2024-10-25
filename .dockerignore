@@ -5,5 +5,4 @@ docker
 .git
 .gitmodules
 scripts
-examples
 target
