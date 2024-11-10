@@ -1,5 +1,5 @@
 [workspace]
-members = ["examples", "flowgen"]
+members = ["flowgen"]
 resolver = "2"
 exclude = [".cargo"]
 
