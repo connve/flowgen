@@ -35,13 +35,18 @@ pub enum Error {
     // Bincode(#[source] Box<bincode::ErrorKind>),
 }
 
+#[allow(non_camel_case_types)]
+pub enum Source {
+    salesforce_pubsub(flowgen_salesforce::pubsub::subscriber::Subscriber),
+}
+
 pub struct Flow {
     config: config::Config,
-    pub source: Option<flowgen_salesforce::pubsub::subscriber::Subscriber>,
+    pub source: Option<Source>,
 }
 
 impl Flow {
-    pub async fn run(self) -> Result<Self, Error> {
+    pub async fn run(mut self) -> Result<Self, Error> {
         // Setup Flowgen service.
         let flowgen_service = flowgen_core::service::Builder::new()
             .with_endpoint(format!(
@@ -61,8 +66,7 @@ impl Flow {
                 .build()
                 .await
                 .unwrap();
-
-        let _ = subscriber.subscribe().await;
+        self.source = Some(Source::salesforce_pubsub(subscriber));
 
         // Setup NATS client and stream.
         // let nats_seed = fs::read_to_string(nats_credentials).await?;

@@ -35,7 +35,7 @@ pub struct Subscriber {
 }
 
 impl Subscriber {
-    pub async fn subscribe(&self) -> Result<(), Error> {
+    pub fn subscribe(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
         let mut async_task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
 
         // Subscribe to all topics from the config.
@@ -71,39 +71,33 @@ impl Subscriber {
                     .map_err(Error::FlowgenSalesforcePubSub)?
                     .into_inner();
 
-                let tx = tx.clone();
-                let subscribe_handle = tokio::spawn(async move {
-                    while let Some(received) = stream.next().await {
-                        match received {
-                            Ok(fr) => {
-                                tx.send(ChannelMessage::FetchResponse(fr))
-                                    .await
-                                    .map_err(Error::TokioSendChannelMessage)?;
-                            }
-                            Err(e) => {
-                                return Err(Error::FlowgenSalesforcePubSub(
-                                    super::context::Error::RPCFailed(e),
-                                ));
-                            }
+                while let Some(received) = stream.next().await {
+                    match received {
+                        Ok(fr) => {
+                            tx.send(ChannelMessage::FetchResponse(fr))
+                                .await
+                                .map_err(Error::TokioSendChannelMessage)?;
+                        }
+                        Err(e) => {
+                            return Err(Error::FlowgenSalesforcePubSub(
+                                super::context::Error::RPCFailed(e),
+                            ));
                         }
                     }
-                    Ok(())
-                });
-                let _ = subscribe_handle.await.map_err(Error::TokioJoin)?;
+                }
                 Ok(())
             });
-
             async_task_list.push(subscribe_task);
         }
 
-        // Handle all async tasks.
-        async_task_list
-            .into_iter()
-            .collect::<TryJoinAll<_>>()
-            .await
-            .map_err(Error::TokioJoin)?;
+        // // Run all async tasks.
+        // async_task_list
+        //     .into_iter()
+        //     .collect::<TryJoinAll<_>>()
+        //     .await
+        //     .map_err(Error::TokioJoin)?;
 
-        Ok(())
+        Ok(async_task_list)
     }
 }
 
