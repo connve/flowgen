@@ -1,11 +1,11 @@
 [package]
-name = "event-writer"
+name = "event-store"
 version = "0.1.0"
 edition = "2021"
 
 
 [[bin]]
-name = "event-writer"
+name = "event-store"
 path = "src/main.rs"
 
 

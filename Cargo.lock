@@ -1500,7 +1500,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-listener"
+name = "event-relay"
 version = "0.1.0"
 dependencies = [
  "async-nats",
@@ -1530,7 +1530,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-writer"
+name = "event-store"
 version = "0.1.0"
 dependencies = [
  "async-nats",

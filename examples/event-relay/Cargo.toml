@@ -1,11 +1,11 @@
 [package]
-name = "event-listener"
+name = "event-relay"
 version = "0.1.0"
 edition = "2021"
 
 
 [[bin]]
-name = "event-listener"
+name = "event-relay"
 path = "src/main.rs"
 
 
