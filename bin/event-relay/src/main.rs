@@ -68,6 +68,7 @@ async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
                             for ce in fr.events {
                                 if let Some(pe) = ce.event {
                                     event!(name: "event_consumed", Level::INFO, event_id = pe.id);
+                                    
                                     // Get the relevant topic from the list.
                                     let topic: Vec<TopicInfo> = topic_info_list
                                         .iter()
@@ -77,29 +78,27 @@ async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
 
                                     // Setup nats subject and payload.
                                     let s = topic[0].topic_name.replace('/', ".").to_lowercase();
-                                    let subject = &s[1..];
+                                    let event_name = &s[1..];
+                                    let subject = format!("{en}.{eid}", en = event_name, eid = pe.id);
                                     let event: Vec<u8> = bincode::serialize(&pe).map_err(Error::Bincode)?;
 
                                     // Publish an event.
-                                    if let Some(target) = f.target.as_ref(){
-                                         match target {
-                                            flow::Target::nats_jetstream(context) => {
-                                                context.jetstream.send_publish(
-                                            subject.to_string(),
-                                            Publish::build().payload(event.into())).await.map_err(Error::NatsPublish)?;
+                                    if let Some(target) = f.target.as_ref()
+                                    {
+                                        match target {
+                                                flow::Target::nats_jetstream(context) => {
+                                                    context.jetstream.send_publish(
+                                                subject.to_string(),
+                                                Publish::build().payload(event.into())).await.map_err(Error::NatsPublish)?;
+                                                    }
                                                 }
-                                            }
-                                     }
+                                    }
                                     
                                 }
                             }
                         }
                         flowgen_salesforce::pubsub::subscriber::ChannelMessage::TopicInfo(t) => {
                             event!(name: "topic_info", Level::INFO, rpc_id = t.rpc_id);
-                            // let t_bytes: Vec<u8> = bincode::serialize(&t).unwrap();
-                            // kv.put(t.topic_name.clone(), t_bytes.into())
-                            //     .await
-                            //     .map_err(Error::NatsPutKeyValue)?;
                             topic_info_list.push(t);
                         }
                     }
@@ -116,7 +115,6 @@ async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
 
                 // Run all receiver tasks.
                 let _ = receiver_task_list.await.map_err(Error::TokioJoin)?;
-         
             }
         }
     }
