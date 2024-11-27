@@ -21,13 +21,13 @@ test-rust-nightly:
   rules:
     - if: '$CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
 
-build-flowgen:
+build-event-relay:
   image: docker
   stage: build
   services:
     - docker:dind
   variables:
-    SERVICE_NAME: flowgen
+    SERVICE_NAME: event-relay
   script:
     - echo "$CI_JOB_TOKEN" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
     - docker build -t $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest -f docker/Dockerfile . --build-arg SERVICE_NAME=$SERVICE_NAME
