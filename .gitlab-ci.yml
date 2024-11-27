@@ -29,6 +29,7 @@ build-event-relay:
   variables:
     SERVICE_NAME: event-relay
   script:
+    - ./scripts/build.sh
     - echo "$CI_JOB_TOKEN" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
     - docker build -t $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest -f docker/Dockerfile . --build-arg SERVICE_NAME=$SERVICE_NAME
     - docker push $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest

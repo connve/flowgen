@@ -6,6 +6,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(false)
         .out_dir("src/pubsub")
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .compile(&["proto/pubsub/pubsub.proto"], &["proto/pubsub"])?;
+        .compile(&["proto/pubsub/pubsub_api.proto"], &["proto/pubsub"])?;
     Ok(())
 }
