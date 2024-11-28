@@ -1,12 +1,13 @@
 stages:
   - test
-  - build 
+  - build
 
 test-rust-latest:
   stage: test
   image: rust:latest
   variables:
     GIT_STRATEGY: clone
+    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
@@ -18,6 +19,7 @@ test-rust-nightly:
   image: rustlang/rust:nightly
   variables:
     GIT_STRATEGY: clone
+    GIT_SUBMODULE_STRATEGY: recursive
   script:
     - chmod +x ./scripts/*.sh
     - ./scripts/build.sh
@@ -28,17 +30,14 @@ test-rust-nightly:
 build-event-relay:
   image: docker
   stage: build
-  variables:
-    GIT_STRATEGY: clone
   services:
     - docker:dind
   variables:
     SERVICE_NAME: event-relay
+    GIT_SUBMODULE_STRATEGY: recursive
   script:
-    - chmod +x ./scripts/*.sh
-    - ./scripts/build.sh
     - echo "$CI_JOB_TOKEN" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
     - docker build -t $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest -f docker/Dockerfile . --build-arg SERVICE_NAME=$SERVICE_NAME
     - docker push $CI_REGISTRY_IMAGE/$SERVICE_NAME:latest
-  rules: 
+  rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
