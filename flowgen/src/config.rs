@@ -14,8 +14,9 @@ pub struct Flow {
 #[derive(Deserialize, Clone)]
 #[allow(non_camel_case_types)]
 pub enum Source {
-    salesforce_pubsub(flowgen_salesforce::pubsub::config::Source),
     file(flowgen_file::config::Source),
+    salesforce_pubsub(flowgen_salesforce::pubsub::config::Source),
+    gcp_storage(flowgen_google::storage::config::Source),
 }
 
 #[derive(Deserialize, Clone)]

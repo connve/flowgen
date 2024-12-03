@@ -10,6 +10,7 @@ oauth2 = "4.4.2"
 deltalake = { version = "0.21.0", features = ["datafusion"] }
 flowgen_core = { path = "../components/core" }
 flowgen_salesforce = { path = "../components/salesforce" }
+flowgen_google = { path = "../components/google" }
 flowgen_nats = { path = "../components/nats" }
 flowgen_file = { path = "../components/file" }
 prost = "0.12.3"

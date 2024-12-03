@@ -21,8 +21,9 @@ pub enum Error {
 
 #[allow(non_camel_case_types)]
 pub enum Source {
-    salesforce_pubsub(flowgen_salesforce::pubsub::subscriber::Subscriber),
     file(flowgen_file::subscriber::Subscriber),
+    salesforce_pubsub(flowgen_salesforce::pubsub::subscriber::Subscriber),
+    gcp_storage(flowgen_google::storage::subscriber::Subscriber),
 }
 
 #[allow(non_camel_case_types)]
@@ -55,6 +56,13 @@ impl Flow {
 
         // Setup source subscribers.
         match config.flow.source {
+            config::Source::file(config) => {
+                let subscriber = flowgen_file::subscriber::Builder::new(config)
+                    .build()
+                    .await
+                    .map_err(Error::FlowgenFileSubscriberError)?;
+                self.source = Some(Source::file(subscriber));
+            }
             config::Source::salesforce_pubsub(config) => {
                 let subscriber =
                     flowgen_salesforce::pubsub::subscriber::Builder::new(service.clone(), config)
@@ -63,12 +71,13 @@ impl Flow {
                         .map_err(Error::FlowgenSalesforcePubSubSubscriberError)?;
                 self.source = Some(Source::salesforce_pubsub(subscriber));
             }
-            config::Source::file(config) => {
-                let subscriber = flowgen_file::subscriber::Builder::new(config)
-                    .build()
-                    .await
-                    .map_err(Error::FlowgenFileSubscriberError)?;
-                self.source = Some(Source::file(subscriber));
+            config::Source::gcp_storage(config) => {
+                let subscriber =
+                    flowgen_google::storage::subscriber::Builder::new(config, service.clone())
+                        .build()
+                        .await
+                        .unwrap();
+                self.source = Some(Source::gcp_storage(subscriber));
             }
         }
 

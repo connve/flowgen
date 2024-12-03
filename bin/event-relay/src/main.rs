@@ -204,6 +204,24 @@ async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
                     .await
                     .map_err(Error::TokioJoin)?;
             }
+            flow::Source::gcp_storage(source) => {
+                let mut subscriber = source.init().unwrap();
+                subscriber.subscribe().await.unwrap();
+
+                let mut rx = subscriber.rx;
+
+                let receiver_task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                    while let Some(m) = rx.recv().await {
+                        println!("{:?}", m)
+                    }
+                    Ok(())
+                });
+
+                //Run all receiver tasks.
+                try_join_all(vec![receiver_task])
+                    .await
+                    .map_err(Error::TokioJoin)?;
+            }
         }
     }
 
