@@ -5,7 +5,7 @@ use flowgen_core::client::Client;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("There was an error with connecting to a Nats Server.")]
+    #[error("Failed to connect to a Nats Server.")]
     NatsClientAuth(#[source] crate::client::Error),
     #[error("Nats Client is missing / not initialized properly.")]
     NatsClientMissing(),
@@ -13,6 +13,10 @@ pub enum Error {
     NatsPublish(#[source] async_nats::jetstream::context::PublishError),
     #[error("Failed to create or update Nats Jetstream.")]
     NatsCreateStream(#[source] async_nats::jetstream::context::CreateStreamError),
+    #[error("Failed to get Nats Jetstream.")]
+    NatsGetStream(#[source] async_nats::jetstream::context::GetStreamError),
+    #[error("Failed to get process request to Nats Server.")]
+    NatsRequest(#[source] async_nats::jetstream::context::RequestError),
 }
 
 pub struct Context {
@@ -64,10 +68,10 @@ impl Builder {
             match stream {
                 Ok(_) => {
                     let mut subjects = stream
-                        .unwrap()
+                        .map_err(Error::NatsGetStream)?
                         .info()
                         .await
-                        .unwrap()
+                        .map_err(Error::NatsRequest)?
                         .config
                         .subjects
                         .clone();

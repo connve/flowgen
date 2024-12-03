@@ -15,6 +15,8 @@ pub enum Error {
     FlowgenSalesforcePubSubSubscriberError(#[source] flowgen_salesforce::pubsub::subscriber::Error),
     #[error("Failed to setup Nats JetStream as flow target.")]
     FlowgenNatsJetStreamContext(#[source] flowgen_nats::jetstream::context::Error),
+    #[error("There was an error with Flowgen File Subscriber.")]
+    FlowgenFileSubscriberError(#[source] flowgen_file::subscriber::Error),
 }
 
 #[allow(non_camel_case_types)]
@@ -65,7 +67,7 @@ impl Flow {
                 let subscriber = flowgen_file::subscriber::Builder::new(config)
                     .build()
                     .await
-                    .unwrap();
+                    .map_err(Error::FlowgenFileSubscriberError)?;
                 self.source = Some(Source::file(subscriber));
             }
         }

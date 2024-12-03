@@ -35,9 +35,16 @@ async fn main() {
 
     // Setup environment variables
     let config_dir = env::var("CONFIG_DIR").expect("env variable CONFIG_DIR should be set");
-    let dir = format!("{path}/*.json", path = config_dir);
-    for config in glob(&dir).unwrap() {
-        let config_path = config.unwrap();
+
+    // Run Flowgen service for each of individual configs.
+    for config in glob(&config_dir).unwrap_or_else(|err| {
+        error!("{:?}", err);
+        process::exit(1);
+    }) {
+        let config_path = config.unwrap_or_else(|err| {
+            error!("{:?}", err);
+            process::exit(1);
+        });
         let f = flowgen::flow::Builder::new(config_path)
             .build()
             .unwrap_or_else(|err| {
@@ -160,7 +167,11 @@ async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
                 let receiver_task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                     while let Some(m) = rx.recv().await {
                         // Setup nats subject and payload.
-                        let filename = path.split("/").last().unwrap();
+                        let filename = match path.split("/").last() {
+                            Some(filename) => filename,
+                            None => break,
+                        };
+
                         let timestamp = Utc::now().timestamp();
                         let subject = format!(
                             "filedrop.in.{filename}.{timestamp}",
