@@ -24,6 +24,7 @@ pub enum Source {
     file(flowgen_file::subscriber::Subscriber),
     salesforce_pubsub(flowgen_salesforce::pubsub::subscriber::Subscriber),
     gcp_storage(flowgen_google::storage::subscriber::Subscriber),
+    nats_jetstream(flowgen_nats::jetstream::context::Context),
 }
 
 #[allow(non_camel_case_types)]

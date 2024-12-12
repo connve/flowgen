@@ -1734,41 +1734,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-relay"
-version = "0.1.0"
-dependencies = [
- "async-nats",
- "bincode",
- "bytes",
- "chrono",
- "deltalake",
- "flowgen",
- "flowgen_core",
- "flowgen_file",
- "flowgen_google",
- "flowgen_salesforce",
- "futures",
- "futures-util",
- "glob",
- "google-cloud-auth",
- "oauth2",
- "prost",
- "reqwest 0.11.27",
- "serde",
- "serde_avro_fast",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tonic",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1830,10 +1795,10 @@ dependencies = [
 name = "flowgen"
 version = "0.1.0"
 dependencies = [
- "arrow 53.3.0",
  "async-nats",
  "bincode",
  "bytes",
+ "chrono",
  "deltalake",
  "flowgen_core",
  "flowgen_file",
@@ -1842,6 +1807,8 @@ dependencies = [
  "flowgen_salesforce",
  "futures",
  "futures-util",
+ "glob",
+ "google-cloud-auth",
  "oauth2",
  "prost",
  "reqwest 0.11.27",

@@ -66,7 +66,7 @@ async fn main() {
 }
 
 // Run an event relay service.
-async fn run(f: flowgen::flow::Flow) -> Result<(), Error> {
+async fn run(f: flow::Flow) -> Result<(), Error> {
     if let Some(source) = f.source {
         match source {
             flow::Source::salesforce_pubsub(source) => {
