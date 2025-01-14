@@ -2213,6 +2213,7 @@ dependencies = [
  "bytes",
  "flowgen_core",
  "futures-util",
+ "handlebars",
  "oauth2",
  "prost 0.12.6",
  "prost-types",

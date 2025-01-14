@@ -151,7 +151,7 @@ impl Builder {
                                     )
                                     .map_err(Error::SerdeAvroValue)?;
 
-                                    let data = value.to_recordbatch().unwrap();
+                                    let record_batch = value.to_recordbatch().unwrap();
 
                                     let topic =
                                         topic_info.topic_name.replace('/', ".").to_lowercase();
@@ -164,7 +164,7 @@ impl Builder {
                                     );
 
                                     let e = EventBuilder::new()
-                                        .data(data)
+                                        .data(record_batch)
                                         .subject(subject)
                                         .current_task_id(self.current_task_id)
                                         .build()

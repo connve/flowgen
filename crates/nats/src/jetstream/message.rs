@@ -42,13 +42,13 @@ impl NatsMessageExt for async_nats::Message {
         let mut buffer = arrow::buffer::Buffer::from_vec(self.payload.to_vec());
         let mut decoder = StreamDecoder::new();
 
-        let data = decoder
+        let record_batch = decoder
             .decode(&mut buffer)
             .map_err(Error::Arrow)?
             .ok_or_else(Error::NoRecordBatch)?;
 
         let e = EventBuilder::new()
-            .data(data)
+            .data(record_batch)
             .subject(self.subject.to_string())
             .build()
             .map_err(Error::FlowgenEvent)?;

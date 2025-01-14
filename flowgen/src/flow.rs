@@ -132,24 +132,30 @@ impl Flow {
                         }
                     }
                     config::Target::salesforce_pubsub(config) => {
-                        let publisher = flowgen_salesforce::pubsub::publisher::Builder::new(
-                            config.clone(),
-                            service.clone(),
-                        )
-                        .build()
-                        .await
-                        .unwrap();
+                        let rx = tx.subscribe();
+                        let publisher =
+                            flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
+                                .service(service.clone())
+                                .config(config.clone())
+                                .receiver(rx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .unwrap()
+                                .publish()
+                                .await
+                                .unwrap();
 
-                        let mut rx = tx.subscribe();
-                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                            while let Ok(e) = rx.recv().await {
-                                if e.current_task_id == Some(i - 1) {
-                                    println!("{:?}", e);
-                                }
-                            }
-                            Ok(())
-                        });
-                        handle_list.push(handle);
+                        // let mut rx = tx.subscribe();
+                        // let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                        //     while let Ok(e) = rx.recv().await {
+                        //         if e.current_task_id == Some(i - 1) {
+                        //             println!("{:?}", e);
+                        //         }
+                        //     }
+                        //     Ok(())
+                        // });
+                        // handle_list.push(handle);
                     }
                     _ => {}
                 },

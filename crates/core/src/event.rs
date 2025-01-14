@@ -48,6 +48,10 @@ impl EventBuilder {
         self.current_task_id = Some(current_task_id);
         self
     }
+    pub fn extensions(mut self, extensions: HashMap<String, String>) -> Self {
+        self.extensions = extensions;
+        self
+    }
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
             data: self

@@ -30,6 +30,7 @@ bincode = "1.3.3"
 tracing = "0.1.41"
 arrow = "54.0.0"
 serde_avro_fast = "2.0.0"
+handlebars = "6.3.0"
 
 [build-dependencies]
 tonic-build = "0.10.2"
