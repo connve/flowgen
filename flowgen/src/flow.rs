@@ -1,7 +1,7 @@
 use crate::config::Task;
 
 use super::config;
-use flowgen_core::{client::Client, event::Event};
+use flowgen_core::{client::Client, event::Event, publisher::Publisher};
 use flowgen_nats::jetstream::message::FlowgenMessageExt;
 use futures::{future::Join, TryFutureExt};
 use std::{path::PathBuf, sync::Arc};
@@ -60,6 +60,7 @@ impl Flow {
         let config = self.config.clone();
 
         let mut handle_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
+
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
 
         for (i, task) in config.flow.tasks.iter().enumerate() {
@@ -136,19 +137,23 @@ impl Flow {
                     }
                     config::Target::salesforce_pubsub(config) => {
                         let rx = tx.subscribe();
-                        let handle = flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
-                            .service(service.clone())
-                            .config(config.clone())
-                            .receiver(rx)
-                            .current_task_id(i)
-                            .build()
-                            .await
-                            .unwrap()
-                            .publish()
-                            .await
-                            .map_err(Error::SalesforcePubsubPublisher)?;
-
-                        // handle_list.push(test);
+                        let service = service.clone();
+                        let config = config.clone();
+                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                            flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
+                                .service(service)
+                                .config(config)
+                                .receiver(rx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .map_err(Error::SalesforcePubsubPublisher)?
+                                .publish()
+                                .await
+                                .map_err(Error::SalesforcePubsubPublisher)?;
+                            Ok(())
+                        });
+                        handle_list.push(handle);
 
                         // let mut rx = tx.subscribe();
                         // let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {

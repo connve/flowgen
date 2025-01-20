@@ -6,7 +6,7 @@ use flowgen_core::{
 };
 use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
 use serde_json::{Map, Value};
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tokio::{
     sync::{broadcast::Receiver, Mutex},
     task::JoinHandle,
@@ -33,8 +33,8 @@ pub struct Publisher {
     current_task_id: usize,
 }
 
-impl Publisher {
-    pub async fn publish(mut self) -> Result<JoinHandle<Result<(), Error>>, Error> {
+impl flowgen_core::publisher::Publisher for Publisher {
+    async fn publish(mut self) -> Result<(), Error> {
         let sfdc_client = crate::client::Builder::new()
             .with_credentials_path(self.config.credentials.into())
             .build()
@@ -70,61 +70,62 @@ impl Publisher {
             .into_inner();
 
         let pubsub = pubsub.clone();
-        let handle = tokio::spawn(async move {
-            let topic_name = &self.config.topic;
-            let schema_id = &schema_info.schema_id;
-            while let Ok(event) = self.rx.recv().await {
-                if event.current_task_id == Some(self.current_task_id - 1) {
-                    let mut data = Map::new();
-                    if let Some(inputs) = &self.config.inputs {
-                        for (key, input) in inputs {
-                            let value = input.extract_from(&event.data, &event.extensions);
-                            if let Ok(value) = value {
-                                data.insert(key.to_string(), Value::String(value.to_string()));
-                            }
+
+        let topic_name = &self.config.topic;
+        let schema_id = &schema_info.schema_id;
+
+        while let Ok(event) = self.rx.recv().await {
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let mut data = Map::new();
+                if let Some(inputs) = &self.config.inputs {
+                    for (key, input) in inputs {
+                        let value = input.extract_from(&event.data, &event.extensions);
+                        if let Ok(value) = value {
+                            data.insert(key.to_string(), Value::String(value.to_string()));
                         }
                     }
-
-                    let payload = self
-                        .config
-                        .payload
-                        .to_string()
-                        .map_err(Error::Serde)?
-                        .render(&data)
-                        .map_err(Error::Render)?
-                        .to_value()
-                        .map_err(Error::Serde)?;
-
-                    let mut bytes: Vec<u8> = Vec::new();
-                    serde_json::to_writer(&mut bytes, &payload).unwrap();
-
-                    let mut events = Vec::new();
-                    let pe = ProducerEvent {
-                        schema_id: schema_id.to_string(),
-                        payload: bytes,
-                        ..Default::default()
-                    };
-
-                    println!("{:?}", payload);
-
-                    events.push(pe);
-                    let test = pubsub
-                        .lock()
-                        .await
-                        .publish(PublishRequest {
-                            topic_name: topic_name.to_string(),
-                            events,
-                            ..Default::default()
-                        })
-                        .await
-                        .unwrap();
-                    println!("{:?}", test);
                 }
+
+                let payload = self
+                    .config
+                    .payload
+                    .to_string()
+                    .map_err(Error::Serde)?
+                    .render(&data)
+                    .map_err(Error::Render)?
+                    .to_value()
+                    .map_err(Error::Serde)?;
+
+                let mut bytes: Vec<u8> = Vec::new();
+                serde_json::to_writer(&mut bytes, &payload).unwrap();
+
+                let mut events = Vec::new();
+                let pe = ProducerEvent {
+                    schema_id: schema_id.to_string(),
+                    payload: bytes,
+                    ..Default::default()
+                };
+
+                println!("{:?}", payload);
+
+                events.push(pe);
+                let test = pubsub
+                    .lock()
+                    .await
+                    .publish(PublishRequest {
+                        topic_name: topic_name.to_string(),
+                        events,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                println!("{:?}", test);
             }
-            Ok(())
-        });
-        Ok(handle)
+        }
+        Ok(())
     }
+
+    type Error = Error;
 }
 
 #[derive(Default)]
