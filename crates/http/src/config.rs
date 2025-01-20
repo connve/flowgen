@@ -1,8 +1,8 @@
-use flowgen_core::config::Input;
-use serde::Deserialize;
+use flowgen_core::input::Input;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Processor {
     pub endpoint: String,
     pub payload: Option<HashMap<String, String>>,

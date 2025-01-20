@@ -9,3 +9,6 @@ authors = ["CONNVE"]
 license = "MIT"
 edition = "2021"
 publish = false
+
+[workspace.dependencies]
+handlebars = "6.3.0"

@@ -2040,7 +2040,6 @@ dependencies = [
  "flowgen_core",
  "flowgen_deltalake",
  "flowgen_file",
- "flowgen_google",
  "flowgen_http",
  "flowgen_nats",
  "flowgen_salesforce",
@@ -2073,6 +2072,7 @@ dependencies = [
  "async-nats",
  "bincode",
  "bytes",
+ "handlebars",
  "salesforce_pubsub",
  "serde",
  "serde_json",
@@ -2121,29 +2121,6 @@ dependencies = [
  "flowgen_core",
  "futures",
  "futures-util",
- "oauth2",
- "prost 0.12.6",
- "prost-types",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-build",
- "url",
-]
-
-[[package]]
-name = "flowgen_google"
-version = "0.0.1"
-dependencies = [
- "bincode",
- "bytes",
- "flowgen_core",
- "futures-util",
- "google-cloud-auth",
  "oauth2",
  "prost 0.12.6",
  "prost-types",

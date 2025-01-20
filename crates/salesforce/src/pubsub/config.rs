@@ -1,18 +1,19 @@
-use flowgen_core::config::Input;
-use serde::Deserialize;
+use flowgen_core::input::Input;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Source {
     pub credentials: String,
     pub topic_list: Vec<String>,
     pub next_node: Option<String>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Target {
     pub credentials: String,
     pub topic: String,
-    pub payload: HashMap<String, String>,
+    pub payload: Map<String, Value>,
     pub inputs: Option<HashMap<String, Input>>,
 }

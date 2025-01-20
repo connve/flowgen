@@ -14,7 +14,6 @@ serde_avro_fast = "1.1.2"
 oauth2 = "4.4.2"
 flowgen_core = { path = "../crates/core" }
 flowgen_deltalake = { path = "../crates/deltalake" }
-flowgen_google = { path = "../crates/google" }
 flowgen_http = { path = "../crates/http" }
 flowgen_salesforce = { path = "../crates/salesforce" }
 flowgen_file = { path = "../crates/file" }

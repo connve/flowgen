@@ -1,14 +1,12 @@
-use arrow::{
-    array::{MapArray, StringArray},
-    datatypes::DataType,
+use flowgen_core::{
+    client::Client,
+    event::Event,
+    render::Render,
+    serde::{MapExt, StringExt},
 };
-use flowgen_core::{client::Client, event::Event};
-use handlebars::Handlebars;
-use salesforce_pubsub::eventbus::v1::{
-    ProducerEvent, PublishRequest, SchemaInfo, SchemaRequest, TopicRequest,
-};
-use serde_json::Value;
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
+use serde_json::{Map, Value};
+use std::sync::Arc;
 use tokio::{
     sync::{broadcast::Receiver, Mutex},
     task::JoinHandle,
@@ -17,9 +15,13 @@ use tokio::{
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("There was an error with PubSub context.")]
-    FlowgenSalesforcePubSub(#[source] super::context::Error),
+    SalesforcePubSub(#[source] super::context::Error),
     #[error("There was an error with Salesforce authentication.")]
-    FlowgenSalesforceAuth(#[source] crate::client::Error),
+    SalesforceAuth(#[source] crate::client::Error),
+    #[error("There was an error with parsing a given value.")]
+    Serde(#[source] flowgen_core::serde::Error),
+    #[error("There was an error with rendering a given value.")]
+    Render(#[source] flowgen_core::render::Error),
     #[error("Missing required event attrubute.")]
     MissingRequiredAttribute(String),
 }
@@ -32,22 +34,19 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    pub async fn publish(mut self) -> Result<(), Error> {
-        let handlebars = Handlebars::new();
-
+    pub async fn publish(mut self) -> Result<JoinHandle<Result<(), Error>>, Error> {
         let sfdc_client = crate::client::Builder::new()
             .with_credentials_path(self.config.credentials.into())
             .build()
-            .map_err(Error::FlowgenSalesforceAuth)?
+            .map_err(Error::SalesforceAuth)?
             .connect()
             .await
-            .map_err(Error::FlowgenSalesforceAuth)?;
+            .map_err(Error::SalesforceAuth)?;
 
         let pubsub = super::context::Builder::new(self.service)
             .with_client(sfdc_client)
             .build()
-            .map_err(Error::FlowgenSalesforcePubSub)?;
-
+            .map_err(Error::SalesforcePubSub)?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
         let topic_info = pubsub
@@ -71,27 +70,33 @@ impl Publisher {
             .into_inner();
 
         let pubsub = pubsub.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let topic_name = &self.config.topic;
             let schema_id = &schema_info.schema_id;
             while let Ok(event) = self.rx.recv().await {
                 if event.current_task_id == Some(self.current_task_id - 1) {
-                    let mut data = HashMap::new();
+                    let mut data = Map::new();
                     if let Some(inputs) = &self.config.inputs {
                         for (key, input) in inputs {
                             let value = input.extract_from(&event.data, &event.extensions);
                             if let Ok(value) = value {
-                                data.insert(key.to_string(), value.to_string());
+                                data.insert(key.to_string(), Value::String(value.to_string()));
                             }
                         }
                     }
 
-                    let template = serde_json::to_string(&self.config.payload).unwrap();
-                    let payload = handlebars.render_template(&template, &data).unwrap();
-                    let value = serde_json::Value::from_str(&payload).unwrap();
+                    let payload = self
+                        .config
+                        .payload
+                        .to_string()
+                        .map_err(Error::Serde)?
+                        .render(&data)
+                        .map_err(Error::Render)?
+                        .to_value()
+                        .map_err(Error::Serde)?;
 
                     let mut bytes: Vec<u8> = Vec::new();
-                    serde_json::to_writer(&mut bytes, &value).unwrap();
+                    serde_json::to_writer(&mut bytes, &payload).unwrap();
 
                     let mut events = Vec::new();
                     let pe = ProducerEvent {
@@ -100,7 +105,7 @@ impl Publisher {
                         ..Default::default()
                     };
 
-                    println!("{:?}", value);
+                    println!("{:?}", payload);
 
                     events.push(pe);
                     let test = pubsub
@@ -116,8 +121,9 @@ impl Publisher {
                     println!("{:?}", test);
                 }
             }
+            Ok(())
         });
-        Ok(())
+        Ok(handle)
     }
 }
 

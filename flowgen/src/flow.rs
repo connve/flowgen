@@ -3,10 +3,11 @@ use crate::config::Task;
 use super::config;
 use flowgen_core::{client::Client, event::Event};
 use flowgen_nats::jetstream::message::FlowgenMessageExt;
+use futures::{future::Join, TryFutureExt};
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
     sync::broadcast::{Receiver, Sender},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::{error, event, Level};
 
@@ -20,6 +21,8 @@ pub enum Error {
     FlowgenService(#[source] flowgen_core::service::Error),
     #[error("Failed to setup Salesforce PubSub as flow source.")]
     FlowgenSalesforcePubSubSubscriberError(#[source] flowgen_salesforce::pubsub::subscriber::Error),
+    #[error("Failed to setup Salesforce PubSub as flow source.")]
+    SalesforcePubsubPublisher(#[source] flowgen_salesforce::pubsub::publisher::Error),
     #[error("There was an error with Flowgen Nats JetStream Publisher.")]
     FlowgenNatsJetStreamPublisher(#[source] flowgen_nats::jetstream::publisher::Error),
     #[error("There was an error with Flowgen Nats JetStream Subscriber.")]
@@ -133,18 +136,19 @@ impl Flow {
                     }
                     config::Target::salesforce_pubsub(config) => {
                         let rx = tx.subscribe();
-                        let publisher =
-                            flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
-                                .service(service.clone())
-                                .config(config.clone())
-                                .receiver(rx)
-                                .current_task_id(i)
-                                .build()
-                                .await
-                                .unwrap()
-                                .publish()
-                                .await
-                                .unwrap();
+                        let handle = flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
+                            .service(service.clone())
+                            .config(config.clone())
+                            .receiver(rx)
+                            .current_task_id(i)
+                            .build()
+                            .await
+                            .unwrap()
+                            .publish()
+                            .await
+                            .map_err(Error::SalesforcePubsubPublisher)?;
+
+                        // handle_list.push(test);
 
                         // let mut rx = tx.subscribe();
                         // let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {

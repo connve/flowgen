@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use arrow::array::StringArray;
 use flowgen_core::event::{Event, EventBuilder, SerdeValueExt};
 use futures_util::future::TryJoinAll;
@@ -12,7 +10,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Credentials {
     bearer_auth: Option<String>,
 }

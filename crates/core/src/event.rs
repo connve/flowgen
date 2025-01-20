@@ -17,17 +17,17 @@ pub enum Error {
 #[derive(PartialEq, Debug, Clone)]
 pub struct Event {
     pub data: arrow::array::RecordBatch,
+    pub extensions: Option<arrow::array::RecordBatch>,
     pub subject: String,
     pub current_task_id: Option<usize>,
-    pub extensions: Option<arrow::array::RecordBatch>,
 }
 
 #[derive(PartialEq, Debug, Clone, Default)]
 pub struct EventBuilder {
     pub data: Option<arrow::array::RecordBatch>,
+    pub extensions: Option<arrow::array::RecordBatch>,
     pub subject: Option<String>,
     pub current_task_id: Option<usize>,
-    pub extensions: Option<arrow::array::RecordBatch>,
 }
 
 impl EventBuilder {
@@ -57,11 +57,11 @@ impl EventBuilder {
             data: self
                 .data
                 .ok_or_else(|| Error::MissingRequiredAttribute("data".to_string()))?,
+            extensions: self.extensions,
             subject: self
                 .subject
                 .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,
             current_task_id: self.current_task_id,
-            extensions: self.extensions,
         })
     }
 }
