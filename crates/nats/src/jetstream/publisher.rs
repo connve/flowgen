@@ -19,7 +19,7 @@ pub enum Error {
     NatsRequest(#[source] async_nats::jetstream::context::RequestError),
 }
 
-pub struct Context {
+pub struct Publisher {
     pub jetstream: async_nats::jetstream::Context,
 }
 
@@ -33,7 +33,7 @@ impl Builder {
         Builder { config }
     }
 
-    pub async fn build(self) -> Result<Context, Error> {
+    pub async fn build(self) -> Result<Publisher, Error> {
         // Connect to Nats Server.
         let client = crate::client::Builder::new()
             .with_credentials_path(self.config.credentials.into())
@@ -44,7 +44,7 @@ impl Builder {
             .map_err(Error::NatsClientAuth)?;
 
         if let Some(nats_client) = client.nats_client {
-            let context = async_nats::jetstream::new(nats_client);
+            let jetstream = async_nats::jetstream::new(nats_client);
 
             let mut max_age = 86400;
             if let Some(config_max_age) = self.config.max_age {
@@ -63,7 +63,7 @@ impl Builder {
                 ..Default::default()
             };
 
-            let stream = context.get_stream(self.config.stream_name).await;
+            let stream = jetstream.get_stream(self.config.stream_name).await;
 
             match stream {
                 Ok(_) => {
@@ -81,20 +81,20 @@ impl Builder {
                     subjects.dedup();
                     stream_config.subjects = subjects;
 
-                    context
+                    jetstream
                         .update_stream(stream_config)
                         .await
                         .map_err(Error::NatsCreateStream)?;
                 }
                 Err(_) => {
-                    context
+                    jetstream
                         .create_stream(stream_config)
                         .await
                         .map_err(Error::NatsCreateStream)?;
                 }
             }
 
-            Ok(Context { jetstream: context })
+            Ok(Publisher { jetstream })
         } else {
             Err(Error::NatsClientMissing())
         }

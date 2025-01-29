@@ -3,97 +3,130 @@ use arrow::{
     csv::{reader::Format, ReaderBuilder},
     ipc::writer::StreamWriter,
 };
+use chrono::Utc;
+use flowgen_core::event::{Event, EventBuilder};
+use futures::future::TryJoinAll;
 use std::{fs::File, io::Seek, sync::Arc};
-use tokio::{
-    sync::mpsc::{Receiver, Sender},
-    task::JoinHandle,
-};
+use tokio::{sync::broadcast::Sender, task::JoinHandle};
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum SubscriberError {
     #[error("There was an error reading/writing/seeking file.")]
-    InputOutput(#[source] std::io::Error),
+    IOError(#[source] std::io::Error),
     #[error("There was an error executing async task.")]
-    TokioJoin(#[source] tokio::task::JoinError),
+    TokioJoinError(#[source] tokio::task::JoinError),
     #[error("There was an error deserializing data into binary format.")]
-    Arrow(#[source] arrow::error::ArrowError),
+    ArrowError(#[source] arrow::error::ArrowError),
     #[error("There was an error with sending message over channel.")]
-    TokioSendMessage(#[source] tokio::sync::mpsc::error::SendError<RecordBatch>),
+    TokioSendMessageError(#[source] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("There was an error constructing Flowgen Event.")]
+    EventError(#[source] flowgen_core::event::Error),
 }
 
-pub trait Converter {
+pub trait RecordBatchConverter {
     type Error;
     fn to_bytes(&self) -> Result<Vec<u8>, Self::Error>;
 }
 
-impl Converter for RecordBatch {
-    type Error = Error;
-    fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+impl RecordBatchConverter for RecordBatch {
+    type Error = SubscriberError;
+    fn to_bytes(&self) -> Result<Vec<u8>, SubscriberError> {
         let buffer: Vec<u8> = Vec::new();
 
         let mut stream_writer =
-            StreamWriter::try_new(buffer, &self.schema()).map_err(Error::Arrow)?;
-        stream_writer.write(self).map_err(Error::Arrow)?;
-        stream_writer.finish().map_err(Error::Arrow)?;
+            StreamWriter::try_new(buffer, &self.schema()).map_err(SubscriberError::ArrowError)?;
+        stream_writer
+            .write(self)
+            .map_err(SubscriberError::ArrowError)?;
+        stream_writer
+            .finish()
+            .map_err(SubscriberError::ArrowError)?;
 
         Ok(stream_writer.get_mut().to_vec())
     }
 }
 
 pub struct Subscriber {
-    pub async_task_list: Vec<JoinHandle<Result<(), Error>>>,
-    pub path: String,
-    pub rx: Receiver<RecordBatch>,
-    pub tx: Sender<RecordBatch>,
+    handle_list: Vec<JoinHandle<Result<(), SubscriberError>>>,
+}
+
+impl Subscriber {
+    pub async fn subscribe(self) -> Result<(), SubscriberError> {
+        tokio::spawn(async move {
+            let _ = self
+                .handle_list
+                .into_iter()
+                .collect::<TryJoinAll<_>>()
+                .await
+                .map_err(SubscriberError::TokioJoinError);
+        });
+        Ok(())
+    }
 }
 
 /// A builder of the file reader.
 pub struct Builder {
     config: super::config::Source,
+    tx: Sender<Event>,
+    current_task_id: usize,
 }
 
 impl Builder {
     /// Creates a new instance of a Builder.
-    pub fn new(config: super::config::Source) -> Builder {
-        Builder { config }
+    pub fn new(
+        config: super::config::Source,
+        tx: &Sender<Event>,
+        current_task_id: usize,
+    ) -> Builder {
+        Builder {
+            config,
+            tx: tx.clone(),
+            current_task_id,
+        }
     }
 
-    pub async fn build(self) -> Result<Subscriber, Error> {
-        let (tx, rx) = tokio::sync::mpsc::channel(200);
-        let mut async_task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
-        let path = self.config.path.clone();
+    pub async fn build(self) -> Result<Subscriber, SubscriberError> {
+        let mut handle_list: Vec<JoinHandle<Result<(), SubscriberError>>> = Vec::new();
 
-        {
-            let tx = tx.clone();
-            let subscribe_task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                let mut file = File::open(path).map_err(Error::InputOutput)?;
-                let (schema, _) = Format::default()
-                    .infer_schema(&mut file, Some(100))
-                    .map_err(Error::Arrow)?;
-                file.rewind().map_err(Error::InputOutput)?;
+        let handle: JoinHandle<Result<(), SubscriberError>> = tokio::spawn(async move {
+            let mut file =
+                File::open(self.config.path.clone()).map_err(SubscriberError::IOError)?;
+            let (schema, _) = Format::default()
+                .with_header(true)
+                .infer_schema(&mut file, Some(100))
+                .map_err(SubscriberError::ArrowError)?;
+            file.rewind().map_err(SubscriberError::IOError)?;
 
-                let mut csv = ReaderBuilder::new(Arc::new(schema.clone()))
-                    .with_header(true)
-                    .build(file)
-                    .map_err(Error::Arrow)?;
+            let csv = ReaderBuilder::new(Arc::new(schema.clone()))
+                .with_header(true)
+                .with_batch_size(1000)
+                .build(file)
+                .map_err(SubscriberError::ArrowError)?;
 
-                if let Some(value) = csv.next() {
-                    let record_batch = value.map_err(Error::Arrow)?;
+            for batch in csv {
+                let recordbatch = batch.map_err(SubscriberError::ArrowError)?;
+                let timestamp = Utc::now().timestamp_micros();
+                let filename = match self.config.path.split("/").last() {
+                    Some(filename) => filename,
+                    None => break,
+                };
+                let subject = format!("{}.{}", filename, timestamp);
 
-                    tx.send(record_batch)
-                        .await
-                        .map_err(Error::TokioSendMessage)?;
-                }
-                Ok(())
-            });
-            async_task_list.push(subscribe_task);
-        }
+                let e = EventBuilder::new()
+                    .data(recordbatch)
+                    .subject(subject)
+                    .current_task_id(self.current_task_id)
+                    .build()
+                    .map_err(SubscriberError::EventError)?;
 
-        Ok(Subscriber {
-            path: self.config.path,
-            async_task_list,
-            tx,
-            rx,
-        })
+                self.tx
+                    .send(e)
+                    .map_err(SubscriberError::TokioSendMessageError)?;
+            }
+            Ok(())
+        });
+        handle_list.push(handle);
+
+        Ok(Subscriber { handle_list })
     }
 }

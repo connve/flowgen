@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/event-relay"]
+members = ["flowgen"]
 resolver = "2"
 exclude = [".cargo"]
 
@@ -9,3 +9,8 @@ authors = ["CONNVE"]
 license = "MIT"
 edition = "2021"
 publish = false
+
+[workspace.dependencies]
+handlebars = "6.3.0"
+arrow-json = "54.0.0"
+chrono = "0.4.39"

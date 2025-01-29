@@ -1,6 +1,6 @@
-use super::eventbus::v1::pub_sub_client::PubSubClient;
 use crate::client;
 use oauth2::TokenResponse;
+use salesforce_pubsub::eventbus::v1::pub_sub_client::PubSubClient;
 use tokio_stream::StreamExt;
 
 #[derive(thiserror::Error, Debug)]
@@ -43,7 +43,7 @@ impl tonic::service::Interceptor for ContextInterceptor {
 
 #[derive(Debug)]
 pub struct Context {
-    pubsub: super::eventbus::v1::pub_sub_client::PubSubClient<
+    pubsub: salesforce_pubsub::eventbus::v1::pub_sub_client::PubSubClient<
         tonic::service::interceptor::InterceptedService<
             tonic::transport::Channel,
             ContextInterceptor,
@@ -54,8 +54,8 @@ pub struct Context {
 impl Context {
     pub async fn get_topic(
         &mut self,
-        request: super::eventbus::v1::TopicRequest,
-    ) -> Result<tonic::Response<super::eventbus::v1::TopicInfo>, Error> {
+        request: salesforce_pubsub::eventbus::v1::TopicRequest,
+    ) -> Result<tonic::Response<salesforce_pubsub::eventbus::v1::TopicInfo>, Error> {
         self.pubsub
             .get_topic(tonic::Request::new(request))
             .await
@@ -63,8 +63,8 @@ impl Context {
     }
     pub async fn get_schema(
         &mut self,
-        request: super::eventbus::v1::SchemaRequest,
-    ) -> Result<tonic::Response<super::eventbus::v1::SchemaInfo>, Error> {
+        request: salesforce_pubsub::eventbus::v1::SchemaRequest,
+    ) -> Result<tonic::Response<salesforce_pubsub::eventbus::v1::SchemaInfo>, Error> {
         self.pubsub
             .get_schema(tonic::Request::new(request))
             .await
@@ -73,8 +73,8 @@ impl Context {
 
     pub async fn publish(
         &mut self,
-        request: super::eventbus::v1::PublishRequest,
-    ) -> Result<tonic::Response<super::eventbus::v1::PublishResponse>, Error> {
+        request: salesforce_pubsub::eventbus::v1::PublishRequest,
+    ) -> Result<tonic::Response<salesforce_pubsub::eventbus::v1::PublishResponse>, Error> {
         self.pubsub
             .publish(tonic::Request::new(request))
             .await
@@ -83,9 +83,11 @@ impl Context {
 
     pub async fn subscribe(
         &mut self,
-        request: super::eventbus::v1::FetchRequest,
-    ) -> Result<tonic::Response<tonic::codec::Streaming<super::eventbus::v1::FetchResponse>>, Error>
-    {
+        request: salesforce_pubsub::eventbus::v1::FetchRequest,
+    ) -> Result<
+        tonic::Response<tonic::codec::Streaming<salesforce_pubsub::eventbus::v1::FetchResponse>>,
+        Error,
+    > {
         self.pubsub
             .subscribe(
                 tokio_stream::iter(1..usize::MAX)
@@ -98,9 +100,11 @@ impl Context {
 
     pub async fn managed_subscribe(
         &mut self,
-        request: super::eventbus::v1::ManagedFetchRequest,
+        request: salesforce_pubsub::eventbus::v1::ManagedFetchRequest,
     ) -> Result<
-        tonic::Response<tonic::codec::Streaming<super::eventbus::v1::ManagedFetchResponse>>,
+        tonic::Response<
+            tonic::codec::Streaming<salesforce_pubsub::eventbus::v1::ManagedFetchResponse>,
+        >,
         Error,
     > {
         self.pubsub
@@ -115,9 +119,11 @@ impl Context {
 
     pub async fn publish_stream(
         &mut self,
-        request: super::eventbus::v1::PublishRequest,
-    ) -> Result<tonic::Response<tonic::codec::Streaming<super::eventbus::v1::PublishResponse>>, Error>
-    {
+        request: salesforce_pubsub::eventbus::v1::PublishRequest,
+    ) -> Result<
+        tonic::Response<tonic::codec::Streaming<salesforce_pubsub::eventbus::v1::PublishResponse>>,
+        Error,
+    > {
         self.pubsub
             .publish_stream(
                 tokio_stream::iter(1..usize::MAX)

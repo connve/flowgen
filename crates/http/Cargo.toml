@@ -1,5 +1,6 @@
+
 [package]
-name = "flowgen_google"
+name = "flowgen_http"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -7,9 +8,8 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "flowgen_google"
+name = "flowgen_http"
 path = "src/lib.rs"
-doctest = false
 
 [dependencies]
 oauth2 = "4.4.2"
@@ -17,6 +17,7 @@ prost = "0.12.3"
 prost-types = "0.12.3"
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = { version = "1.0.111" }
+arrow = "54.0.0"
 tonic = "0.10.2"
 bytes = "1.5.0"
 tokio = "1.35.1"
@@ -25,9 +26,7 @@ tokio-stream = "0.1.14"
 tokio-util = "0.7.10"
 thiserror = "1.0.63"
 url = "2.5.2"
+reqwest = "0.12.11"
 flowgen_core = { path = "../core" }
-google-cloud-auth = { git = "https://github.com/googleapis/google-cloud-rust" }
-bincode = "1.3.3"
-
-[build-dependencies]
-tonic-build = "0.10.2"
+handlebars = { workspace = true }
+arrow-json = { workspace = true }
