@@ -1,5 +1,6 @@
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+#[non_exhaustive]
+pub enum EventError {
     #[error("Missing required attributes.")]
     MissingRequiredAttribute(String),
 }
@@ -42,15 +43,15 @@ impl EventBuilder {
         self.extensions = Some(extensions);
         self
     }
-    pub fn build(self) -> Result<Event, Error> {
+    pub fn build(self) -> Result<Event, EventError> {
         Ok(Event {
             data: self
                 .data
-                .ok_or_else(|| Error::MissingRequiredAttribute("data".to_string()))?,
+                .ok_or_else(|| EventError::MissingRequiredAttribute("data".to_string()))?,
             extensions: self.extensions,
             subject: self
                 .subject
-                .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,
+                .ok_or_else(|| EventError::MissingRequiredAttribute("subject".to_string()))?,
             current_task_id: self.current_task_id,
         })
     }

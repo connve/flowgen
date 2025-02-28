@@ -7,11 +7,12 @@ use serde_json::Value;
 use std::sync::Arc;
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum InputError {
     #[error("There was an error with an Apache Arrow data.")]
     ArrowError(#[source] arrow::error::ArrowError),
     #[error("There is not data available in the array.")]
-    EmptyArrayError(),
+    EmptyArray(),
 }
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -31,7 +32,7 @@ fn extract_from_array(array: &Arc<dyn Array>, input: &Input) -> Result<Value, In
             let array_data = array.as_any().downcast_ref::<StringArray>();
             value = Value::String(
                 array_data
-                    .ok_or_else(InputError::EmptyArrayError)?
+                    .ok_or_else(InputError::EmptyArray)?
                     .value(input.index)
                     .to_string()
                     .to_string(),
@@ -40,7 +41,7 @@ fn extract_from_array(array: &Arc<dyn Array>, input: &Input) -> Result<Value, In
         DataType::List(_) => {
             let array_data = array.as_any().downcast_ref::<ListArray>();
             let nested_array = array_data
-                .ok_or_else(InputError::EmptyArrayError)?
+                .ok_or_else(InputError::EmptyArray)?
                 .value(input.index);
             if let Some(nested_input) = &input.nested {
                 let input = &Input {
@@ -58,9 +59,9 @@ fn extract_from_array(array: &Arc<dyn Array>, input: &Input) -> Result<Value, In
         DataType::Struct(_) => {
             let array_data = array.as_any().downcast_ref::<StructArray>();
             let nested_array = array_data
-                .ok_or_else(InputError::EmptyArrayError)?
+                .ok_or_else(InputError::EmptyArray)?
                 .column_by_name(&input.value)
-                .ok_or_else(InputError::EmptyArrayError)?;
+                .ok_or_else(InputError::EmptyArray)?;
 
             if let Some(nested_input) = &input.nested {
                 let input = &Input {

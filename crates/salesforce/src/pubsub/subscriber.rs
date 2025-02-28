@@ -21,7 +21,7 @@ pub enum Error {
     #[error("There was an error with Salesforce authentication.")]
     FlowgenSalesforceAuth(#[source] crate::client::Error),
     #[error("There was an error constructing Flowgen Event.")]
-    FlowgenEvent(#[source] flowgen_core::event::Error),
+    FlowgenEvent(#[source] flowgen_core::event::EventError),
     #[error("There was an error executing async task.")]
     TokioJoin(#[source] tokio::task::JoinError),
     #[error("There was an error parsing value to avro schema.")]

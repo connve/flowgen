@@ -1,6 +1,5 @@
-use crate::config::Task;
-
 use super::config;
+use crate::config::Task;
 use flowgen_core::{client::Client, event::Event, publisher::Publisher};
 use flowgen_nats::jetstream::message::FlowgenMessageExt;
 use std::{path::PathBuf, sync::Arc};
@@ -11,13 +10,14 @@ use tokio::{
 use tracing::{error, event, Level};
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Cannot open/read the credentials file at path {1}")]
     OpenFile(#[source] std::io::Error, PathBuf),
     #[error("Cannot parse config file")]
     ParseConfig(#[source] serde_json::Error),
     #[error("Cannot setup Flowgen Client")]
-    FlowgenService(#[source] flowgen_core::service::Error),
+    FlowgenService(#[source] flowgen_core::service::ServiceError),
     #[error("Failed to setup Salesforce PubSub as flow source.")]
     FlowgenSalesforcePubSubSubscriberError(#[source] flowgen_salesforce::pubsub::subscriber::Error),
     #[error("Failed to setup Salesforce PubSub as flow source.")]
@@ -95,7 +95,7 @@ impl Flow {
                             flowgen_http::processor::ProcessorBuilder::new()
                                 .config(config)
                                 .receiver(rx)
-                                // .sender(tx)
+                                .sender(tx)
                                 .current_task_id(i)
                                 .build()
                                 .await

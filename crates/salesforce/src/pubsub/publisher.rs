@@ -18,11 +18,11 @@ pub enum PublisherError {
     #[error("There was an error with Salesforce authentication.")]
     SalesforceAuthError(#[source] crate::client::Error),
     #[error("There was an error with parsing a given value.")]
-    SerdeError(#[source] flowgen_core::serde::Error),
+    SerdeError(#[source] flowgen_core::serde::SerdeError),
     #[error("There was an error with parsing a given value.")]
     SerdeJsonError(#[source] serde_json::error::Error),
     #[error("There was an error with rendering a given value.")]
-    RenderError(#[source] flowgen_core::render::Error),
+    RenderError(#[source] flowgen_core::render::RenderError),
     #[error("Missing required event attrubute.")]
     MissingRequiredAttributeError(String),
 }
@@ -133,7 +133,7 @@ impl flowgen_core::publisher::Publisher for Publisher {
                     .await
                     .map_err(PublisherError::SalesforcePubSubError)?;
 
-                // println!("{:?}", resp);
+                println!("{:?}", resp);
             }
         }
         Ok(())

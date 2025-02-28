@@ -1,9 +1,9 @@
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum ServiceError {
     #[error("An error resulting from a failed attempt to construct a URI")]
     InvalidUri(#[source] tonic::codegen::http::uri::InvalidUri),
     #[error("Error that originate from the client or server")]
-    Transport(#[source] tonic::transport::Error),
+    TransportError(#[source] tonic::transport::Error),
     #[error("Error that originate from the client or server")]
     MissingEndpoint(),
 }
@@ -15,21 +15,21 @@ pub struct Service {
 }
 
 impl super::client::Client for Service {
-    type Error = Error;
-    async fn connect(mut self) -> Result<Self, Error> {
+    type Error = ServiceError;
+    async fn connect(mut self) -> Result<Self, Self::Error> {
         if let Some(endpoint) = self.endpoint.take() {
             let tls_config = tonic::transport::ClientTlsConfig::new();
             let channel = tonic::transport::Channel::from_shared(endpoint)
-                .map_err(Error::InvalidUri)?
+                .map_err(ServiceError::InvalidUri)?
                 .tls_config(tls_config)
-                .map_err(Error::Transport)?
+                .map_err(ServiceError::TransportError)?
                 .connect()
                 .await
-                .map_err(Error::Transport)?;
+                .map_err(ServiceError::TransportError)?;
             self.channel = Some(channel);
             Ok(self)
         } else {
-            Err(Error::MissingEndpoint())
+            Err(ServiceError::MissingEndpoint())
         }
     }
 }
@@ -52,7 +52,7 @@ impl Builder {
         self
     }
 
-    pub fn build(&mut self) -> Result<Service, Error> {
+    pub fn build(&mut self) -> Result<Service, ServiceError> {
         Ok(Service {
             endpoint: self.endpoint.take(),
             channel: None,

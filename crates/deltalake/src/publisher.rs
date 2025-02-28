@@ -11,17 +11,17 @@ use deltalake::{
 };
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum PublisherError {
     #[error("Nats Client is missing / not initialized properly.")]
     NatsClientMissing(),
     #[error("Failed to publish message to Nats Jetstream.")]
-    NatsPublish(#[source] async_nats::jetstream::context::PublishError),
+    NatsPublishError(#[source] async_nats::jetstream::context::PublishError),
     #[error("Failed to create or update Nats Jetstream.")]
-    NatsCreateStream(#[source] async_nats::jetstream::context::CreateStreamError),
+    NatsCreateStreamError(#[source] async_nats::jetstream::context::CreateStreamError),
     #[error("Failed to get Nats Jetstream.")]
-    NatsGetStream(#[source] async_nats::jetstream::context::GetStreamError),
+    NatsGetStreamError(#[source] async_nats::jetstream::context::GetStreamError),
     #[error("Failed to get process request to Nats Server.")]
-    NatsRequest(#[source] async_nats::jetstream::context::RequestError),
+    NatsRequestError(#[source] async_nats::jetstream::context::RequestError),
 }
 
 pub struct Publisher {
@@ -39,7 +39,7 @@ impl Builder {
         Builder { config }
     }
 
-    pub async fn build(self) -> Result<Publisher, Error> {
+    pub async fn build(self) -> Result<Publisher, PublisherError> {
         deltalake_gcp::register_handlers(None);
         let mut map = HashMap::new();
         map.insert(

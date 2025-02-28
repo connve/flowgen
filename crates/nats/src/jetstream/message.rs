@@ -5,9 +5,9 @@ use flowgen_core::event::EventBuilder;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("There was an error with an Apache Arrow data.")]
-    Arrow(#[source] arrow::error::ArrowError),
+    ArrowError(#[source] arrow::error::ArrowError),
     #[error("There was an error constructing Flowgen Event.")]
-    FlowgenEvent(#[source] flowgen_core::event::Error),
+    EventError(#[source] flowgen_core::event::EventError),
     #[error("There was an error getting RecordBatch.")]
     NoRecordBatch(),
 }
@@ -27,9 +27,9 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
     fn to_publish(&self) -> Result<Publish, Self::Error> {
         let buffer: Vec<u8> = Vec::new();
         let mut stream_writer =
-            StreamWriter::try_new(buffer, &self.data.schema()).map_err(Error::Arrow)?;
-        stream_writer.write(&self.data).map_err(Error::Arrow)?;
-        stream_writer.finish().map_err(Error::Arrow)?;
+            StreamWriter::try_new(buffer, &self.data.schema()).map_err(Error::ArrowError)?;
+        stream_writer.write(&self.data).map_err(Error::ArrowError)?;
+        stream_writer.finish().map_err(Error::ArrowError)?;
         let payload = stream_writer.get_mut().to_vec();
         let event = Publish::build().payload(payload.into());
         Ok(event)
@@ -44,16 +44,16 @@ impl NatsMessageExt for async_nats::Message {
 
         let record_batch = decoder
             .decode(&mut buffer)
-            .map_err(Error::Arrow)?
+            .map_err(Error::ArrowError)?
             .ok_or_else(Error::NoRecordBatch)?;
 
         let e = EventBuilder::new()
             .data(record_batch)
             .subject(self.subject.to_string())
             .build()
-            .map_err(Error::FlowgenEvent)?;
+            .map_err(Error::EventError)?;
 
-        decoder.finish().map_err(Error::Arrow)?;
+        decoder.finish().map_err(Error::ArrowError)?;
         Ok(e)
     }
 }

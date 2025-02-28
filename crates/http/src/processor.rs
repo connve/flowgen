@@ -1,24 +1,17 @@
-use std::sync::Arc;
-
 use flowgen_core::{
-    client,
     event::{Event, EventBuilder},
     recordbatch::RecordBatchExt,
     render::Render,
 };
-use futures_util::future::{try_join_all, TryJoinAll};
+use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::sync::Arc;
 use tokio::{
     fs,
-    sync::{
-        broadcast::{Receiver, Sender},
-        Mutex,
-    },
+    sync::broadcast::{Receiver, Sender},
     task::JoinHandle,
 };
-
-use crate::config;
 
 #[derive(Deserialize, Serialize)]
 struct Credentials {
@@ -30,19 +23,19 @@ pub enum ProcessorError {
     #[error("There was an error reading/writing/seeking file.")]
     IOError(#[source] std::io::Error),
     #[error("There was an error executing async task.")]
-    TokioJoinError(#[source] tokio::task::JoinError),
+    JoinError(#[source] tokio::task::JoinError),
     #[error("There was an error with sending event over channel.")]
-    TokioSendMessageError(#[source] tokio::sync::broadcast::error::SendError<Event>),
+    SendMessageError(#[source] tokio::sync::broadcast::error::SendError<Event>),
     #[error("There was an error constructing Flowgen Event.")]
-    EventError(#[source] flowgen_core::event::Error),
+    EventError(#[source] flowgen_core::event::EventError),
     #[error("There was an error with parsing credentials file.")]
     ParseCredentialsError(#[source] serde_json::Error),
     #[error("There was an error with processing record batch.")]
     RecordBatchError(#[source] flowgen_core::recordbatch::RecordBatchError),
     #[error("There was an error with rendering a given value.")]
-    RenderError(#[source] flowgen_core::render::Error),
-    #[error("There was an error with processing request.")]
-    ReqwestError(#[source] reqwest::Error),
+    RenderError(#[source] flowgen_core::render::RenderError),
+    #[error("There was an error with processing a request.")]
+    RequestError(#[source] reqwest::Error),
     #[error("Missing required event attrubute.")]
     MissingRequiredAttributeError(String),
 }
@@ -60,7 +53,7 @@ impl Processor {
         let client = reqwest::ClientBuilder::new()
             .https_only(true)
             .build()
-            .map_err(ProcessorError::ReqwestError)?;
+            .map_err(ProcessorError::RequestError)?;
 
         let client = Arc::new(client);
 
@@ -102,14 +95,13 @@ impl Processor {
                                 .bearer_auth(bearer_token)
                                 .send()
                                 .await
-                                .map_err(ProcessorError::ReqwestError)?
+                                .map_err(ProcessorError::RequestError)?
                                 .text()
                                 .await
-                                .map_err(ProcessorError::ReqwestError)?;
+                                .map_err(ProcessorError::RequestError)?;
                         }
                     };
 
-                    println!("{:?}", resp);
                     let recordbatch = resp
                         .to_recordbatch()
                         .map_err(ProcessorError::RecordBatchError)?;
@@ -129,15 +121,15 @@ impl Processor {
                         .build()
                         .map_err(ProcessorError::EventError)?;
 
-                    tx.send(e).map_err(ProcessorError::TokioSendMessageError)?;
+                    tx.send(e).map_err(ProcessorError::SendMessageError)?;
                 }
                 Ok(())
             });
             handle_list.push(handle);
         }
-        tokio::spawn(async move {
-            let results = try_join_all(handle_list.iter_mut()).await;
-        });
+
+        let _ = try_join_all(handle_list.iter_mut()).await;
+
         Ok(())
     }
 }

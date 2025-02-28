@@ -8,10 +8,8 @@ pub const DEFAULT_TOPIC_NAME: &str = "/data/ChangeEvents";
 
 #[tokio::main]
 async fn main() {
-    // Install global log collector.
     tracing_subscriber::fmt::init();
 
-    // Setup environment variables
     let config_dir = env::var("CONFIG_DIR").expect("env variable CONFIG_DIR should be set");
 
     if let Ok(configs) = glob(&config_dir) {
@@ -57,16 +55,9 @@ async fn main() {
     }
 
     for handle in all_handle_list {
-        let e = handle.await.unwrap();
-        if let Err(e) = e {
-            println!("{:?}", e);
-        }
+        let result = handle.await.unwrap();
+        if let Err(e) = result {
+            error!("{:?}", e);
+        };
     }
-    // let result = futures::future::try_join_all(all_handle_list).await;
-    // println!("{:?}", "here");
-    // for (i, r) in result.iter().enumerate() {
-    //     println!("{:?}", r);
-    //     println!("{:?}", i);
-    //     // let _ = r.unwrap();
-    // }
 }

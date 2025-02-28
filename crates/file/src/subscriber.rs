@@ -14,13 +14,13 @@ pub enum SubscriberError {
     #[error("There was an error reading/writing/seeking file.")]
     IOError(#[source] std::io::Error),
     #[error("There was an error executing async task.")]
-    TokioJoinError(#[source] tokio::task::JoinError),
+    JoinError(#[source] tokio::task::JoinError),
     #[error("There was an error deserializing data into binary format.")]
     ArrowError(#[source] arrow::error::ArrowError),
     #[error("There was an error with sending message over channel.")]
-    TokioSendMessageError(#[source] tokio::sync::broadcast::error::SendError<Event>),
+    SendMessageError(#[source] tokio::sync::broadcast::error::SendError<Event>),
     #[error("There was an error constructing Flowgen Event.")]
-    EventError(#[source] flowgen_core::event::Error),
+    EventError(#[source] flowgen_core::event::EventError),
 }
 
 pub trait RecordBatchConverter {
@@ -58,7 +58,7 @@ impl Subscriber {
                 .into_iter()
                 .collect::<TryJoinAll<_>>()
                 .await
-                .map_err(SubscriberError::TokioJoinError);
+                .map_err(SubscriberError::JoinError);
         });
         Ok(())
     }
@@ -119,9 +119,7 @@ impl Builder {
                     .build()
                     .map_err(SubscriberError::EventError)?;
 
-                self.tx
-                    .send(e)
-                    .map_err(SubscriberError::TokioSendMessageError)?;
+                self.tx.send(e).map_err(SubscriberError::SendMessageError)?;
             }
             Ok(())
         });

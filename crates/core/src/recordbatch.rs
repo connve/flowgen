@@ -1,11 +1,12 @@
 use std::{io::BufReader, sync::Arc};
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum RecordBatchError {
     #[error("There was an error with an Apache Arrow data.")]
     ArrowError(#[source] arrow::error::ArrowError),
     #[error("There is not data available in the buffer.")]
-    EmptyBufferError(),
+    EmptyBuffer(),
 }
 pub trait RecordBatchExt {
     type Error;
@@ -24,7 +25,7 @@ impl RecordBatchExt for String {
             .build(reader)
             .map_err(RecordBatchError::ArrowError)?
             .next()
-            .ok_or_else(RecordBatchError::EmptyBufferError)?;
+            .ok_or_else(RecordBatchError::EmptyBuffer)?;
 
         let recordbatch = reader_result.map_err(RecordBatchError::ArrowError)?;
         Ok(recordbatch)
