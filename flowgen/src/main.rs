@@ -1,6 +1,7 @@
 use glob::glob;
 use std::env;
 use std::process;
+use std::result;
 use tracing::error;
 use tracing::event;
 use tracing::Level;
@@ -55,9 +56,16 @@ async fn main() {
     }
 
     for handle in all_handle_list {
-        let result = handle.await.unwrap();
-        if let Err(e) = result {
-            error!("{:?}", e);
-        };
+        let result = handle.await;
+        match result {
+            Ok(result) => {
+                if let Err(e) = result {
+                    error!("{:?}", e);
+                };
+            }
+            Err(e) => {
+                error!("{:?}", e);
+            }
+        }
     }
 }
