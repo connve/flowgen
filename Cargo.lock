@@ -2143,6 +2143,7 @@ dependencies = [
  "arrow 54.0.0",
  "arrow-json 54.0.0",
  "bytes",
+ "chrono",
  "flowgen_core",
  "futures-util",
  "handlebars",
@@ -2157,6 +2158,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tracing",
  "url",
 ]
 

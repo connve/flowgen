@@ -14,6 +14,8 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{event, Level};
 
+const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.in";
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("error with PubSub context")]
@@ -35,8 +37,6 @@ pub enum Error {
     #[error("error with processing record batch")]
     RecordBatch(#[source] flowgen_core::recordbatch::Error),
 }
-
-const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.in";
 
 pub struct Subscriber {
     handle_list: Vec<JoinHandle<Result<(), Error>>>,

@@ -10,6 +10,9 @@ use serde_avro_fast::{ser, Schema};
 use serde_json::{Map, Value};
 use std::{path::Path, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
+use tracing::{event, Level};
+
+const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.out";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -23,8 +26,14 @@ pub enum Error {
     SerdeJson(#[source] serde_json::error::Error),
     #[error("error with rendering a given value.")]
     Render(#[source] flowgen_core::render::Error),
+    #[error("error with processing recordbatch")]
+    RecordBatch(#[source] flowgen_core::recordbatch::Error),
     #[error("Missing required event attrubute.")]
     MissingRequiredAttribute(String),
+    #[error("error with sending event over channel")]
+    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("error with creating event")]
+    Event(#[source] flowgen_core::event::Error),
 }
 
 pub struct Publisher {
@@ -76,7 +85,7 @@ impl flowgen_core::publisher::Publisher for Publisher {
 
         let pubsub = pubsub.clone();
 
-        let topic_name = &self.config.topic;
+        let topic = &self.config.topic;
         let schema_id = &schema_info.schema_id;
 
         let schema: Schema = schema_info.schema_json.parse().unwrap();
@@ -122,18 +131,22 @@ impl flowgen_core::publisher::Publisher for Publisher {
                 };
                 events.push(pe);
 
-                let resp = pubsub
+                let _ = pubsub
                     .lock()
                     .await
                     .publish(PublishRequest {
-                        topic_name: topic_name.to_string(),
+                        topic_name: topic.to_string(),
                         events,
                         ..Default::default()
                     })
                     .await
                     .map_err(Error::SalesforcePubSub)?;
 
-                println!("{:?}", resp);
+                let timestamp = Utc::now().timestamp_micros();
+                let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
+                let subject = format!("{}.{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..], timestamp);
+
+                event!(Level::INFO, "event processed: {}", subject);
             }
         }
         Ok(())

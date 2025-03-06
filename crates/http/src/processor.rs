@@ -1,3 +1,4 @@
+use chrono::Utc;
 use flowgen_core::{
     event::{Event, EventBuilder},
     recordbatch::RecordBatchExt,
@@ -12,6 +13,9 @@ use tokio::{
     sync::broadcast::{Receiver, Sender},
     task::JoinHandle,
 };
+use tracing::{event, Level};
+
+const DEFAULT_MESSAGE_SUBJECT: &str = "http.response.out";
 
 #[derive(Deserialize, Serialize)]
 struct Credentials {
@@ -105,7 +109,8 @@ impl Processor {
                         .to_recordbatch()
                         .map_err(Error::RecordBatch)?;
 
-                    let subject = "http.response.out".to_string();
+                    let timestamp = Utc::now().timestamp_micros();
+                    let subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, timestamp);
 
                     let e = EventBuilder::new()
                         .data(recordbatch)
@@ -114,6 +119,8 @@ impl Processor {
                         .current_task_id(self.current_task_id)
                         .build()
                         .map_err(Error::Event)?;
+
+                    event!(Level::INFO, "event processed: {}", e.subject);
 
                     tx.send(e).map_err(Error::SendMessage)?;
                 }

@@ -30,3 +30,5 @@ reqwest = "0.12.11"
 flowgen_core = { path = "../core" }
 handlebars = { workspace = true }
 arrow-json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
