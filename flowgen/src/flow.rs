@@ -1,6 +1,6 @@
 use super::config;
 use crate::config::Task;
-use flowgen_core::{client::Client, event::Event, publisher::Publisher};
+use flowgen_core::{event::Event, publisher::Publisher};
 use flowgen_nats::jetstream::message::FlowgenMessageExt;
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
@@ -16,8 +16,6 @@ pub enum Error {
     OpenFile(#[source] std::io::Error, PathBuf),
     #[error("error parsing config file")]
     ParseConfig(#[source] serde_json::Error),
-    #[error("error setting up Flowgen Client")]
-    Service(#[source] flowgen_core::service::Error),
     #[error("error setting up Salesforce PubSub as flow source")]
     SalesforcePubSubSubscriber(#[source] flowgen_salesforce::pubsub::subscriber::Error),
     #[error("error setting up Salesforce PubSub as flow source")]
@@ -46,14 +44,6 @@ pub struct Flow {
 
 impl Flow {
     pub async fn run(mut self) -> Result<Self, Error> {
-        let service = flowgen_core::service::ServiceBuilder::new()
-            .with_endpoint(format!("{0}:443", "https://api.pubsub.salesforce.com"))
-            .build()
-            .map_err(Error::Service)?
-            .connect()
-            .await
-            .map_err(Error::Service)?;
-
         let config = &self.config;
         let mut handle_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
@@ -62,18 +52,22 @@ impl Flow {
             match task {
                 Task::source(source) => match source {
                     config::Source::salesforce_pubsub(config) => {
-                        flowgen_salesforce::pubsub::subscriber::Builder::new(
-                            service.clone(),
-                            config.clone(),
-                            &tx,
-                            i,
-                        )
-                        .build()
-                        .await
-                        .map_err(Error::SalesforcePubSubSubscriber)?
-                        .subscribe()
-                        .await
-                        .map_err(Error::SalesforcePubSubSubscriber)?;
+                        let config = Arc::new(config.to_owned());
+                        let tx = tx.clone();
+                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                            flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
+                                .config(config)
+                                .sender(tx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .map_err(Error::SalesforcePubSubSubscriber)?
+                                .subscribe()
+                                .await
+                                .map_err(Error::SalesforcePubSubSubscriber)?;
+                            Ok(())
+                        });
+                        handle_list.push(handle);
                     }
                     config::Source::nats_jetstream(config) => {
                         let config = Arc::new(config.to_owned());
@@ -153,10 +147,8 @@ impl Flow {
                     config::Target::salesforce_pubsub(config) => {
                         let config = Arc::new(config.to_owned());
                         let rx = tx.subscribe();
-                        let service = service.clone();
                         let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                             flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
-                                .service(service)
                                 .config(config)
                                 .receiver(rx)
                                 .current_task_id(i)

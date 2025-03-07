@@ -13,6 +13,8 @@ use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.out";
+const DEFAULT_PUBSUB_URI: &str = "https://api.pubsub.salesforce.com";
+const DEFAULT_PUBSUB_PORT: &str = "443";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -34,10 +36,11 @@ pub enum Error {
     SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
     #[error("error with creating event")]
     Event(#[source] flowgen_core::event::Error),
+    #[error("error setting up flowgen grpc service")]
+    Service(#[source] flowgen_core::service::Error),
 }
 
 pub struct Publisher {
-    service: flowgen_core::service::Service,
     config: Arc<super::config::Target>,
     rx: Receiver<Event>,
     current_task_id: usize,
@@ -48,6 +51,15 @@ impl flowgen_core::publisher::Publisher for Publisher {
     async fn publish(mut self) -> Result<(), Self::Error> {
         let config = self.config.as_ref();
         let a = Path::new(&config.credentials);
+
+        let service = flowgen_core::service::ServiceBuilder::new()
+            .with_endpoint(format!("{0}:{1}", DEFAULT_PUBSUB_URI, DEFAULT_PUBSUB_PORT))
+            .build()
+            .map_err(Error::Service)?
+            .connect()
+            .await
+            .map_err(Error::Service)?;
+
         let sfdc_client = crate::client::Builder::new()
             .with_credentials_path(a.to_path_buf())
             .build()
@@ -56,7 +68,7 @@ impl flowgen_core::publisher::Publisher for Publisher {
             .await
             .map_err(Error::SalesforceAuth)?;
 
-        let pubsub = super::context::Builder::new(self.service)
+        let pubsub = super::context::Builder::new(service)
             .with_client(sfdc_client)
             .build()
             .map_err(Error::SalesforcePubSub)?;
@@ -190,9 +202,6 @@ impl PublisherBuilder {
 
     pub async fn build(self) -> Result<Publisher, Error> {
         Ok(Publisher {
-            service: self
-                .service
-                .ok_or_else(|| Error::MissingRequiredAttribute("service".to_string()))?,
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,

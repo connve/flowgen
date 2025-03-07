@@ -3,7 +3,7 @@ use flowgen_core::{
     event::{Event, EventBuilder},
     recordbatch::RecordBatchExt,
 };
-use futures_util::future::TryJoinAll;
+use futures_util::future::try_join_all;
 use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use serde_json::Value;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ use tokio_stream::StreamExt;
 use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.in";
+const DEFAULT_PUBSUB_URI: &str = "https://api.pubsub.salesforce.com";
+const DEFAULT_PUBSUB_PORT: &str = "443";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -36,63 +38,37 @@ pub enum Error {
     Bincode(#[source] bincode::Error),
     #[error("error with processing record batch")]
     RecordBatch(#[source] flowgen_core::recordbatch::Error),
+    #[error("error setting up flowgen grpc service")]
+    Service(#[source] flowgen_core::service::Error),
+    #[error("missing required attribute")]
+    MissingRequiredAttribute(String),
 }
 
 pub struct Subscriber {
-    handle_list: Vec<JoinHandle<Result<(), Error>>>,
-}
-
-impl Subscriber {
-    pub async fn subscribe(self) -> Result<(), Error> {
-        tokio::spawn(async move {
-            let _ = self
-                .handle_list
-                .into_iter()
-                .collect::<TryJoinAll<_>>()
-                .await
-                .map_err(Error::TaskJoin);
-        });
-        event!(Level::INFO, "event: subscribed");
-        Ok(())
-    }
-}
-
-pub struct Builder {
-    service: flowgen_core::service::Service,
-    config: super::config::Source,
+    config: Arc<super::config::Source>,
     tx: Sender<Event>,
     current_task_id: usize,
 }
 
-impl Builder {
-    // Creates a new instance of a Builder.
-    pub fn new(
-        service: flowgen_core::service::Service,
-        config: super::config::Source,
-        tx: &Sender<Event>,
-        current_task_id: usize,
-    ) -> Builder {
-        Builder {
-            service,
-            config,
-            tx: tx.clone(),
-            current_task_id,
-        }
-    }
+impl Subscriber {
+    pub async fn subscribe(self) -> Result<(), Error> {
+        let service = flowgen_core::service::ServiceBuilder::new()
+            .with_endpoint(format!("{0}:{1}", DEFAULT_PUBSUB_URI, DEFAULT_PUBSUB_PORT))
+            .build()
+            .map_err(Error::Service)?
+            .connect()
+            .await
+            .map_err(Error::Service)?;
 
-    /// Builds a new FlowgenSalesforcePubsub Subscriber.
-    pub async fn build(self) -> Result<Subscriber, Error> {
-        // Connect to Salesforce.
         let sfdc_client = crate::client::Builder::new()
-            .with_credentials_path(self.config.credentials.into())
+            .with_credentials_path(self.config.credentials.clone().into())
             .build()
             .map_err(Error::SalesforceAuth)?
             .connect()
             .await
             .map_err(Error::SalesforceAuth)?;
 
-        // Get PubSub context.
-        let pubsub = super::context::Builder::new(self.service)
+        let pubsub = super::context::Builder::new(service)
             .with_client(sfdc_client)
             .build()
             .map_err(Error::SalesforcePubSub)?;
@@ -176,6 +152,7 @@ impl Builder {
                                         .build()
                                         .map_err(Error::Event)?;
 
+                                    event!(Level::INFO, "event processed: {}", e.subject);
                                     tx.send(e).map_err(Error::SendMessage)?;
                                 }
                             }
@@ -192,6 +169,49 @@ impl Builder {
             handle_list.push(handle);
         }
 
-        Ok(Subscriber { handle_list })
+        let _ = try_join_all(handle_list.iter_mut()).await;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct SubscriberBuilder {
+    config: Option<Arc<super::config::Source>>,
+    tx: Option<Sender<Event>>,
+    current_task_id: usize,
+}
+
+impl SubscriberBuilder {
+    pub fn new() -> SubscriberBuilder {
+        SubscriberBuilder {
+            ..Default::default()
+        }
+    }
+
+    pub fn config(mut self, config: Arc<super::config::Source>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn sender(mut self, sender: Sender<Event>) -> Self {
+        self.tx = Some(sender);
+        self
+    }
+
+    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
+        self.current_task_id = current_task_id;
+        self
+    }
+
+    pub async fn build(self) -> Result<Subscriber, Error> {
+        Ok(Subscriber {
+            config: self
+                .config
+                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+            tx: self
+                .tx
+                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            current_task_id: self.current_task_id,
+        })
     }
 }

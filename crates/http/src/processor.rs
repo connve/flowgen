@@ -121,7 +121,6 @@ impl Processor {
                         .map_err(Error::Event)?;
 
                     event!(Level::INFO, "event processed: {}", e.subject);
-
                     tx.send(e).map_err(Error::SendMessage)?;
                 }
                 Ok(())
