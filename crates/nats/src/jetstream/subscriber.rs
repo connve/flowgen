@@ -55,6 +55,7 @@ impl Subscriber {
                     &self.config.durable_name,
                     jetstream::consumer::pull::Config {
                         durable_name: Some(self.config.durable_name.clone()),
+                        filter_subject: self.config.subject.clone(),
                         ..Default::default()
                     },
                 )
