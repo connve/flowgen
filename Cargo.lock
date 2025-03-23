@@ -2040,7 +2040,6 @@ dependencies = [
  "flowgen_core",
  "flowgen_deltalake",
  "flowgen_file",
- "flowgen_generate",
  "flowgen_http",
  "flowgen_nats",
  "flowgen_salesforce",
@@ -2074,11 +2073,14 @@ dependencies = [
  "async-nats",
  "bincode",
  "bytes",
+ "chrono",
  "handlebars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tonic",
+ "tracing",
  "url",
 ]
 
@@ -2120,18 +2122,6 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "flowgen_generate"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "flowgen_core",
- "serde",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

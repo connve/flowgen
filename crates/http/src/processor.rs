@@ -1,8 +1,7 @@
 use chrono::Utc;
 use flowgen_core::{
+    conversion::{recordbatch::RecordBatchExt, render::Render},
     event::{Event, EventBuilder},
-    recordbatch::RecordBatchExt,
-    render::Render,
 };
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
@@ -35,9 +34,9 @@ pub enum Error {
     #[error("error with parsing credentials file")]
     ParseCredentials(#[source] serde_json::Error),
     #[error("error with processing recordbatch")]
-    RecordBatch(#[source] flowgen_core::recordbatch::Error),
+    RecordBatch(#[source] flowgen_core::conversion::recordbatch::Error),
     #[error("error with rendering content")]
-    Render(#[source] flowgen_core::render::Error),
+    Render(#[source] flowgen_core::conversion::render::Error),
     #[error("error with processing http request")]
     Request(#[source] reqwest::Error),
     #[error("missing required attrubute")]

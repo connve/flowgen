@@ -1,8 +1,8 @@
-use chrono::Utc;
-use flowgen_core::{
+use crate::{
+    conversion::recordbatch::RecordBatchExt,
     event::{Event, EventBuilder},
-    recordbatch::RecordBatchExt,
 };
+use chrono::Utc;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::broadcast::Sender, time};
 use tracing::{event, Level};
@@ -14,9 +14,9 @@ pub enum Error {
     #[error("error with sending event over channel")]
     SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
     #[error("error with creating event")]
-    Event(#[source] flowgen_core::event::Error),
+    Event(#[source] crate::event::Error),
     #[error("error with processing recordbatch")]
-    RecordBatch(#[source] flowgen_core::recordbatch::Error),
+    RecordBatch(#[source] crate::conversion::recordbatch::Error),
     #[error("missing required attrubute")]
     MissingRequiredAttribute(String),
 }

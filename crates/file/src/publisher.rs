@@ -33,6 +33,7 @@ impl flowgen_core::publisher::Publisher for Publisher {
             let config = Arc::clone(&self.config);
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 if event.current_task_id == Some(self.current_task_id - 1) {
+                    let timestamp = Utc::now().timestamp_micros();
                     let file = File::create(&config.path).map_err(Error::IO)?;
 
                     WriterBuilder::new()
@@ -41,7 +42,6 @@ impl flowgen_core::publisher::Publisher for Publisher {
                         .write(&event.data)
                         .map_err(Error::Arrow)?;
 
-                    let timestamp = Utc::now().timestamp_micros();
                     let subject = match &config.path.split("/").last() {
                         Some(filename) => {
                             format!(

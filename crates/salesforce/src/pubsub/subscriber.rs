@@ -1,7 +1,7 @@
 use flowgen_core::{
     client::Client,
+    conversion::recordbatch::RecordBatchExt,
     event::{Event, EventBuilder},
-    recordbatch::RecordBatchExt,
 };
 use futures_util::future::try_join_all;
 use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
@@ -37,7 +37,7 @@ pub enum Error {
     #[error("error deserializing data into binary format")]
     Bincode(#[source] bincode::Error),
     #[error("error with processing record batch")]
-    RecordBatch(#[source] flowgen_core::recordbatch::Error),
+    RecordBatch(#[source] flowgen_core::conversion::recordbatch::Error),
     #[error("error setting up flowgen grpc service")]
     Service(#[source] flowgen_core::service::Error),
     #[error("missing required attribute")]

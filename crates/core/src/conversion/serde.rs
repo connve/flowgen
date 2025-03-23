@@ -34,3 +34,24 @@ impl StringExt for String {
         Ok(value)
     }
 }
+
+pub trait SerdeValueExt {
+    type Error;
+    fn try_from(&self) -> Result<serde_json::Value, Self::Error>;
+}
+
+impl SerdeValueExt for arrow::record_batch::RecordBatch {
+    type Error = Error;
+    fn try_from(&self) -> Result<serde_json::Value, Self::Error> {
+        let buf = Vec::new();
+        let mut writer = arrow_json::ArrayWriter::new(buf);
+        writer.write_batches(&[self]).unwrap();
+        writer.finish().unwrap();
+        let json_data = writer.into_inner();
+
+        use serde_json::{Map, Value};
+        let json_rows: Vec<Map<String, Value>> =
+            serde_json::from_reader(json_data.as_slice()).unwrap();
+        Ok(json_rows.into())
+    }
+}

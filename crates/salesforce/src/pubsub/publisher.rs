@@ -1,9 +1,9 @@
 use chrono::Utc;
 use flowgen_core::{
     client::Client,
+    conversion::render::Render,
+    conversion::serde::{MapExt, StringExt},
     event::Event,
-    render::Render,
-    serde::{MapExt, StringExt},
 };
 use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
 use serde_avro_fast::{ser, Schema};
@@ -23,13 +23,13 @@ pub enum Error {
     #[error("error with Salesforce authentication")]
     SalesforceAuth(#[source] crate::client::Error),
     #[error("error with parsing a given value")]
-    Serde(#[source] flowgen_core::serde::Error),
+    Serde(#[source] flowgen_core::conversion::serde::Error),
     #[error("error with parsing a given value")]
     SerdeJson(#[source] serde_json::error::Error),
     #[error("error with rendering a given value")]
-    Render(#[source] flowgen_core::render::Error),
+    Render(#[source] flowgen_core::conversion::render::Error),
     #[error("error with processing recordbatch")]
-    RecordBatch(#[source] flowgen_core::recordbatch::Error),
+    RecordBatch(#[source] flowgen_core::conversion::recordbatch::Error),
     #[error("missing required event attrubute")]
     MissingRequiredAttribute(String),
     #[error("error with sending event over channel")]

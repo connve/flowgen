@@ -20,6 +20,8 @@ pub enum Error {
     SalesforcePubsubPublisher(#[source] flowgen_salesforce::pubsub::publisher::Error),
     #[error("error processing http request")]
     HttpProcessor(#[source] flowgen_http::processor::Error),
+    #[error("error processing element during enumaration")]
+    EnumerateProcessor(#[source] flowgen_core::task::enumerate::processor::Error),
     #[error("error with NATS JetStream Publisher")]
     NatsJetStreamPublisher(#[source] flowgen_nats::jetstream::publisher::Error),
     #[error("error with NATS JetStream Subscriber")]
@@ -29,7 +31,7 @@ pub enum Error {
     #[error("error with file publisher")]
     FilePublisher(#[source] flowgen_file::publisher::Error),
     #[error("error with generate subscriber")]
-    GenerateSubscriber(#[source] flowgen_generate::subscriber::Error),
+    GenerateSubscriber(#[source] flowgen_core::task::generate::subscriber::Error),
 }
 
 #[derive(Debug)]
@@ -105,7 +107,7 @@ impl Flow {
                         let config = Arc::new(config.to_owned());
                         let tx = tx.clone();
                         let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                            flowgen_generate::subscriber::SubscriberBuilder::new()
+                            flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
                                 .config(config)
                                 .sender(tx)
                                 .current_task_id(i)
@@ -137,6 +139,27 @@ impl Flow {
                                 .process()
                                 .await
                                 .map_err(Error::HttpProcessor)?;
+
+                            Ok(())
+                        });
+                        handle_list.push(handle);
+                    }
+                    config::Processor::enumerate(config) => {
+                        let config = Arc::new(config.to_owned());
+                        let rx = tx.subscribe();
+                        let tx = tx.clone();
+                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                            flowgen_core::task::enumerate::processor::ProcessorBuilder::new()
+                                .config(config)
+                                .receiver(rx)
+                                .sender(tx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .map_err(Error::EnumerateProcessor)?
+                                .process()
+                                .await
+                                .map_err(Error::EnumerateProcessor)?;
 
                             Ok(())
                         });

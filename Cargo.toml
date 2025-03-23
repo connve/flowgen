@@ -11,6 +11,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+bytes = { version = "1.9.0" }
 handlebars = { version = "6.3.0" }
 arrow-json = { version = "54.0.0" }
 chrono = { version = "0.4.39" }
@@ -23,3 +24,7 @@ futures-util = { version = "0.3.30" }
 futures = { version = "0.3.30" }
 arrow = { version = "54.0.0" }
 reqwest = { version = "0.12.11" }
+url = { version = "2.5.2" }
+async-nats = { version = "0.35.1" }
+bincode = { version = "1.3.3" }
+tonic = { version = "0.10.2", features = ["tls-roots"] }

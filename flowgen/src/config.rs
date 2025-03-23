@@ -23,13 +23,14 @@ pub enum Source {
     file(flowgen_file::config::Source),
     salesforce_pubsub(flowgen_salesforce::pubsub::config::Source),
     nats_jetstream(flowgen_nats::jetstream::config::Source),
-    generate(flowgen_generate::config::Source),
+    generate(flowgen_core::task::generate::config::Source),
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[allow(non_camel_case_types)]
 pub enum Processor {
     http(flowgen_http::config::Processor),
+    enumerate(flowgen_core::task::enumerate::config::Processor),
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
