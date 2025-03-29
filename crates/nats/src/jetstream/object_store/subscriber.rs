@@ -1,6 +1,6 @@
 use arrow::csv::reader::Format;
 use arrow::csv::ReaderBuilder;
-use async_nats::jetstream::{context::ObjectStoreError,context::ObjectStoreErrorKind, object_store::{Config, GetErrorKind}};
+use async_nats::jetstream::{context::ObjectStoreErrorKind, object_store::GetErrorKind};
 use flowgen_core::{connect::client::Client, stream::event::Event, stream::event::EventBuilder};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;

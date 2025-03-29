@@ -34,6 +34,8 @@ pub enum Error {
     GenerateSubscriber(#[source] flowgen_core::task::generate::subscriber::Error),
     #[error("error with NATS JetStream Subscriber")]
     NatsJetStreamObjectStoreSubscriber(#[source] flowgen_nats::jetstream::object_store::subscriber::Error),
+    #[error("error with NATS JetStream Subscriber")]
+    NatsJetStreamObjectStoreCSVSubscriber(#[source] flowgen_nats::jetstream::object_store::csvsubscriber::Error),
 
 }
 
@@ -138,6 +140,24 @@ impl Flow {
                                 .subscribe()
                                 .await
                                 .map_err(Error::NatsJetStreamObjectStoreSubscriber)?;
+                            Ok(())
+                        });
+                        handle_list.push(handle);
+                    }
+                    config::Source::csv_to_object_store(config) => {
+                        let config = Arc::new(config.to_owned());
+                        let tx = tx.clone();
+                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                            flowgen_nats::jetstream::object_store::csvsubscriber::CSVSubscriberBuilder::new()
+                                .config(config)
+                                .sender(tx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .map_err(Error::NatsJetStreamObjectStoreCSVSubscriber)?
+                                .subscribe()
+                                .await
+                                .map_err(Error::NatsJetStreamObjectStoreCSVSubscriber)?;
                             Ok(())
                         });
                         handle_list.push(handle);

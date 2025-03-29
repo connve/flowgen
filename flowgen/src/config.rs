@@ -25,6 +25,7 @@ pub enum Source {
     nats_jetstream(flowgen_nats::jetstream::config::Source),
     generate(flowgen_core::task::generate::config::Source),
     object_store(flowgen_nats::jetstream::object_store::config::Source),
+    csv_to_object_store(flowgen_nats::jetstream::object_store::config::Source),
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
