@@ -5,7 +5,6 @@ pub struct Source {
     pub credentials: String,
     pub input_bucket: String,
     pub stream: String,
-    pub subject: String,
     pub durable_name: String,
     pub batch_size: Option<usize>,
     pub delay_secs: Option<u64>,

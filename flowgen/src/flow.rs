@@ -146,12 +146,9 @@ impl Flow {
                     }
                     config::Source::csv_to_object_store(config) => {
                         let config = Arc::new(config.to_owned());
-                        let tx = tx.clone();
                         let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                             flowgen_nats::jetstream::object_store::csvsubscriber::CSVSubscriberBuilder::new()
                                 .config(config)
-                                .sender(tx)
-                                .current_task_id(i)
                                 .build()
                                 .await
                                 .map_err(Error::NatsJetStreamObjectStoreCSVSubscriber)?

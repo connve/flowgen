@@ -97,8 +97,6 @@ impl Csvsubscriber {
 #[derive(Default)]
 pub struct CSVSubscriberBuilder {
     config: Option<Arc<super::config::Source>>,
-    tx: Option<Sender<Event>>,
-    current_task_id: usize,
 }
 
 impl CSVSubscriberBuilder {
@@ -110,16 +108,6 @@ impl CSVSubscriberBuilder {
 
     pub fn config(mut self, config: Arc<super::config::Source>) -> Self {
         self.config = Some(config);
-        self
-    }
-
-    pub fn sender(mut self, sender: Sender<Event>) -> Self {
-        self.tx = Some(sender);
-        self
-    }
-
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
         self
     }
 
