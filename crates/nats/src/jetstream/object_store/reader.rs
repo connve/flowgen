@@ -1,5 +1,4 @@
 use arrow::csv::reader::Format;
-use arrow::csv::ReaderBuilder;
 use async_nats::jetstream::{context::ObjectStoreErrorKind, object_store::GetErrorKind};
 use flowgen_core::{connect::client::Client, stream::event::Event, stream::event::EventBuilder};
 use std::sync::Arc;
@@ -35,13 +34,13 @@ pub enum Error {
     SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
 }
 
-pub struct NatsObjectReader {
+pub struct Reader {
     config: Arc<super::config::Source>,
     tx: Sender<Event>,
     current_task_id: usize,
 }
 
-impl NatsObjectReader {
+impl Reader {
     pub async fn subscribe(self) -> Result<(), Error> {
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone().into())
@@ -90,7 +89,7 @@ impl NatsObjectReader {
                         None => DEFAULT_HAS_HEADER,
                 };
 
-                let csv = ReaderBuilder::new(Arc::new(schema.clone()))
+                let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
                     .with_header(has_header)
                     .with_batch_size(batch_size)
                     .build(buffer.as_slice())
@@ -117,15 +116,15 @@ impl NatsObjectReader {
 }
 
 #[derive(Default)]
-pub struct NatsObjectReaderBuilder {
+pub struct ReaderBuilder {
     config: Option<Arc<super::config::Source>>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
 }
 
-impl NatsObjectReaderBuilder {
-    pub fn new() -> NatsObjectReaderBuilder {
-        NatsObjectReaderBuilder {
+impl ReaderBuilder {
+    pub fn new() -> ReaderBuilder {
+        ReaderBuilder {
             ..Default::default()
         }
     }
@@ -145,8 +144,8 @@ impl NatsObjectReaderBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<NatsObjectReader, Error> {
-        Ok(NatsObjectReader {
+    pub async fn build(self) -> Result<Reader, Error> {
+        Ok(Reader {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
