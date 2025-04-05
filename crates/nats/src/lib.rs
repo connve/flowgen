@@ -6,7 +6,7 @@ pub mod jetstream {
     pub mod subscriber;
     pub mod object_store{
         pub mod config;
-        pub mod subscriber;
+        pub mod reader;
     }
 
 }

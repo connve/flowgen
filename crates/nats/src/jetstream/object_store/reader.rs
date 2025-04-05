@@ -35,13 +35,13 @@ pub enum Error {
     SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
 }
 
-pub struct Subscriber {
+pub struct NatsObjectReader {
     config: Arc<super::config::Source>,
     tx: Sender<Event>,
     current_task_id: usize,
 }
 
-impl Subscriber {
+impl NatsObjectReader {
     pub async fn subscribe(self) -> Result<(), Error> {
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone().into())
@@ -117,15 +117,15 @@ impl Subscriber {
 }
 
 #[derive(Default)]
-pub struct SubscriberBuilder {
+pub struct NatsObjectReaderBuilder {
     config: Option<Arc<super::config::Source>>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
 }
 
-impl SubscriberBuilder {
-    pub fn new() -> SubscriberBuilder {
-        SubscriberBuilder {
+impl NatsObjectReaderBuilder {
+    pub fn new() -> NatsObjectReaderBuilder {
+        NatsObjectReaderBuilder {
             ..Default::default()
         }
     }
@@ -145,8 +145,8 @@ impl SubscriberBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Subscriber, Error> {
-        Ok(Subscriber {
+    pub async fn build(self) -> Result<NatsObjectReader, Error> {
+        Ok(NatsObjectReader {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
