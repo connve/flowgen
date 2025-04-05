@@ -21,4 +21,5 @@ pub enum Task {
     nats_jetstream_publisher(flowgen_nats::jetstream::config::Publisher),
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
+    object_store_subscriber(flowgen_nats::jetstream::object_store::config::Source),
 }

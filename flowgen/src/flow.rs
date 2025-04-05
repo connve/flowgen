@@ -32,6 +32,9 @@ pub enum Error {
     FileWriter(#[source] flowgen_file::writer::Error),
     #[error("error with generate subscriber")]
     GenerateSubscriber(#[source] flowgen_core::task::generate::subscriber::Error),
+    #[error("error with NATS JetStream Subscriber")]
+    NatsJetStreamObjectStoreSubscriber(#[source] flowgen_nats::jetstream::object_store::reader::Error),
+
 }
 
 #[derive(Debug)]
@@ -181,6 +184,25 @@ impl Flow {
                         Ok(())
                     });
                     handle_list.push(handle);
+                }
+                Task::object_store_subscriber(config) => {
+                    let config = Arc::new(config.to_owned());
+                        let tx = tx.clone();
+                        let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                            flowgen_nats::jetstream::object_store::reader::ReaderBuilder::new()
+                                .config(config)
+                                .sender(tx)
+                                .current_task_id(i)
+                                .build()
+                                .await
+                                .map_err(Error::NatsJetStreamObjectStoreSubscriber)?
+                                .subscribe()
+                                .await
+                                .map_err(Error::NatsJetStreamObjectStoreSubscriber)?;
+                            Ok(())
+                        });
+                        handle_list.push(handle);
+
                 }
                 Task::salesforce_pubsub_subscriber(config) => {
                     let config = Arc::new(config.to_owned());

@@ -4,4 +4,9 @@ pub mod jetstream {
     pub mod message;
     pub mod publisher;
     pub mod subscriber;
+    pub mod object_store{
+        pub mod config;
+        pub mod reader;
+    }
+
 }
