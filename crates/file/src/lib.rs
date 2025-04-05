@@ -1,3 +1,3 @@
 pub mod config;
-pub mod publisher;
-pub mod subscriber;
+pub mod reader;
+pub mod writer;

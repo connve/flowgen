@@ -1,4 +1,3 @@
-use arrow::csv::WriterBuilder;
 use chrono::Utc;
 use flowgen_core::stream::event::Event;
 use futures::future::try_join_all;
@@ -22,21 +21,21 @@ pub enum Error {
     EmptyStr(),
 }
 
-pub struct Publisher {
-    config: Arc<super::config::Publisher>,
+pub struct Writer {
+    config: Arc<super::config::Writer>,
     rx: Receiver<Event>,
     current_task_id: usize,
 }
 
-impl flowgen_core::task::runner::Runner for Publisher {
+impl flowgen_core::task::runner::Runner for Writer {
     type Error = Error;
     async fn run(mut self) -> Result<(), Self::Error> {
         let mut handle_list = Vec::new();
 
         while let Ok(event) = self.rx.recv().await {
-            let config = Arc::clone(&self.config);
-            let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                if event.current_task_id == Some(self.current_task_id - 1) {
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let config = Arc::clone(&self.config);
+                let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                     let file_stem = config
                         .path
                         .file_stem()
@@ -56,7 +55,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
                     let file = File::create(filename).map_err(Error::IO)?;
 
-                    WriterBuilder::new()
+                    arrow::csv::WriterBuilder::new()
                         .with_header(true)
                         .build(file)
                         .write(&event.data)
@@ -67,34 +66,33 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         DEFAULT_MESSAGE_SUBJECT, file_stem, timestamp, file_ext
                     );
                     event!(Level::INFO, "event published: {}", subject);
-                }
-                Ok(())
-            });
 
-            handle_list.push(handle);
+                    Ok(())
+                });
+
+                handle_list.push(handle);
+            }
         }
-
         let _ = try_join_all(handle_list.iter_mut()).await;
-
         Ok(())
     }
 }
 
 #[derive(Default)]
-pub struct PublisherBuilder {
-    config: Option<Arc<super::config::Publisher>>,
+pub struct WriterBuilder {
+    config: Option<Arc<super::config::Writer>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
 }
 
-impl PublisherBuilder {
-    pub fn new() -> PublisherBuilder {
-        PublisherBuilder {
+impl WriterBuilder {
+    pub fn new() -> WriterBuilder {
+        WriterBuilder {
             ..Default::default()
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Publisher>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Writer>) -> Self {
         self.config = Some(config);
         self
     }
@@ -109,8 +107,8 @@ impl PublisherBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Publisher, Error> {
-        Ok(Publisher {
+    pub async fn build(self) -> Result<Writer, Error> {
+        Ok(Writer {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,

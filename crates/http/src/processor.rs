@@ -83,12 +83,12 @@ impl flowgen_core::task::runner::Runner for Processor {
         let client = Arc::new(client);
 
         while let Ok(event) = self.rx.recv().await {
-            let config = Arc::clone(&self.config);
-            let client = Arc::clone(&client);
-            let tx = self.tx.clone();
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let config = Arc::clone(&self.config);
+                let client = Arc::clone(&client);
+                let tx = self.tx.clone();
 
-            let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                if event.current_task_id == Some(self.current_task_id - 1) {
+                let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                     // Get input dynamic values.
                     let mut data = Map::new();
                     if let Some(inputs) = &config.inputs {
@@ -206,14 +206,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                     tx.send(e).map_err(Error::SendMessage)?;
                     event!(Level::INFO, "{}", event_message);
-                }
-                Ok(())
-            });
-            handle_list.push(handle);
+                    Ok(())
+                });
+                handle_list.push(handle);
+            }
         }
-
         let _ = try_join_all(handle_list.iter_mut()).await;
-
         Ok(())
     }
 }

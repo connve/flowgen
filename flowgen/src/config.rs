@@ -13,8 +13,8 @@ pub struct Flow {
 #[allow(non_camel_case_types)]
 pub enum Task {
     enumerate(flowgen_core::task::enumerate::config::Processor),
-    file_subscriber(flowgen_file::config::Subscriber),
-    file_publisher(flowgen_file::config::Publisher),
+    file_reader(flowgen_file::config::Reader),
+    file_writer(flowgen_file::config::Writer),
     generate(flowgen_core::task::generate::config::Subscriber),
     http(flowgen_http::config::Processor),
     nats_jetstream_subscriber(flowgen_nats::jetstream::config::Subscriber),
