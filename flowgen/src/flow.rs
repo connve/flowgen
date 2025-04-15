@@ -6,12 +6,13 @@ use tokio::{
     sync::broadcast::{Receiver, Sender},
     task::JoinHandle,
 };
+use tracing::error;
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("error writing data into Deltalake")]
-    DeltalakeWriter(#[source] flowgen_deltalake::writer::Error),
+    #[error(transparent)]
+    DeltalakeWriter(#[from] flowgen_deltalake::writer::Error),
     #[error("error processing element during enumaration")]
     EnumerateProcessor(#[source] flowgen_core::task::enumerate::processor::Error),
     #[error("error reading a credentials file at path {1}")]
@@ -59,21 +60,16 @@ impl Flow {
                 Task::deltalake_writer(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
-                    let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                        flowgen_deltalake::writer::WriterBuilder::new()
-                            .config(config)
-                            .receiver(rx)
-                            .current_task_id(i)
-                            .build()
-                            .await
-                            .map_err(Error::DeltalakeWriter)?
-                            .run()
-                            .await
-                            .map_err(Error::DeltalakeWriter)?;
-
-                        Ok(())
-                    });
-                    handle_list.push(handle);
+                    flowgen_deltalake::writer::WriterBuilder::new()
+                        .config(config)
+                        .receiver(rx)
+                        .current_task_id(i)
+                        .build()
+                        .await
+                        .map_err(Error::DeltalakeWriter)?
+                        .run()
+                        .await
+                        .map_err(Error::DeltalakeWriter)?;
                 }
                 Task::enumerate(config) => {
                     let config = Arc::new(config.to_owned());

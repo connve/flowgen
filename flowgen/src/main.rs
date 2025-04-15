@@ -4,7 +4,6 @@ use std::process;
 use tracing::error;
 use tracing::event;
 use tracing::Level;
-pub const DEFAULT_TOPIC_NAME: &str = "/data/ChangeEvents";
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +23,6 @@ async fn main() {
         }
     }
 
-    let mut all_handle_list = Vec::new();
     for config in glob(&config_dir).unwrap_or_else(|err| {
         error!("{:?}", err);
         process::exit(1);
@@ -47,24 +45,8 @@ async fn main() {
                 process::exit(1);
             });
 
-        if let Some(handle_list) = f.handle_list {
-            for handle in handle_list {
-                all_handle_list.push(handle);
-            }
-        }
-    }
-
-    for handle in all_handle_list {
-        let result = handle.await;
-        match result {
-            Ok(result) => {
-                if let Err(e) = result {
-                    error!("{:?}", e);
-                };
-            }
-            Err(e) => {
-                error!("{:?}", e);
-            }
+        if let Some(tasks) = f.handle_list {
+            futures_util::future::join_all(tasks).await;
         }
     }
 }

@@ -63,7 +63,7 @@ impl flowgen_core::task::runner::Runner for Reader {
                 let config = Arc::clone(&self.config);
                 let tx = self.tx.clone();
                 let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                    let mut file = File::open(&config.path).map_err(Error::IO)?;
+                    let mut file = File::open(&config.path).unwrap();
                     let (schema, _) = Format::default()
                         .with_header(true)
                         .infer_schema(&mut file, Some(100))
