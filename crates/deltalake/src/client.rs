@@ -46,8 +46,7 @@ impl flowgen_core::connect::client::Client for Client {
             .map_err(Error::DeltaTable)?;
 
         match deltalake::open_table_with_storage_options(path, storage_options).await {
-            Ok(ops) => {
-                let table = ops;
+            Ok(table) => {
                 self.table = Some(table);
             }
             Err(_) => {

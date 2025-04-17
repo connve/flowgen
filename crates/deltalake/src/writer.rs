@@ -1,10 +1,16 @@
 use chrono::Utc;
 use deltalake::{
+    datafusion::{
+        datasource::MemTable,
+        logical_expr::function::ExpressionArgs,
+        prelude::{col, lit, DataFrame, SessionContext},
+    },
     parquet::{
         basic::{Compression, ZstdLevel},
         file::properties::WriterProperties,
     },
     writer::{DeltaWriter, RecordBatchWriter},
+    DeltaOps, DeltaTable,
 };
 use flowgen_core::{connect::client::Client, stream::event::Event};
 use std::sync::Arc;
@@ -43,23 +49,40 @@ pub struct EventHandler {
 impl EventHandler {
     async fn process(self, event: Event) -> Result<(), Error> {
         let mut client = self.client.lock().await;
+
         let table = client.table.as_mut().ok_or_else(Error::MissingDeltaTable)?;
+        let ops = DeltaOps::from(table.clone());
 
-        let writer_properties = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(
-                ZstdLevel::try_new(3).map_err(Error::Parquet)?,
-            ))
-            .build();
+        let ctx = SessionContext::new();
+        let schema = event.data.schema();
+        let provider = MemTable::try_new(schema.clone(), vec![vec![event.data]]).unwrap();
+        ctx.register_table("source", Arc::new(provider)).unwrap();
 
-        let mut writer = RecordBatchWriter::for_table(table)
-            .map_err(Error::DeltaTable)?
-            .with_writer_properties(writer_properties);
-
-        writer.write(event.data).await.map_err(Error::DeltaTable)?;
-        writer
-            .flush_and_commit(table)
+        // Now, get a DataFusion DataFrame handle for the source:
+        let df = ctx.table("source").await.unwrap();
+        let predicate = "target.Id = source.Id";
+        ops.merge(df, predicate)
+            .with_source_alias("source")
+            .with_target_alias("target")
+            // .when_not_matched_insert(|insert| insert.set("Id", col("source.\"Id\"")))?
             .await
-            .map_err(Error::DeltaTable)?;
+            .unwrap();
+
+        // let writer_properties = WriterProperties::builder()
+        //     .set_compression(Compression::ZSTD(
+        //         ZstdLevel::try_new(3).map_err(Error::Parquet)?,
+        //     ))
+        //     .build();
+
+        // let mut writer = RecordBatchWriter::for_table(table)
+        //     .map_err(Error::DeltaTable)?
+        //     .with_writer_properties(writer_properties);
+
+        // writer.write(event.data).await.map_err(Error::DeltaTable)?;
+        // writer
+        //     .flush_and_commit(table)
+        //     .await
+        //     .map_err(Error::DeltaTable)?;
 
         let file_stem = self
             .config
