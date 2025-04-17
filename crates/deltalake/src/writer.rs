@@ -35,7 +35,6 @@ pub enum Error {
     EmptyStr(),
 }
 
-#[derive(Debug)]
 pub struct EventHandler {
     client: Arc<Mutex<super::client::Client>>,
     config: Arc<super::config::Writer>,

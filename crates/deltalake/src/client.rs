@@ -22,7 +22,6 @@ pub enum Error {
     EmptyStr(),
 }
 
-#[derive(Debug)]
 pub struct Client {
     credentials: String,
     path: PathBuf,
@@ -42,29 +41,39 @@ impl flowgen_core::connect::client::Client for Client {
 
         let path = self.path.to_str().ok_or_else(Error::MissingPath)?;
 
-        let ops = DeltaOps::try_from_uri_with_storage_options(path, storage_options)
+        let ops = DeltaOps::try_from_uri_with_storage_options(path, storage_options.clone())
             .await
             .map_err(Error::DeltaTable)?;
 
-        if let Some(ref config_columns) = self.columns {
-            let mut columns = Vec::new();
-
-            for c in config_columns {
-                let data_type = match c.data_type {
-                    crate::config::DataType::Utf8 => DataType::Primitive(PrimitiveType::String),
-                };
-                let struct_field = StructField::new(c.name.to_string(), data_type, c.nullable);
-                columns.push(struct_field);
+        match deltalake::open_table_with_storage_options(path, storage_options).await {
+            Ok(ops) => {
+                let table = ops;
+                self.table = Some(table);
             }
+            Err(_) => {
+                if let Some(ref config_columns) = self.columns {
+                    let mut columns = Vec::new();
 
-            let table = ops
-                .create()
-                .with_columns(columns)
-                .await
-                .map_err(Error::DeltaTable)?;
+                    for c in config_columns {
+                        let data_type = match c.data_type {
+                            crate::config::DataType::Utf8 => {
+                                DataType::Primitive(PrimitiveType::String)
+                            }
+                        };
+                        let struct_field =
+                            StructField::new(c.name.to_string(), data_type, c.nullable);
+                        columns.push(struct_field);
+                    }
+                    let table = ops
+                        .create()
+                        .with_columns(columns)
+                        .await
+                        .map_err(Error::DeltaTable)?;
+                    self.table = Some(table);
+                }
+            }
+        };
 
-            self.table = Some(table)
-        }
         Ok(self)
     }
 }
