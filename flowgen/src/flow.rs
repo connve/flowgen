@@ -55,6 +55,12 @@ impl Flow {
         let mut task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
 
+        let cache = flowgen_nats::cache::CacheBuilder::new()
+            .credentials("".to_string().into())
+            .build()
+            .unwrap();
+        let cache = Arc::new(cache);
+
         for (i, task) in config.flow.tasks.iter().enumerate() {
             match task {
                 Task::deltalake_writer(config) => {
@@ -100,11 +106,13 @@ impl Flow {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let tx = tx.clone();
+                    let cache = Arc::clone(&cache);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_file::reader::ReaderBuilder::new()
                             .config(config)
                             .sender(tx)
                             .receiver(rx)
+                            .cache(cache)
                             .current_task_id(i)
                             .build()
                             .await

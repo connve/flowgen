@@ -1,6 +1,9 @@
 use arrow::{array::RecordBatch, csv::reader::Format, ipc::writer::StreamWriter};
 use chrono::Utc;
-use flowgen_core::stream::event::{Event, EventBuilder};
+use flowgen_core::{
+    cache::Cache,
+    stream::event::{Event, EventBuilder},
+};
 use futures::future::try_join_all;
 use std::{fs::File, io::Seek, sync::Arc};
 use tokio::{
@@ -46,14 +49,15 @@ impl RecordBatchConverter for RecordBatch {
     }
 }
 
-pub struct Reader {
+pub struct Reader<T: Cache> {
     config: Arc<super::config::Reader>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
+    cache: Arc<T>,
     current_task_id: usize,
 }
 
-impl flowgen_core::task::runner::Runner for Reader {
+impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     type Error = Error;
     async fn run(mut self) -> Result<(), Error> {
         let mut handle_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
@@ -61,6 +65,7 @@ impl flowgen_core::task::runner::Runner for Reader {
         while let Ok(event) = self.rx.recv().await {
             if event.current_task_id == Some(self.current_task_id - 1) {
                 let config = Arc::clone(&self.config);
+                let cache = Arc::clone(&self.cache);
                 let tx = self.tx.clone();
                 let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                     let mut file = File::open(&config.path).unwrap();
@@ -70,9 +75,9 @@ impl flowgen_core::task::runner::Runner for Reader {
                         .map_err(Error::Arrow)?;
                     file.rewind().map_err(Error::IO)?;
 
-                    // if config.cache_schema.is_some_and(|x| x) {
-                    //     println!("cache")
-                    // }
+                    if config.cache_schema.is_some_and(|x| x) {
+                        // cache.get();
+                    }
 
                     let batch_size = match config.batch_size {
                         Some(batch_size) => batch_size,
@@ -122,15 +127,19 @@ impl flowgen_core::task::runner::Runner for Reader {
 }
 
 #[derive(Default)]
-pub struct ReaderBuilder {
+pub struct ReaderBuilder<T> {
     config: Option<Arc<super::config::Reader>>,
     tx: Option<Sender<Event>>,
     rx: Option<Receiver<Event>>,
+    cache: Option<Arc<T>>,
     current_task_id: usize,
 }
 
-impl ReaderBuilder {
-    pub fn new() -> ReaderBuilder {
+impl<T: Cache> ReaderBuilder<T>
+where
+    T: Default,
+{
+    pub fn new() -> ReaderBuilder<T> {
         ReaderBuilder {
             ..Default::default()
         }
@@ -156,7 +165,21 @@ impl ReaderBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Reader, Error> {
+    /// Sets the cache instance for this object.
+    ///
+    /// This method allows injecting a shared, thread-safe cache implementation
+    /// that conforms to the `Cache` trait. The object will use this
+    /// cache for its caching needs (e.g., storing or retrieving data).
+    ///
+    /// # Arguments
+    /// * `cache` - An `Arc<dyn Cache<Error = Error>>` representing the shared cache instance.
+    ///             The `Error` type must match the expected error type for cache operations
+    ///             within this object.
+    pub fn cache(mut self, cache: Arc<T>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+    pub async fn build(self) -> Result<Reader<T>, Error> {
         Ok(Reader {
             config: self
                 .config
@@ -167,6 +190,9 @@ impl ReaderBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+            cache: self
+                .cache
+                .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
         })
     }
