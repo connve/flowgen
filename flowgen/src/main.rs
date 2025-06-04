@@ -10,6 +10,8 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let config_dir = env::var("CONFIG_DIR").expect("env variable CONFIG_DIR should be set");
+    let cache_credentials_path = env::var("CACHE_CREDENTIALS_PATH")
+        .expect("env variable CACHE_CREDENTIALS_PATH should be set");
 
     if let Ok(configs) = glob(&config_dir) {
         let num_configs = configs.count();
@@ -32,7 +34,9 @@ async fn main() {
             process::exit(1);
         });
 
-        let f = flowgen::flow::Builder::new(config_path)
+        let f = flowgen::flow::FlowBuilder::new()
+            .config_path(config_path)
+            .cache_credentials_path(cache_credentials_path.clone().into())
             .build()
             .unwrap_or_else(|err| {
                 error!("{:?}", err);

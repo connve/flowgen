@@ -44,22 +44,29 @@ pub enum Error {
     ),
     #[error("error rendering content")]
     RenderProcessor(#[source] flowgen_core::task::render::processor::Error),
+    /// An expected attribute or configuration value was missing.
+    #[error("missing required event attribute")]
+    MissingRequiredAttribute(String),
 }
 
 #[derive(Debug)]
 pub struct Flow {
-    config: config::Config,
+    config_path: PathBuf,
+    cache_credential_path: PathBuf,
     pub task_list: Option<Vec<JoinHandle<Result<(), Error>>>>,
 }
 
 impl Flow {
     pub async fn run(mut self) -> Result<Self, Error> {
-        let config = &self.config;
+        let c = std::fs::read_to_string(&self.config_path)
+            .map_err(|e| Error::OpenFile(e, self.config_path.clone()))?;
+        let config: config::Config = serde_json::from_str(&c).map_err(Error::ParseConfig)?;
+
         let mut task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
 
         let cache = flowgen_nats::cache::CacheBuilder::new()
-            .credentials_path("".to_string().into())
+            .credentials_path(self.cache_credential_path.clone())
             .build()
             .unwrap()
             .init(DEFAULT_CACHE_NAME)
@@ -308,23 +315,38 @@ impl Flow {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct Builder {
-    config_path: PathBuf,
+#[derive(Default)]
+pub struct FlowBuilder {
+    config_path: Option<PathBuf>,
+    cache_credentials_path: Option<PathBuf>,
 }
 
-impl Builder {
-    pub fn new(config_path: PathBuf) -> Builder {
-        Builder { config_path }
+impl FlowBuilder {
+    pub fn new() -> FlowBuilder {
+        FlowBuilder {
+            ..Default::default()
+        }
     }
-    pub fn build(&mut self) -> Result<Flow, Error> {
-        let c = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| Error::OpenFile(e, self.config_path.clone()))?;
-        let config: config::Config = serde_json::from_str(&c).map_err(Error::ParseConfig)?;
-        let f = Flow {
-            config,
+
+    pub fn config_path(mut self, config_path: PathBuf) -> Self {
+        self.config_path = Some(config_path);
+        self
+    }
+
+    pub fn cache_credentials_path(mut self, cache_credentials_path: PathBuf) -> Self {
+        self.cache_credentials_path = Some(cache_credentials_path);
+        self
+    }
+
+    pub fn build(self) -> Result<Flow, Error> {
+        Ok(Flow {
+            config_path: self
+                .config_path
+                .ok_or_else(|| Error::MissingRequiredAttribute("config_path".to_string()))?,
+            cache_credential_path: self.cache_credentials_path.ok_or_else(|| {
+                Error::MissingRequiredAttribute("cache_credential_path".to_string())
+            })?,
             task_list: None,
-        };
-        Ok(f)
+        })
     }
 }

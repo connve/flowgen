@@ -72,8 +72,7 @@ pub enum Error {
     #[error(transparent)]
     DataFusion(#[from] deltalake::datafusion::error::DataFusionError),
     /// An expected attribute or configuration value was missing.
-    #[error("missing required event attrubute")]
-    // Note: "attrubute" typo exists in original code
+    #[error("missing required event attribute")]
     MissingRequiredAttribute(String),
     /// The required `path` configuration for the Delta table was not provided.
     #[error("missing required config value path")]
