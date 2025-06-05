@@ -11,10 +11,10 @@ pub enum Error {
     MissingTokenResponse(),
     #[error("service channel missing")]
     MissingServiceChannel(),
-    #[error("invalid metadata value")]
-    InvalidMetadataValue(#[source] tonic::metadata::errors::InvalidMetadataValue),
-    #[error("error error with RPC call")]
-    RPCFailed(#[source] tonic::Status),
+    #[error(transparent)]
+    InvalidMetadataValue(#[from] tonic::metadata::errors::InvalidMetadataValue),
+    #[error(transparent)]
+    Tonic(#[from] tonic::Status),
 }
 
 struct ContextInterceptor {
@@ -59,7 +59,7 @@ impl Context {
         self.pubsub
             .get_topic(tonic::Request::new(request))
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
     pub async fn get_schema(
         &mut self,
@@ -68,7 +68,7 @@ impl Context {
         self.pubsub
             .get_schema(tonic::Request::new(request))
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
 
     pub async fn publish(
@@ -78,7 +78,7 @@ impl Context {
         self.pubsub
             .publish(tonic::Request::new(request))
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
 
     pub async fn subscribe(
@@ -95,7 +95,7 @@ impl Context {
                     .throttle(std::time::Duration::from_millis(10)),
             )
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
 
     pub async fn managed_subscribe(
@@ -114,7 +114,7 @@ impl Context {
                     .throttle(std::time::Duration::from_millis(10)),
             )
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
 
     pub async fn publish_stream(
@@ -131,7 +131,7 @@ impl Context {
                     .throttle(std::time::Duration::from_millis(10)),
             )
             .await
-            .map_err(Error::RPCFailed)
+            .map_err(Error::Tonic)
     }
 }
 

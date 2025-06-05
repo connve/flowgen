@@ -11,14 +11,16 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "enumerate";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("error with sending event over channel")]
-    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("error with creating event")]
-    Event(#[source] crate::stream::event::Error),
-    #[error("error with processing Record Batch")]
-    RecordBatch(#[source] crate::convert::recordbatch::Error),
+    #[error(transparent)]
+    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error(transparent)]
+    Event(#[from] crate::stream::event::Error),
+    #[error(transparent)]
+    RecordBatch(#[from] crate::convert::recordbatch::Error),
     #[error("missing required attrubute")]
     MissingRequiredAttribute(String),
+    #[error("no array data available")]
+    EmptyArray(),
 }
 pub struct Processor {
     config: Arc<super::config::Processor>,
@@ -34,7 +36,12 @@ impl crate::task::runner::Runner for Processor {
             if event.current_task_id == Some(self.current_task_id - 1) {
                 let data = self.config.array.extract(&event.data, &event.extensions);
                 if let Ok(data) = data {
-                    let arr = data.as_array().unwrap().iter().enumerate();
+                    let arr = data
+                        .as_array()
+                        .ok_or_else(Error::EmptyArray)?
+                        .iter()
+                        .enumerate();
+
                     for (i, el) in arr {
                         let recordbatch = el
                             .to_string()

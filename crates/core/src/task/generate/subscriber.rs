@@ -11,12 +11,12 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("error with sending event over channel")]
-    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("error with creating event")]
-    Event(#[source] crate::stream::event::Error),
-    #[error("error with processing recordbatch")]
-    RecordBatch(#[source] crate::convert::recordbatch::Error),
+    #[error(transparent)]
+    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error(transparent)]
+    Event(#[from] crate::stream::event::Error),
+    #[error(transparent)]
+    RecordBatch(#[from] crate::convert::recordbatch::Error),
     #[error("missing required attrubute")]
     MissingRequiredAttribute(String),
 }
@@ -45,7 +45,11 @@ impl crate::task::runner::Runner for Subscriber {
                 None => format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, timestamp),
             };
 
-            let recordbatch = self.config.message.to_recordbatch().unwrap();
+            let recordbatch = self
+                .config
+                .message
+                .to_recordbatch()
+                .map_err(Error::RecordBatch)?;
 
             let e = EventBuilder::new()
                 .data(recordbatch)

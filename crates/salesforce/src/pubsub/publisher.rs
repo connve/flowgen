@@ -20,26 +20,30 @@ const DEFAULT_PUBSUB_PORT: &str = "443";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("error with PubSub context")]
-    SalesforcePubSub(#[source] super::context::Error),
-    #[error("error with Salesforce authentication")]
-    SalesforceAuth(#[source] crate::client::Error),
-    #[error("error with parsing a given value")]
-    Serde(#[source] flowgen_core::convert::serde::Error),
-    #[error("error with parsing a given value")]
-    SerdeJson(#[source] serde_json::error::Error),
-    #[error("error with rendering a given value")]
-    Render(#[source] flowgen_core::convert::render::Error),
-    #[error("error with processing Record Batch")]
-    RecordBatch(#[source] flowgen_core::convert::recordbatch::Error),
-    #[error("missing required event attrubute")]
+    #[error(transparent)]
+    SalesforcePubSub(#[from] super::context::Error),
+    #[error(transparent)]
+    SalesforceAuth(#[from] crate::client::Error),
+    #[error(transparent)]
+    SerdeExt(#[from] flowgen_core::convert::serde::Error),
+    #[error(transparent)]
+    SerdeAvro(#[from] serde_avro_fast::ser::SerError),
+    #[error(transparent)]
+    Render(#[from] flowgen_core::convert::render::Error),
+    #[error(transparent)]
+    RecordBatch(#[from] flowgen_core::convert::recordbatch::Error),
+    #[error(transparent)]
+    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error(transparent)]
+    Event(#[from] flowgen_core::stream::event::Error),
+    #[error(transparent)]
+    Service(#[from] flowgen_core::connect::service::Error),
+    #[error("missing required event attribute")]
     MissingRequiredAttribute(String),
-    #[error("error with sending event over channel")]
-    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("error with creating event")]
-    Event(#[source] flowgen_core::stream::event::Error),
-    #[error("error setting up flowgen grpc service")]
-    Service(#[source] flowgen_core::connect::service::Error),
+    #[error("empty object")]
+    EmptyObject(),
+    #[error("error parsing Schema Json string to Schema type")]
+    SchemaParse(),
 }
 
 pub struct Publisher {
@@ -102,7 +106,11 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let topic = &self.config.topic;
         let schema_id = &schema_info.schema_id;
 
-        let schema: Schema = schema_info.schema_json.parse().unwrap();
+        let schema: Schema = schema_info
+            .schema_json
+            .parse()
+            .map_err(|_| Error::SchemaParse())?;
+
         let serializer_config = &mut ser::SerializerConfig::new(&schema);
 
         while let Ok(event) = self.rx.recv().await {
@@ -121,21 +129,22 @@ impl flowgen_core::task::runner::Runner for Publisher {
                     .config
                     .payload
                     .to_string()
-                    .map_err(Error::Serde)?
+                    .map_err(Error::SerdeExt)?
                     .render(&data)
                     .map_err(Error::Render)?
                     .to_value()
-                    .map_err(Error::Serde)?;
+                    .map_err(Error::SerdeExt)?;
 
                 let mut publish_payload: Map<String, Value> = Map::new();
-                for (k, v) in payload.as_object().unwrap() {
+                for (k, v) in payload.as_object().ok_or_else(Error::EmptyObject)? {
                     publish_payload.insert(k.to_owned(), v.to_owned());
                 }
                 let now = Utc::now().timestamp_millis();
                 publish_payload.insert("CreatedDate".to_string(), Value::Number(now.into()));
 
                 let serialized_payload: Vec<u8> =
-                    serde_avro_fast::to_datum_vec(&publish_payload, serializer_config).unwrap();
+                    serde_avro_fast::to_datum_vec(&publish_payload, serializer_config)
+                        .map_err(Error::SerdeAvro)?;
 
                 let mut events = Vec::new();
                 let pe = ProducerEvent {

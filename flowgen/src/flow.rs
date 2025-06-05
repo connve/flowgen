@@ -1,10 +1,7 @@
 use super::config;
 use crate::config::Task;
 use flowgen_core::{cache::Cache, stream::event::Event, task::runner::Runner};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 use tokio::{
     sync::broadcast::{Receiver, Sender},
     task::JoinHandle,
@@ -19,35 +16,36 @@ const DEFAULT_CACHE_NAME: &str = "flowgen_cache";
 pub enum Error {
     #[error(transparent)]
     DeltalakeWriter(#[from] flowgen_deltalake::writer::Error),
-    #[error("error processing element during enumaration")]
-    EnumerateProcessor(#[source] flowgen_core::task::enumerate::processor::Error),
-    #[error("error reading a credentials file at path {1}")]
-    OpenFile(#[source] std::io::Error, PathBuf),
-    #[error("error parsing config file")]
-    ParseConfig(#[source] serde_json::Error),
-    #[error("error setting up Salesforce PubSub as flow source")]
-    SalesforcePubSubSubscriber(#[source] flowgen_salesforce::pubsub::subscriber::Error),
-    #[error("error setting up Salesforce PubSub as flow source")]
-    SalesforcePubsubPublisher(#[source] flowgen_salesforce::pubsub::publisher::Error),
-    #[error("error processing http request")]
-    HttpProcessor(#[source] flowgen_http::processor::Error),
-    #[error("error with NATS JetStream Publisher")]
-    NatsJetStreamPublisher(#[source] flowgen_nats::jetstream::publisher::Error),
-    #[error("error with NATS JetStream Subscriber")]
-    NatsJetStreamSubscriber(#[source] flowgen_nats::jetstream::subscriber::Error),
-    #[error("error with file subscriber")]
-    FileReader(#[source] flowgen_file::reader::Error),
-    #[error("error with file publisher")]
-    FileWriter(#[source] flowgen_file::writer::Error),
-    #[error("error with generate subscriber")]
-    GenerateSubscriber(#[source] flowgen_core::task::generate::subscriber::Error),
-    #[error("error with NATS JetStream Subscriber")]
+    #[error(transparent)]
+    EnumerateProcessor(#[from] flowgen_core::task::enumerate::processor::Error),
+    #[error(transparent)]
+    OpenFile(#[from] std::io::Error),
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
+    #[error(transparent)]
+    SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsub::subscriber::Error),
+    #[error(transparent)]
+    SalesforcePubsubPublisher(#[from] flowgen_salesforce::pubsub::publisher::Error),
+    #[error(transparent)]
+    HttpProcessor(#[from] flowgen_http::processor::Error),
+    #[error(transparent)]
+    NatsJetStreamPublisher(#[from] flowgen_nats::jetstream::publisher::Error),
+    #[error(transparent)]
+    NatsJetStreamSubscriber(#[from] flowgen_nats::jetstream::subscriber::Error),
+    #[error(transparent)]
+    Cache(#[from] flowgen_nats::cache::Error),
+    #[error(transparent)]
+    FileReader(#[from] flowgen_file::reader::Error),
+    #[error(transparent)]
+    FileWriter(#[from] flowgen_file::writer::Error),
+    #[error(transparent)]
+    GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
+    #[error(transparent)]
     NatsJetStreamObjectStoreSubscriber(
-        #[source] flowgen_nats::jetstream::object_store::reader::Error,
+        #[from] flowgen_nats::jetstream::object_store::reader::Error,
     ),
-    #[error("error rendering content")]
-    RenderProcessor(#[source] flowgen_core::task::render::processor::Error),
-    /// An expected attribute or configuration value was missing.
+    #[error(transparent)]
+    RenderProcessor(#[from] flowgen_core::task::render::processor::Error),
     #[error("missing required event attribute")]
     MissingRequiredAttribute(String),
 }
@@ -61,9 +59,8 @@ pub struct Flow<'a> {
 
 impl Flow<'_> {
     pub async fn run(mut self) -> Result<Self, Error> {
-        let c = std::fs::read_to_string(self.config_path)
-            .map_err(|e| Error::OpenFile(e, self.config_path.to_path_buf()))?;
-        let config: config::Config = serde_json::from_str(&c).map_err(Error::ParseConfig)?;
+        let c = std::fs::read_to_string(self.config_path).map_err(Error::OpenFile)?;
+        let config: config::Config = serde_json::from_str(&c).map_err(Error::Serde)?;
 
         let mut task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
@@ -71,10 +68,10 @@ impl Flow<'_> {
         let cache = flowgen_nats::cache::CacheBuilder::new()
             .credentials_path(self.cache_credential_path.to_path_buf())
             .build()
-            .unwrap()
+            .map_err(Error::Cache)?
             .init(DEFAULT_CACHE_NAME)
             .await
-            .unwrap();
+            .map_err(Error::Cache)?;
 
         let cache = Arc::new(cache);
 

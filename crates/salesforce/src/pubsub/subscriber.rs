@@ -159,9 +159,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                             }
                         }
                         Err(e) => {
-                            return Err(Error::SalesforcePubSub(super::context::Error::RPCFailed(
-                                e,
-                            )));
+                            return Err(Error::SalesforcePubSub(super::context::Error::Tonic(e)));
                         }
                     }
                 }

@@ -19,16 +19,20 @@ const DEFAULT_HAS_HEADER: bool = true;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("error reading file")]
-    IO(#[source] std::io::Error),
-    #[error("error deserializing data into binary format")]
-    Arrow(#[source] arrow::error::ArrowError),
-    #[error("error with sending message over channel")]
-    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("error constructing Flowgen Event")]
-    Event(#[source] flowgen_core::stream::event::Error),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Arrow(#[from] arrow::error::ArrowError),
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
+    #[error(transparent)]
+    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error(transparent)]
+    Event(#[from] flowgen_core::stream::event::Error),
     #[error("missing required event attrubute")]
     MissingRequiredAttribute(String),
+    #[error("cache errors")]
+    Cache(),
 }
 
 pub trait RecordBatchConverter {
@@ -69,7 +73,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
                 let cache = Arc::clone(&self.cache);
                 let tx = self.tx.clone();
                 let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                    let mut file = File::open(&config.path).unwrap();
+                    let mut file = File::open(&config.path).map_err(Error::IO)?;
                     let (schema, _) = Format::default()
                         .with_header(true)
                         .infer_schema(&mut file, Some(100))
@@ -78,9 +82,13 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
                     if let Some(cache_options) = &config.cache_options {
                         if let Some(insert_key) = &cache_options.insert_key {
-                            let schema_string = serde_json::to_string(&schema).unwrap();
+                            let schema_string =
+                                serde_json::to_string(&schema).map_err(Error::Serde)?;
                             let schema_bytes = Bytes::from(schema_string);
-                            cache.put(insert_key.as_str(), schema_bytes).await.unwrap();
+                            cache
+                                .put(insert_key.as_str(), schema_bytes)
+                                .await
+                                .map_err(|_| Error::Cache())?;
                         }
                     };
 
