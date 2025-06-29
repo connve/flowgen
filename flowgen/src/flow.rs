@@ -1,5 +1,4 @@
-use super::config;
-use crate::config::Task;
+use crate::config::{FlowConfig, Task};
 use flowgen_core::{cache::Cache, stream::event::Event, task::runner::Runner};
 use std::{path::Path, sync::Arc};
 use tokio::{
@@ -18,10 +17,6 @@ pub enum Error {
     DeltalakeWriter(#[from] flowgen_deltalake::writer::Error),
     #[error(transparent)]
     EnumerateProcessor(#[from] flowgen_core::task::enumerate::processor::Error),
-    #[error(transparent)]
-    OpenFile(#[from] std::io::Error),
-    #[error(transparent)]
-    Serde(#[from] serde_json::Error),
     #[error(transparent)]
     SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsub::subscriber::Error),
     #[error(transparent)]
@@ -52,16 +47,13 @@ pub enum Error {
 
 #[derive(Debug)]
 pub struct Flow<'a> {
-    config_path: &'a Path,
+    config: FlowConfig,
     cache_credential_path: &'a Path,
     pub task_list: Option<Vec<JoinHandle<Result<(), Error>>>>,
 }
 
 impl Flow<'_> {
     pub async fn run(mut self) -> Result<Self, Error> {
-        let c = std::fs::read_to_string(self.config_path).map_err(Error::OpenFile)?;
-        let config: config::Config = serde_json::from_str(&c).map_err(Error::Serde)?;
-
         let mut task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
 
@@ -75,7 +67,7 @@ impl Flow<'_> {
 
         let cache = Arc::new(cache);
 
-        for (i, task) in config.flow.tasks.iter().enumerate() {
+        for (i, task) in self.config.flow.tasks.iter().enumerate() {
             match task {
                 Task::deltalake_writer(config) => {
                     let config = Arc::new(config.to_owned());
@@ -319,7 +311,7 @@ impl Flow<'_> {
 
 #[derive(Default)]
 pub struct FlowBuilder<'a> {
-    config_path: Option<&'a Path>,
+    config: Option<FlowConfig>,
     cache_credentials_path: Option<&'a Path>,
 }
 
@@ -328,8 +320,8 @@ impl<'a> FlowBuilder<'a> {
         Self::default()
     }
 
-    pub fn config_path(mut self, path: &'a Path) -> Self {
-        self.config_path = Some(path);
+    pub fn config(mut self, config: FlowConfig) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -340,9 +332,9 @@ impl<'a> FlowBuilder<'a> {
 
     pub fn build(self) -> Result<Flow<'a>, Error> {
         Ok(Flow {
-            config_path: self
-                .config_path
-                .ok_or_else(|| Error::MissingRequiredAttribute("config_path".to_string()))?,
+            config: self
+                .config
+                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
             cache_credential_path: self.cache_credentials_path.ok_or_else(|| {
                 Error::MissingRequiredAttribute("cache_credential_path".to_string())
             })?,

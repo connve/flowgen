@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct Config {
+pub struct FlowConfig {
     pub flow: Flow,
 }
 
@@ -24,4 +26,21 @@ pub enum Task {
     render(flowgen_core::task::render::config::Processor),
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
+}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct AppConfig {
+    pub cache: Option<CacheOptions>,
+    pub flows: FlowOptions,
+}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct CacheOptions {
+    pub enabled: bool,
+    pub credentials_path: PathBuf,
+}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct FlowOptions {
+    pub dir: Option<PathBuf>,
 }

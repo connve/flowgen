@@ -1,70 +1,60 @@
-use glob::glob;
+use config::Config;
+use flowgen::app::App;
+use flowgen::config::AppConfig;
+use flowgen_core::task::runner::Runner;
 use std::env;
-use std::path::PathBuf;
 use std::process;
-use tracing::error;
 use tracing::event;
 use tracing::Level;
 
+/// Main entry point for the flowgen application.
+///
+/// Initializes tracing, loads configuration from environment variables and files,
+/// creates the application instance, and runs it. Exits with code 1 on any error.
 #[tokio::main]
 async fn main() {
+    // Initialize tracing for logging
     tracing_subscriber::fmt::init();
 
-    let config_dir = env::var("CONFIG_DIR").expect("env variable CONFIG_DIR should be set");
-    let cache_credentials_path = env::var("CACHE_CREDENTIALS_PATH")
-        .expect("env variable CACHE_CREDENTIALS_PATH should be set");
-
-    let cache_credentials_path = PathBuf::from(cache_credentials_path);
-
-    if let Ok(configs) = glob(&config_dir) {
-        let num_configs = configs.count();
-        if num_configs == 0 {
+    // Get configuration file path from environment variable.
+    let config_path = match env::var("CONFIG_PATH") {
+        Ok(path) => path,
+        Err(e) => {
             event!(
-                Level::WARN,
-                "{} flow configurations found at path: {}",
-                num_configs,
-                config_dir
+                Level::ERROR,
+                "environment variable CONFIG_PATH should be set: {}",
+                e
             );
-        }
-    }
-
-    let mut config_handles = Vec::new();
-
-    for config in glob(&config_dir).unwrap_or_else(|err| {
-        error!("{:?}", err);
-        process::exit(1);
-    }) {
-        let config_path = config.unwrap_or_else(|err| {
-            error!("{:?}", err);
             process::exit(1);
-        });
+        }
+    };
 
-        let cache_credentials_path = cache_credentials_path.clone();
+    // Build configuration from file and environment variables.
+    let config = match Config::builder()
+        .add_source(config::File::with_name(&config_path))
+        .add_source(config::Environment::with_prefix("APP"))
+        .build()
+    {
+        Ok(config) => config,
+        Err(e) => {
+            event!(Level::ERROR, "failed to build config: {}", e);
+            process::exit(1);
+        }
+    };
 
-        let handle = tokio::spawn(async move {
-            let f = flowgen::flow::FlowBuilder::new()
-                .config_path(&config_path)
-                .cache_credentials_path(&cache_credentials_path)
-                .build()
-                .unwrap_or_else(|err| {
-                    error!("{:?}", err);
-                    process::exit(1);
-                })
-                .run()
-                .await
-                .unwrap_or_else(|err| {
-                    error!("{:?}", err);
-                    process::exit(1);
-                });
+    // Deserialize configuration into AppConfig struct.
+    let app_config = match config.try_deserialize::<AppConfig>() {
+        Ok(config) => config,
+        Err(e) => {
+            event!(Level::ERROR, "failed to deserialize app config: {}", e);
+            process::exit(1);
+        }
+    };
 
-            if let Some(tasks) = f.task_list {
-                futures_util::future::join_all(tasks).await;
-            }
-        });
-
-        config_handles.push(handle);
+    // Create and run the application.
+    let app = App { config: app_config };
+    if let Err(e) = app.run().await {
+        event!(Level::ERROR, "application failed to run: {}", e);
+        process::exit(1);
     }
-
-    // Wait for all configs to complete
-    futures_util::future::join_all(config_handles).await;
 }
