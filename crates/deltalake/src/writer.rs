@@ -134,7 +134,7 @@ impl EventHandler {
     /// # Returns
     /// * `Ok(())` if the event was processed and written successfully.
     /// * `Err(Error)` if any error occurred during processing or writing.
-    async fn process(self, mut event: Event) -> Result<(), Error> {
+    async fn run(self, mut event: Event) -> Result<(), Error> {
         // Lock the client and setup necessary components i.e. table, operations context,
         // writer properties etc.
         let mut client = self.client.lock().await;
@@ -309,7 +309,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Writer<T> {
                 // while existing events are being written concurrently.
                 tokio::spawn(async move {
                     // Process the events and in case of error log it.
-                    if let Err(err) = event_handler.process(event).await {
+                    if let Err(err) = event_handler.run(event).await {
                         event!(Level::ERROR, "{}", err);
                     }
                 });

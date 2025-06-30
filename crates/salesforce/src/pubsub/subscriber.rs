@@ -67,7 +67,7 @@ struct TopicListener<T: Cache> {
 
 impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
     type Error = Error;
-    
+
     /// Runs the topic listener to process events from Salesforce Pub/Sub.
     ///
     /// Fetches topic and schema info, establishes subscription with optional
@@ -232,7 +232,7 @@ pub struct Subscriber<T: Cache> {
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
     type Error = Error;
-    
+
     /// Runs the subscriber by spawning TopicListener tasks for each topic.
     ///
     /// Establishes Salesforce connection, authenticates, and spawns a
