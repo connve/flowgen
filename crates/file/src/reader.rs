@@ -9,10 +9,14 @@ use std::{fs::File, io::Seek, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
+/// Default subject prefix for file reader events
 const DEFAULT_MESSAGE_SUBJECT: &str = "file.reader";
+/// Default batch size for processing records.
 const DEFAULT_BATCH_SIZE: usize = 1000;
+/// Default CSV header setting.
 const DEFAULT_HAS_HEADER: bool = true;
 
+/// File reader error types.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -25,14 +29,16 @@ pub enum Error {
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error(transparent)]
     Event(#[from] flowgen_core::stream::event::Error),
-    #[error("missing required event attrubute")]
+    #[error("missing required event attribute")]
     MissingRequiredAttribute(String),
     #[error("cache errors")]
     Cache(),
 }
 
+/// Converts RecordBatch to bytes.
 pub trait RecordBatchConverter {
     type Error;
+    /// Converts RecordBatch to bytes using Arrow IPC format.
     fn to_bytes(&self) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -41,6 +47,7 @@ impl RecordBatchConverter for RecordBatch {
     fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         let buffer: Vec<u8> = Vec::new();
 
+        // Create Arrow IPC stream writer.
         let mut stream_writer =
             StreamWriter::try_new(buffer, &self.schema()).map_err(Error::Arrow)?;
         stream_writer.write(self).map_err(Error::Arrow)?;
@@ -50,20 +57,22 @@ impl RecordBatchConverter for RecordBatch {
     }
 }
 
+/// Handles CSV file reading and event processing.
 struct EventHandler<T: Cache> {
-    /// Cache for replay IDs and schemas
+    /// Cache for replay IDs and schemas.
     cache: Arc<T>,
-    /// Channel sender for processed events
+    /// Channel sender for processed events.
     tx: Sender<Event>,
-    /// Subscriber configuration
+    /// Subscriber configuration.
     config: Arc<super::config::Reader>,
-    /// Task identifier for event tracking
+    /// Task identifier for event tracking.
     current_task_id: usize,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
     type Error = Error;
     async fn run(self) -> Result<(), Error> {
+        // Open file and infer schema.
         let mut file = File::open(&self.config.path).map_err(Error::IO)?;
         let (schema, _) = Format::default()
             .with_header(true)
@@ -82,6 +91,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
             }
         };
 
+        // Configure batch size and header settings.
         let batch_size = match self.config.batch_size {
             Some(batch_size) => batch_size,
             None => DEFAULT_BATCH_SIZE,
@@ -92,15 +102,18 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
             None => DEFAULT_HAS_HEADER,
         };
 
+        // Create CSV reader.
         let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
             .with_header(has_header)
             .with_batch_size(batch_size)
             .build(file)
             .map_err(Error::Arrow)?;
 
+        // Process each batch.
         for batch in csv {
             let recordbatch = batch.map_err(Error::Arrow)?;
             let timestamp = Utc::now().timestamp_micros();
+            // Generate event subject from filename.
             let subject = match &self.config.path.split("/").last() {
                 Some(filename) => {
                     format!("{}.{}.{}", DEFAULT_MESSAGE_SUBJECT, filename, timestamp)
@@ -109,6 +122,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
             };
             let event_message = format!("event processed: {}", subject);
 
+            // Create and send event.
             let e = EventBuilder::new()
                 .data(recordbatch)
                 .subject(subject)
@@ -122,18 +136,26 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
         Ok(())
     }
 }
+/// File reader that processes events and spawns reading tasks.
 pub struct Reader<T: Cache> {
+    /// Reader configuration settings.
     config: Arc<super::config::Reader>,
+    /// Channel sender for processed events.
     tx: Sender<Event>,
+    /// Channel receiver for incoming events.
     rx: Receiver<Event>,
+    /// Cache instance for storing schemas and replay data.
     cache: Arc<T>,
+    /// Current task identifier.
     current_task_id: usize,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     type Error = Error;
     async fn run(mut self) -> Result<(), Error> {
+        // Process incoming events.
         while let Ok(event) = self.rx.recv().await {
+            // Only process events from previous task.
             if event.current_task_id == Some(self.current_task_id - 1) {
                 let config = Arc::clone(&self.config);
                 let cache = Arc::clone(&self.cache);
@@ -160,12 +182,18 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     }
 }
 
+/// Builder for constructing Reader instances.
 #[derive(Default)]
 pub struct ReaderBuilder<T> {
+    /// Optional reader configuration.
     config: Option<Arc<super::config::Reader>>,
+    /// Optional event sender.
     tx: Option<Sender<Event>>,
+    /// Optional event receiver.
     rx: Option<Receiver<Event>>,
+    /// Optional cache instance.
     cache: Option<Arc<T>>,
+    /// Task identifier for event processing.
     current_task_id: usize,
 }
 
@@ -173,46 +201,47 @@ impl<T: Cache> ReaderBuilder<T>
 where
     T: Default,
 {
+    /// Creates new ReaderBuilder.
     pub fn new() -> ReaderBuilder<T> {
         ReaderBuilder {
             ..Default::default()
         }
     }
 
+    /// Sets reader configuration.
     pub fn config(mut self, config: Arc<super::config::Reader>) -> Self {
         self.config = Some(config);
         self
     }
 
+    /// Sets event sender.
     pub fn sender(mut self, sender: Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
     }
 
+    /// Sets event receiver.
     pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
         self.rx = Some(receiver);
         self
     }
 
+    /// Sets current task ID.
     pub fn current_task_id(mut self, current_task_id: usize) -> Self {
         self.current_task_id = current_task_id;
         self
     }
 
-    /// Sets the cache instance for this object.
+    /// Sets cache instance.
     ///
     /// This method allows injecting a shared, thread-safe cache implementation
     /// that conforms to the `Cache` trait. The object will use this
     /// cache for its caching needs (e.g., storing or retrieving data).
-    ///
-    /// # Arguments
-    /// * `cache` - An `Arc<dyn Cache<Error = Error>>` representing the shared cache instance.
-    ///             The `Error` type must match the expected error type for cache operations
-    ///             within this object.
     pub fn cache(mut self, cache: Arc<T>) -> Self {
         self.cache = Some(cache);
         self
     }
+    /// Builds Reader instance.
     pub async fn build(self) -> Result<Reader<T>, Error> {
         Ok(Reader {
             config: self
