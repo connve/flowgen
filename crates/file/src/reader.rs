@@ -89,7 +89,7 @@ pub trait RecordBatchConverter {
 
 impl RecordBatchConverter for RecordBatch {
     type Error = Error;
-    
+
     /// Converts this RecordBatch to bytes using Arrow IPC streaming format.
     ///
     /// This implementation creates an Arrow IPC StreamWriter to serialize
@@ -101,10 +101,10 @@ impl RecordBatchConverter for RecordBatch {
         // Create Arrow IPC stream writer with the RecordBatch schema.
         let mut stream_writer =
             StreamWriter::try_new(buffer, &self.schema()).map_err(Error::Arrow)?;
-        
+
         // Write the RecordBatch data to the stream.
         stream_writer.write(self).map_err(Error::Arrow)?;
-        
+
         // Finalize the stream to ensure all data is written.
         stream_writer.finish().map_err(Error::Arrow)?;
 
@@ -131,7 +131,6 @@ struct EventHandler<T: Cache> {
 
 impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
     type Error = Error;
-    
     /// Executes the file reading process for a single task.
     ///
     /// This method performs the complete file reading workflow:
@@ -151,7 +150,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
             .with_header(true)
             .infer_schema(&mut file, Some(100))
             .map_err(Error::Arrow)?;
-        
+
         // Reset file position to beginning for actual reading.
         file.rewind().map_err(Error::IO)?;
 
@@ -189,7 +188,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for EventHandler<T> {
             let recordbatch = batch.map_err(Error::Arrow)?;
             let timestamp = Utc::now().timestamp_micros();
             // Generate event subject from filename.
-            let subject = match &self.config.path.split("/").last() {
+            let subject = match self.config.path.file_name().and_then(|f| f.to_str()) {
                 Some(filename) => {
                     format!("{}.{}.{}", DEFAULT_MESSAGE_SUBJECT, filename, timestamp)
                 }
