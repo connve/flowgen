@@ -9,7 +9,7 @@ use std::{fs::File, io::Seek, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
-/// Default subject prefix for file reader events
+/// Default subject prefix for file reader events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "file.reader";
 /// Default batch size for processing records.
 const DEFAULT_BATCH_SIZE: usize = 1000;
@@ -57,7 +57,7 @@ impl RecordBatchConverter for RecordBatch {
     }
 }
 
-/// Handles CSV file reading and event processing.
+/// Handles file reading and event processing.
 struct EventHandler<T: Cache> {
     /// Cache for replay IDs and schemas.
     cache: Arc<T>,

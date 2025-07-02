@@ -55,8 +55,6 @@ struct TopicListener<T: Cache> {
     cache: Arc<T>,
     /// Salesforce Pub/Sub client context
     pubsub: Arc<Mutex<super::context::Context>>,
-    /// Topic name to subscribe to
-    topic: String,
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Subscriber configuration
@@ -79,7 +77,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
             .lock()
             .await
             .get_topic(TopicRequest {
-                topic_name: self.topic.clone(),
+                topic_name: self.config.topic.name.clone(),
             })
             .await
             .map_err(Error::SalesforcePubSub)?
@@ -98,7 +96,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
             .into_inner();
 
         // Set batch size for event fetching
-        let num_requested = match self.config.num_requested {
+        let num_requested = match self.config.topic.num_requested {
             Some(num_requested) => num_requested,
             None => DEFAULT_NUM_REQUESTED,
         };
@@ -114,6 +112,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
         // Set replay ID for durable consumers
         if let Some(durable_consumer_opts) = self
             .config
+            .topic
             .durable_consumer_options
             .as_ref()
             .filter(|opts| opts.enabled && !opts.managed_subscription)
@@ -149,6 +148,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
                         // Cache replay ID for durable consumer recovery
                         if let Some(durable_consumer_opts) = self
                             .config
+                            .topic
                             .durable_consumer_options
                             .as_ref()
                             .filter(|opts| opts.enabled && !opts.managed_subscription)
@@ -269,29 +269,26 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             .map_err(Error::SalesforcePubSub)?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
-        // Spawn TopicListener for each topic
-        for topic in self.config.topic_list.clone().into_iter() {
-            let pubsub: Arc<Mutex<super::context::Context>> = Arc::clone(&pubsub);
-            let tx = self.tx.clone();
-            let config = Arc::clone(&self.config);
-            let cache = Arc::clone(&self.cache);
-            let current_task_id = self.current_task_id;
-            let topic_listener = TopicListener {
-                cache,
-                config,
-                current_task_id,
-                tx,
-                topic,
-                pubsub,
-            };
+        // Spawn TopicListener.
+        let pubsub: Arc<Mutex<super::context::Context>> = Arc::clone(&pubsub);
+        let tx = self.tx.clone();
+        let config = Arc::clone(&self.config);
+        let cache = Arc::clone(&self.cache);
+        let current_task_id = self.current_task_id;
+        let topic_listener = TopicListener {
+            cache,
+            config,
+            current_task_id,
+            tx,
+            pubsub,
+        };
 
-            // Spawn TopicListener task
-            tokio::spawn(async move {
-                if let Err(err) = topic_listener.run().await {
-                    event!(Level::ERROR, "{}", err);
-                }
-            });
-        }
+        // Spawn TopicListener task
+        tokio::spawn(async move {
+            if let Err(err) = topic_listener.run().await {
+                event!(Level::ERROR, "{}", err);
+            }
+        });
 
         Ok(())
     }

@@ -1,8 +1,7 @@
 use chrono::Utc;
 use flowgen_core::stream::event::Event;
-use futures::future::try_join_all;
 use std::{fs::File, sync::Arc};
-use tokio::{sync::broadcast::Receiver, task::JoinHandle};
+use tokio::sync::broadcast::Receiver;
 use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "file.writer";
@@ -27,53 +26,68 @@ pub struct Writer {
     current_task_id: usize,
 }
 
+/// Handles file writing and event processing.
+struct EventHandler {
+    /// Subscriber configuration.
+    config: Arc<super::config::Writer>,
+}
+
+impl EventHandler {
+    async fn run(self, event: Event) -> Result<(), Error> {
+        let file_stem = self
+            .config
+            .path
+            .file_stem()
+            .ok_or_else(Error::EmptyFileName)?
+            .to_str()
+            .ok_or_else(Error::EmptyStr)?;
+
+        let file_ext = self
+            .config
+            .path
+            .extension()
+            .ok_or_else(Error::EmptyFileName)?
+            .to_str()
+            .ok_or_else(Error::EmptyStr)?;
+
+        let timestamp = Utc::now().timestamp_micros();
+        let filename = format!("{}.{}.{}", file_stem, timestamp, file_ext);
+
+        let file = File::create(filename).map_err(Error::IO)?;
+
+        arrow::csv::WriterBuilder::new()
+            .with_header(true)
+            .build(file)
+            .write(&event.data)
+            .map_err(Error::Arrow)?;
+
+        let subject = format!(
+            "{}.{}.{}.{}",
+            DEFAULT_MESSAGE_SUBJECT, file_stem, timestamp, file_ext
+        );
+        event!(Level::INFO, "event processed: {}", subject);
+
+        Ok(())
+    }
+}
 impl flowgen_core::task::runner::Runner for Writer {
     type Error = Error;
     async fn run(mut self) -> Result<(), Self::Error> {
-        let mut handle_list = Vec::new();
-
         while let Ok(event) = self.rx.recv().await {
             if event.current_task_id == Some(self.current_task_id - 1) {
                 let config = Arc::clone(&self.config);
-                let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                    let file_stem = config
-                        .path
-                        .file_stem()
-                        .ok_or_else(Error::EmptyFileName)?
-                        .to_str()
-                        .ok_or_else(Error::EmptyStr)?;
-
-                    let file_ext = config
-                        .path
-                        .extension()
-                        .ok_or_else(Error::EmptyFileName)?
-                        .to_str()
-                        .ok_or_else(Error::EmptyStr)?;
-
-                    let timestamp = Utc::now().timestamp_micros();
-                    let filename = format!("{}.{}.{}", file_stem, timestamp, file_ext);
-
-                    let file = File::create(filename).map_err(Error::IO)?;
-
-                    arrow::csv::WriterBuilder::new()
-                        .with_header(true)
-                        .build(file)
-                        .write(&event.data)
-                        .map_err(Error::Arrow)?;
-
-                    let subject = format!(
-                        "{}.{}.{}.{}",
-                        DEFAULT_MESSAGE_SUBJECT, file_stem, timestamp, file_ext
-                    );
-                    event!(Level::INFO, "event processed: {}", subject);
-
-                    Ok(())
+                let event_handler = EventHandler { config };
+                // Spawn a new asynchronous task to handle the event processing.
+                // This allows the main loop to continue receiving new events
+                // while existing events are being written concurrently.
+                tokio::spawn(async move {
+                    // Process the events and in case of error log it.
+                    if let Err(err) = event_handler.run(event).await {
+                        event!(Level::ERROR, "{}", err);
+                    }
                 });
-
-                handle_list.push(handle);
             }
         }
-        let _ = try_join_all(handle_list.iter_mut()).await;
         Ok(())
     }
 }
