@@ -15,16 +15,16 @@ struct Credentials {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("missing required attributes")]
+    #[error("missing required attribute")]
     MissingRequiredAttribute(String),
-    #[error("cannot open the credentials file at path {1}")]
-    OpenFile(#[source] std::io::Error, PathBuf),
-    #[error("error parsing credentials file")]
-    ParseCredentials(#[source] serde_json::Error),
-    #[error("error parsing provided url")]
-    ParseUrl(#[source] url::ParseError),
-    #[error("error connecting to NATS")]
-    NatsConnect(#[source] async_nats::ConnectError),
+    #[error(transparent)]
+    OpenFile(#[from] std::io::Error),
+    #[error(transparent)]
+    ParseCredentials(#[from] serde_json::Error),
+    #[error(transparent)]
+    ParseUrl(#[from] url::ParseError),
+    #[error(transparent)]
+    NatsConnect(#[from] async_nats::ConnectError),
     #[error("credentials are not provided")]
     CredentialsNotProvided(),
 }
@@ -39,11 +39,10 @@ impl flowgen_core::connect::client::Client for Client {
     type Error = Error;
     /// Connect to the NATS Server with provided options.
     async fn connect(mut self) -> Result<Self, Error> {
-        let credentials_string = fs::read_to_string(&self.credentials_path)
-            .map_err(|e| Error::OpenFile(e, self.credentials_path.to_owned()))?;
-
-        let credentials: Credentials =
-            serde_json::from_str(&credentials_string).map_err(Error::ParseCredentials)?;
+        let credentials: Credentials = serde_json::from_str(
+            &fs::read_to_string(&self.credentials_path).map_err(Error::OpenFile)?,
+        )
+        .map_err(Error::ParseCredentials)?;
 
         let mut connect_options = async_nats::ConnectOptions::new();
         if let Some(configured_nkey) = credentials.nkey {

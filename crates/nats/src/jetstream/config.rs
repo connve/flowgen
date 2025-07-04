@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Subscriber {
-    pub credentials: String,
+    pub credentials: PathBuf,
     pub stream: String,
     pub subject: String,
     pub durable_name: String,
@@ -12,7 +13,7 @@ pub struct Subscriber {
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Publisher {
-    pub credentials: String,
+    pub credentials: PathBuf,
     pub stream: String,
     pub stream_description: Option<String>,
     pub subjects: Vec<String>,

@@ -4,7 +4,6 @@ use flowgen_core::{
     convert::recordbatch::RecordBatchExt,
     stream::event::{Event, EventBuilder},
 };
-
 use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use serde_json::Value;
 use std::sync::Arc;
@@ -50,7 +49,7 @@ pub enum Error {
 ///
 /// Subscribes to a topic, deserializes Avro payloads, and forwards events
 /// to the event channel. Supports durable consumers with replay ID caching.
-struct TopicListener<T: Cache> {
+struct EventHandler<T: Cache> {
     /// Cache for replay IDs and schemas
     cache: Arc<T>,
     /// Salesforce Pub/Sub client context
@@ -63,14 +62,12 @@ struct TopicListener<T: Cache> {
     current_task_id: usize,
 }
 
-impl<T: Cache> flowgen_core::task::runner::Runner for TopicListener<T> {
-    type Error = Error;
-
+impl<T: Cache> EventHandler<T> {
     /// Runs the topic listener to process events from Salesforce Pub/Sub.
     ///
     /// Fetches topic and schema info, establishes subscription with optional
     /// replay ID, then processes incoming events in a loop.
-    async fn run(self) -> Result<(), Error> {
+    async fn handle(self) -> Result<(), Error> {
         // Get topic metadata
         let topic_info = self
             .pubsub
@@ -275,7 +272,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
         let config = Arc::clone(&self.config);
         let cache = Arc::clone(&self.cache);
         let current_task_id = self.current_task_id;
-        let topic_listener = TopicListener {
+        let event_handler = EventHandler {
             cache,
             config,
             current_task_id,
@@ -283,9 +280,9 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             pubsub,
         };
 
-        // Spawn TopicListener task
+        // Spawn event handler.
         tokio::spawn(async move {
-            if let Err(err) = topic_listener.run().await {
+            if let Err(err) = event_handler.handle().await {
                 event!(Level::ERROR, "{}", err);
             }
         });

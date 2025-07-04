@@ -8,22 +8,22 @@ use tracing::{event, Level};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("error authorizating to NATS client")]
-    NatsClient(#[source] crate::client::Error),
-    #[error("error with NATS JetStream Message")]
-    NatsJetStreamMessage(#[source] crate::jetstream::message::Error),
-    #[error("error with NATS JetStream durable consumer")]
-    NatsJetStreamConsumer(#[source] async_nats::jetstream::stream::ConsumerError),
-    #[error("error with NATS JetStream")]
-    NatsJetStream(#[source] async_nats::jetstream::consumer::StreamError),
-    #[error("error getting NATS JetStream")]
-    NatsJetStreamGetStream(#[source] async_nats::jetstream::context::GetStreamError),
-    #[error("error subscriging to NATS subject")]
-    NatsSubscribe(#[source] async_nats::SubscribeError),
-    #[error("error executing async task")]
-    TaskJoin(#[source] tokio::task::JoinError),
-    #[error("error with sending message over channel")]
-    SendMessage(#[source] tokio::sync::broadcast::error::SendError<Event>),
+    #[error(transparent)]
+    NatsClient(#[from] crate::client::Error),
+    #[error(transparent)]
+    NatsJetStreamMessage(#[from] crate::jetstream::message::Error),
+    #[error(transparent)]
+    NatsJetStreamConsumer(#[from] async_nats::jetstream::stream::ConsumerError),
+    #[error(transparent)]
+    NatsJetStream(#[from] async_nats::jetstream::consumer::StreamError),
+    #[error(transparent)]
+    NatsJetStreamGetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    #[error(transparent)]
+    NatsSubscribe(#[from] async_nats::SubscribeError),
+    #[error(transparent)]
+    TaskJoin(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error("missing required attribute")]
     MissingRequiredAttribute(String),
     #[error("other error with subscriber")]
@@ -40,7 +40,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     type Error = Error;
     async fn run(self) -> Result<(), Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone().into())
+            .credentials_path(self.config.credentials.clone())
             .build()
             .map_err(Error::NatsClient)?
             .connect()

@@ -89,7 +89,7 @@ impl EventHandler {
     /// # Returns
     /// * `Ok(())` if the event was processed and written successfully.
     /// * `Err(Error)` if any error occurred during processing or writing.
-    async fn run(self, event: Event) -> Result<(), Error> {
+    async fn handle(self, event: Event) -> Result<(), Error> {
         // Extract filename stem and extension from the configured path.
         let file_stem = self
             .config
@@ -132,7 +132,7 @@ impl EventHandler {
 }
 impl flowgen_core::task::runner::Runner for Writer {
     type Error = Error;
-    
+
     /// Executes the main loop of the writer task.
     ///
     /// 1. Enters a loop, receiving `Event`s from the `rx` channel.
@@ -154,13 +154,13 @@ impl flowgen_core::task::runner::Runner for Writer {
                 // Setup thread-safe reference to the configuration.
                 let config = Arc::clone(&self.config);
                 let event_handler = EventHandler { config };
-                
+
                 // Spawn a new asynchronous task to handle the file writing.
                 // This allows the main loop to continue receiving new events
                 // while existing events are being written concurrently.
                 tokio::spawn(async move {
                     // Process the file writing and log any errors that occur.
-                    if let Err(err) = event_handler.run(event).await {
+                    if let Err(err) = event_handler.handle(event).await {
                         event!(Level::ERROR, "{}", err);
                     }
                 });

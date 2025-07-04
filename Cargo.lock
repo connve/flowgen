@@ -1962,7 +1962,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
- "tonic-build",
  "tracing",
  "url",
 ]

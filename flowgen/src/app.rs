@@ -1,6 +1,7 @@
 use crate::config::{AppConfig, FlowConfig};
 use config::{Config, File};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tracing::{event, Level};
 
 /// Errors that can occur during application execution.
@@ -68,17 +69,7 @@ impl flowgen_core::task::runner::Runner for App {
                     }
                 }
 
-                match flow_builder.build() {
-                    Ok(flow) => match flow.run().await {
-                        Ok(flow) => {
-                            if let Some(tasks) = flow.task_list {
-                                futures_util::future::join_all(tasks).await;
-                            }
-                        }
-                        Err(e) => event!(Level::ERROR, "flow run failed: {}", e),
-                    },
-                    Err(e) => event!(Level::ERROR, "flow build failed: {}", e),
-                }
+                run_flow(flow_builder).await;
             });
             config_handles.push(handle);
         }
@@ -88,14 +79,69 @@ impl flowgen_core::task::runner::Runner for App {
     }
 }
 
+/// Runs a single flow with comprehensive error handling.
+///
+/// This function encapsulates the flow execution logic and error handling,
+/// reducing nesting in the main run method.
+async fn run_flow(flow_builder: super::flow::FlowBuilder<'_>) {
+    let flow = match flow_builder.build() {
+        Ok(flow) => flow,
+        Err(e) => {
+            event!(Level::ERROR, "flow build failed: {}", e);
+            return;
+        }
+    };
+
+    let flow = match flow.run().await {
+        Ok(flow) => flow,
+        Err(e) => {
+            event!(Level::ERROR, "flow run failed: {}", e);
+            return;
+        }
+    };
+
+    if let Some(tasks) = flow.task_list {
+        handle_task_results(tasks).await;
+    }
+}
+
+/// Handles the results of all tasks in a flow.
+///
+/// This function processes the join results from all spawned tasks,
+/// logging appropriate error messages for both task execution failures
+/// and task logic failures.
+async fn handle_task_results(tasks: Vec<JoinHandle<Result<(), super::flow::Error>>>) {
+    let task_results = futures_util::future::join_all(tasks).await;
+    for result in task_results {
+        log_task_error(result);
+    }
+}
+
+/// Logs errors from task execution results.
+///
+/// This function handles the nested Result structure from tokio::spawn,
+/// distinguishing between task execution failures (JoinError) and
+/// task logic failures (flow::Error).
+fn log_task_error(result: Result<Result<(), super::flow::Error>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {} // Task completed successfully
+        Ok(Err(error)) => {
+            event!(Level::ERROR, "task failed to run: {}", error);
+        }
+        Err(error) => {
+            event!(Level::ERROR, "task failed to execute: {}", error);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{CacheOptions, FlowOptions};
+    use flowgen_core::task::runner::Runner;
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::fs;
-    use flowgen_core::{task::runner::Runner};
 
     fn create_test_app_config(flow_dir: Option<PathBuf>) -> AppConfig {
         AppConfig {
@@ -111,7 +157,8 @@ mod tests {
         r#"
         [flow]
         tasks = []
-        "#.to_string()
+        "#
+        .to_string()
     }
 
     #[tokio::test]
@@ -140,7 +187,7 @@ mod tests {
         let flow_pattern = temp_dir.path().join("*.toml");
         let config = create_test_app_config(Some(flow_pattern));
         let app = App { config };
-        
+
         let result = app.run().await;
         assert!(result.is_ok());
     }
@@ -149,15 +196,15 @@ mod tests {
     async fn test_run_with_valid_flow_config() {
         let temp_dir = TempDir::new().unwrap();
         let flow_file = temp_dir.path().join("test_flow.toml");
-        
+
         fs::write(&flow_file, create_test_flow_config())
             .await
             .unwrap();
-        
+
         let flow_pattern = temp_dir.path().join("*.toml");
         let config = create_test_app_config(Some(flow_pattern));
         let app = App { config };
-        
+
         let result = app.run().await;
         assert!(result.is_ok());
     }
@@ -166,21 +213,23 @@ mod tests {
     async fn test_run_with_cache_disabled() {
         let temp_dir = TempDir::new().unwrap();
         let flow_file = temp_dir.path().join("test_flow.toml");
-        
+
         fs::write(&flow_file, create_test_flow_config())
             .await
             .unwrap();
-        
+
         let flow_pattern = temp_dir.path().join("*.toml");
         let config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: false,
                 credentials_path: PathBuf::from("/tmp/cache"),
             }),
-            flows: FlowOptions { dir: Some(flow_pattern) },
+            flows: FlowOptions {
+                dir: Some(flow_pattern),
+            },
         };
         let app = App { config };
-        
+
         let result = app.run().await;
         assert!(result.is_ok());
     }
@@ -189,18 +238,20 @@ mod tests {
     async fn test_run_with_no_cache() {
         let temp_dir = TempDir::new().unwrap();
         let flow_file = temp_dir.path().join("test_flow.toml");
-        
+
         fs::write(&flow_file, create_test_flow_config())
             .await
             .unwrap();
-        
+
         let flow_pattern = temp_dir.path().join("*.toml");
         let config = AppConfig {
             cache: None,
-            flows: FlowOptions { dir: Some(flow_pattern) },
+            flows: FlowOptions {
+                dir: Some(flow_pattern),
+            },
         };
         let app = App { config };
-        
+
         let result = app.run().await;
         assert!(result.is_ok());
     }

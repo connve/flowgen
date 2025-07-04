@@ -30,6 +30,3 @@ async-nats = "0.35.1"
 tracing = { workspace = true }
 chrono = { workspace = true }
 csv = "1.3"
-
-[build-dependencies]
-tonic-build = "0.10.2"

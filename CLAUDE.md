@@ -8,5 +8,7 @@
 - Use full sentences.
 - Document module intros, methods, struct fields, constants etc.
 - Do not change any code while documenting.
+- Do not comment every function, especially if function meaning is very clear.
+- Do comment every function which is part of a public API of a module.
 
 

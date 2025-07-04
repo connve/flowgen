@@ -3,27 +3,47 @@ use async_nats::jetstream::stream::{Config, DiscardPolicy, RetentionPolicy};
 use flowgen_core::connect::client::Client;
 use flowgen_core::stream::event::Event;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::broadcast::Receiver;
+use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{event, Level};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("failed to connect to a NATS Server")]
-    NatsClientAuth(#[source] crate::client::Error),
-    #[error("NATS Client is missing / not initialized properly")]
-    MissingNatsClient(),
-    #[error("error publish message to NATS Jetstream")]
-    NatsPublish(#[source] async_nats::jetstream::context::PublishError),
-    #[error("failed to create or update Nats Jetstream")]
-    NatsCreateStream(#[source] async_nats::jetstream::context::CreateStreamError),
-    #[error("failed to get NATS Jetstream")]
-    NatsGetStream(#[source] async_nats::jetstream::context::GetStreamError),
-    #[error("failed to get process request to NATS Server")]
-    NatsRequest(#[source] async_nats::jetstream::context::RequestError),
-    #[error("error with NATS JetStream Event")]
-    NatsJetStreamEvent(#[source] super::message::Error),
+    #[error(transparent)]
+    NatsClientAuth(#[from] crate::client::Error),
+    #[error(transparent)]
+    NatsPublish(#[from] async_nats::jetstream::context::PublishError),
+    #[error(transparent)]
+    NatsCreateStream(#[from] async_nats::jetstream::context::CreateStreamError),
+    #[error(transparent)]
+    NatsGetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    #[error(transparent)]
+    NatsRequest(#[from] async_nats::jetstream::context::RequestError),
+    #[error(transparent)]
+    NatsJetStreamEvent(#[from] super::message::Error),
     #[error("missing required event attrubute")]
     MissingRequiredAttribute(String),
+    #[error("NATS Client is missing / not initialized properly")]
+    MissingNatsClient(),
+}
+
+struct EventHandler {
+    jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
+}
+
+impl EventHandler {
+    async fn handle(self, event: Event) -> Result<(), Error> {
+        let e = event.to_publish().map_err(Error::NatsJetStreamEvent)?;
+
+        self.jetstream
+            .lock()
+            .await
+            .send_publish(event.subject.clone(), e)
+            .await
+            .map_err(Error::NatsPublish)?;
+
+        event!(Level::INFO, "event processed: {}", event.subject);
+        Ok(())
+    }
 }
 
 pub struct Publisher {
@@ -36,7 +56,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
     async fn run(mut self) -> Result<(), Self::Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone().into())
+            .credentials_path(self.config.credentials.clone())
             .build()
             .map_err(Error::NatsClientAuth)?
             .connect()
@@ -91,16 +111,18 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 }
             }
 
-            while let Ok(e) = self.rx.recv().await {
-                if e.current_task_id == Some(self.current_task_id - 1) {
-                    let event = e.to_publish().map_err(Error::NatsJetStreamEvent)?;
+            let jetstream = Arc::new(Mutex::new(jetstream));
 
-                    jetstream
-                        .send_publish(e.subject.clone(), event)
-                        .await
-                        .map_err(Error::NatsPublish)?;
-
-                    event!(Level::INFO, "event processed: {}", e.subject);
+            while let Ok(event) = self.rx.recv().await {
+                if event.current_task_id == Some(self.current_task_id - 1) {
+                    let jetstream = Arc::clone(&jetstream);
+                    let event_handler = EventHandler { jetstream };
+                    // Spawn a new asynchronous task to handle event processing.
+                    tokio::spawn(async move {
+                        if let Err(err) = event_handler.handle(event).await {
+                            event!(Level::ERROR, "{}", err);
+                        }
+                    });
                 }
             }
         }
