@@ -1,0 +1,30 @@
+{
+    "flow": {
+        "name": "salesforce_pubsub_subscriber_account",
+        "tasks": [
+            {
+                "salesforce_pubsub_subscriber": {
+                    "credentials": "/etc/sfdc/credentials.json",
+                    "topic": {
+                        "name": "/data/AccountChangeEvent",
+                        "durable_consumer_options": {
+                            "enabled": true,
+                            "managed_subscription": false,
+                            "name": "salesforce_pubsub_subscriber_account"
+                        }
+                    }
+                }
+            },
+            {
+                "nats_jetstream_publisher": {
+                    "credentials": "/etc/nats/credentials.json",
+                    "stream": "eventbus",
+                    "stream_description": "main streaming event-bus of flowgen",
+                    "subjects": [
+                        "salesforce.pubsub.in.>"
+                    ]
+                }
+            }
+        ]
+    }
+}

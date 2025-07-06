@@ -11,13 +11,13 @@ use std::path::PathBuf;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Cannot open/read the credentials file at path {1}")]
-    OpenFile(#[source] std::io::Error, PathBuf),
-    #[error("Cannot parse the credentials file")]
-    ParseCredentials(#[source] serde_json::Error),
-    #[error("Cannot parse url")]
-    ParseUrl(#[source] url::ParseError),
-    #[error("Other error: {}", _0)]
+    #[error(transparent)]
+    OpenFile(#[from] std::io::Error),
+    #[error(transparent)]
+    ParseCredentials(#[from] serde_json::Error),
+    #[error(transparent)]
+    ParseUrl(#[from] url::ParseError),
+    #[error("other error: {}", _0)]
     Other(String),
 }
 /// Used to store Salesforce Client credentials.
@@ -93,8 +93,8 @@ impl Builder {
     /// Generates a new client or return error in case
     /// provided credentials path is not valid.
     pub fn build(&self) -> Result<Client, Error> {
-        let credentials_string = fs::read_to_string(&self.credentials_path)
-            .map_err(|e| Error::OpenFile(e, self.credentials_path.to_owned()))?;
+        let credentials_string =
+            fs::read_to_string(&self.credentials_path).map_err(Error::OpenFile)?;
         let credentials: Credentials =
             serde_json::from_str(&credentials_string).map_err(Error::ParseCredentials)?;
         let oauth2_client = BasicClient::new(

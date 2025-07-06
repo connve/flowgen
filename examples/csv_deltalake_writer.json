@@ -1,0 +1,37 @@
+{
+    "flow": {
+        "name": "file_reader",
+        "tasks": [
+            {
+                "generate": {
+                    "label": "run_file_reader",
+                    "interval": 1,
+                    "count": 1,
+                    "message": "{\"key\":\"value\"}"
+                }
+            },
+            {
+                "file_reader": {
+                    "path": "tmp/data/sample.csv",
+                    "cache_options": {
+                        "insert_key": "schema/sample"
+                    }
+                }
+            },
+            {
+                "deltalake_writer": {
+                    "credentials": "/etc/gcp/credentials.json",
+                    "path": "gs://somepath",
+                    "operation": "Append",
+                    "predicate": "target.Id = source.Id",
+                    "create_options": {
+                        "create_if_not_exist": true,
+                        "cache_options": {
+                            "retrieve_key": "schema/sample"
+                        }
+                    }
+                }
+            }
+        ]
+    }
+}

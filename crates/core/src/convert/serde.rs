@@ -3,10 +3,8 @@ use std::str::FromStr;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Error originating from Serde crate.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
-    /// Error originating from Arrow crate.
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
 }

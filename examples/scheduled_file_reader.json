@@ -1,5 +1,6 @@
 {
     "flow": {
+        "name:": "file_reader",
         "tasks": [
             {
                 "generate": {

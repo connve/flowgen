@@ -8,6 +8,7 @@ pub struct FlowConfig {
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Flow {
+    pub name: String,
     pub tasks: Vec<Task>,
 }
 
