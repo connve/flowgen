@@ -1969,7 +1969,6 @@ dependencies = [
  "bytes",
  "chrono",
  "flowgen_core",
- "futures",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
