@@ -16,6 +16,7 @@ flowgen_http = { path = "../crates/http" }
 flowgen_salesforce = { path = "../crates/salesforce" }
 flowgen_file = { path = "../crates/file" }
 flowgen_nats = { path = "../crates/nats" }
+flowgen_object_store = { path = "../crates/object-store" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 futures-util = { workspace = true }

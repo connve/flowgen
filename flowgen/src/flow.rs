@@ -79,6 +79,13 @@ pub enum Error {
         task_id: usize,
     },
     #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    ObjectStoreWriter {
+        #[source]
+        source: flowgen_object_store::writer::Error,
+        flow: String,
+        task_id: usize,
+    },
+    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
     GenerateSubscriber {
         #[source]
         source: flowgen_core::task::generate::subscriber::Error,
@@ -152,7 +159,6 @@ impl Flow<'_> {
                     // });
                     // task_list.push(task);
                 }
-
                 Task::enumerate(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
@@ -435,36 +441,34 @@ impl Flow<'_> {
                     });
                     task_list.push(task);
                 }
-                Task::render(config) => todo!(), // Task::render(config) => {
-                                                 //     let config = Arc::new(config.to_owned());
-                                                 //     let rx = tx.subscribe();
-                                                 //     let tx = tx.clone();
-                                                 //     let flow_config = Arc::clone(&self.config);
-                                                 //     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                                                 //         flowgen_core::task::render::processor::ProcessorBuilder::new()
-                                                 //             .config(config)
-                                                 //             .receiver(rx)
-                                                 //             .sender(tx)
-                                                 //             .current_task_id(i)
-                                                 //             .build()
-                                                 //             .await
-                                                 //             .map_err(|e| Error::RenderProcessor {
-                                                 //                 source: e,
-                                                 //                 flow: flow_config.flow.name.to_owned(),
-                                                 //                 task_id: i,
-                                                 //             })?
-                                                 //             .run()
-                                                 //             .await
-                                                 //             .map_err(|e| Error::RenderProcessor {
-                                                 //                 source: e,
-                                                 //                 flow: flow_config.flow.name.to_owned(),
-                                                 //                 task_id: i,
-                                                 //             })?;
-
-                                                 //         Ok(())
-                                                 //     });
-                                                 //     task_list.push(task);
-                                                 // }
+                Task::render(config) => todo!(),
+                Task::object_store_writer(config) => {
+                    let config = Arc::new(config.to_owned());
+                    let rx = tx.subscribe();
+                    let flow_config = Arc::clone(&self.config);
+                    let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                        flowgen_object_store::writer::WriterBuilder::new()
+                            .config(config)
+                            .receiver(rx)
+                            .current_task_id(i)
+                            .build()
+                            .await
+                            .map_err(|e| Error::ObjectStoreWriter {
+                                source: e,
+                                flow: flow_config.flow.name.to_owned(),
+                                task_id: i,
+                            })?
+                            .run()
+                            .await
+                            .map_err(|e| Error::ObjectStoreWriter {
+                                source: e,
+                                flow: flow_config.flow.name.to_owned(),
+                                task_id: i,
+                            })?;
+                        Ok(())
+                    });
+                    task_list.push(task);
+                }
             }
         }
         self.task_list = Some(task_list);
