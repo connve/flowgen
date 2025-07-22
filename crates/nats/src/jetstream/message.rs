@@ -1,5 +1,5 @@
 use arrow::ipc::{reader::StreamDecoder, writer::StreamWriter};
-use async_nats::jetstream::context::Publish;
+use async_nats::{jetstream::context::Publish, HeaderName};
 use bincode::{deserialize, serialize};
 use flowgen_core::stream::event::{AvroData, EventBuilder, EventData};
 
@@ -29,6 +29,11 @@ pub trait NatsMessageExt {
 impl FlowgenMessageExt for flowgen_core::stream::event::Event {
     type Error = Error;
     fn to_publish(&self) -> Result<Publish, Self::Error> {
+        let mut event = Publish::build();
+        if let Some(id) = &self.id {
+            event = event.message_id(id)
+        }
+
         match &self.data {
             flowgen_core::stream::event::EventData::ArrowRecordBatch(data) => {
                 let buffer: Vec<u8> = Vec::new();
@@ -36,23 +41,28 @@ impl FlowgenMessageExt for flowgen_core::stream::event::Event {
                     StreamWriter::try_new(buffer, &data.schema()).map_err(Error::Arrow)?;
                 stream_writer.write(data).map_err(Error::Arrow)?;
                 stream_writer.finish().map_err(Error::Arrow)?;
-                let serialized = stream_writer.get_mut().to_vec();
-                let event = Publish::build().payload(serialized.into());
-                Ok(event)
+                let serialized = serialize(stream_writer.get_mut())?;
+                event = event.payload(serialized.into());
             }
             flowgen_core::stream::event::EventData::Avro(data) => {
                 let serialized = serialize(&data)?;
-                let event = Publish::build().payload(serialized.into());
-                Ok(event)
+                event = event.payload(serialized.into());
             }
         }
+        Ok(event)
     }
 }
 
 impl NatsMessageExt for async_nats::Message {
     type Error = Error;
     fn to_event(&self) -> Result<flowgen_core::stream::event::Event, Self::Error> {
-        let event = EventBuilder::new().subject(self.subject.to_string());
+        let mut event = EventBuilder::new().subject(self.subject.to_string());
+        if let Some(headers) = &self.headers {
+            if let Some(id) = headers.get(async_nats::header::NATS_MESSAGE_ID) {
+                event = event.id(id.to_string());
+            }
+        }
+
         let event_data = match deserialize::<AvroData>(&self.payload) {
             Ok(data) => EventData::Avro(data),
             Err(_) => {
