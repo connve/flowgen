@@ -1,11 +1,17 @@
-use crate::convert::serde::SerdeValueExt;
 use apache_avro::from_avro_datum;
 use chrono::Utc;
 use serde::{Serialize, Serializer};
+use serde_json::{Map, Value};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error(transparent)]
+    Arrow(#[from] arrow::error::ArrowError),
+    #[error(transparent)]
+    Avro(#[from] apache_avro::Error),
+    #[error(transparent)]
+    SerdeJson(#[from] serde_json::error::Error),
     #[error("missing required attribute")]
     MissingRequiredAttribute(String),
 }
@@ -13,7 +19,6 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Event {
     pub data: EventData,
-    pub extensions: Option<arrow::array::RecordBatch>,
     pub subject: String,
     pub current_task_id: Option<usize>,
     pub id: Option<String>,
@@ -24,6 +29,7 @@ pub struct Event {
 pub enum EventData {
     ArrowRecordBatch(arrow::array::RecordBatch),
     Avro(AvroData),
+    Json(serde_json::Value)
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AvroData {
@@ -31,29 +37,46 @@ pub struct AvroData {
     pub raw_bytes: Vec<u8>,
 }
 
+impl TryFrom<&EventData> for Value {
+    type Error = Error;
+    
+    fn try_from(event_data: &EventData) -> Result<Self, Self::Error> {
+            let  value = match event_data {
+                EventData::ArrowRecordBatch(data) => {
+                            let buf = Vec::new();
+                            let mut writer = arrow_json::ArrayWriter::new(buf);
+                            writer.write_batches(&[data])?;
+                            writer.finish()?;
+                            let json_data = writer.into_inner();
+                            let json_rows: Vec<Map<String, Value>> =
+                            serde_json::from_reader(json_data.as_slice())?;
+                            json_rows.into()
+                        }
+                EventData::Avro(data) => {
+                            let schema = apache_avro::Schema::parse_str(&data.schema)?;
+                            let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
+                           serde_json::Value::try_from(avro_value).unwrap()
+                        }
+                EventData::Json(value) => {
+                            value.clone()
+                    },
+            };
+        Ok(value)
+    }
+
+}
+
 impl Serialize for EventData {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        match self {
-            EventData::ArrowRecordBatch(data) => {
-                let json_value: serde_json::Value =
-                    data.try_from().map_err(serde::ser::Error::custom)?;
-                json_value.serialize(serializer)
-            }
-            EventData::Avro(data) => {
-                let schema = apache_avro::Schema::parse_str(&data.schema)
-                    .map_err(serde::ser::Error::custom)?;
-                let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)
-                    .map_err(serde::ser::Error::custom)?;
-                let json_value =
-                    serde_json::Value::try_from(avro_value).map_err(serde::ser::Error::custom)?;
-                json_value.serialize(serializer)
-            }
-        }
+
+        let json_value = serde_json::Value::try_from(self).map_err(serde::ser::Error::custom)?;
+          json_value.serialize(serializer)
     }
 }
+
 
 #[derive(Default)]
 pub struct EventBuilder {
@@ -92,17 +115,12 @@ impl EventBuilder {
         self.timestamp = timestamp;
         self
     }
-    pub fn extensions(mut self, extensions: arrow::array::RecordBatch) -> Self {
-        self.extensions = Some(extensions);
-        self
-    }
 
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
             data: self
                 .data
                 .ok_or_else(|| Error::MissingRequiredAttribute("data".to_string()))?,
-            extensions: self.extensions,
             subject: self
                 .subject
                 .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,

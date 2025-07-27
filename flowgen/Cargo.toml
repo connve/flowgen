@@ -10,13 +10,13 @@ path = "src/main.rs"
 
 
 [dependencies]
-flowgen_core = { path = "../crates/core" }
-flowgen_deltalake = { path = "../crates/deltalake" }
-flowgen_http = { path = "../crates/http" }
-flowgen_salesforce = { path = "../crates/salesforce" }
-flowgen_file = { path = "../crates/file" }
-flowgen_nats = { path = "../crates/nats" }
-flowgen_object_store = { path = "../crates/object-store" }
+flowgen_core = { path = "../flowgen-worker/core" }
+flowgen_deltalake = { path = "../flowgen-worker/deltalake" }
+flowgen_http = { path = "../flowgen-worker/http" }
+flowgen_salesforce = { path = "../flowgen-worker/salesforce" }
+flowgen_file = { path = "../flowgen-worker/file" }
+flowgen_nats = { path = "../flowgen-worker/nats" }
+flowgen_object_store = { path = "../flowgen-worker/object-store" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 futures-util = { workspace = true }

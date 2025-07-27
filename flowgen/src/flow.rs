@@ -72,13 +72,6 @@ pub enum Error {
         task_id: usize,
     },
     #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
-    FileWriter {
-        #[source]
-        source: flowgen_file::writer::Error,
-        flow: String,
-        task_id: usize,
-    },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
     ObjectStoreWriter {
         #[source]
         source: flowgen_object_store::writer::Error,
@@ -205,34 +198,7 @@ impl Flow<'_> {
                         Ok(())
                     });
                     task_list.push(task);
-                }
-                Task::file_writer(config) => {
-                    let config = Arc::new(config.to_owned());
-                    let rx = tx.subscribe();
-                    let flow_config = Arc::clone(&self.config);
-                    let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                        flowgen_file::writer::WriterBuilder::new()
-                            .config(config)
-                            .receiver(rx)
-                            .current_task_id(i)
-                            .build()
-                            .await
-                            .map_err(|e| Error::FileWriter {
-                                source: e,
-                                flow: flow_config.flow.name.to_owned(),
-                                task_id: i,
-                            })?
-                            .run()
-                            .await
-                            .map_err(|e| Error::FileWriter {
-                                source: e,
-                                flow: flow_config.flow.name.to_owned(),
-                                task_id: i,
-                            })?;
-                        Ok(())
-                    });
-                    task_list.push(task);
-                }
+                },
                 Task::generate(config) => {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();

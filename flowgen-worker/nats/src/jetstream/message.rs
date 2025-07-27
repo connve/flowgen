@@ -35,19 +35,20 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
         }
 
         match &self.data {
-            flowgen_core::event::EventData::ArrowRecordBatch(data) => {
-                let buffer: Vec<u8> = Vec::new();
-                let mut stream_writer =
-                    StreamWriter::try_new(buffer, &data.schema()).map_err(Error::Arrow)?;
-                stream_writer.write(data).map_err(Error::Arrow)?;
-                stream_writer.finish().map_err(Error::Arrow)?;
-                let serialized = serialize(stream_writer.get_mut())?;
-                event = event.payload(serialized.into());
-            }
-            flowgen_core::event::EventData::Avro(data) => {
-                let serialized = serialize(&data)?;
-                event = event.payload(serialized.into());
-            }
+            EventData::ArrowRecordBatch(data) => {
+                        let buffer: Vec<u8> = Vec::new();
+                        let mut stream_writer =
+                            StreamWriter::try_new(buffer, &data.schema()).map_err(Error::Arrow)?;
+                        stream_writer.write(data).map_err(Error::Arrow)?;
+                        stream_writer.finish().map_err(Error::Arrow)?;
+                        let serialized = serialize(stream_writer.get_mut())?;
+                        event = event.payload(serialized.into());
+                    }
+            EventData::Avro(data) => {
+                        let serialized = serialize(&data)?;
+                        event = event.payload(serialized.into());
+                    },
+            EventData::Json(value) => todo!(),
         }
         Ok(event)
     }

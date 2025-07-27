@@ -1,10 +1,11 @@
 use std::{io::BufReader, sync::Arc};
 
+
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("error with an Apache Arrow data")]
-    Arrow(#[source] arrow::error::ArrowError),
+    #[error(transparent)]
+    Arrow(#[from] arrow::error::ArrowError),
     #[error("no data available in the buffer")]
     EmptyBuffer(),
 }
@@ -49,3 +50,4 @@ impl RecordBatchExt for String {
         Ok(recordbatch)
     }
 }
+

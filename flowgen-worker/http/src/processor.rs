@@ -1,12 +1,11 @@
 use chrono::Utc;
 use flowgen_core::{
     config::ConfigExt,
-    convert::recordbatch::RecordBatchExt,
     event::{Event, EventBuilder, EventData},
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::{
     fs,
@@ -129,7 +128,7 @@ impl EventHandler {
         let resp = client.send().await?.text().await?;
 
         // Prepare processor output.
-        let recordbatch = resp.to_recordbatch()?;
+        let data = json!(resp);
 
         let timestamp = Utc::now().timestamp_micros();
         let subject = match &self.config.label {
@@ -144,7 +143,7 @@ impl EventHandler {
 
         // Send processor output as event.
         let e = EventBuilder::new()
-            .data(EventData::ArrowRecordBatch(recordbatch))
+            .data(EventData::Json(data))
             .subject(subject.clone())
             .current_task_id(self.current_task_id)
             .build()?;

@@ -18,7 +18,6 @@ pub enum Task {
     deltalake_writer(flowgen_deltalake::config::Writer),
     enumerate(flowgen_core::task::enumerate::config::Processor),
     file_reader(flowgen_file::config::Reader),
-    file_writer(flowgen_file::config::Writer),
     object_store_writer(flowgen_object_store::config::Writer),
     generate(flowgen_core::task::generate::config::Subscriber),
     http(flowgen_http::config::Processor),

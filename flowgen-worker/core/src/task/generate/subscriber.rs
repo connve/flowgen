@@ -1,8 +1,8 @@
 use crate::{
-    convert::recordbatch::RecordBatchExt,
     event::{Event, EventBuilder, EventData},
 };
 use chrono::Utc;
+use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::broadcast::Sender, time};
 use tracing::{event, Level};
@@ -45,21 +45,20 @@ impl crate::task::runner::Runner for Subscriber {
                 None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
             };
 
-            let recordbatch = self
-                .config
-                .message
-                .to_recordbatch()
-                .map_err(Error::RecordBatch)?;
+            let data = match &self.config.message {
+                Some(message) => json!(message),
+                None => json!(null),
+            };
 
             let e = EventBuilder::new()
-                .data(EventData::ArrowRecordBatch(recordbatch))
-                .subject(subject)
+                .data(EventData::Json(data))
+                .subject(subject.clone())
                 .current_task_id(self.current_task_id)
                 .build()
                 .map_err(Error::Event)?;
 
-            event!(Level::INFO, "event processed: {}", e.subject);
             self.tx.send(e).map_err(Error::SendMessage)?;
+            event!(Level::INFO, "event processed: {}", subject);
 
             match self.config.count {
                 Some(count) if count == counter => break,

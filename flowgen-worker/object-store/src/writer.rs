@@ -14,6 +14,8 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "object_store.writer";
 const DEFAULT_AVRO_EXTENSION: &str = "avro";
 /// File extension for CSV format files.
 const DEFAULT_CSV_EXTENSION: &str = "csv";
+/// File extension for JSON format files.
+const DEFAULT_JSON_EXTENSION: &str = "json";
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -24,6 +26,8 @@ pub enum Error {
     Arrow(#[from] arrow::error::ArrowError),
     #[error(transparent)]
     Avro(#[from] apache_avro::Error),
+    #[error(transparent)]
+    SerdeJson(#[from] serde_json::Error),
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
     #[error(transparent)]
@@ -73,45 +77,48 @@ impl EventHandler {
         };
         path.push(&filename);
 
-        let mut buffer = Vec::new();
+        let mut writer = Vec::new();
         let object_path = match &event.data {
             flowgen_core::event::EventData::ArrowRecordBatch(data) => {
-                // Convert Arrow RecordBatch to CSV format.
-                arrow::csv::WriterBuilder::new()
-                    .with_header(true)
-                    .build(&mut buffer)
-                    .write(data)
-                    .map_err(Error::Arrow)?;
-                object_store::path::Path::from(format!(
-                    "{}.{}",
-                    path.to_string_lossy(),
-                    DEFAULT_CSV_EXTENSION
-                ))
-            }
+                        arrow::csv::WriterBuilder::new()
+                            .with_header(true)
+                            .build(&mut writer)
+                            .write(data)?;
+                        object_store::path::Path::from(format!(
+                            "{}.{}",
+                            path.to_string_lossy(),
+                            DEFAULT_CSV_EXTENSION
+                        ))
+                    }
             flowgen_core::event::EventData::Avro(data) => {
-                // Parse Avro schema and deserialize raw bytes.
-                let schema = apache_avro::Schema::parse_str(&data.schema).map_err(Error::Avro)?;
-                let value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)
-                    .map_err(Error::Avro)?;
+                        let schema = apache_avro::Schema::parse_str(&data.schema)?;
+                        let value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
 
-                let mut writer = apache_avro::Writer::new(&schema, &mut buffer);
-                writer.append(value).map_err(Error::Avro)?;
-                writer.flush().map_err(Error::Avro)?;
-                object_store::path::Path::from(format!(
-                    "{}.{}",
-                    path.to_string_lossy(),
-                    DEFAULT_AVRO_EXTENSION
-                ))
-            }
-        };
-
-        // Upload processed data to object store
-        let payload = PutPayload::from_bytes(Bytes::from(buffer));
+                        let mut writer = apache_avro::Writer::new(&schema, &mut writer);
+                        writer.append(value)?;
+                        writer.flush()?;
+                        object_store::path::Path::from(format!(
+                            "{}.{}",
+                            path.to_string_lossy(),
+                            DEFAULT_AVRO_EXTENSION
+                        ))
+                    }
+            flowgen_core::event::EventData::Json(data) => {
+                       serde_json::to_writer_pretty(&mut writer, data)?;
+                       object_store::path::Path::from(format!(
+                            "{}.{}",
+                            path.to_string_lossy(),
+                            DEFAULT_JSON_EXTENSION
+                        ))
+                    },
+            };
+        // Upload processed data to object store.
+        let payload = PutPayload::from_bytes(Bytes::from(writer));
+        println!("{:?}", payload);
         context
             .object_store
             .put(&object_path, payload)
-            .await
-            .map_err(Error::ObjectStore)?;
+            .await?;
 
         let subject = format!("{DEFAULT_MESSAGE_SUBJECT}.{filename}");
         event!(Level::INFO, "event processed: {}", subject);
@@ -155,11 +162,9 @@ impl flowgen_core::task::runner::Runner for Writer {
 
         let client = Arc::new(Mutex::new(
             client_builder
-                .build()
-                .map_err(Error::ObjectStoreClient)?
+                .build()?
                 .connect()
-                .await
-                .map_err(Error::ObjectStoreClient)?,
+                .await?,
         ));
 
         // Process incoming events, filtering by task ID.

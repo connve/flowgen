@@ -40,7 +40,7 @@ impl flowgen_core::connect::client::Client for Client {
     async fn connect(mut self) -> Result<Client, Error> {
         // Parse URL and prepare connection options.
         let path = self.path.to_str().ok_or_else(Error::EmptyPath)?;
-        let url = Url::parse(path).map_err(Error::ParseUrl)?;
+        let url = Url::parse(path)?;
         let mut parse_opts = match &self.options {
             Some(options) => options.clone(),
             None => HashMap::new(),
@@ -55,7 +55,7 @@ impl flowgen_core::connect::client::Client for Client {
         }
 
         // Initialize object store from URL and options.
-        let (object_store, path) = parse_url_opts(&url, parse_opts).map_err(Error::ObjectStore)?;
+        let (object_store, path) = parse_url_opts(&url, parse_opts)?;
         let context = Context { object_store, path };
         self.context = Some(context);
         Ok(self)
