@@ -1,6 +1,7 @@
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 /// Processor for creating salesforce account query job.
 /// ```json
@@ -36,7 +37,7 @@ pub struct Processor {
     /// Optional human-readable label for identifying this subscriber configuration.
     pub label: Option<String>,
     /// Reference to credential store entry containing Salesforce authentication details.
-    pub credentials:  Option<String>,
+    pub credentials: String,
     /// Salesforce query input for job create.
     pub query:  Option<String>,
     /// Salesforce object for job create.
@@ -106,7 +107,7 @@ pub enum ColumnDelimiter {
 }
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-enum LineEnding {
+pub enum LineEnding {
     /// Defaults to CRLF as line ending.
     #[default]
     #[serde(rename = "LF")]
