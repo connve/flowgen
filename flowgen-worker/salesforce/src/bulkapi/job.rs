@@ -11,12 +11,13 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "bulkapi";
+const URI_PATH: &str = "/services/data/v61.0/jobs/query";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("missing required attrubute")]
+    #[error("missing required attribute")]
     MissingRequiredAttribute(String),
     #[error("no array data available")]
     EmptyArray(),
@@ -58,15 +59,14 @@ impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(self, event: Event) -> Result<(), Error> {
         let config = self.config.as_ref();
-        let a = Path::new(&config.credentials);
+        let creds_path = Path::new(&config.credentials);
 
         let sfdc_client = crate::client::Builder::new()
-            .credentials_path(a.to_path_buf())
+            .credentials_path(creds_path.to_path_buf())
             .build()
             .map_err(Error::SalesforceAuth)?
             .connect()
-            .await
-            .map_err(Error::SalesforceAuth)?;
+            .await?;
 
         if let Some(token_result) = sfdc_client.token_result {
             // Create payload for query job.
@@ -81,7 +81,8 @@ impl EventHandler {
             // Create http client with sf endpoint.
             let mut client = self
                 .client
-                .post(sfdc_client.instance_url + "/services/data/v50.0/jobs/query");
+                .post(sfdc_client.instance_url + URI_PATH);
+            
             client = client.bearer_auth(token_result.access_token().secret());
             client = client.json(&payload);
 

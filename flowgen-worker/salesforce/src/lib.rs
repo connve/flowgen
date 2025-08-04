@@ -8,5 +8,5 @@ pub mod pubsub {
 
 pub mod bulkapi {
     pub mod config;
-    pub mod processor;
+    pub mod job;
 }
