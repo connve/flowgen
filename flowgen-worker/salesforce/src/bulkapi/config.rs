@@ -33,7 +33,7 @@ use std::path::PathBuf;
 ///  }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Processor {
+pub struct JobCreator {
     /// Optional human-readable label for identifying this subscriber configuration.
     pub label: Option<String>,
     /// Reference to credential store entry containing Salesforce authentication details.
@@ -43,7 +43,7 @@ pub struct Processor {
     /// Salesforce object for job create.
     pub object: Option<String>,
     /// Operation name related to Salesforce bulk job.
-    pub operation: Option<Operation>,
+    pub operation: Operation,
     /// Output file format for the bulk job.
     pub content_type: Option<ContentType>,
     /// Column delimeter for output file for the bulk job.
@@ -116,4 +116,4 @@ pub enum LineEnding {
     Crlf,
 }
 
-impl ConfigExt for Processor {}
+impl ConfigExt for JobCreator {}

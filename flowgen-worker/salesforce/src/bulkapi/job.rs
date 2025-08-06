@@ -5,13 +5,13 @@ use flowgen_core::{
 };
 use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json,Value};
 use std::{path::Path, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "bulkapi";
-const URI_PATH: &str = "/services/data/v61.0/jobs/query";
+const DEFAULT_URI_PATH: &str = "/services/data/v61.0/jobs/query";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -31,14 +31,16 @@ pub enum Error {
     SalesforceAuth(#[from] crate::client::Error),
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
+    #[error("could not connect to Salesforce: {}", _0)]
+    NoSalesforceAuthToken(String),
 }
 #[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default)]
 struct Credentials {
     bearer_auth: Option<String>,
 }
 
-pub struct Processor {
-    config: Arc<super::config::Processor>,
+pub struct JobCreator {
+    config: Arc<super::config::JobCreator>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
     current_task_id: usize,
@@ -48,7 +50,7 @@ struct EventHandler {
     /// HTTP client.
     client: Arc<reqwest::Client>,
     /// Processor configuration settings.
-    config: Arc<super::config::Processor>,
+    config: Arc<super::config::JobCreator>,
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Task identifier for event tracking
@@ -68,56 +70,82 @@ impl EventHandler {
             .connect()
             .await?;
 
-        if let Some(token_result) = sfdc_client.token_result {
-            // Create payload for query job.
-            let payload = json!({
-                "operation": Some(self.config.operation.clone()),
-                "query": Some(self.config.query.clone()),
-                "contentType": Some(self.config.content_type.clone()),
-                "columnDelimiter": Some(self.config.column_delimiter.clone()),
-                "lineEnding": Some(self.config.line_ending.clone()),
-            });
+        let token_result = sfdc_client.token_result.ok_or_else(|| {
+            Error::NoSalesforceAuthToken("Error getting access token".to_string())
+        })?;
 
-            // Create http client with sf endpoint.
-            let mut client = self
-                .client
-                .post(sfdc_client.instance_url + URI_PATH);
-            
-            client = client.bearer_auth(token_result.access_token().secret());
-            client = client.json(&payload);
+        let payload: Value;
 
-            // Do API Call.
-            let resp = client.send().await?.text().await?;
-
-            // Prepare processor output.
-            let data = json!(resp);
-
-            let timestamp = Utc::now().timestamp_micros();
-            let subject = match &self.config.label {
-                Some(label) => format!(
-                    "{}.{}.{}",
-                    DEFAULT_MESSAGE_SUBJECT,
-                    label.to_lowercase(),
-                    timestamp
-                ),
-                None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
-            };
-
-            // Send processor output as event.
-            let e = EventBuilder::new()
-                .data(EventData::Json(data))
-                .subject(subject.clone())
-                .current_task_id(self.current_task_id)
-                .build()?;
-            self.tx.send(e)?;
-            event!(Level::INFO, "event processed: {}", subject);
+        match self.config.operation {
+            super::config::Operation::Query | super::config::Operation::QueryAll => {
+                // Create payload for query or queryall job.
+                payload = json!({
+                    "operation": self.config.operation,
+                    "query": Some(self.config.query.clone()),
+                    "contentType": Some(self.config.content_type.clone()),
+                    "columnDelimiter": Some(self.config.column_delimiter.clone()),
+                    "lineEnding": Some(self.config.line_ending.clone()),
+                });
+            }
+            super::config::Operation::Insert => {
+                todo!()
+            }
+            super::config::Operation::Update => {
+                todo!()
+            }
+            super::config::Operation::Upsert => {
+                todo!()
+            }
+            super::config::Operation::Delete => {
+                todo!()
+            }
+            super::config::Operation::HardDelete => {
+                todo!()
+            }
+            _ => {
+                payload = json!({});
+            }
         }
+
+        // Create http client with sf endpoint.
+        let mut client = self
+            .client
+            .post(sfdc_client.instance_url + DEFAULT_URI_PATH);
+
+        client = client.bearer_auth(token_result.access_token().secret());
+        client = client.json(&payload);
+
+        // Do API Call.
+        let resp = client.send().await?.text().await?;
+
+        // Prepare processor output.
+        let data = json!(resp);
+
+        let timestamp = Utc::now().timestamp_micros();
+        let subject = match &self.config.label {
+            Some(label) => format!(
+                "{}.{}.{}",
+                DEFAULT_MESSAGE_SUBJECT,
+                label.to_lowercase(),
+                timestamp
+            ),
+            None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
+        };
+
+        // Send processor output as event.
+        let e = EventBuilder::new()
+            .data(EventData::Json(data))
+            .subject(subject.clone())
+            .current_task_id(self.current_task_id)
+            .build()?;
+        self.tx.send(e)?;
+        event!(Level::INFO, "event processed: {}", subject);
 
         Ok(())
     }
 }
 
-impl flowgen_core::task::runner::Runner for Processor {
+impl flowgen_core::task::runner::Runner for JobCreator {
     type Error = Error;
     async fn run(mut self) -> Result<(), Error> {
         let client = reqwest::ClientBuilder::new().https_only(true).build()?;
@@ -149,7 +177,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
 #[derive(Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Processor>>,
+    config: Option<Arc<super::config::JobCreator>>,
     tx: Option<Sender<Event>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
@@ -162,7 +190,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::JobCreator>) -> Self {
         self.config = Some(config);
         self
     }
@@ -182,8 +210,8 @@ impl ProcessorBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Processor, Error> {
-        Ok(Processor {
+    pub async fn build(self) -> Result<JobCreator, Error> {
+        Ok(JobCreator {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
