@@ -24,7 +24,7 @@ pub enum Error {
     TaskJoin(#[from] tokio::task::JoinError),
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
-    #[error("missing required attribute")]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("other error with subscriber")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),

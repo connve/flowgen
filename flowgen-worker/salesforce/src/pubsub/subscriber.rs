@@ -37,7 +37,7 @@ pub enum Error {
     RecordBatch(#[from] flowgen_core::convert::recordbatch::Error),
     #[error(transparent)]
     Service(#[from] flowgen_core::connect::service::Error),
-    #[error("missing required attribute")]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("cache error: {0}")]
     Cache(String),

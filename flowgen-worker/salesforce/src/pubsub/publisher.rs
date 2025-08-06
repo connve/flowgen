@@ -36,7 +36,7 @@ pub enum Error {
     Event(#[from] flowgen_core::event::Error),
     #[error(transparent)]
     Service(#[from] flowgen_core::connect::service::Error),
-    #[error("missing required event attribute")]
+    #[error("missing required event attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("empty object")]
     EmptyObject(),

@@ -12,7 +12,7 @@ pub enum Error {
     Avro(#[from] apache_avro::Error),
     #[error(transparent)]
     SerdeJson(#[from] serde_json::error::Error),
-    #[error("missing required attribute")]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 

@@ -17,7 +17,7 @@ pub enum Error {
     Event(#[from] crate::event::Error),
     #[error(transparent)]
     RecordBatch(#[from] crate::convert::recordbatch::Error),
-    #[error("missing required attribute")]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 pub struct Subscriber {

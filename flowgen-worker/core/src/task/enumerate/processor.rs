@@ -17,7 +17,7 @@ pub enum Error {
     Event(#[from] crate::event::Error),
     #[error(transparent)]
     RecordBatch(#[from] crate::convert::recordbatch::Error),
-    #[error("missing required attrubute")]
+    #[error("missing required attrubute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("no array data available")]
     EmptyArray(),

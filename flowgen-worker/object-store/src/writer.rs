@@ -27,7 +27,7 @@ pub enum Error {
     ObjectStore(#[from] object_store::Error),
     #[error(transparent)]
     ObjectStoreClient(#[from] super::client::Error),
-    #[error("missing required attribute: {}", 1)]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("could not initialize object store context")]
     NoObjectStoreContext(),

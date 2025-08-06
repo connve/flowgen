@@ -45,7 +45,7 @@ pub enum Error {
     ReqwestInvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
     #[error(transparent)]
     ReqwestInvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
-    #[error("missing required attribute")]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("provided attribute not found")]
     NotFound(),

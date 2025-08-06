@@ -40,7 +40,7 @@ pub enum Error {
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
-    #[error("missing required attribute: {}", 1)]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error("could not initialize object store context")]
     NoObjectStoreContext(),
@@ -195,6 +195,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T>{
                         event!(Level::ERROR, "{}", err);
                     }
                 });
+    
             }
         }
         Ok(())

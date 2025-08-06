@@ -92,7 +92,7 @@ pub enum Error {
         flow: String,
         task_id: usize,
     },
-    #[error("missing required event attribute: {}", 1)]
+    #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),

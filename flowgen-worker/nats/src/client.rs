@@ -15,8 +15,6 @@ struct Credentials {
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("missing required attribute")]
-    MissingRequiredAttribute(String),
     #[error(transparent)]
     OpenFile(#[from] std::io::Error),
     #[error(transparent)]
@@ -27,6 +25,8 @@ pub enum Error {
     NatsConnect(#[from] async_nats::ConnectError),
     #[error("credentials are not provided")]
     CredentialsNotProvided(),
+    #[error("missing required attribute: {}", _0)]
+    MissingRequiredAttribute(String),
 }
 
 #[derive(Debug)]
