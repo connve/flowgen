@@ -247,7 +247,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             .map_err(Error::SalesforceAuth)?;
 
         // Create Pub/Sub context
-        let pubsub = super::context::Builder::new(service)
+        let pubsub = super::context::ContextBuilder::new(service)
             .with_client(sfdc_client)
             .build()
             .map_err(Error::SalesforcePubSub)?;
