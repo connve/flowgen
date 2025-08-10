@@ -7,7 +7,7 @@ use std::collections::HashMap;
 pub struct Processor {
     pub label: Option<String>,
     pub endpoint: String,
-    pub method: HttpMethod,
+    pub method: Method,
     pub payload: Option<Payload>,
     pub headers: Option<HashMap<String, String>>,
     pub credentials: Option<String>,
@@ -31,7 +31,7 @@ pub enum PayloadSendAs {
 }
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub enum HttpMethod {
+pub enum Method {
     #[default]
     GET,
     POST,

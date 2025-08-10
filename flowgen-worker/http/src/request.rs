@@ -15,13 +15,13 @@ use tracing::{event, Level};
 
 const DEFAULT_MESSAGE_SUBJECT: &'static str = "http.response";
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 struct Credentials {
     bearer_auth: Option<String>,
     basic_auth: Option<BasicAuth>,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 struct BasicAuth {
     username: String,
     password: String,
@@ -53,7 +53,8 @@ pub enum Error {
     PayloadConfig(),
 }
 
-/// Handles processing of https call outs..
+/// Handles processing of https call outs.
+#[derive(Clone, Debug)]
 struct EventHandler {
     /// HTTP client.
     client: Arc<reqwest::Client>,
@@ -72,12 +73,12 @@ impl EventHandler {
 
         // Setup http client with endpoint according to chosen method.
         let mut client = match config.method {
-            crate::config::HttpMethod::GET => self.client.get(config.endpoint),
-            crate::config::HttpMethod::POST => self.client.post(config.endpoint),
-            crate::config::HttpMethod::PUT => self.client.put(config.endpoint),
-            crate::config::HttpMethod::DELETE => self.client.delete(config.endpoint),
-            crate::config::HttpMethod::PATCH => self.client.patch(config.endpoint),
-            crate::config::HttpMethod::HEAD => self.client.head(config.endpoint),
+            crate::config::Method::GET => self.client.get(config.endpoint),
+            crate::config::Method::POST => self.client.post(config.endpoint),
+            crate::config::Method::PUT => self.client.put(config.endpoint),
+            crate::config::Method::DELETE => self.client.delete(config.endpoint),
+            crate::config::Method::PATCH => self.client.patch(config.endpoint),
+            crate::config::Method::HEAD => self.client.head(config.endpoint),
         };
 
         // Add headers if present in the config.
@@ -152,6 +153,8 @@ impl EventHandler {
     }
 }
 
+
+#[derive(Debug)]
 pub struct Processor {
     config: Arc<super::config::Processor>,
     tx: Sender<Event>,
@@ -190,7 +193,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ProcessorBuilder {
     config: Option<Arc<super::config::Processor>>,
     tx: Option<Sender<Event>>,

@@ -135,22 +135,21 @@ impl Context {
     }
 }
 
-/// Used to store configure PubSub Context.
-pub struct Builder {
+pub struct ContextBuilder {
     client: Option<client::Client>,
     service: flowgen_core::connect::service::Service,
 }
 
-impl Builder {
+impl ContextBuilder {
     // Creates a new instance of builder..
     pub fn new(service: flowgen_core::connect::service::Service) -> Self {
-        Builder {
+        ContextBuilder {
             client: None,
             service,
         }
     }
     /// Pass the Salesforce client.
-    pub fn with_client(&mut self, client: client::Client) -> &mut Builder {
+    pub fn with_client(&mut self, client: client::Client) -> &mut Self {
         self.client = Some(client);
         self
     }
@@ -207,7 +206,7 @@ mod tests {
         let service = flowgen_core::connect::service::ServiceBuilder::new()
             .build()
             .unwrap();
-        let client = Builder::new(service).build();
+        let client = ContextBuilder::new(service).build();
         assert!(matches!(client, Err(Error::MissingClient(..))));
     }
     #[test]
@@ -230,7 +229,7 @@ mod tests {
             .build()
             .unwrap();
         let _ = fs::remove_file(path);
-        let pubsub = Builder::new(service).with_client(client).build();
+        let pubsub = ContextBuilder::new(service).with_client(client).build();
         assert!(matches!(pubsub, Err(Error::MissingTokenResponse(..))));
     }
 }
