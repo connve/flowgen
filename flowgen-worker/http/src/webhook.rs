@@ -41,14 +41,14 @@ impl IntoResponse for Error {
     }
 }
 
-/// Handles processing of incoming http webhooks.
+/// Handles processing of incoming HTTP webhooks.
 #[derive(Clone, Debug)]
 struct EventHandler {
     /// Processor configuration settings.
     config: Arc<super::config::Processor>,
-    /// Channel sender for processed events
+    /// Channel sender for processed events.
     tx: Sender<Event>,
-    /// Task identifier for event tracking
+    /// Task identifier for event tracking.
     current_task_id: usize,
 }
 
