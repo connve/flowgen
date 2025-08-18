@@ -1,19 +1,22 @@
+use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use arrow::csv::reader::Format;
 use bytes::Bytes;
-use chrono::{Utc};
+use chrono::Utc;
 use flowgen_core::cache::Cache;
-use flowgen_core::{connect::client::Client, event::EventData};
 use flowgen_core::event::{Event, EventBuilder};
-use object_store::{GetResultPayload};
+use flowgen_core::{connect::client::Client, event::EventData};
+use object_store::GetResultPayload;
 use serde_json::Value;
 use std::io::{BufReader, Seek};
-use std::{sync::Arc};
-use tokio::sync::{broadcast::{Receiver, Sender}, Mutex};
+use std::sync::Arc;
+use tokio::sync::{
+    broadcast::{Receiver, Sender},
+    Mutex,
+};
 use tracing::{event, Level};
-use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_JSON_EXTENSION, DEFAULT_CSV_EXTENSION};
 
 /// Default subject prefix for logging messages.
-const DEFAULT_MESSAGE_SUBJECT: &'static str = "object_store.reader";
+const DEFAULT_MESSAGE_SUBJECT: &str = "object_store.reader.in";
 /// Default batch size for files.
 const DEFAULT_BATCH_SIZE: usize = 1000;
 /// Default files have headers.
@@ -48,7 +51,6 @@ pub enum Error {
     NoFileExtension(),
     #[error("cache errors")]
     Cache(),
-    
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -74,31 +76,31 @@ impl<T: Cache> EventHandler<T> {
             .as_mut()
             .ok_or_else(Error::NoObjectStoreContext)?;
 
-        let result = context
-            .object_store
-            .get(&context.path)
-            .await?;
+        let result = context.object_store.get(&context.path).await?;
 
-        let extension = result.meta.location.extension().ok_or_else(Error::NoFileExtension)?;
+        let extension = result
+            .meta
+            .location
+            .extension()
+            .ok_or_else(Error::NoFileExtension)?;
 
         let mut e = EventBuilder::new();
         match result.payload {
-            GetResultPayload::File(mut file, _) => {
-                  match extension {
-                      DEFAULT_JSON_EXTENSION => {
-                        let reader = BufReader::new(file);
-                        let data: Value = serde_json::from_reader(reader)?;
-                        e = e.data(EventData::Json(data));
-                      }, 
-                      DEFAULT_CSV_EXTENSION => {
-                        let (schema, _) = Format::default()
-                                .with_header(true)
-                                .infer_schema(&mut file, Some(100))
-                                .map_err(Error::Arrow)?;
-                            file.rewind().map_err(Error::IO)?;
+            GetResultPayload::File(mut file, _) => match extension {
+                DEFAULT_JSON_EXTENSION => {
+                    let reader = BufReader::new(file);
+                    let data: Value = serde_json::from_reader(reader)?;
+                    e = e.data(EventData::Json(data));
+                }
+                DEFAULT_CSV_EXTENSION => {
+                    let (schema, _) = Format::default()
+                        .with_header(true)
+                        .infer_schema(&mut file, Some(100))
+                        .map_err(Error::Arrow)?;
+                    file.rewind().map_err(Error::IO)?;
 
-                        if let Some(cache_options) = &self.config.cache_options {
-                            if let Some(insert_key) = &cache_options.insert_key {
+                    if let Some(cache_options) = &self.config.cache_options {
+                        if let Some(insert_key) = &cache_options.insert_key {
                             let schema_string = serde_json::to_string(&schema)?;
                             let schema_bytes = Bytes::from(schema_string);
                             self.cache
@@ -106,44 +108,44 @@ impl<T: Cache> EventHandler<T> {
                                 .await
                                 .map_err(|_| Error::Cache())?;
                         }
-        };
+                    };
 
-                        let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-                        let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
-                        let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
-                            .with_header(has_header)
-                            .with_batch_size(batch_size)
-                            .build(file)
-                            .map_err(Error::Arrow)?;
-                            
-                            for data in csv {
-                                e = e.data(EventData::ArrowRecordBatch(data?))
-                            }
-                      }
-                      _ => {
-                        todo!()
-                      }
-                  }
+                    let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                    let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
+                    let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
+                        .with_header(has_header)
+                        .with_batch_size(batch_size)
+                        .build(file)
+                        .map_err(Error::Arrow)?;
 
+                    for data in csv {
+                        e = e.data(EventData::ArrowRecordBatch(data?))
+                    }
+                }
+                _ => {
+                    todo!()
+                }
             },
             GetResultPayload::Stream(pin) => todo!(),
         }
         let timestamp = Utc::now().timestamp_micros();
         let subject = match &self.config.label {
-                Some(label) => format!(
-                    "{}.{}.{}",
-                    DEFAULT_MESSAGE_SUBJECT,
-                    label.to_lowercase(),
-                    timestamp
-                ),
-                None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
-            };
-        let e = e.subject(subject.clone()).current_task_id(self.current_task_id).build()?;
+            Some(label) => format!(
+                "{}.{}.{}",
+                DEFAULT_MESSAGE_SUBJECT,
+                label.to_lowercase(),
+                timestamp
+            ),
+            None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
+        };
+        let e = e
+            .subject(subject.clone())
+            .current_task_id(self.current_task_id)
+            .build()?;
         self.tx.send(e)?;
         event!(Level::INFO, "event processed: {}", DEFAULT_MESSAGE_SUBJECT);
         Ok(())
     }
-
 }
 
 /// Object store writer that processes events from a broadcast receiver.
@@ -160,7 +162,7 @@ pub struct Reader<T: Cache> {
     cache: Arc<T>,
 }
 
-impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T>{
+impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     type Error = Error;
 
     async fn run(mut self) -> Result<(), Self::Error> {
@@ -174,12 +176,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T>{
             client_builder = client_builder.credentials(credentials.to_path_buf());
         }
 
-        let client = Arc::new(Mutex::new(
-            client_builder
-                .build()?
-                .connect()
-                .await?,
-        ));
+        let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
 
         // Process incoming events, filtering by task ID.
         while let Ok(event) = self.rx.recv().await {
@@ -189,13 +186,18 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T>{
                 let cache = Arc::clone(&self.cache);
                 let tx = self.tx.clone();
                 let current_task_id = self.current_task_id;
-                let event_handler = EventHandler { client, config, tx, current_task_id, cache};
+                let event_handler = EventHandler {
+                    client,
+                    config,
+                    tx,
+                    current_task_id,
+                    cache,
+                };
                 tokio::spawn(async move {
                     if let Err(err) = event_handler.handle(event).await {
                         event!(Level::ERROR, "{}", err);
                     }
                 });
-    
             }
         }
         Ok(())
@@ -217,10 +219,10 @@ pub struct ReaderBuilder<T: Cache> {
     cache: Option<Arc<T>>,
 }
 
-impl<T: Cache> ReaderBuilder<T> 
+impl<T: Cache> ReaderBuilder<T>
 where
-    T: Default
-    {
+    T: Default,
+{
     pub fn new() -> ReaderBuilder<T> {
         ReaderBuilder {
             ..Default::default()
@@ -246,11 +248,10 @@ where
     }
 
     /// Sets the cache object.
-      pub fn cache(mut self, cache: Arc<T>) -> Self {
+    pub fn cache(mut self, cache: Arc<T>) -> Self {
         self.cache = Some(cache);
         self
     }
-
 
     /// Sets the current task identifier.
     pub fn current_task_id(mut self, current_task_id: usize) -> Self {

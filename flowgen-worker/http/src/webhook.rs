@@ -1,24 +1,20 @@
+use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter, Router};
 use chrono::Utc;
-use flowgen_core::{
-    config::ConfigExt,
-    event::{Event, EventBuilder, EventData},
-};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use flowgen_core::event::{Event, EventBuilder, EventData};
+use reqwest::{header::HeaderMap, StatusCode};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
-use tokio::{
-    fs,
-    sync::broadcast::{Receiver, Sender},
-};
+use tokio::sync::broadcast::Sender;
 use tracing::{event, Level};
 
-const DEFAULT_MESSAGE_SUBJECT: &'static str = "http.webhook";
+const DEFAULT_MESSAGE_SUBJECT: &str = "http.webhook.in";
+const DEFAULT_HEADERS_KEY: &str = "headers";
+const DEFAULT_PAYLOAD_KEY: &str = "payload";
+const DEFAULT_HTTP_PORT: &str = "3000";
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error(transparent)]
@@ -26,26 +22,27 @@ pub enum Error {
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
     #[error(transparent)]
-    ConfigRender(#[from] flowgen_core::config::Error),
+    Axum(#[from] axum::Error),
     #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
-    #[error(transparent)]
-    ReqwestInvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
-    #[error(transparent)]
-    ReqwestInvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+    IO(#[from] std::io::Error),
     #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    #[error("provided attribute not found")]
-    NotFound(),
-    #[error("either payload json or payload input is required")]
-    PayloadConfig(),
 }
 
-/// Handles processing of https call outs.
+impl IntoResponse for Error {
+    fn into_response(self) -> axum::response::Response {
+        let status = match &self {
+            Error::SerdeJson(_) | Error::Axum(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        event!(Level::ERROR, "webhook error: {}", self);
+        status.into_response()
+    }
+}
+
+/// Handles processing of incoming http webhooks.
 #[derive(Clone, Debug)]
 struct EventHandler {
-    /// HTTP client.
-    client: Arc<reqwest::Client>,
     /// Processor configuration settings.
     config: Arc<super::config::Processor>,
     /// Channel sender for processed events
@@ -55,68 +52,36 @@ struct EventHandler {
 }
 
 impl EventHandler {
-    /// Processes an event and writes it to the configured object store.
-    async fn handle(self, event: Event) -> Result<(), Error> {
-        let config = self.config.render(&event.data)?;
+    async fn handle(
+        &self,
+        headers: HeaderMap,
+        request: Request<Body>,
+    ) -> Result<StatusCode, Error> {
+        // Get bytes out of the body.
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX).await?;
 
-        // Setup http client with endpoint according to chosen method.
-        let mut client = match config.method {
-            crate::config::Method::GET => self.client.get(config.endpoint),
-            crate::config::Method::POST => self.client.post(config.endpoint),
-            crate::config::Method::PUT => self.client.put(config.endpoint),
-            crate::config::Method::DELETE => self.client.delete(config.endpoint),
-            crate::config::Method::PATCH => self.client.patch(config.endpoint),
-            crate::config::Method::HEAD => self.client.head(config.endpoint),
+        // Convert bytes body to JSON object.
+        let json_body = match body.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_slice(&body)?,
         };
 
-        // Add headers if present in the config.
-        if let Some(headers) = self.config.headers.to_owned() {
-            let mut header_map = HeaderMap::new();
-            for (key, value) in headers {
-                let header_name = HeaderName::try_from(key)?;
-                let header_value = HeaderValue::try_from(value)?;
-                header_map.insert(header_name, header_value);
-            }
-            client = client.headers(header_map);
+        // Convert headers to a JSON object.
+        let mut headers_map = Map::new();
+        for (key, value) in headers.iter() {
+            headers_map.insert(
+                key.as_str().to_string(),
+                Value::String(value.to_str().unwrap_or("").to_string()),
+            );
         }
 
-        // Set client body to json from the provided json string.
-        if let Some(payload) = &self.config.payload {
-            let json = match &payload.object {
-                Some(obj) => Value::Object(obj.to_owned()),
-                None => match &payload.input {
-                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())?,
-                    None => return Err(Error::PayloadConfig()),
-                },
-            };
+        // Merge headers and body into one JSON value.
+        let data = json!({
+            DEFAULT_HEADERS_KEY: Value::Object(headers_map),
+            DEFAULT_PAYLOAD_KEY: json_body
+        });
 
-            client = match payload.send_as {
-                crate::config::PayloadSendAs::Json => client.json(&json),
-                crate::config::PayloadSendAs::UrlEncoded => client.form(&json),
-                crate::config::PayloadSendAs::QueryParams => client.query(&json),
-            }
-        }
-
-        // Set client auth method & credentials.
-        if let Some(credentials) = &self.config.credentials {
-            let credentials_string = fs::read_to_string(credentials).await?;
-            let credentials: Credentials = serde_json::from_str(&credentials_string)?;
-
-            if let Some(bearer_token) = credentials.bearer_auth {
-                client = client.bearer_auth(bearer_token);
-            }
-
-            if let Some(basic_auth) = credentials.basic_auth {
-                client = client.basic_auth(basic_auth.username, Some(basic_auth.password));
-            }
-        };
-
-        // Do API Call.
-        let resp = client.send().await?.text().await?;
-
-        // Prepare processor output.
-        let data = json!(resp);
-
+        // Create event subject.
         let timestamp = Utc::now().timestamp_micros();
         let subject = match &self.config.label {
             Some(label) => format!(
@@ -136,50 +101,50 @@ impl EventHandler {
             .build()?;
 
         self.tx.send(e)?;
-        event!(Level::INFO, "event processeds: {}", subject);
-        Ok(())
+        event!(Level::INFO, "event processed: {}", subject);
+        Ok(StatusCode::OK)
     }
 }
-
 
 #[derive(Debug)]
 pub struct Processor {
     config: Arc<super::config::Processor>,
     tx: Sender<Event>,
-    rx: Receiver<Event>,
     current_task_id: usize,
+    server_manager: Arc<super::server::HttpServerManager>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
-    async fn run(mut self) -> Result<(), Error> {
-        let app = Router::new()
-            .route("/", get(root));
+    async fn run(self) -> Result<(), Error> {
+        // Init event handler with required setup.
+        let config = Arc::clone(&self.config);
+        let event_handler = EventHandler {
+            config: self.config,
+            tx: self.tx,
+            current_task_id: self.current_task_id,
+        };
 
-        // run our app with hyper, listening globally on port 3000
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        // Prepare closure for MethodRouter.
+        let handler = move |headers: HeaderMap, request: Request<Body>| async move {
+            event_handler.handle(headers, request).await
+        };
 
-        while let Ok(event) = self.rx.recv().await {
-            if event.current_task_id == Some(self.current_task_id - 1) {
-                let config = Arc::clone(&self.config);
-                let client = Arc::clone(&client);
-                let tx = self.tx.clone();
-                let current_task_id = self.current_task_id;
+        // Handle routing according to selected method.
+        let method_router = match config.method {
+            crate::config::Method::GET => MethodRouter::new().get(handler),
+            crate::config::Method::POST => MethodRouter::new().post(handler),
+            crate::config::Method::PUT => MethodRouter::new().put(handler),
+            crate::config::Method::DELETE => MethodRouter::new().delete(handler),
+            crate::config::Method::PATCH => MethodRouter::new().patch(handler),
+            crate::config::Method::HEAD => MethodRouter::new().head(handler),
+        };
 
-                let event_handler = EventHandler {
-                    config,
-                    current_task_id,
-                    tx,
-                    client,
-                };
-                tokio::spawn(async move {
-                    if let Err(err) = event_handler.handle(event).await {
-                        event!(Level::ERROR, "{}", err);
-                    }
-                });
-            }
-        }
+        // Register route with the shared server manager.
+        self.server_manager
+            .register_route(config.endpoint.clone(), method_router)
+            .await;
+
         Ok(())
     }
 }
@@ -188,8 +153,8 @@ impl flowgen_core::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     config: Option<Arc<super::config::Processor>>,
     tx: Option<Sender<Event>>,
-    rx: Option<Receiver<Event>>,
     current_task_id: usize,
+    server_manager: Option<Arc<super::server::HttpServerManager>>,
 }
 
 impl ProcessorBuilder {
@@ -204,11 +169,6 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
-        self.rx = Some(receiver);
-        self
-    }
-
     pub fn sender(mut self, sender: Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
@@ -219,18 +179,23 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn server_manager(mut self, server_manager: Arc<super::server::HttpServerManager>) -> Self {
+        self.server_manager = Some(server_manager);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            server_manager: self
+                .server_manager
+                .ok_or_else(|| Error::MissingRequiredAttribute("server_manager".to_string()))?,
         })
     }
 }

@@ -13,7 +13,7 @@ use tokio::{
 };
 use tracing::{event, Level};
 
-const DEFAULT_MESSAGE_SUBJECT: &str = "http.response";
+const DEFAULT_MESSAGE_SUBJECT: &str = "http.response.out";
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 struct Credentials {
@@ -28,6 +28,7 @@ struct BasicAuth {
 }
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error(transparent)]
     IO(#[from] std::io::Error),

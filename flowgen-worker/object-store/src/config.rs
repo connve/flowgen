@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 /// File extension for Avro format files.
-pub const DEFAULT_AVRO_EXTENSION: &'static str = "avro";
+pub const DEFAULT_AVRO_EXTENSION: &str = "avro";
 /// File extension for CSV format files.
-pub const DEFAULT_CSV_EXTENSION: &'static str = "csv";
+pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 /// File extension for JSON format files.
-pub const DEFAULT_JSON_EXTENSION: &'static str = "json";
+pub const DEFAULT_JSON_EXTENSION: &str = "json";
 
 /// Object Store reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
@@ -23,7 +23,7 @@ pub struct Reader {
     pub path: PathBuf,
     /// Optional path to credentials file.
     pub credentials: Option<PathBuf>,
-   /// Additional client connection options.
+    /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
     /// Number of records to process in each batch.
     pub batch_size: Option<usize>,
@@ -32,7 +32,6 @@ pub struct Reader {
     /// Caching configuration for performance optimization.
     pub cache_options: Option<CacheOptions>,
 }
-
 
 /// Object Store writer configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
@@ -67,5 +66,5 @@ pub enum HiveParitionKeys {
 }
 
 /// Implement default ConfigExt traits.
-impl ConfigExt for Reader{}
-impl ConfigExt for Writer{}
+impl ConfigExt for Reader {}
+impl ConfigExt for Writer {}

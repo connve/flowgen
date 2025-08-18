@@ -4,6 +4,7 @@ use salesforce_pubsub::eventbus::v1::pub_sub_client::PubSubClient;
 use tokio_stream::StreamExt;
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("client missing")]
     MissingClient(),
@@ -164,18 +165,11 @@ impl ContextBuilder {
             .ok_or_else(Error::MissingTokenResponse)?
             .access_token()
             .secret()
-            .parse()
-            .map_err(Error::InvalidMetadataValue)?;
+            .parse()?;
 
-        let instance_url: tonic::metadata::AsciiMetadataValue = client
-            .instance_url
-            .parse()
-            .map_err(Error::InvalidMetadataValue)?;
+        let instance_url: tonic::metadata::AsciiMetadataValue = client.instance_url.parse()?;
 
-        let tenant_id: tonic::metadata::AsciiMetadataValue = client
-            .tenant_id
-            .parse()
-            .map_err(Error::InvalidMetadataValue)?;
+        let tenant_id: tonic::metadata::AsciiMetadataValue = client.tenant_id.parse()?;
 
         let interceptor = ContextInterceptor {
             auth_header,

@@ -1,3 +1,4 @@
+use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use apache_avro::from_avro_datum;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
@@ -7,10 +8,9 @@ use object_store::PutPayload;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{event, Level};
-use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_JSON_EXTENSION, DEFAULT_CSV_EXTENSION};
 
 /// Default subject prefix for logging messages.
-const DEFAULT_MESSAGE_SUBJECT: &'static str = "object_store.writer";
+const DEFAULT_MESSAGE_SUBJECT: &str = "object_store.writer.out";
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -75,44 +75,41 @@ impl EventHandler {
         let mut writer = Vec::new();
         let object_path = match &event.data {
             flowgen_core::event::EventData::ArrowRecordBatch(data) => {
-                        arrow::csv::WriterBuilder::new()
-                            .with_header(true)
-                            .build(&mut writer)
-                            .write(data)?;
-                        object_store::path::Path::from(format!(
-                            "{}.{}",
-                            path.to_string_lossy(),
-                            DEFAULT_CSV_EXTENSION
-                        ))
-                    }
+                arrow::csv::WriterBuilder::new()
+                    .with_header(true)
+                    .build(&mut writer)
+                    .write(data)?;
+                object_store::path::Path::from(format!(
+                    "{}.{}",
+                    path.to_string_lossy(),
+                    DEFAULT_CSV_EXTENSION
+                ))
+            }
             flowgen_core::event::EventData::Avro(data) => {
-                        let schema = apache_avro::Schema::parse_str(&data.schema)?;
-                        let value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
+                let schema = apache_avro::Schema::parse_str(&data.schema)?;
+                let value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
 
-                        let mut writer = apache_avro::Writer::new(&schema, &mut writer);
-                        writer.append(value)?;
-                        writer.flush()?;
-                        object_store::path::Path::from(format!(
-                            "{}.{}",
-                            path.to_string_lossy(),
-                            DEFAULT_AVRO_EXTENSION
-                        ))
-                    }
+                let mut writer = apache_avro::Writer::new(&schema, &mut writer);
+                writer.append(value)?;
+                writer.flush()?;
+                object_store::path::Path::from(format!(
+                    "{}.{}",
+                    path.to_string_lossy(),
+                    DEFAULT_AVRO_EXTENSION
+                ))
+            }
             flowgen_core::event::EventData::Json(data) => {
-                       serde_json::to_writer_pretty(&mut writer, data)?;
-                       object_store::path::Path::from(format!(
-                            "{}.{}",
-                            path.to_string_lossy(),
-                            DEFAULT_JSON_EXTENSION
-                        ))
-                    },
-            };
+                serde_json::to_writer_pretty(&mut writer, data)?;
+                object_store::path::Path::from(format!(
+                    "{}.{}",
+                    path.to_string_lossy(),
+                    DEFAULT_JSON_EXTENSION
+                ))
+            }
+        };
         // Upload processed data to object store.
         let payload = PutPayload::from_bytes(Bytes::from(writer));
-        context
-            .object_store
-            .put(&object_path, payload)
-            .await?;
+        context.object_store.put(&object_path, payload).await?;
 
         let subject = format!("{DEFAULT_MESSAGE_SUBJECT}.{filename}");
         event!(Level::INFO, "event processed: {}", subject);
@@ -154,12 +151,7 @@ impl flowgen_core::task::runner::Runner for Writer {
             client_builder = client_builder.credentials(credentials.to_path_buf());
         }
 
-        let client = Arc::new(Mutex::new(
-            client_builder
-                .build()?
-                .connect()
-                .await?,
-        ));
+        let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
 
         // Process incoming events, filtering by task ID.
         while let Ok(event) = self.rx.recv().await {

@@ -29,7 +29,7 @@ pub struct Event {
 pub enum EventData {
     ArrowRecordBatch(arrow::array::RecordBatch),
     Avro(AvroData),
-    Json(serde_json::Value)
+    Json(serde_json::Value),
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AvroData {
@@ -39,31 +39,28 @@ pub struct AvroData {
 
 impl TryFrom<&EventData> for Value {
     type Error = Error;
-    
+
     fn try_from(event_data: &EventData) -> Result<Self, Self::Error> {
-            let  value = match event_data {
-                EventData::ArrowRecordBatch(data) => {
-                            let buf = Vec::new();
-                            let mut writer = arrow_json::ArrayWriter::new(buf);
-                            writer.write_batches(&[data])?;
-                            writer.finish()?;
-                            let json_data = writer.into_inner();
-                            let json_rows: Vec<Map<String, Value>> =
-                            serde_json::from_reader(json_data.as_slice())?;
-                            json_rows.into()
-                        }
-                EventData::Avro(data) => {
-                            let schema = apache_avro::Schema::parse_str(&data.schema)?;
-                            let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
-                           serde_json::Value::try_from(avro_value).unwrap()
-                        }
-                EventData::Json(value) => {
-                            value.clone()
-                    },
-            };
+        let value = match event_data {
+            EventData::ArrowRecordBatch(data) => {
+                let buf = Vec::new();
+                let mut writer = arrow_json::ArrayWriter::new(buf);
+                writer.write_batches(&[data])?;
+                writer.finish()?;
+                let json_data = writer.into_inner();
+                let json_rows: Vec<Map<String, Value>> =
+                    serde_json::from_reader(json_data.as_slice())?;
+                json_rows.into()
+            }
+            EventData::Avro(data) => {
+                let schema = apache_avro::Schema::parse_str(&data.schema)?;
+                let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
+                serde_json::Value::try_from(avro_value).unwrap()
+            }
+            EventData::Json(value) => value.clone(),
+        };
         Ok(value)
     }
-
 }
 
 impl Serialize for EventData {
@@ -71,12 +68,10 @@ impl Serialize for EventData {
     where
         S: Serializer,
     {
-
         let json_value = serde_json::Value::try_from(self).map_err(serde::ser::Error::custom)?;
-          json_value.serialize(serializer)
+        json_value.serialize(serializer)
     }
 }
-
 
 #[derive(Default, Debug)]
 pub struct EventBuilder {

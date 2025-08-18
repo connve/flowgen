@@ -7,86 +7,99 @@ use tokio::{
 };
 use tracing::error;
 
-/// Default cache object bucket name.
 const DEFAULT_CACHE_NAME: &str = "flowgen_cache";
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     DeltalakeWriter {
         #[source]
         source: flowgen_deltalake::writer::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     EnumerateProcessor {
         #[source]
         source: flowgen_core::task::enumerate::processor::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     SalesforcePubSubSubscriber {
         #[source]
         source: flowgen_salesforce::pubsub::subscriber::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     SalesforcePubsubPublisher {
         #[source]
         source: flowgen_salesforce::pubsub::publisher::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     HttpRequestProcessor {
         #[source]
         source: flowgen_http::request::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
+    HttpWebhookProcessor {
+        #[source]
+        source: flowgen_http::webhook::Error,
+        flow: String,
+        task_id: usize,
+    },
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
+    HttpServerManager {
+        #[source]
+        source: flowgen_http::server::Error,
+        flow: String,
+        task_id: usize,
+    },
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     NatsJetStreamPublisher {
         #[source]
         source: flowgen_nats::jetstream::publisher::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     NatsJetStreamSubscriber {
         #[source]
         source: flowgen_nats::jetstream::subscriber::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     ObjectStoreReader {
         #[source]
         source: flowgen_object_store::reader::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     ObjectStoreWriter {
         #[source]
         source: flowgen_object_store::writer::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     GenerateSubscriber {
         #[source]
         source: flowgen_core::task::generate::subscriber::Error,
         flow: String,
         task_id: usize,
     },
-    #[error("missing required attribute: {}", _0)]
-    MissingRequiredAttribute(String),
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),
+    #[error("missing required attribute: {}", _0)]
+    MissingRequiredAttribute(String),
 }
 
 #[derive(Debug)]
@@ -100,6 +113,9 @@ impl Flow<'_> {
     pub async fn run(mut self) -> Result<Self, Error> {
         let mut task_list: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
         let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
+        
+        // Create shared HTTP server manager for webhook processors
+        let http_server_manager = Arc::new(flowgen_http::server::HttpServerManager::new());
 
         let cache = flowgen_nats::cache::CacheBuilder::new()
             .credentials_path(self.cache_credential_path.to_path_buf())
@@ -108,7 +124,6 @@ impl Flow<'_> {
             .init(DEFAULT_CACHE_NAME)
             .await
             .map_err(Error::Cache)?;
-
         let cache = Arc::new(cache);
 
         for (i, task) in self.config.flow.tasks.iter().enumerate() {
@@ -195,7 +210,7 @@ impl Flow<'_> {
                     });
                     task_list.push(task);
                 }
-                Task::http(config) => {
+                Task::http_request(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let tx = tx.clone();
@@ -216,6 +231,36 @@ impl Flow<'_> {
                             .run()
                             .await
                             .map_err(|e| Error::HttpRequestProcessor {
+                                source: e,
+                                flow: flow_config.flow.name.to_owned(),
+                                task_id: i,
+                            })?;
+
+                        Ok(())
+                    });
+                    task_list.push(task);
+                }
+                Task::http_webhook(config) => {
+                    let config = Arc::new(config.to_owned());
+                    let tx = tx.clone();
+                    let flow_config = Arc::clone(&self.config);
+                    let server_manager = Arc::clone(&http_server_manager);
+                    let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                        flowgen_http::webhook::ProcessorBuilder::new()
+                            .config(config)
+                            .sender(tx)
+                            .current_task_id(i)
+                            .server_manager(server_manager)
+                            .build()
+                            .await
+                            .map_err(|e| Error::HttpWebhookProcessor {
+                                source: e,
+                                flow: flow_config.flow.name.to_owned(),
+                                task_id: i,
+                            })?
+                            .run()
+                            .await
+                            .map_err(|e| Error::HttpWebhookProcessor {
                                 source: e,
                                 flow: flow_config.flow.name.to_owned(),
                                 task_id: i,
@@ -395,6 +440,18 @@ impl Flow<'_> {
                 }
             }
         }
+        
+        // Start HTTP server after all webhook processors has been created.
+        let http_server_task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            http_server_manager.start_server().await.map_err(|e| Error::HttpServerManager {
+                source: e,
+                flow: "http_server".to_string(),
+                task_id: 0,
+            })
+        });
+        task_list.push(http_server_task);
+
         self.task_list = Some(task_list);
         Ok(self)
     }
