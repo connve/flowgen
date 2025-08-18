@@ -13,12 +13,12 @@ pub enum Error {
 
 /// Shared HTTP Server manager that allows multiple webhook processors to register routes.
 #[derive(Debug, Clone)]
-pub struct HttpServerManager {
+pub struct HttpServer {
     routes: Arc<RwLock<HashMap<String, MethodRouter>>>,
     server_started: Arc<Mutex<bool>>,
 }
 
-impl HttpServerManager {
+impl HttpServer {
     /// Create a new HTTP Server.
     pub fn new() -> Self {
         Self {
@@ -47,7 +47,6 @@ impl HttpServerManager {
 
         // Add all registered routes to the router.
         for (path, method_router) in routes.iter() {
-            event!(Level::INFO, "Adding route to server: {}", path);
             router = router.route(path, method_router.clone());
         }
 
@@ -70,7 +69,7 @@ impl HttpServerManager {
     }
 }
 
-impl Default for HttpServerManager {
+impl Default for HttpServer {
     fn default() -> Self {
         Self::new()
     }

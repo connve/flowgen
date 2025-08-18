@@ -17,29 +17,17 @@ pub enum Error {
     #[error("Invalid path")]
     InvalidPath,
 }
-/// Main application struct that orchestrates flow execution.
-/// The App loads flow configurations from files and runs them concurrently,
-/// with optional caching support based on the global configuration.
+/// Main application that loads and runs flows concurrently.
 pub struct App {
     /// Global application configuration.
     pub config: AppConfig,
 }
 
 impl flowgen_core::task::runner::Runner for App {
-    /// Runs the application by loading flow configurations and executing them concurrently.
-    ///
-    /// This method:
-    /// 1. Loads flow configuration files from the configured directory using glob patterns.
-    /// 2. Deserializes each configuration file into a FlowConfig.
-    /// 3. Spawns each flow as a separate async task for concurrent execution.
-    /// 4. Optionally configures caching based on global settings.
-    ///
-    /// Returns an error if configuration loading fails, but individual flow errors
-    /// are logged rather than propagated to maintain system stability.
+    /// Loads flow configs, registers routes, starts server, then runs tasks.
     type Error = Error;
     async fn run(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
-        let mut config_handles = Vec::new();
 
         let glob_pattern = app_config
             .flows
@@ -57,75 +45,68 @@ impl flowgen_core::task::runner::Runner for App {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Create shared HTTP Server manager and start it immediately.
-        let http_server = Arc::new(flowgen_http::server::HttpServerManager::new());
+        // Create shared HTTP Server.
+        let http_server = Arc::new(flowgen_http::server::HttpServer::new());
 
+        // Initialize flows and register routes
+        let mut flow_tasks = Vec::new();
         for config in flow_configs {
             let app_config = Arc::clone(&app_config);
             let http_server = Arc::clone(&http_server);
-            let handle = tokio::spawn(async move {
-                let mut flow_builder = super::flow::FlowBuilder::new()
-                    .config(Arc::new(config))
-                    .http_server(http_server);
 
-                if let Some(cache) = &app_config.cache {
-                    if cache.enabled {
-                        flow_builder = flow_builder.cache_credentials_path(&cache.credentials_path);
-                    }
+            let mut flow_builder = super::flow::FlowBuilder::new()
+                .config(Arc::new(config))
+                .http_server(http_server);
+
+            if let Some(cache) = &app_config.cache {
+                if cache.enabled {
+                    flow_builder = flow_builder.cache_credentials_path(&cache.credentials_path);
                 }
+            }
 
-                run_flow(flow_builder).await;
-            });
-            config_handles.push(handle);
+            // Register routes and collect tasks
+            let flow = match flow_builder.build() {
+                Ok(flow) => flow,
+                Err(e) => {
+                    event!(Level::ERROR, "Flow build failed: {}", e);
+                    continue;
+                }
+            };
+
+            let flow = match flow.run().await {
+                Ok(flow) => flow,
+                Err(e) => {
+                    event!(Level::ERROR, "{}", e);
+                    continue;
+                }
+            };
+
+            // Collect tasks for concurrent execution
+            if let Some(tasks) = flow.task_list {
+                flow_tasks.extend(tasks);
+            }
         }
 
+        // Start server with registered routes
         let server_handle = tokio::spawn(async move {
             if let Err(e) = http_server.start_server().await {
                 event!(Level::ERROR, "Failed to start HTTP Server: {}", e);
             }
         });
 
-        // Wait for all flows and server
-        let (_, _) = tokio::join!(
-            futures_util::future::join_all(config_handles),
-            server_handle
-        );
+        // Run tasks concurrently with server
+        let flow_handle = tokio::spawn(async move {
+            handle_task_results(flow_tasks).await;
+        });
+
+        // Wait for server and tasks
+        let (_, _) = tokio::join!(server_handle, flow_handle);
 
         Ok(())
     }
 }
 
-/// Runs a single flow with comprehensive error handling.
-///
-/// This function encapsulates the flow execution logic and error handling,
-/// reducing nesting in the main run method.
-async fn run_flow(flow_builder: super::flow::FlowBuilder<'_>) {
-    let flow = match flow_builder.build() {
-        Ok(flow) => flow,
-        Err(e) => {
-            event!(Level::ERROR, "Flow build failed: {}", e);
-            return;
-        }
-    };
-
-    let flow = match flow.run().await {
-        Ok(flow) => flow,
-        Err(e) => {
-            event!(Level::ERROR, "{}", e);
-            return;
-        }
-    };
-
-    if let Some(tasks) = flow.task_list {
-        handle_task_results(tasks).await;
-    }
-}
-
-/// Handles the results of all tasks in a flow.
-///
-/// This function processes the join results from all spawned tasks,
-/// logging appropriate error messages for both task execution failures
-/// and task logic failures.
+/// Processes task results and logs errors.
 async fn handle_task_results(tasks: Vec<JoinHandle<Result<(), super::flow::Error>>>) {
     let task_results = futures_util::future::join_all(tasks).await;
     for result in task_results {
@@ -133,14 +114,10 @@ async fn handle_task_results(tasks: Vec<JoinHandle<Result<(), super::flow::Error
     }
 }
 
-/// Logs errors from task execution results.
-///
-/// This function handles the nested Result structure from tokio::spawn,
-/// distinguishing between task execution failures (JoinError) and
-/// task logic failures (flow::Error).
+/// Logs task execution and logic errors.
 fn log_task_error(result: Result<Result<(), super::flow::Error>, tokio::task::JoinError>) {
     match result {
-        Ok(Ok(())) => {} // Task completed successfully
+        Ok(Ok(())) => {}
         Ok(Err(error)) => {
             event!(Level::ERROR, "{}", error);
         }

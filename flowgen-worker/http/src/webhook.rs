@@ -112,7 +112,7 @@ pub struct Processor {
     config: Arc<super::config::Processor>,
     tx: Sender<Event>,
     current_task_id: usize,
-    server_manager: Arc<super::server::HttpServerManager>,
+    http_server: Arc<super::server::HttpServer>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
@@ -141,8 +141,8 @@ impl flowgen_core::task::runner::Runner for Processor {
             crate::config::Method::HEAD => MethodRouter::new().head(handler),
         };
 
-        // Register route with the shared server manager.
-        self.server_manager
+        // Register route with the shared HTTP Server.
+        self.http_server
             .register_route(config.endpoint.clone(), method_router)
             .await;
 
@@ -155,7 +155,7 @@ pub struct ProcessorBuilder {
     config: Option<Arc<super::config::Processor>>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
-    server_manager: Option<Arc<super::server::HttpServerManager>>,
+    http_server: Option<Arc<super::server::HttpServer>>,
 }
 
 impl ProcessorBuilder {
@@ -180,8 +180,8 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn server_manager(mut self, server_manager: Arc<super::server::HttpServerManager>) -> Self {
-        self.server_manager = Some(server_manager);
+    pub fn http_server(mut self, server: Arc<super::server::HttpServer>) -> Self {
+        self.http_server = Some(server);
         self
     }
 
@@ -194,9 +194,9 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            server_manager: self
-                .server_manager
-                .ok_or_else(|| Error::MissingRequiredAttribute("server_manager".to_string()))?,
+            http_server: self
+                .http_server
+                .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
         })
     }
 }

@@ -114,7 +114,7 @@ pub struct Flow<'a> {
     config: Arc<FlowConfig>,
     cache_credential_path: &'a Path,
     pub task_list: Option<Vec<JoinHandle<Result<(), Error>>>>,
-    http_server: Arc<flowgen_http::server::HttpServerManager>,
+    http_server: Arc<flowgen_http::server::HttpServer>,
 }
 
 impl Flow<'_> {
@@ -255,7 +255,7 @@ impl Flow<'_> {
                             .config(config)
                             .sender(tx)
                             .current_task_id(i)
-                            .server_manager(http_server)
+                            .http_server(http_server)
                             .build()
                             .await
                             .map_err(|e| Error::HttpWebhookProcessor {
@@ -487,7 +487,7 @@ impl Flow<'_> {
 pub struct FlowBuilder<'a> {
     config: Option<Arc<FlowConfig>>,
     cache_credentials_path: Option<&'a Path>,
-    http_server: Option<Arc<flowgen_http::server::HttpServerManager>>,
+    http_server: Option<Arc<flowgen_http::server::HttpServer>>,
 }
 
 impl<'a> FlowBuilder<'a> {
@@ -505,7 +505,7 @@ impl<'a> FlowBuilder<'a> {
         self
     }
 
-    pub fn http_server(mut self, server: Arc<flowgen_http::server::HttpServerManager>) -> Self {
+    pub fn http_server(mut self, server: Arc<flowgen_http::server::HttpServer>) -> Self {
         self.http_server = Some(server);
         self
     }
