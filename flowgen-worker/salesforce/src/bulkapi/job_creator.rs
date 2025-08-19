@@ -122,7 +122,7 @@ impl EventHandler {
             .current_task_id(self.current_task_id)
             .build()?;
         self.tx.send(e)?;
-        event!(Level::INFO, "event processed: {}", subject);
+        event!(Level::INFO, "Event processed: {}", subject);
 
         Ok(())
     }

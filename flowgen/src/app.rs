@@ -39,7 +39,7 @@ impl flowgen_core::task::runner::Runner for App {
         let flow_configs: Vec<FlowConfig> = glob::glob(glob_pattern)?
             .map(|path| -> Result<FlowConfig, Error> {
                 let path = path?;
-                event!(Level::INFO, "Loading flow {:?}", path);
+                event!(Level::INFO, "Loading flow: {:?}", path);
                 let config = Config::builder().add_source(File::from(path)).build()?;
                 Ok(config.try_deserialize::<FlowConfig>()?)
             })

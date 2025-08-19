@@ -66,7 +66,7 @@ impl crate::task::runner::Runner for Processor {
                 //             .build()
                 //             .map_err(Error::Event)?;
 
-                //         event!(Level::INFO, "event processed: {}", e.subject);
+                //         event!(Level::INFO, "Event processed: {}", e.subject);
                 //         self.tx.send(e).map_err(Error::SendMessage)?;
                 //     }
             }

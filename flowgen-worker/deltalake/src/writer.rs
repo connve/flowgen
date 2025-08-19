@@ -214,7 +214,7 @@ impl EventHandler {
 
         let timestamp = Utc::now().timestamp_micros();
         let subject = format!("{}.{}.{}", DEFAULT_MESSAGE_SUBJECT, file_stem, timestamp);
-        event!(Level::INFO, "{}", format!("event processed: {}", subject));
+        event!(Level::INFO, "{}", format!("Event processed: {}", subject));
         Ok(())
     }
 }

@@ -143,7 +143,7 @@ impl<T: Cache> EventHandler<T> {
             .current_task_id(self.current_task_id)
             .build()?;
         self.tx.send(e)?;
-        event!(Level::INFO, "event processed: {}", DEFAULT_MESSAGE_SUBJECT);
+        event!(Level::INFO, "Event processed: {}", DEFAULT_MESSAGE_SUBJECT);
         Ok(())
     }
 }

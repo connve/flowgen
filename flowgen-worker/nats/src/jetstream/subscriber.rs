@@ -82,7 +82,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
                         let subject = e.subject.clone();
                         self.tx.send(e).map_err(Error::SendMessage)?;
-                        event!(Level::INFO, "event processed: {}", subject);
+                        event!(Level::INFO, "Event processed: {}", subject);
                     }
                 }
             }

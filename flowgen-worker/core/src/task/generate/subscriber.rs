@@ -1,6 +1,4 @@
-use crate::{
-    event::{Event, EventBuilder, EventData},
-};
+use crate::event::{Event, EventBuilder, EventData};
 use chrono::Utc;
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -58,7 +56,7 @@ impl crate::task::runner::Runner for Subscriber {
                 .map_err(Error::Event)?;
 
             self.tx.send(e).map_err(Error::SendMessage)?;
-            event!(Level::INFO, "event processed: {}", subject);
+            event!(Level::INFO, "Event processed: {}", subject);
 
             match self.config.count {
                 Some(count) if count == counter => break,

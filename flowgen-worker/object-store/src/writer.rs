@@ -112,7 +112,7 @@ impl EventHandler {
         context.object_store.put(&object_path, payload).await?;
 
         let subject = format!("{DEFAULT_MESSAGE_SUBJECT}.{filename}");
-        event!(Level::INFO, "event processed: {}", subject);
+        event!(Level::INFO, "Event processed: {}", subject);
         Ok(())
     }
 

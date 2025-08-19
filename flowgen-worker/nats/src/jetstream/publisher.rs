@@ -41,7 +41,7 @@ impl EventHandler {
             .await
             .map_err(Error::NatsPublish)?;
 
-        event!(Level::INFO, "event processed: {}", event.subject);
+        event!(Level::INFO, "Event processed: {}", event.subject);
         Ok(())
     }
 }
