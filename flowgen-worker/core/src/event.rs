@@ -41,7 +41,7 @@ impl TryFrom<&EventData> for Value {
     type Error = Error;
 
     fn try_from(event_data: &EventData) -> Result<Self, Self::Error> {
-        let value = match event_data {
+        let data = match event_data {
             EventData::ArrowRecordBatch(data) => {
                 let buf = Vec::new();
                 let mut writer = arrow_json::ArrayWriter::new(buf);
@@ -57,9 +57,9 @@ impl TryFrom<&EventData> for Value {
                 let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)?;
                 serde_json::Value::try_from(avro_value).unwrap()
             }
-            EventData::Json(value) => value.clone(),
+            EventData::Json(data) => data.clone(),
         };
-        Ok(value)
+        Ok(data)
     }
 }
 
