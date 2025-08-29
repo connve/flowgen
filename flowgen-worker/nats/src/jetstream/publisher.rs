@@ -32,14 +32,13 @@ struct EventHandler {
 
 impl EventHandler {
     async fn handle(self, event: Event) -> Result<(), Error> {
-        let e = event.to_publish().map_err(Error::NatsJetStreamEvent)?;
+        let e = event.to_publish()?;
 
         self.jetstream
             .lock()
             .await
             .send_publish(event.subject.clone(), e)
-            .await
-            .map_err(Error::NatsPublish)?;
+            .await?;
 
         event!(Level::INFO, "Event processed: {}", event.subject);
         Ok(())

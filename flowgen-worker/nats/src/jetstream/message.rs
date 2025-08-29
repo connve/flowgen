@@ -1,4 +1,4 @@
-use arrow::ipc::{reader::StreamDecoder, writer::StreamWriter};
+use arrow::ipc::writer::StreamWriter;
 use async_nats::jetstream::context::Publish;
 use bincode::{deserialize, serialize};
 use flowgen_core::event::{AvroData, EventBuilder, EventData};
@@ -38,11 +38,14 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
 
         match &self.data {
             EventData::ArrowRecordBatch(data) => {
-                let buffer: Vec<u8> = Vec::new();
-                let mut stream_writer = StreamWriter::try_new(buffer, &data.schema())?;
-                stream_writer.write(data)?;
-                stream_writer.finish()?;
-                let serialized = serialize(stream_writer.get_mut())?;
+                let mut buffer = Vec::new();
+                {
+                    let mut stream_writer = StreamWriter::try_new(&mut buffer, &data.schema())?;
+                    stream_writer.write(data)?;
+                    stream_writer.finish()?;
+                }
+
+                let serialized = serialize(&buffer)?;
                 event = event.payload(serialized.into());
             }
             EventData::Avro(data) => {
@@ -73,15 +76,14 @@ impl NatsMessageExt for async_nats::Message {
             Err(_) => match serde_json::from_slice(&self.payload) {
                 Ok(data) => EventData::Json(data),
                 Err(_) => {
-                    let mut buffer = arrow::buffer::Buffer::from_vec(self.payload.clone().into());
-                    let mut decoder = StreamDecoder::new();
+                    let arrow_bytes = deserialize::<Vec<u8>>(&self.payload)?;
 
-                    let recordbatch = decoder
-                        .decode(&mut buffer)
-                        .map_err(Error::Arrow)?
-                        .ok_or_else(Error::NoRecordBatch)?;
+                    let cursor = std::io::Cursor::new(arrow_bytes);
+                    let mut stream_reader =
+                        arrow::ipc::reader::StreamReader::try_new(cursor, None)?;
 
-                    decoder.finish()?;
+                    let recordbatch = stream_reader.next().ok_or_else(Error::NoRecordBatch)??;
+
                     EventData::ArrowRecordBatch(recordbatch)
                 }
             },

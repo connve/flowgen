@@ -76,7 +76,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
                 while let Some(message) = stream.next().await {
                     if let Ok(message) = message {
-                        let mut e = message.to_event()?;
+                        let mut e = message.to_event().unwrap();
                         message.ack().await.map_err(Error::Other)?;
                         e.current_task_id = Some(self.current_task_id);
 
