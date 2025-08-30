@@ -1,13 +1,12 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
-use apache_avro::Reader as AvroReader;
 use arrow::csv::reader::Format;
 use bytes::Bytes;
 use chrono::Utc;
 use flowgen_core::cache::Cache;
-use flowgen_core::event::{AvroData, Event, EventBuilder};
+use flowgen_core::event::{Event, EventBuilder};
+use flowgen_core::file::{FileType, FromReader};
 use flowgen_core::{client::Client, event::EventData};
 use object_store::GetResultPayload;
-use serde_json::Value;
 use std::io::{BufReader, Seek};
 use std::sync::Arc;
 use tokio::sync::{
@@ -92,83 +91,55 @@ impl<T: Cache> EventHandler<T> {
         };
 
         match result.payload {
-            GetResultPayload::File(mut file, _) => match extension {
-                DEFAULT_JSON_EXTENSION => {
-                    let reader = BufReader::new(file);
-                    let data: Value = serde_json::from_reader(reader)?;
+            GetResultPayload::File(mut file, _) => {
+                let file_type = match extension {
+                    DEFAULT_JSON_EXTENSION => FileType::Json,
+                    DEFAULT_CSV_EXTENSION => {
+                        let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                        let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
 
+                        // Handle CSV schema caching before processing the events.
+                        if let Some(cache_options) = &self.config.cache_options {
+                            if let Some(insert_key) = &cache_options.insert_key {
+                                let (schema, _) = Format::default()
+                                    .with_header(true)
+                                    .infer_schema(&mut file, Some(100))
+                                    .map_err(Error::Arrow)?;
+                                file.rewind().map_err(Error::IO)?;
+
+                                let schema_bytes = Bytes::from(schema.to_string());
+                                self.cache
+                                    .put(insert_key.as_str(), schema_bytes)
+                                    .await
+                                    .map_err(|_| Error::Cache())?;
+                            }
+                        }
+
+                        FileType::Csv {
+                            batch_size,
+                            has_header,
+                        }
+                    }
+                    DEFAULT_AVRO_EXTENSION => FileType::Avro,
+                    _ => {
+                        event!(Level::WARN, "Unsupported file extension: {}", extension);
+                        return Ok(());
+                    }
+                };
+
+                let reader = BufReader::new(file);
+                let event_data_list = EventData::from_reader(reader, file_type)?;
+
+                for event_data in event_data_list {
                     let e = EventBuilder::new()
                         .subject(subject.clone())
-                        .data(EventData::Json(data))
+                        .data(event_data)
                         .current_task_id(self.current_task_id)
                         .build()?;
                     self.tx.send(e)?;
                     event!(Level::INFO, "Event processed: {}", subject);
                 }
-                DEFAULT_CSV_EXTENSION => {
-                    let (schema, _) = Format::default()
-                        .with_header(true)
-                        .infer_schema(&mut file, Some(100))
-                        .map_err(Error::Arrow)?;
-                    file.rewind().map_err(Error::IO)?;
-
-                    if let Some(cache_options) = &self.config.cache_options {
-                        if let Some(insert_key) = &cache_options.insert_key {
-                            let schema_bytes = Bytes::from(schema.to_string());
-                            self.cache
-                                .put(insert_key.as_str(), schema_bytes)
-                                .await
-                                .map_err(|_| Error::Cache())?;
-                        }
-                    };
-
-                    let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-                    let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
-                    let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
-                        .with_header(has_header)
-                        .with_batch_size(batch_size)
-                        .build(file)
-                        .map_err(Error::Arrow)?;
-
-                    for data in csv {
-                        let e = EventBuilder::new()
-                            .subject(subject.clone())
-                            .data(EventData::ArrowRecordBatch(data?))
-                            .current_task_id(self.current_task_id)
-                            .build()?;
-                        self.tx.send(e)?;
-                        event!(Level::INFO, "Event processed: {}", subject);
-                    }
-                }
-                DEFAULT_AVRO_EXTENSION => {
-                    let reader = BufReader::new(file);
-                    let avro_reader = AvroReader::new(reader)?;
-
-                    let schema = avro_reader.writer_schema().clone();
-                    let schema_json = schema.canonical_form();
-
-                    for record in avro_reader {
-                        let value = record?;
-                        let raw_bytes = apache_avro::to_avro_datum(&schema, value)?;
-
-                        let avro_data = AvroData {
-                            schema: schema_json.clone(),
-                            raw_bytes,
-                        };
-
-                        let e = EventBuilder::new()
-                            .subject(subject.clone())
-                            .data(EventData::Avro(avro_data))
-                            .current_task_id(self.current_task_id)
-                            .build()?;
-                        self.tx.send(e)?;
-                        event!(Level::INFO, "Event processed: {}", subject);
-                    }
-                }
-                _ => {
-                    event!(Level::WARN, "Unsupported file extension: {}", extension);
-                }
-            },
+            }
             GetResultPayload::Stream(_pin) => todo!(),
         }
         Ok(())
