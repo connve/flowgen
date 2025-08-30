@@ -1,9 +1,10 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
+use apache_avro::Reader as AvroReader;
 use arrow::csv::reader::Format;
 use bytes::Bytes;
 use chrono::Utc;
 use flowgen_core::cache::Cache;
-use flowgen_core::event::{Event, EventBuilder};
+use flowgen_core::event::{AvroData, Event, EventBuilder};
 use flowgen_core::{client::Client, event::EventData};
 use object_store::GetResultPayload;
 use serde_json::Value;
@@ -84,13 +85,25 @@ impl<T: Cache> EventHandler<T> {
             .extension()
             .ok_or_else(Error::NoFileExtension)?;
 
-        let mut e = EventBuilder::new();
+        let timestamp = Utc::now().timestamp_micros();
+        let subject = match &self.config.label {
+            Some(label) => format!("{}.{}", label.to_lowercase(), timestamp),
+            None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
+        };
+
         match result.payload {
             GetResultPayload::File(mut file, _) => match extension {
                 DEFAULT_JSON_EXTENSION => {
                     let reader = BufReader::new(file);
                     let data: Value = serde_json::from_reader(reader)?;
-                    e = e.data(EventData::Json(data));
+
+                    let e = EventBuilder::new()
+                        .subject(subject.clone())
+                        .data(EventData::Json(data))
+                        .current_task_id(self.current_task_id)
+                        .build()?;
+                    self.tx.send(e)?;
+                    event!(Level::INFO, "Event processed: {}", subject);
                 }
                 DEFAULT_CSV_EXTENSION => {
                     let (schema, _) = Format::default()
@@ -118,38 +131,53 @@ impl<T: Cache> EventHandler<T> {
                         .map_err(Error::Arrow)?;
 
                     for data in csv {
-                        e = e.data(EventData::ArrowRecordBatch(data?))
+                        let e = EventBuilder::new()
+                            .subject(subject.clone())
+                            .data(EventData::ArrowRecordBatch(data?))
+                            .current_task_id(self.current_task_id)
+                            .build()?;
+                        self.tx.send(e)?;
+                        event!(Level::INFO, "Event processed: {}", subject);
+                    }
+                }
+                DEFAULT_AVRO_EXTENSION => {
+                    let reader = BufReader::new(file);
+                    let avro_reader = AvroReader::new(reader)?;
+
+                    let schema = avro_reader.writer_schema().clone();
+                    let schema_json = schema.canonical_form();
+
+                    for record in avro_reader {
+                        let value = record?;
+                        let raw_bytes = apache_avro::to_avro_datum(&schema, value)?;
+
+                        let avro_data = AvroData {
+                            schema: schema_json.clone(),
+                            raw_bytes,
+                        };
+
+                        let e = EventBuilder::new()
+                            .subject(subject.clone())
+                            .data(EventData::Avro(avro_data))
+                            .current_task_id(self.current_task_id)
+                            .build()?;
+                        self.tx.send(e)?;
+                        event!(Level::INFO, "Event processed: {}", subject);
                     }
                 }
                 _ => {
-                    todo!()
+                    event!(Level::WARN, "Unsupported file extension: {}", extension);
                 }
             },
-            GetResultPayload::Stream(pin) => todo!(),
+            GetResultPayload::Stream(_pin) => todo!(),
         }
-        let timestamp = Utc::now().timestamp_micros();
-        let subject = match &self.config.label {
-            Some(label) => format!(
-                "{}.{}.{}",
-                DEFAULT_MESSAGE_SUBJECT,
-                label.to_lowercase(),
-                timestamp
-            ),
-            None => format!("{DEFAULT_MESSAGE_SUBJECT}.{timestamp}"),
-        };
-        let e = e
-            .subject(subject.clone())
-            .current_task_id(self.current_task_id)
-            .build()?;
-        self.tx.send(e)?;
-        event!(Level::INFO, "Event processed: {}", DEFAULT_MESSAGE_SUBJECT);
         Ok(())
     }
 }
 
-/// Object store writer that processes events from a broadcast receiver.
+/// Object store reader that processes events from a broadcast receiver.
 pub struct Reader<T: Cache> {
-    /// Writer configuration settings.
+    /// Reader configuration settings.
     config: Arc<super::config::Reader>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,

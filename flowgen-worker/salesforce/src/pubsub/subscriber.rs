@@ -26,10 +26,6 @@ pub enum Error {
     #[error(transparent)]
     TaskJoin(#[from] tokio::task::JoinError),
     #[error(transparent)]
-    SerdeAvroSchema(#[from] serde_avro_fast::schema::SchemaError),
-    #[error(transparent)]
-    SerdeAvroValue(#[from] serde_avro_fast::de::DeError),
-    #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
