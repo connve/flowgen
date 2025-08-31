@@ -1,15 +1,27 @@
+//! Custom serialization and deserialization utilities.
+//!
+//! Provides extension traits for common data type conversions between JSON,
+//! Arrow, and string formats used throughout the flowgen event processing pipeline.
+
 use std::str::FromStr;
 
+/// Errors that can occur during serialization operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// JSON serialization or deserialization error.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+    /// Arrow data processing error.
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
 }
+
+/// Extension trait for JSON Map types to enable string serialization.
 pub trait MapExt {
+    /// Error type for serialization operations.
     type Error;
+    /// Converts the map to a JSON string representation.
     fn to_string(&self) -> Result<String, Self::Error>;
 }
 
@@ -24,8 +36,11 @@ where
     }
 }
 
+/// Extension trait for String types to enable JSON value parsing.
 pub trait StringExt {
+    /// Error type for parsing operations.
     type Error;
+    /// Parses the string as a JSON value.
     fn to_value(&self) -> Result<serde_json::Value, Self::Error>;
 }
 
@@ -37,8 +52,11 @@ impl StringExt for String {
     }
 }
 
+/// Extension trait for converting data types to JSON values.
 pub trait SerdeValueExt {
+    /// Error type for conversion operations.
     type Error;
+    /// Converts the data to a JSON value representation.
     fn try_from(&self) -> Result<serde_json::Value, Self::Error>;
 }
 

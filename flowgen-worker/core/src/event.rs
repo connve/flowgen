@@ -1,3 +1,8 @@
+//! Event system for processing and routing data through workflows.
+//!
+//! Provides event structures, data format handling, subject generation utilities,
+//! and logging functionality for the flowgen event processing pipeline.
+
 use crate::buffer::{ContentType, FromReader, ToWriter};
 use apache_avro::{from_avro_datum, Reader as AvroReader};
 use arrow::{array::RecordBatchWriter, csv::reader::Format};
@@ -36,29 +41,42 @@ pub fn generate_subject(label: Option<&str>, base_subject: &str, suffix: Subject
     }
 }
 
+/// Errors that can occur during event processing operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    /// Arrow data processing error.
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
+    /// Avro serialization or deserialization error.
     #[error(transparent)]
     Avro(#[from] apache_avro::Error),
+    /// JSON serialization or deserialization error.
     #[error(transparent)]
     SerdeJson(#[from] serde_json::error::Error),
+    /// Required builder attribute was not provided.
     #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Attempted conversion between unsupported content types.
     #[error("content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
 }
 
+/// Core event structure containing data and metadata for workflow processing.
 #[derive(Debug, Clone)]
 pub struct Event {
+    /// Event payload in one of the supported data formats.
     pub data: EventData,
+    /// Subject identifier for event routing and filtering.
     pub subject: String,
+    /// Task identifier for tracking event flow through pipeline stages.
     pub current_task_id: Option<usize>,
+    /// Optional unique identifier for the event.
     pub id: Option<String>,
+    /// Event creation timestamp in microseconds since Unix epoch.
     pub timestamp: i64,
 }
 
@@ -69,15 +87,23 @@ impl Event {
     }
 }
 
+/// Event data payload supporting multiple serialization formats.
 #[derive(Debug, Clone)]
 pub enum EventData {
+    /// Apache Arrow columnar data format for analytics workloads.
     ArrowRecordBatch(arrow::array::RecordBatch),
+    /// Apache Avro binary format with embedded schema.
     Avro(AvroData),
+    /// JSON format for flexible structured data.
     Json(serde_json::Value),
 }
+
+/// Avro data container with schema and serialized payload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AvroData {
+    /// Avro schema definition in JSON format.
     pub schema: String,
+    /// Binary-encoded Avro data according to the schema.
     pub raw_bytes: Vec<u8>,
 }
 
@@ -117,13 +143,20 @@ impl Serialize for EventData {
     }
 }
 
+/// Builder for constructing Event instances with validation.
 #[derive(Default, Debug)]
 pub struct EventBuilder {
+    /// Event data payload (required for build).
     pub data: Option<EventData>,
+    /// Arrow record batch extensions for metadata.
     pub extensions: Option<arrow::array::RecordBatch>,
+    /// Event subject for routing (required for build).
     pub subject: Option<String>,
+    /// Current task identifier for pipeline tracking.
     pub current_task_id: Option<usize>,
+    /// Optional unique event identifier.
     pub id: Option<String>,
+    /// Event timestamp, defaults to current time.
     pub timestamp: i64,
 }
 
