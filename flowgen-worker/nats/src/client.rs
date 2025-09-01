@@ -13,25 +13,35 @@ struct Credentials {
     host: Option<String>,
 }
 
+/// Errors that can occur during NATS client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// Failed to open or read the credentials file.
     #[error(transparent)]
     OpenFile(#[from] std::io::Error),
+    /// Failed to parse credentials JSON file.
     #[error(transparent)]
     ParseCredentials(#[from] serde_json::Error),
+    /// Invalid URL format in credentials or configuration.
     #[error(transparent)]
     ParseUrl(#[from] url::ParseError),
+    /// Failed to establish connection to NATS server.
     #[error(transparent)]
     NatsConnect(#[from] async_nats::ConnectError),
+    /// Credentials file path was not provided during client creation.
     #[error("credentials are not provided")]
     CredentialsNotProvided(),
+    /// Required configuration attribute is missing.
     #[error("missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
+/// NATS client with optional JetStream context for reliable messaging.
 #[derive(Debug)]
 pub struct Client {
+    /// Path to the NATS credentials file.
     credentials_path: PathBuf,
+    /// JetStream context for reliable messaging operations.
     pub jetstream: Option<async_nats::jetstream::Context>,
 }
 
@@ -66,9 +76,10 @@ impl flowgen_core::client::Client for Client {
     }
 }
 
+/// Builder for configuring and creating NATS clients.
 #[derive(Default)]
-/// Configuration options of the client.
 pub struct ClientBuilder {
+    /// Optional path to NATS credentials file.
     credentials_path: Option<PathBuf>,
 }
 

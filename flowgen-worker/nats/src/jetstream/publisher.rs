@@ -6,22 +6,31 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{event, Level};
 
+/// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// NATS client authentication or connection error.
     #[error(transparent)]
     NatsClientAuth(#[from] crate::client::Error),
+    /// Failed to publish message to JetStream.
     #[error(transparent)]
     NatsPublish(#[from] async_nats::jetstream::context::PublishError),
+    /// Failed to create JetStream stream.
     #[error(transparent)]
     NatsCreateStream(#[from] async_nats::jetstream::context::CreateStreamError),
+    /// Failed to get existing JetStream stream.
     #[error(transparent)]
     NatsGetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    /// Failed to make request to JetStream.
     #[error(transparent)]
     NatsRequest(#[from] async_nats::jetstream::context::RequestError),
+    /// Error converting event to NATS message format.
     #[error(transparent)]
     NatsJetStreamEvent(#[from] super::message::Error),
+    /// Required event attribute is missing.
     #[error("missing required event attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// NATS client was not properly initialized or is missing.
     #[error("Nats client is missing / not initialized properly")]
     MissingNatsClient(),
 }
@@ -45,10 +54,14 @@ impl EventHandler {
     }
 }
 
+/// NATS JetStream publisher that receives events and publishes them to configured streams.
 #[derive(Debug)]
 pub struct Publisher {
+    /// Publisher configuration including stream settings.
     config: Arc<super::config::Publisher>,
+    /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
+    /// Current task identifier for event filtering.
     current_task_id: usize,
 }
 
@@ -115,10 +128,14 @@ impl flowgen_core::task::runner::Runner for Publisher {
     }
 }
 
+/// Builder for configuring and creating NATS JetStream publishers.
 #[derive(Default)]
 pub struct PublisherBuilder {
+    /// Optional publisher configuration.
     config: Option<Arc<super::config::Publisher>>,
+    /// Optional event receiver.
     rx: Option<Receiver<Event>>,
+    /// Current task identifier for event processing.
     current_task_id: usize,
 }
 

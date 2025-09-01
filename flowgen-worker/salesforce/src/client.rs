@@ -9,14 +9,19 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+/// Errors that can occur during Salesforce client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// Failed to open or read the credentials file.
     #[error(transparent)]
     OpenFile(#[from] std::io::Error),
+    /// Failed to parse credentials JSON file.
     #[error(transparent)]
     ParseCredentials(#[from] serde_json::Error),
+    /// Invalid URL format in credentials or configuration.
     #[error(transparent)]
     ParseUrl(#[from] url::ParseError),
+    /// General error with descriptive message.
     #[error("other error: {}", _0)]
     Other(String),
 }
@@ -33,8 +38,8 @@ struct Credentials {
     tenant_id: String,
 }
 
+/// Salesforce OAuth2 client for API authentication and token management.
 #[derive(Debug, Clone)]
-/// Used to store Salesforce Client credentials.
 #[allow(clippy::type_complexity)]
 pub struct Client {
     /// Oauth2.0 client for getting the tokens.

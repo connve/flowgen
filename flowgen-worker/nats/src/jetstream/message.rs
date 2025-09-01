@@ -3,28 +3,38 @@ use async_nats::jetstream::context::Publish;
 use bincode::{deserialize, serialize};
 use flowgen_core::event::{AvroData, EventBuilder, EventData};
 
+/// Errors that can occur during message conversion between flowgen and NATS formats.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Apache Arrow error during data serialization or deserialization.
     #[error(transparent)]
     Arrow(#[from] arrow::error::ArrowError),
+    /// JSON serialization or deserialization error.
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
+    /// Flowgen core event system error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
+    /// Binary encoding or decoding error.
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
+    /// Expected record batch data is missing or unavailable.
     #[error("error getting recordbatch")]
     NoRecordBatch(),
 }
 
+/// Trait for converting flowgen events to NATS publish messages.
 pub trait FlowgenMessageExt {
     type Error;
+    /// Convert a flowgen event to a NATS JetStream publish message.
     fn to_publish(&self) -> Result<Publish, Self::Error>;
 }
 
+/// Trait for converting NATS messages to flowgen events.
 pub trait NatsMessageExt {
     type Error;
+    /// Convert a NATS message to a flowgen event.
     fn to_event(&self) -> Result<flowgen_core::event::Event, Self::Error>;
 }
 

@@ -16,36 +16,52 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.out";
 const DEFAULT_PUBSUB_URI: &str = "https://api.pubsub.salesforce.com";
 const DEFAULT_PUBSUB_PORT: &str = "443";
 
+/// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// Salesforce Pub/Sub context or gRPC communication error.
     #[error(transparent)]
     SalesforcePubSub(#[from] super::context::Error),
+    /// Salesforce client authentication error.
     #[error(transparent)]
     SalesforceAuth(#[from] crate::client::Error),
+    /// Flowgen core serialization extension error.
     #[error(transparent)]
     SerdeExt(#[from] flowgen_core::serde::Error),
+    /// Apache Avro serialization error.
     #[error(transparent)]
     SerdeAvro(#[from] serde_avro_fast::ser::SerError),
+    /// Template rendering error for dynamic configuration.
     #[error(transparent)]
     Render(#[from] flowgen_core::config::Error),
+    /// Failed to send event through broadcast channel.
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    /// Flowgen core event system error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
+    /// Flowgen core service error.
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
+    /// Required event attribute is missing.
     #[error("Missing required event attribute: {}.", _0)]
     MissingRequiredAttribute(String),
+    /// Event data object is empty when content is expected.
     #[error("Empty object.")]
     EmptyObject(),
+    /// Failed to parse Avro schema from JSON string.
     #[error("Error parsing Schema Json string to Schema type.")]
     SchemaParse(),
 }
 
+/// Salesforce Pub/Sub publisher that receives events and publishes them to configured topics.
 #[derive(Debug)]
 pub struct Publisher {
+    /// Publisher configuration including topic settings and credentials.
     config: Arc<super::config::Publisher>,
+    /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
+    /// Current task identifier for event filtering.
     current_task_id: usize,
 }
 
@@ -317,12 +333,12 @@ mod tests {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
         assert!(err
             .to_string()
-            .contains("missing required event attribute: test_field"));
+            .contains("Missing required event attribute: test_field"));
 
         let err = Error::EmptyObject();
-        assert!(err.to_string().contains("empty object"));
+        assert!(err.to_string().contains("Empty object"));
 
         let err = Error::SchemaParse();
-        assert!(err.to_string().contains("error parsing Schema Json"));
+        assert!(err.to_string().contains("Error parsing Schema Json"));
     }
 }

@@ -17,27 +17,38 @@ const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
 const DEFAULT_PUBSUB_PORT: &str = "443";
 const DEFAULT_NUM_REQUESTED: i32 = 1000;
 
+/// Errors that can occur during Salesforce Pub/Sub subscription operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Salesforce Pub/Sub context or gRPC communication error.
     #[error(transparent)]
     SalesforcePubSub(#[from] super::context::Error),
+    /// Salesforce client authentication error.
     #[error(transparent)]
     SalesforceAuth(#[from] crate::client::Error),
+    /// Flowgen core event system error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
+    /// Async task join error.
     #[error(transparent)]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// Failed to send event through broadcast channel.
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    /// Binary encoding or decoding error.
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
+    /// Flowgen core service error.
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
+    /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}.", _0)]
     MissingRequiredAttribute(String),
+    /// Cache operation error with descriptive message.
     #[error("Cache error: {0}.")]
     Cache(String),
+    /// JSON serialization or deserialization error.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 }
@@ -545,10 +556,10 @@ mod tests {
         let err = Error::MissingRequiredAttribute("test_attr".to_string());
         assert!(err
             .to_string()
-            .contains("missing required attribute: test_attr"));
+            .contains("Missing required attribute: test_attr"));
 
         let err = Error::Cache("cache failure".to_string());
-        assert!(err.to_string().contains("cache error: cache failure"));
+        assert!(err.to_string().contains("Cache error: cache failure"));
     }
 
     #[test]

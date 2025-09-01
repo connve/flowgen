@@ -9,44 +9,62 @@ use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
 use tracing::{event, Level};
 
+/// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// NATS client authentication or connection error.
     #[error(transparent)]
     NatsClient(#[from] crate::client::Error),
+    /// Error converting NATS message to flowgen event format.
     #[error(transparent)]
     NatsJetStreamMessage(#[from] crate::jetstream::message::Error),
+    /// JetStream consumer operation error.
     #[error(transparent)]
     NatsJetStreamConsumer(#[from] async_nats::jetstream::stream::ConsumerError),
+    /// JetStream consumer stream error.
     #[error(transparent)]
     NatsJetStream(#[from] async_nats::jetstream::consumer::StreamError),
+    /// Failed to get JetStream stream.
     #[error(transparent)]
     NatsJetStreamGetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    /// Failed to get JetStream stream information.
     #[error(transparent)]
     NatsJetStreamStreamInfo(#[from] async_nats::jetstream::stream::InfoError),
+    /// Failed to retrieve consumer configuration information.
     #[error("Consumer configuration check failed.")]
     ConsumerInfoFailed,
+    /// Consumer exists with conflicting filter subject configuration.
     #[error("Consumer '{consumer}' exists with different filter subject '{existing}', expected '{expected}'. Please delete the existing consumer or use a different durable name.")]
     ConsumerFilterMismatch {
         consumer: String,
         existing: String,
         expected: String,
     },
+    /// Failed to subscribe to NATS subject.
     #[error(transparent)]
     Subscribe(#[from] async_nats::SubscribeError),
+    /// Async task join error.
     #[error(transparent)]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// Failed to send event through broadcast channel.
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}.", _0)]
     MissingRequiredAttribute(String),
+    /// General subscriber error for wrapped external errors.
     #[error("Other error with subscriber.")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// NATS JetStream subscriber that consumes messages and converts them to flowgen events.
 #[derive(Debug)]
 pub struct Subscriber {
+    /// Subscriber configuration including stream and consumer settings.
     config: Arc<super::config::Subscriber>,
+    /// Sender for forwarding converted events.
     tx: Sender<Event>,
+    /// Current task identifier for event tagging.
     current_task_id: usize,
 }
 
@@ -109,10 +127,14 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     }
 }
 
+/// Builder for configuring and creating NATS JetStream subscribers.
 #[derive(Default)]
 pub struct SubscriberBuilder {
+    /// Optional subscriber configuration.
     config: Option<Arc<super::config::Subscriber>>,
+    /// Optional event sender.
     tx: Option<Sender<Event>>,
+    /// Current task identifier for event processing.
     current_task_id: usize,
 }
 
@@ -162,13 +184,13 @@ mod tests {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
         assert!(err
             .to_string()
-            .contains("missing required attribute: test_field"));
+            .contains("Missing required attribute: test_field"));
 
         let err = Error::Other(Box::new(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "test error",
         )));
-        assert!(err.to_string().contains("other error with subscriber"));
+        assert!(err.to_string().contains("Other error with subscriber"));
     }
 
     #[test]
@@ -330,7 +352,7 @@ mod tests {
         let consumer_err = Error::MissingRequiredAttribute("test".to_string());
         assert!(consumer_err
             .to_string()
-            .contains("missing required attribute"));
+            .contains("Missing required attribute"));
 
         // Test error display for comprehensive coverage
         let other_err = Error::Other(Box::new(std::io::Error::new(
@@ -339,7 +361,7 @@ mod tests {
         )));
         assert!(other_err
             .to_string()
-            .contains("other error with subscriber"));
+            .contains("Other error with subscriber"));
 
         // Test consumer filter mismatch error
         let filter_err = Error::ConsumerFilterMismatch {
@@ -357,6 +379,6 @@ mod tests {
         let info_err = Error::ConsumerInfoFailed;
         assert!(info_err
             .to_string()
-            .contains("consumer configuration check failed"));
+            .contains("Consumer configuration check failed"));
     }
 }

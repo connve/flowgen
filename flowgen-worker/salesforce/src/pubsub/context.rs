@@ -3,17 +3,23 @@ use oauth2::TokenResponse;
 use salesforce_pubsub::eventbus::v1::pub_sub_client::PubSubClient;
 use tokio_stream::StreamExt;
 
+/// Errors that can occur during Salesforce Pub/Sub context operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Salesforce client was not properly initialized or is missing.
     #[error("client missing")]
     MissingClient(),
+    /// OAuth2 token response is missing or unavailable.
     #[error("token response missing")]
     MissingTokenResponse(),
+    /// gRPC service channel is missing or unavailable.
     #[error("service channel missing")]
     MissingServiceChannel(),
+    /// Invalid metadata value for gRPC headers.
     #[error(transparent)]
     InvalidMetadataValue(#[from] tonic::metadata::errors::InvalidMetadataValue),
+    /// gRPC transport or communication error.
     #[error(transparent)]
     Tonic(Box<tonic::Status>),
 }
@@ -42,6 +48,7 @@ impl tonic::service::Interceptor for ContextInterceptor {
     }
 }
 
+/// Salesforce Pub/Sub context that manages gRPC client connections with authentication.
 #[derive(Debug)]
 pub struct Context {
     pubsub: salesforce_pubsub::eventbus::v1::pub_sub_client::PubSubClient<
