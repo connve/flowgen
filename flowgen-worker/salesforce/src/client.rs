@@ -22,7 +22,7 @@ pub enum Error {
     #[error(transparent)]
     ParseUrl(#[from] url::ParseError),
     /// General error with descriptive message.
-    #[error("other error: {}", _0)]
+    #[error("Other error: {}", _0)]
     Other(String),
 }
 /// Used to store Salesforce Client credentials.
@@ -161,7 +161,10 @@ mod tests {
                 "tenant_id": "some_tenant_id"
             }"#;
         let mut path = env::temp_dir();
-        path.push(format!("invalid_url_credentials_{}.json", std::process::id()));
+        path.push(format!(
+            "invalid_url_credentials_{}.json",
+            std::process::id()
+        ));
         let _ = fs::write(path.clone(), creds);
         let client = Builder::new().credentials_path(path.clone()).build();
         let _ = fs::remove_file(path);

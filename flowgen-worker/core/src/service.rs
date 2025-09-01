@@ -7,13 +7,13 @@
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to construct a valid URI from the provided endpoint.
-    #[error("error resulting from a failed attempt to construct a URI")]
+    #[error("Error resulting from a failed attempt to construct a URI")]
     InvalidUri(#[source] tonic::codegen::http::uri::InvalidUri),
     /// Transport layer error during connection establishment.
-    #[error("errror that originate from the client or server")]
+    #[error("Error that originates from the client or server")]
     TransportError(#[source] tonic::transport::Error),
     /// Service endpoint was not configured before attempting connection.
-    #[error("error that originate from the client or server")]
+    #[error("Service endpoint was not configured")]
     MissingEndpoint(),
 }
 

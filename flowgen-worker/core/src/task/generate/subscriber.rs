@@ -25,7 +25,7 @@ pub enum Error {
     #[error(transparent)]
     Event(#[from] crate::event::Error),
     /// Required builder attribute was not provided.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 /// Event generator that produces events at scheduled intervals.
@@ -170,7 +170,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("missing required attribute: config"));
+            .contains("Missing required attribute: config"));
     }
 
     #[tokio::test]
@@ -183,7 +183,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("missing required attribute: sender"));
+            .contains("Missing required attribute: sender"));
     }
 
     #[tokio::test]

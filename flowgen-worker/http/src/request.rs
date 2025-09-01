@@ -68,10 +68,10 @@ pub enum Error {
     #[error(transparent)]
     ReqwestInvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
     /// Required configuration attribute is missing.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Payload configuration is invalid.
-    #[error("either payload json or payload input is required")]
+    #[error("Either payload json or payload input is required")]
     PayloadConfig(),
 }
 
@@ -341,10 +341,14 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required attribute: test_field"));
+        assert!(err
+            .to_string()
+            .contains("Missing required attribute: test_field"));
 
         let err = Error::PayloadConfig();
-        assert!(err.to_string().contains("either payload json or payload input is required"));
+        assert!(err
+            .to_string()
+            .contains("Either payload json or payload input is required"));
     }
 
     #[test]
@@ -425,7 +429,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
+        );
     }
 
     #[tokio::test]
@@ -448,7 +454,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
+        );
     }
 
     #[tokio::test]
@@ -471,7 +479,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
+        );
     }
 
     #[tokio::test]

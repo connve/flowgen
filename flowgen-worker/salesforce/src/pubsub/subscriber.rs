@@ -43,10 +43,10 @@ pub enum Error {
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
     /// Required configuration attribute is missing.
-    #[error("Missing required attribute: {}.", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Cache operation error with descriptive message.
-    #[error("Cache error: {0}.")]
+    #[error("Cache error: {_0}")]
     Cache(String),
     /// JSON serialization or deserialization error.
     #[error(transparent)]
@@ -130,7 +130,8 @@ impl<T: Cache> EventHandler<T> {
                 Err(_) => {
                     event!(
                         Level::WARN,
-                        "status: NoCacheKeyFound, message: 'The cache key was not found'"
+                        "No cache entry found for key: {:?}",
+                        &durable_consumer_opts.name
                     );
                 }
             }
@@ -203,9 +204,7 @@ impl<T: Cache> EventHandler<T> {
                     }
                 }
                 Err(e) => {
-                    return Err(Error::PubSub(super::context::Error::Tonic(
-                        Box::new(e),
-                    )));
+                    return Err(Error::PubSub(super::context::Error::Tonic(Box::new(e))));
                 }
             }
         }

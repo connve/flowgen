@@ -43,13 +43,13 @@ pub enum Error {
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    #[error("could not initialize object store context")]
+    #[error("Could not initialize object store context")]
     NoObjectStoreContext(),
-    #[error("could not retrieve file extension")]
+    #[error("Could not retrieve file extension")]
     NoFileExtension(),
-    #[error("cache errors")]
+    #[error("Cache errors")]
     Cache(),
 }
 
@@ -514,7 +514,7 @@ mod tests {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
         assert!(err
             .to_string()
-            .contains("missing required attribute: test_field"));
+            .contains("Missing required attribute: test_field"));
     }
 
     #[test]

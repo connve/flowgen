@@ -44,13 +44,13 @@ pub enum Error {
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
     /// Required event attribute is missing.
-    #[error("Missing required event attribute: {}.", _0)]
+    #[error("Missing required event attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Event data object is empty when content is expected.
-    #[error("Empty object.")]
+    #[error("Empty object")]
     EmptyObject(),
     /// Failed to parse Avro schema from JSON string.
-    #[error("Error parsing Schema Json string to Schema type.")]
+    #[error("Error parsing Schema Json string to Schema type")]
     SchemaParse(),
 }
 

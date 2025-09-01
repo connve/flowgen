@@ -8,13 +8,13 @@ use tokio_stream::StreamExt;
 #[non_exhaustive]
 pub enum Error {
     /// Client was not properly initialized or is missing.
-    #[error("client missing")]
+    #[error("Client missing")]
     MissingClient(),
     /// OAuth2 token response is missing or unavailable.
-    #[error("token response missing")]
+    #[error("Token response missing")]
     MissingTokenResponse(),
     /// gRPC service channel is missing or unavailable.
-    #[error("service channel missing")]
+    #[error("Service channel missing")]
     MissingServiceChannel(),
     /// Invalid metadata value for gRPC headers.
     #[error(transparent)]

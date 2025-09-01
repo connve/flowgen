@@ -4,7 +4,9 @@
 //! data and converting them into events for further processing in the pipeline.
 
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
-use flowgen_core::event::{generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE};
+use flowgen_core::event::{
+    generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
+};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -38,7 +40,7 @@ pub enum Error {
     #[error(transparent)]
     IO(#[from] std::io::Error),
     /// Required configuration attribute is missing.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
@@ -211,13 +213,15 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::broadcast;
     use std::collections::HashMap;
+    use tokio::sync::broadcast;
 
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required attribute: test_field"));
+        assert!(err
+            .to_string()
+            .contains("Missing required attribute: test_field"));
     }
 
     #[test]
@@ -236,7 +240,8 @@ mod tests {
 
     #[test]
     fn test_error_into_response() {
-        let err = Error::SerdeJson(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err());
+        let err =
+            Error::SerdeJson(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err());
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
@@ -302,7 +307,7 @@ mod tests {
     async fn test_processor_builder_build_missing_config() {
         let (tx, _rx) = broadcast::channel(100);
         let server = Arc::new(crate::server::HttpServer::new());
-        
+
         let result = ProcessorBuilder::new()
             .sender(tx)
             .http_server(server)
@@ -311,7 +316,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
+        );
     }
 
     #[tokio::test]
@@ -334,7 +341,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
+        );
     }
 
     #[tokio::test]
@@ -357,7 +366,9 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "http_server"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "http_server")
+        );
     }
 
     #[tokio::test]
@@ -439,5 +450,4 @@ mod tests {
             current_task_id: 0,
         };
     }
-
 }

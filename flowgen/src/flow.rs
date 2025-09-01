@@ -69,7 +69,7 @@ pub enum Error {
         task_id: usize,
     },
     /// Error in NATS JetStream publisher task.
-    #[error("flow: {flow}, task_id: {task_id}, source: {source}")]
+    #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     NatsJetStreamPublisher {
         #[source]
         source: Box<flowgen_nats::jetstream::publisher::Error>,
@@ -112,7 +112,7 @@ pub enum Error {
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),
     /// Missing required configuration attribute.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let error = Error::MissingRequiredAttribute("test_field".to_string());
-        assert_eq!(error.to_string(), "missing required attribute: test_field");
+        assert_eq!(error.to_string(), "Missing required attribute: test_field");
     }
 
     #[test]

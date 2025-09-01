@@ -60,10 +60,10 @@ pub enum Error {
     #[error(transparent)]
     SerdeJson(#[from] serde_json::error::Error),
     /// Required builder attribute was not provided.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Attempted conversion between unsupported content types.
-    #[error("content type conversion not supported: {from} to {to}")]
+    #[error("Content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
 }
 
@@ -337,7 +337,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("missing required attribute: data"));
+            .contains("Missing required attribute: data"));
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("missing required attribute: subject"));
+            .contains("Missing required attribute: subject"));
     }
 
     #[test]

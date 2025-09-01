@@ -31,10 +31,10 @@ pub enum Error {
     #[error(transparent)]
     StreamInfo(#[from] async_nats::jetstream::stream::InfoError),
     /// Failed to retrieve consumer configuration information.
-    #[error("Consumer configuration check failed.")]
+    #[error("Consumer configuration check failed")]
     ConsumerInfoFailed,
     /// Consumer exists with conflicting filter subject configuration.
-    #[error("Consumer '{consumer}' exists with different filter subject '{existing}', expected '{expected}'. Please delete the existing consumer or use a different durable name.")]
+    #[error("Consumer '{consumer}' exists with different filter subject '{existing}', expected '{expected}'. Please delete the existing consumer or use a different durable name")]
     ConsumerFilterMismatch {
         consumer: String,
         existing: String,
@@ -53,7 +53,7 @@ pub enum Error {
     #[error("Missing required attribute: {}.", _0)]
     MissingRequiredAttribute(String),
     /// General subscriber error for wrapped external errors.
-    #[error("Other error with subscriber.")]
+    #[error("Other error with subscriber")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 

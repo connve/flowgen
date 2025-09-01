@@ -8,9 +8,9 @@ pub enum Error {
     ParseUrl(#[from] url::ParseError),
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
-    #[error("missing required attribute")]
+    #[error("Missing required attribute")]
     MissingRequiredAttribute(String),
-    #[error("no path provided")]
+    #[error("No path provided")]
     EmptyPath(),
 }
 
@@ -212,10 +212,10 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required attribute"));
+        assert!(err.to_string().contains("Missing required attribute"));
 
         let err = Error::EmptyPath();
-        assert!(err.to_string().contains("no path provided"));
+        assert!(err.to_string().contains("No path provided"));
     }
 
     #[test]  

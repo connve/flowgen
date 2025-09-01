@@ -29,10 +29,10 @@ pub enum Error {
     #[error(transparent)]
     Connect(#[from] async_nats::ConnectError),
     /// Credentials file path was not provided during client creation.
-    #[error("credentials are not provided")]
+    #[error("Credentials are not provided")]
     CredentialsNotProvided(),
     /// Required configuration attribute is missing.
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
@@ -131,7 +131,9 @@ mod tests {
         let builder = ClientBuilder::new();
         let result = builder.build();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path")
+        );
     }
 
     #[test]
@@ -140,7 +142,7 @@ mod tests {
         let mut builder = ClientBuilder::new();
         builder.credentials_path(path.clone());
         let result = builder.build();
-        
+
         assert!(result.is_ok());
         let client = result.unwrap();
         assert_eq!(client.credentials_path, path);
@@ -151,11 +153,8 @@ mod tests {
     fn test_client_builder_method_chaining() {
         let path = PathBuf::from("/chain/test.creds");
         let mut builder = ClientBuilder::new();
-        let client = builder
-            .credentials_path(path.clone())
-            .build()
-            .unwrap();
-        
+        let client = builder.credentials_path(path.clone()).build().unwrap();
+
         assert_eq!(client.credentials_path, path);
         assert!(client.jetstream.is_none());
     }
@@ -169,10 +168,12 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required attribute: test_field"));
+        assert!(err
+            .to_string()
+            .contains("Missing required attribute: test_field"));
 
         let err = Error::CredentialsNotProvided();
-        assert!(err.to_string().contains("credentials are not provided"));
+        assert!(err.to_string().contains("Credentials are not provided"));
     }
 
     #[test]
@@ -187,10 +188,10 @@ mod tests {
             "nkey": "UAABC123DEF456GHI789JKL",
             "host": "nats.example.com:4222"
         }"#;
-        
+
         let creds: Result<Credentials, serde_json::Error> = serde_json::from_str(json_creds);
         assert!(creds.is_ok());
-        
+
         let creds = creds.unwrap();
         assert_eq!(creds.nkey, Some("UAABC123DEF456GHI789JKL".to_string()));
         assert_eq!(creds.host, Some("nats.example.com:4222".to_string()));
@@ -200,10 +201,10 @@ mod tests {
     fn test_credentials_optional_fields() {
         // Test credentials with missing optional fields
         let json_creds = r#"{}"#;
-        
+
         let creds: Result<Credentials, serde_json::Error> = serde_json::from_str(json_creds);
         assert!(creds.is_ok());
-        
+
         let creds = creds.unwrap();
         assert_eq!(creds.nkey, None);
         assert_eq!(creds.host, None);

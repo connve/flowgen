@@ -29,9 +29,9 @@ pub enum Error {
     ObjectStoreClient(#[from] super::client::Error),
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
-    #[error("missing required attribute: {}", _0)]
+    #[error("Missing required attribute: {}.", _0)]
     MissingRequiredAttribute(String),
-    #[error("could not initialize object store context")]
+    #[error("Could not initialize object store context")]
     NoObjectStoreContext(),
 }
 
@@ -324,10 +324,10 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required attribute: test_field"));
+        assert!(err.to_string().contains("Missing required attribute: test_field"));
 
         let err = Error::NoObjectStoreContext();
-        assert!(err.to_string().contains("could not initialize object store context"));
+        assert!(err.to_string().contains("Could not initialize object store context"));
     }
 
     #[test]

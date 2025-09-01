@@ -20,16 +20,16 @@ pub enum Error {
     #[error(transparent)]
     KVBucketCreate(#[from] async_nats::jetstream::context::CreateKeyValueError),
     /// Expected non-empty buffer from KV store was empty or missing.
-    #[error("no value in provided buffer")]
+    #[error("No value in provided buffer")]
     EmptyBuffer(),
     /// KV store not initialized or unexpectedly `None`.
-    #[error("missing required value KV Store")]
+    #[error("Missing required value KV Store")]
     MissingKVStore(),
     /// Required configuration attribute missing. Contains attribute name.
-    #[error("missing required event attribute: {}", _0)]
+    #[error("Missing required event attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// JetStream context was missing or unavailable.
-    #[error("missing required value JetStream Context")]
+    #[error("Missing required value JetStream Context")]
     MissingJetStreamContext(),
 }
 
@@ -226,16 +226,16 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert!(err.to_string().contains("missing required event attribute: test_field"));
+        assert!(err.to_string().contains("Missing required event attribute: test_field"));
 
         let err = Error::EmptyBuffer();
-        assert!(err.to_string().contains("no value in provided buffer"));
+        assert!(err.to_string().contains("No value in provided buffer"));
 
         let err = Error::MissingKVStore();
-        assert!(err.to_string().contains("missing required value KV Store"));
+        assert!(err.to_string().contains("Missing required value KV Store"));
 
         let err = Error::MissingJetStreamContext();
-        assert!(err.to_string().contains("missing required value JetStream Context"));
+        assert!(err.to_string().contains("Missing required value JetStream Context"));
     }
 
     #[test]

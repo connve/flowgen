@@ -28,10 +28,10 @@ pub enum Error {
     #[error(transparent)]
     MessageConversion(#[from] super::message::Error),
     /// Required event attribute is missing.
-    #[error("missing required event attribute: {}", _0)]
+    #[error("Missing required event attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Client was not properly initialized or is missing.
-    #[error("Client is missing / not initialized properly")]
+    #[error("Client is missing or not initialized properly")]
     MissingClient(),
 }
 
@@ -185,12 +185,12 @@ mod tests {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
         assert!(err
             .to_string()
-            .contains("missing required event attribute: test_field"));
+            .contains("Missing required attribute: test_field"));
 
         let err = Error::MissingClient();
         assert!(err
             .to_string()
-            .contains("Client is missing / not initialized properly"));
+            .contains("Client is missing or not initialized properly"));
     }
 
     #[test]

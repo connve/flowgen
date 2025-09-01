@@ -20,7 +20,7 @@ pub enum Error {
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
     /// Expected record batch data is missing or unavailable.
-    #[error("error getting recordbatch")]
+    #[error("Error getting record batch")]
     NoRecordBatch(),
 }
 
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::NoRecordBatch();
-        assert!(err.to_string().contains("error getting recordbatch"));
+        assert!(err.to_string().contains("Error getting record batch"));
     }
 
     #[test]
