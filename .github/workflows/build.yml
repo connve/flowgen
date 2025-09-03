@@ -40,8 +40,11 @@ jobs:
     - name: Build and test
       run: ./scripts/build.sh
 
-  build-flowgen:
+  build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     if: github.ref == 'refs/heads/main'
     steps:
     - uses: actions/checkout@v4
