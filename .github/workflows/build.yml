@@ -28,6 +28,7 @@ jobs:
         context: .
         file: docker/Dockerfile
         push: true
-        tags: ghcr.io/${{ github.repository }}/flowgen:latest
+        platforms: linux/amd64
+        tags: ghcr.io/${{ github.repository }}:latest
         build-args: |
           SERVICE_NAME=flowgen
