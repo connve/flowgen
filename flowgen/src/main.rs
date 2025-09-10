@@ -20,7 +20,7 @@ async fn main() {
         Err(e) => {
             event!(
                 Level::ERROR,
-                "environment variable CONFIG_PATH should be set: {}",
+                "Environment variable CONFIG_PATH should be set: {}",
                 e
             );
             process::exit(1);
@@ -34,7 +34,7 @@ async fn main() {
     {
         Ok(config) => config,
         Err(e) => {
-            event!(Level::ERROR, "failed to build config: {}", e);
+            event!(Level::ERROR, "Failed to build config: {}", e);
             process::exit(1);
         }
     };
@@ -42,13 +42,13 @@ async fn main() {
     let app_config = match config.try_deserialize::<AppConfig>() {
         Ok(config) => config,
         Err(e) => {
-            event!(Level::ERROR, "failed to deserialize app config: {}", e);
+            event!(Level::ERROR, "Failed to deserialize app config: {}", e);
             process::exit(1);
         }
     };
     let app = App { config: app_config };
     if let Err(e) = app.run().await {
-        event!(Level::ERROR, "application failed to run: {}", e);
+        event!(Level::ERROR, "Application failed to run: {}", e);
         process::exit(1);
     }
 }

@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, FlowConfig};
-use config::{Config, File};
+use config::Config;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{event, Level};
@@ -8,6 +8,9 @@ use tracing::{event, Level};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Input/output operation failed.
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
     /// File system error occurred while globbing flow configuration files.
     #[error(transparent)]
     Glob(#[from] glob::GlobError),
@@ -48,7 +51,10 @@ impl flowgen_core::task::runner::Runner for App {
             .map(|path| -> Result<FlowConfig, Error> {
                 let path = path?;
                 event!(Level::INFO, "Loading flow: {:?}", path);
-                let config = Config::builder().add_source(File::from(path)).build()?;
+                let contents = std::fs::read_to_string(&path)?;
+                let config = Config::builder()
+                    .add_source(config::File::from_str(&contents, config::FileFormat::Json))
+                    .build()?;
                 Ok(config.try_deserialize::<FlowConfig>()?)
             })
             .collect::<Result<Vec<_>, _>>()?;
