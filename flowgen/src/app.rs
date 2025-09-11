@@ -55,14 +55,14 @@ impl flowgen_core::task::runner::Runner for App {
             .map(|path| -> Result<FlowConfig, Error> {
                 let path = path?;
                 event!(Level::INFO, "Loading flow: {:?}", path);
-                let contents = std::fs::read_to_string(&path).unwrap();
-                event!(Level::INFO, "Successfully read file: {:?}", path);
+                let contents = std::fs::read_to_string(&path).map_err(|e| Error::IO {
+                    path: path.clone(),
+                    source: e,
+                })?;
                 let config = Config::builder()
                     .add_source(config::File::from_str(&contents, config::FileFormat::Json))
-                    .build()
-                    .unwrap();
-                event!(Level::INFO, "Successfully built config: {:?}", path);
-                Ok(config.try_deserialize::<FlowConfig>().unwrap())
+                    .build()?;
+                Ok(config.try_deserialize::<FlowConfig>()?)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
