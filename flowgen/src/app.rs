@@ -9,8 +9,12 @@ use tracing::{event, Level};
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    #[error("IO operation failed on path {path}: {source}")]
+    IO {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// File system error occurred while globbing flow configuration files.
     #[error(transparent)]
     Glob(#[from] glob::GlobError),
@@ -51,7 +55,10 @@ impl flowgen_core::task::runner::Runner for App {
             .map(|path| -> Result<FlowConfig, Error> {
                 let path = path?;
                 event!(Level::INFO, "Loading flow: {:?}", path);
-                let contents = std::fs::read_to_string(&path)?;
+                let contents = std::fs::read_to_string(&path).map_err(|e| Error::IO {
+                    path: path.clone(),
+                    source: e,
+                })?;
                 let config = Config::builder()
                     .add_source(config::File::from_str(&contents, config::FileFormat::Json))
                     .build()?;
