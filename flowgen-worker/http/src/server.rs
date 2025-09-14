@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{event, Level};
 
 /// Default HTTP port for the server.
-const DEFAULT_HTTP_PORT: &str = "3000";
+const DEFAULT_HTTP_PORT: u16 = 3000;
 
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
@@ -49,7 +49,7 @@ impl HttpServer {
     }
 
     /// Start the HTTP Server with all registered routes.
-    pub async fn start_server(&self) -> Result<(), Error> {
+    pub async fn start_server(&self, port: Option<u16>) -> Result<(), Error> {
         let mut server_started = self.server_started.lock().await;
         if *server_started {
             event!(Level::WARN, "HTTP Server already started");
@@ -64,13 +64,9 @@ impl HttpServer {
         }
 
         let router = Router::new().nest("/api/flowgen", api_router);
-        let listener =
-            tokio::net::TcpListener::bind(format!("0.0.0.0:{DEFAULT_HTTP_PORT}")).await?;
-        event!(
-            Level::INFO,
-            "Starting HTTP Server on port {}",
-            DEFAULT_HTTP_PORT
-        );
+        let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}")).await?;
+        event!(Level::INFO, "Starting HTTP Server on port {}", server_port);
 
         *server_started = true;
         axum::serve(listener, router).await.map_err(Error::IO)
@@ -149,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_HTTP_PORT, "3000");
+        assert_eq!(DEFAULT_HTTP_PORT, 3000);
     }
 
     #[tokio::test]

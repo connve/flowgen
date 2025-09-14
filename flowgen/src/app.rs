@@ -109,8 +109,9 @@ impl flowgen_core::task::runner::Runner for App {
         }
 
         // Start server with registered routes
+        let configured_port = app_config.http.as_ref().and_then(|http| http.port);
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = http_server.start_server().await {
+            if let Err(e) = http_server.start_server(configured_port).await {
                 event!(Level::ERROR, "Failed to start HTTP Server: {}", e);
             }
         });
