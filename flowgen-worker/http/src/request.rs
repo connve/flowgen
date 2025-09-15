@@ -4,12 +4,12 @@
 //! and various payload formats. Processes events by making HTTP requests
 //! and publishing the responses as new events.
 
+use crate::config::Credentials;
 use flowgen_core::{
     config::ConfigExt,
     event::{generate_subject, Event, EventBuilder, EventData, SubjectSuffix},
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::{
@@ -21,31 +21,17 @@ use tracing::{event, Level};
 /// Default subject for HTTP response events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "http.response.out";
 
-/// Authentication credentials for HTTP requests.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-struct Credentials {
-    /// Bearer token for authorization header.
-    bearer_auth: Option<String>,
-    /// Basic authentication credentials.
-    basic_auth: Option<BasicAuth>,
-}
-
-/// Basic authentication username and password.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-struct BasicAuth {
-    /// Username for basic authentication.
-    username: String,
-    /// Password for basic authentication.
-    password: String,
-}
-
 /// Errors that can occur during HTTP request processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    #[error("IO operation failed on path {path}: {source}")]
+    IO {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// Failed to send event message.
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
@@ -129,7 +115,13 @@ impl EventHandler {
         }
 
         if let Some(credentials) = &self.config.credentials {
-            let credentials_string = fs::read_to_string(credentials).await?;
+            let credentials_string =
+                fs::read_to_string(credentials)
+                    .await
+                    .map_err(|e| Error::IO {
+                        path: credentials.clone(),
+                        source: e,
+                    })?;
             let credentials: Credentials = serde_json::from_str(&credentials_string)?;
 
             if let Some(bearer_token) = credentials.bearer_auth {
@@ -265,7 +257,9 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BasicAuth;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tokio::sync::broadcast;
 
     #[test]
@@ -339,10 +333,14 @@ mod tests {
     }
 
     #[test]
-    fn test_error_from_io_error() {
+    fn test_error_io_structure() {
+        use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: Error = io_error.into();
-        assert!(matches!(error, Error::IO(_)));
+        let error = Error::IO {
+            path: PathBuf::from("/test/file.json"),
+            source: io_error,
+        };
+        assert!(matches!(error, Error::IO { .. }));
     }
 
     #[test]
@@ -487,7 +485,7 @@ mod tests {
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some(headers),
-            credentials: Some("/test/creds.json".to_string()),
+            credentials: Some(PathBuf::from("/test/creds.json")),
         });
 
         let result = ProcessorBuilder::new()

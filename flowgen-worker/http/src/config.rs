@@ -1,12 +1,12 @@
 //! HTTP processor configuration structures and types.
-//! 
+//!
 //! Provides configuration structs for HTTP request processors, including
 //! method types, payload formats, and authentication settings.
 
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 /// HTTP processor configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -22,7 +22,7 @@ pub struct Processor {
     /// Optional HTTP headers to include in requests.
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
-    pub credentials: Option<String>,
+    pub credentials: Option<PathBuf>,
 }
 
 impl ConfigExt for Processor {}
@@ -68,6 +68,24 @@ pub enum Method {
     HEAD,
 }
 
+/// Authentication credentials for HTTP requests.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Credentials {
+    /// Bearer token for authorization header.
+    pub bearer_auth: Option<String>,
+    /// Basic authentication credentials.
+    pub basic_auth: Option<BasicAuth>,
+}
+
+/// Basic authentication username and password.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+pub struct BasicAuth {
+    /// Username for basic authentication.
+    pub username: String,
+    /// Password for basic authentication.
+    pub password: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,7 +125,7 @@ mod tests {
             method: Method::POST,
             payload: Some(payload),
             headers: Some(headers.clone()),
-            credentials: Some("/path/to/creds.json".to_string()),
+            credentials: Some(PathBuf::from("/path/to/creds.json")),
         };
 
         assert_eq!(processor.label, Some("test_processor".to_string()));
@@ -117,7 +135,7 @@ mod tests {
         assert_eq!(processor.headers, Some(headers));
         assert_eq!(
             processor.credentials,
-            Some("/path/to/creds.json".to_string())
+            Some(PathBuf::from("/path/to/creds.json"))
         );
     }
 
@@ -129,7 +147,7 @@ mod tests {
             method: Method::PUT,
             payload: None,
             headers: None,
-            credentials: Some("/test/credentials.json".to_string()),
+            credentials: Some(PathBuf::from("/test/credentials.json")),
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -294,7 +312,7 @@ mod tests {
             method: Method::PATCH,
             payload: Some(payload),
             headers: Some(headers),
-            credentials: Some("/secure/path/to/creds.json".to_string()),
+            credentials: Some(PathBuf::from("/secure/path/to/creds.json")),
         };
 
         let json = serde_json::to_string(&processor).unwrap();

@@ -25,6 +25,7 @@ const DEFAULT_HAS_HEADER: bool = true;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]

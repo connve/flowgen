@@ -15,6 +15,7 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "object_store.writer.out";
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]

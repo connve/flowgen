@@ -24,3 +24,4 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 axum = {workspace = true}
+base64 = { workspace = true }

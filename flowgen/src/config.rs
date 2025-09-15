@@ -59,6 +59,8 @@ pub struct AppConfig {
     pub cache: Option<CacheOptions>,
     /// Flow discovery and loading options.
     pub flows: FlowOptions,
+    /// Optional HTTP server configuration.
+    pub http: Option<HttpOptions>,
 }
 
 /// Cache configuration options.
@@ -75,6 +77,13 @@ pub struct CacheOptions {
 pub struct FlowOptions {
     /// Directory pattern for discovering flow configuration files.
     pub dir: Option<PathBuf>,
+}
+
+/// HTTP server configuration options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct HttpOptions {
+    /// Optional HTTP server port number (defaults to 3000).
+    pub port: Option<u16>,
 }
 
 #[cfg(test)]
@@ -179,11 +188,13 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/test/flows/*")),
             },
+            http: None,
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.dir.is_some());
+        assert!(app_config.http.is_none());
     }
 
     #[test]
@@ -193,6 +204,7 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/flows/*")),
             },
+            http: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -209,6 +221,7 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/serialize/flows/*")),
             },
+            http: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -224,6 +237,7 @@ mod tests {
                 credentials_path: PathBuf::from("/clone/cache"),
             }),
             flows: FlowOptions { dir: None },
+            http: None,
         };
 
         let cloned = app_config.clone();
@@ -320,5 +334,31 @@ mod tests {
         assert_eq!(flow_config.flow.tasks.len(), 2);
         assert!(matches!(flow_config.flow.tasks[0], Task::convert(_)));
         assert!(matches!(flow_config.flow.tasks[1], Task::generate(_)));
+    }
+
+    #[test]
+    fn test_http_options_creation() {
+        let http_options = HttpOptions { port: Some(8080) };
+
+        assert_eq!(http_options.port, Some(8080));
+    }
+
+    #[test]
+    fn test_http_options_without_port() {
+        let http_options = HttpOptions { port: None };
+
+        assert!(http_options.port.is_none());
+    }
+
+    #[test]
+    fn test_app_config_with_http_options() {
+        let app_config = AppConfig {
+            cache: None,
+            flows: FlowOptions { dir: None },
+            http: Some(HttpOptions { port: Some(8080) }),
+        };
+
+        assert!(app_config.http.is_some());
+        assert_eq!(app_config.http.as_ref().unwrap().port, Some(8080));
     }
 }

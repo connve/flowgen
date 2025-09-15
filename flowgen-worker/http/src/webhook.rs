@@ -3,13 +3,15 @@
 //! Processes incoming HTTP webhook requests, extracting headers and payload
 //! data and converting them into events for further processing in the pipeline.
 
+use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tracing::{event, Level};
 
@@ -36,6 +38,15 @@ pub enum Error {
     /// Axum HTTP processing failed.
     #[error(transparent)]
     Axum(#[from] axum::Error),
+    /// Authentication failed - no credentials provided.
+    #[error("No authorization header provided")]
+    NoCredentials,
+    /// Authentication failed - invalid credentials.
+    #[error("Invalid authorization credentials")]
+    InvalidCredentials,
+    /// Authentication failed - malformed authorization header.
+    #[error("Malformed authorization header")]
+    MalformedCredentials,
     /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
@@ -64,14 +75,81 @@ struct EventHandler {
     tx: Sender<Event>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Pre-loaded authentication credentials.
+    credentials: Option<Credentials>,
 }
 
 impl EventHandler {
+    /// Validate authentication credentials against incoming request headers.
+    fn validate_authentication(&self, headers: &HeaderMap) -> Result<(), Error> {
+        let credentials = match &self.credentials {
+            Some(creds) => creds,
+            None => return Ok(()),
+        };
+
+        let auth_header = match headers.get("authorization") {
+            Some(header) => header,
+            None => return Err(Error::NoCredentials),
+        };
+
+        let auth_value = match auth_header.to_str() {
+            Ok(value) => value,
+            Err(_) => return Err(Error::MalformedCredentials),
+        };
+
+        // Check bearer authentication.
+        if let Some(expected_token) = &credentials.bearer_auth {
+            match auth_value.strip_prefix("Bearer ") {
+                Some(token) if token == expected_token => return Ok(()),
+                Some(_) => return Err(Error::InvalidCredentials),
+                None => {}
+            }
+        }
+
+        // Check basic authentication.
+        if let Some(basic_auth) = &credentials.basic_auth {
+            if let Some(encoded) = auth_value.strip_prefix("Basic ") {
+                match STANDARD.decode(encoded) {
+                    Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                        Ok(decoded_str) => {
+                            let expected =
+                                format!("{}:{}", basic_auth.username, basic_auth.password);
+                            return match decoded_str == expected {
+                                true => Ok(()),
+                                false => Err(Error::InvalidCredentials),
+                            };
+                        }
+                        Err(_) => return Err(Error::MalformedCredentials),
+                    },
+                    Err(_) => return Err(Error::MalformedCredentials),
+                }
+            }
+        }
+        Err(Error::InvalidCredentials)
+    }
+
     async fn handle(
         &self,
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
+        let subject = generate_subject(
+            self.config.label.as_deref(),
+            DEFAULT_MESSAGE_SUBJECT,
+            SubjectSuffix::Timestamp,
+        );
+
+        // Validate the authentication and return error if request is not authorized.
+        if let Err(auth_error) = self.validate_authentication(&headers) {
+            event!(
+                Level::ERROR,
+                "Webhook authentication failed for {}: {}",
+                subject,
+                auth_error
+            );
+            return Ok(StatusCode::UNAUTHORIZED);
+        }
+
         let body = axum::body::to_bytes(request.into_body(), usize::MAX).await?;
 
         let json_body = match body.is_empty() {
@@ -91,12 +169,6 @@ impl EventHandler {
             DEFAULT_HEADERS_KEY: Value::Object(headers_map),
             DEFAULT_PAYLOAD_KEY: json_body
         });
-
-        let subject = generate_subject(
-            self.config.label.as_deref(),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
 
         let e = EventBuilder::new()
             .data(EventData::Json(data))
@@ -127,10 +199,21 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     async fn run(self) -> Result<(), Error> {
         let config = Arc::clone(&self.config);
+
+        // Load credentials at task creation time
+        let credentials = match &config.credentials {
+            Some(path) => {
+                let content = fs::read_to_string(path)?;
+                Some(serde_json::from_str(&content)?)
+            }
+            None => None,
+        };
+
         let event_handler = EventHandler {
             config: self.config,
             tx: self.tx,
             current_task_id: self.current_task_id,
+            credentials,
         };
 
         let handler = move |headers: HeaderMap, request: Request<Body>| async move {
@@ -146,8 +229,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             crate::config::Method::HEAD => MethodRouter::new().head(handler),
         };
 
+        let webhook_path = format!("/workers{}", config.endpoint);
         self.http_server
-            .register_route(config.endpoint.clone(), method_router)
+            .register_route(webhook_path, method_router)
             .await;
 
         Ok(())
@@ -440,6 +524,7 @@ mod tests {
             config,
             tx,
             current_task_id: 0,
+            credentials: None,
         };
     }
 }
