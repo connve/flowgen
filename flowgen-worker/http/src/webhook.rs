@@ -158,12 +158,13 @@ impl EventHandler {
         };
 
         let mut headers_map = Map::new();
-        for (key, value) in headers.iter() {
-            headers_map.insert(
-                key.as_str().to_string(),
-                Value::String(value.to_str().unwrap_or("").to_string()),
-            );
-        }
+        // Temporarly turn of headers.
+        // for (key, value) in headers.iter() {
+        //     headers_map.insert(
+        //         key.as_str().to_string(),
+        //         Value::String(value.to_str().unwrap_or("").to_string()),
+        //     );
+        // }
 
         let data = json!({
             DEFAULT_HEADERS_KEY: Value::Object(headers_map),

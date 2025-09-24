@@ -210,8 +210,8 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         let event2 = rx.recv().await.unwrap();
 
-        assert!(event1.subject.starts_with("test."));
-        assert!(event2.subject.starts_with("test."));
+        assert!(event1.subject.starts_with("generate.test."));
+        assert!(event2.subject.starts_with("generate.test."));
         assert_eq!(event1.current_task_id, Some(1));
         assert_eq!(event2.current_task_id, Some(1));
 

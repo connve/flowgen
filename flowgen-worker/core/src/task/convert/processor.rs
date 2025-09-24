@@ -419,7 +419,7 @@ mod tests {
             }
             _ => panic!("Expected JSON passthrough"),
         }
-        assert!(output_event.subject.starts_with("test."));
+        assert!(output_event.subject.starts_with("convert.test."));
         assert_eq!(output_event.current_task_id, Some(1));
     }
 }
