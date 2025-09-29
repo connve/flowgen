@@ -39,16 +39,12 @@ pub enum Error {
 }
 
 /// Transforms JSON object keys by replacing hyphens with underscores.
-///
 /// Required for Avro compatibility as Avro field names cannot contain hyphens.
 fn transform_keys(value: &mut Value) {
     if let Value::Object(map) = value {
         let mut new_map = Map::new();
-
-        // Collect keys that need to be renamed
         let keys_to_rename: Vec<String> = map.keys().filter(|k| k.contains("-")).cloned().collect();
 
-        // Remove old keys and insert with new names
         for old_key in keys_to_rename {
             if let Some(val) = map.remove(&old_key) {
                 let new_key = old_key.replace("-", "_");
@@ -56,7 +52,6 @@ fn transform_keys(value: &mut Value) {
             }
         }
 
-        // Add the new keys to the original map
         for (key, val) in new_map {
             map.insert(key, val);
         }

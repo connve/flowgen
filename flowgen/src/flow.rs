@@ -184,10 +184,12 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
+                    let cache = Arc::clone(&cache);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
+                            .cache(cache)
                             .current_task_id(i)
                             .build()
                             .await

@@ -7,7 +7,12 @@ use crate::event::{
     generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{sync::broadcast::Sender, time};
 use tracing::{event, Level};
 
@@ -27,24 +32,77 @@ pub enum Error {
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Cache operation error with descriptive message.
+    #[error("Cache error: {_0}")]
+    Cache(String),
+    /// System time error when getting current timestamp.
+    #[error(transparent)]
+    SystemTime(#[from] std::time::SystemTimeError),
 }
 /// Event generator that produces events at scheduled intervals.
 #[derive(Debug)]
-pub struct Subscriber {
+pub struct Subscriber<T: crate::cache::Cache> {
     /// Configuration settings for event generation.
     config: Arc<super::config::Subscriber>,
     /// Channel sender for broadcasting generated events.
     tx: Sender<Event>,
     /// Task identifier for event tracking.
     current_task_id: usize,
+    /// Cache instance for storing last run time.
+    cache: Arc<T>,
 }
 
-impl crate::task::runner::Runner for Subscriber {
+impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
     type Error = Error;
     async fn run(self) -> Result<(), Error> {
         let mut counter = 0;
+
+        // Generate a cache key based on label or hash.
+        let cache_key = match &self.config.label {
+            Some(label) => format!("generate.{label}.last_run"),
+            None => {
+                let mut hasher = DefaultHasher::new();
+                self.config.hash(&mut hasher);
+                let config_hash = hasher.finish();
+                format!("generate.{config_hash:x}.last_run")
+            }
+        };
+
+        // Check for last run time from cache and calculate sleep duration.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let sleep_duration = match self.cache.get(&cache_key).await {
+            Ok(cached_bytes) => {
+                let cached_str = String::from_utf8_lossy(&cached_bytes);
+                match cached_str.parse::<u64>() {
+                    Ok(last_run) => {
+                        let elapsed = now.saturating_sub(last_run);
+                        self.config.interval.saturating_sub(elapsed)
+                    }
+                    Err(_) => self.config.interval,
+                }
+            }
+            Err(_) => self.config.interval,
+        };
+
+        // Sleep for the calculated duration.
+        if sleep_duration > 0 {
+            time::sleep(Duration::from_secs(sleep_duration)).await;
+        }
+
         loop {
-            time::sleep(Duration::from_secs(self.config.interval)).await;
+            // Get current time for this iteration.
+            let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+            // Store current time in cache before generating event/
+            if let Err(cache_err) = self
+                .cache
+                .put(&cache_key, current_time.to_string().into())
+                .await
+            {
+                // Log cache error but don't fail the task.
+                event!(Level::WARN, "Failed to update cache: {:?}", cache_err);
+            }
+
             counter += 1;
 
             let data = match &self.config.message {
@@ -58,6 +116,7 @@ impl crate::task::runner::Runner for Subscriber {
                 DEFAULT_MESSAGE_SUBJECT,
                 SubjectSuffix::Timestamp,
             );
+
             // Build and send event.
             let e = EventBuilder::new()
                 .data(EventData::Json(data))
@@ -67,6 +126,8 @@ impl crate::task::runner::Runner for Subscriber {
 
             event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
             self.tx.send(e)?;
+
+            time::sleep(Duration::from_secs(self.config.interval)).await;
 
             match self.config.count {
                 Some(count) if count == counter => break,
@@ -79,17 +140,22 @@ impl crate::task::runner::Runner for Subscriber {
 
 /// Builder for constructing Subscriber instances.
 #[derive(Default)]
-pub struct SubscriberBuilder {
+pub struct SubscriberBuilder<T: crate::cache::Cache> {
     /// Generate task configuration (required for build).
     config: Option<Arc<super::config::Subscriber>>,
     /// Event broadcast sender (required for build).
     tx: Option<Sender<Event>>,
     /// Current task identifier for event tracking.
     current_task_id: usize,
+    /// Cache instance for storing last run time.
+    cache: Option<Arc<T>>,
 }
 
-impl SubscriberBuilder {
-    pub fn new() -> SubscriberBuilder {
+impl<T: crate::cache::Cache> SubscriberBuilder<T>
+where
+    T: Default,
+{
+    pub fn new() -> SubscriberBuilder<T> {
         SubscriberBuilder {
             ..Default::default()
         }
@@ -110,7 +176,12 @@ impl SubscriberBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Subscriber, Error> {
+    pub fn cache(mut self, cache: Arc<T>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub async fn build(self) -> Result<Subscriber<T>, Error> {
         Ok(Subscriber {
             config: self
                 .config
@@ -119,6 +190,9 @@ impl SubscriberBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            cache: self
+                .cache
+                .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
         })
     }
 }
@@ -127,13 +201,71 @@ impl SubscriberBuilder {
 mod tests {
     use super::*;
     use crate::task::runner::Runner;
-    use tokio::sync::broadcast;
+    use std::collections::HashMap;
+    use tokio::sync::{broadcast, Mutex};
+
+    /// Mock cache implementation for testing.
+    #[derive(Debug)]
+    struct MockCache {
+        data: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
+        should_error: bool,
+    }
+
+    impl Default for MockCache {
+        fn default() -> Self {
+            MockCache {
+                data: Arc::new(Mutex::new(HashMap::new())),
+                should_error: false,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockError;
+
+    impl std::fmt::Display for MockError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Mock cache error")
+        }
+    }
+
+    impl std::error::Error for MockError {}
+
+    impl crate::cache::Cache for MockCache {
+        type Error = MockError;
+
+        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
+            if self.should_error {
+                Err(MockError)
+            } else {
+                Ok(self)
+            }
+        }
+
+        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Self::Error> {
+            if self.should_error {
+                Err(MockError)
+            } else {
+                self.data.lock().await.insert(key.to_string(), value);
+                Ok(())
+            }
+        }
+
+        async fn get(&self, key: &str) -> Result<bytes::Bytes, Self::Error> {
+            if self.should_error {
+                Err(MockError)
+            } else {
+                self.data.lock().await.get(key).cloned().ok_or(MockError)
+            }
+        }
+    }
 
     #[test]
     fn test_subscriber_builder_new() {
-        let builder = SubscriberBuilder::new();
+        let builder = SubscriberBuilder::<MockCache>::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
+        assert!(builder.cache.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -147,11 +279,13 @@ mod tests {
         });
 
         let (tx, _rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
 
-        let subscriber = SubscriberBuilder::new()
+        let subscriber = SubscriberBuilder::<MockCache>::new()
             .config(config.clone())
             .sender(tx)
             .current_task_id(1)
+            .cache(cache)
             .build()
             .await
             .unwrap();
@@ -163,8 +297,13 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_config() {
         let (tx, _rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::new().sender(tx).build().await;
+        let result = SubscriberBuilder::<MockCache>::new()
+            .sender(tx)
+            .cache(cache)
+            .build()
+            .await;
 
         assert!(result.is_err());
         assert!(result
@@ -176,14 +315,37 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(crate::task::generate::config::Subscriber::default());
+        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::new().config(config).build().await;
+        let result = SubscriberBuilder::<MockCache>::new()
+            .config(config)
+            .cache(cache)
+            .build()
+            .await;
 
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Missing required attribute: sender"));
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_builder_missing_cache() {
+        let config = Arc::new(crate::task::generate::config::Subscriber::default());
+        let (tx, _rx) = broadcast::channel(100);
+
+        let result = SubscriberBuilder::<MockCache>::new()
+            .config(config)
+            .sender(tx)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Missing required attribute: cache"));
     }
 
     #[tokio::test]
@@ -196,11 +358,13 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 1,
+            cache,
         };
 
         let handle = tokio::spawn(async move {
@@ -229,11 +393,13 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 0,
+            cache,
         };
 
         tokio::spawn(async move {
@@ -248,5 +414,63 @@ mod tests {
             }
             _ => panic!("Expected JSON event data"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_cache_key_generation_with_label() {
+        let config = Arc::new(crate::task::generate::config::Subscriber {
+            label: Some("my_task".to_string()),
+            message: None,
+            interval: 1,    // Short interval for testing
+            count: Some(1), // Only run once
+        });
+
+        let (tx, mut _rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
+
+        let subscriber = Subscriber {
+            config,
+            tx,
+            current_task_id: 1,
+            cache: cache.clone(),
+        };
+
+        // Run subscriber to completion
+        let _ = subscriber.run().await;
+
+        // Check that cache key was created with label format
+        let cache_data = cache.data.lock().await;
+        assert!(cache_data.contains_key("generate.my_task.last_run"));
+    }
+
+    #[tokio::test]
+    async fn test_cache_key_generation_without_label() {
+        let config = Arc::new(crate::task::generate::config::Subscriber {
+            label: None,
+            message: Some("test".to_string()),
+            interval: 1,    // Short interval for testing
+            count: Some(1), // Only run once
+        });
+
+        let (tx, mut _rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
+
+        let subscriber = Subscriber {
+            config,
+            tx,
+            current_task_id: 1,
+            cache: cache.clone(),
+        };
+
+        // Run subscriber to completion
+        let _ = subscriber.run().await;
+
+        // Check that cache key was created with hash format
+        let cache_data = cache.data.lock().await;
+        let has_hash_key = cache_data.keys().any(|k| {
+            k.starts_with("generate.") && k.ends_with(".last_run") && !k.contains("my_task")
+            // Ensure it's not the label format
+        });
+        assert!(has_hash_key);
     }
 }
