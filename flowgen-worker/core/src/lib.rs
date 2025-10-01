@@ -19,6 +19,8 @@ pub mod serde;
 pub mod service;
 /// Task execution framework with different processor types.
 pub mod task {
+    /// Task execution context providing metadata and runtime configuration.
+    pub mod context;
     /// Base runner trait for all task implementations.
     pub mod runner;
     /// Event generation tasks that produce data streams.

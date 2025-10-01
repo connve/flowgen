@@ -165,6 +165,8 @@ pub struct Processor {
     rx: Receiver<Event>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
@@ -209,6 +211,8 @@ pub struct ProcessorBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -238,6 +242,11 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -250,6 +259,9 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -261,6 +273,19 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_id("test-flow".to_string())
+                .flow_label(Some("Test Flow".to_string()))
+                .k8s_enabled(false)
+                .metrics_enabled(true)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_credentials_default() {
@@ -356,6 +381,7 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -365,6 +391,7 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -410,6 +437,7 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -435,6 +463,7 @@ mod tests {
             .config(config)
             .sender(tx)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -460,12 +489,39 @@ mod tests {
             .config(config)
             .receiver(rx)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_build_missing_task_context() {
+        let (tx, rx) = broadcast::channel(100);
+        let config = Arc::new(crate::config::Processor {
+            label: Some("test".to_string()),
+            endpoint: "https://test.com".to_string(),
+            method: crate::config::Method::GET,
+            payload: None,
+            headers: None,
+            credentials: None,
+        });
+
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .sender(tx)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
         );
     }
 
@@ -493,6 +549,7 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(5)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -519,6 +576,7 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(10)
+            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();

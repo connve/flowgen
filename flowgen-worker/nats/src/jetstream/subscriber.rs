@@ -66,6 +66,8 @@ pub struct Subscriber {
     tx: Sender<Event>,
     /// Current task identifier for event tagging.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Subscriber {
@@ -136,6 +138,8 @@ pub struct SubscriberBuilder {
     tx: Option<Sender<Event>>,
     /// Current task identifier for event processing.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl SubscriberBuilder {
@@ -160,6 +164,11 @@ impl SubscriberBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Subscriber, Error> {
         Ok(Subscriber {
             config: self
@@ -169,6 +178,9 @@ impl SubscriberBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

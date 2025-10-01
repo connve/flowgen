@@ -133,6 +133,8 @@ pub struct Writer {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Writer {
@@ -177,6 +179,8 @@ pub struct WriterBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl WriterBuilder {
@@ -204,6 +208,11 @@ impl WriterBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     /// Builds the Writer instance, validating required fields.
     pub async fn build(self) -> Result<Writer, Error> {
         Ok(Writer {
@@ -214,6 +223,9 @@ impl WriterBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

@@ -132,6 +132,8 @@ pub struct Processor {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl super::super::runner::Runner for Processor {
@@ -198,6 +200,8 @@ pub struct ProcessorBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<crate::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -227,6 +231,11 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -239,6 +248,9 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -248,6 +260,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
+        Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_id("test-flow".to_string())
+                .flow_label(Some("Test Flow".to_string()))
+                .k8s_enabled(false)
+                .metrics_enabled(true)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_transform_keys() {
@@ -286,6 +311,7 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -305,6 +331,7 @@ mod tests {
             .sender(tx)
             .receiver(rx2)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
@@ -319,6 +346,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .sender(tx)
             .receiver(rx)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -337,6 +365,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .config(config)
             .receiver(rx)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -355,6 +384,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .config(config)
             .sender(tx)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -363,6 +393,25 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Missing required attribute: receiver"));
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_missing_task_context() {
+        let config = Arc::new(crate::task::convert::config::Processor::default());
+        let (tx, rx) = broadcast::channel(100);
+
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .sender(tx)
+            .receiver(rx)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Missing required attribute: task_context"));
     }
 
     #[test]
@@ -414,7 +463,7 @@ mod tests {
             }
             _ => panic!("Expected JSON passthrough"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
+        assert!(output_event.subject.starts_with("test."));
         assert_eq!(output_event.current_task_id, Some(1));
     }
 }

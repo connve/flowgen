@@ -63,6 +63,8 @@ pub struct Publisher {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Publisher {
@@ -182,6 +184,7 @@ pub struct PublisherBuilder {
     config: Option<Arc<super::config::Publisher>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl PublisherBuilder {
@@ -206,6 +209,11 @@ impl PublisherBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Publisher, Error> {
         Ok(Publisher {
             config: self
@@ -215,6 +223,9 @@ impl PublisherBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

@@ -227,6 +227,8 @@ pub struct Subscriber<T: Cache> {
     current_task_id: usize,
     /// Cache for replay IDs and schemas
     cache: Arc<T>,
+    /// Task execution context providing metadata and runtime configuration
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
@@ -304,6 +306,8 @@ pub struct SubscriberBuilder<T: Cache> {
     current_task_id: usize,
     /// Cache instance
     cache: Option<Arc<T>>,
+    /// Task execution context providing metadata and runtime configuration
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl<T: Cache> SubscriberBuilder<T>
@@ -341,6 +345,12 @@ where
         self
     }
 
+    /// Sets the task execution context.
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     /// Builds the Subscriber instance.
     pub async fn build(self) -> Result<Subscriber<T>, Error> {
         Ok(Subscriber {
@@ -354,6 +364,9 @@ where
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

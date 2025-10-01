@@ -194,6 +194,8 @@ pub struct Processor {
     current_task_id: usize,
     /// Shared HTTP server instance.
     http_server: Arc<super::server::HttpServer>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
@@ -250,6 +252,8 @@ pub struct ProcessorBuilder {
     current_task_id: usize,
     /// Optional HTTP server instance.
     http_server: Option<Arc<super::server::HttpServer>>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -279,6 +283,11 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -291,6 +300,9 @@ impl ProcessorBuilder {
             http_server: self
                 .http_server
                 .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -300,6 +312,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_id("test-flow".to_string())
+                .flow_label(Some("Test Flow".to_string()))
+                .k8s_enabled(false)
+                .metrics_enabled(true)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_error_from_serde_json_error() {
@@ -334,6 +359,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
         assert!(builder.http_server.is_none());
+        assert!(builder.task_context.is_none());
     }
 
     #[tokio::test]
@@ -343,6 +369,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
         assert!(builder.http_server.is_none());
+        assert!(builder.task_context.is_none());
     }
 
     #[tokio::test]

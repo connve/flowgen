@@ -50,6 +50,8 @@ pub struct Subscriber<T: crate::cache::Cache> {
     current_task_id: usize,
     /// Cache instance for storing last run time.
     cache: Arc<T>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
@@ -143,6 +145,8 @@ pub struct SubscriberBuilder<T: crate::cache::Cache> {
     current_task_id: usize,
     /// Cache instance for storing last run time.
     cache: Option<Arc<T>>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<crate::task::context::TaskContext>>,
 }
 
 impl<T: crate::cache::Cache> SubscriberBuilder<T>
@@ -175,6 +179,11 @@ where
         self
     }
 
+    pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Subscriber<T>, Error> {
         Ok(Subscriber {
             config: self
@@ -187,6 +196,9 @@ where
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -212,6 +224,19 @@ mod tests {
                 should_error: false,
             }
         }
+    }
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
+        Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_id("test-flow".to_string())
+                .flow_label(Some("Test Flow".to_string()))
+                .k8s_enabled(false)
+                .metrics_enabled(true)
+                .build()
+                .unwrap(),
+        )
     }
 
     #[derive(Debug)]
@@ -260,6 +285,7 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.cache.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -280,6 +306,7 @@ mod tests {
             .sender(tx)
             .current_task_id(1)
             .cache(cache)
+            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
@@ -296,6 +323,7 @@ mod tests {
         let result = SubscriberBuilder::<MockCache>::new()
             .sender(tx)
             .cache(cache)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -314,6 +342,7 @@ mod tests {
         let result = SubscriberBuilder::<MockCache>::new()
             .config(config)
             .cache(cache)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -332,6 +361,7 @@ mod tests {
         let result = SubscriberBuilder::<MockCache>::new()
             .config(config)
             .sender(tx)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -340,6 +370,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Missing required attribute: cache"));
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_builder_missing_task_context() {
+        let config = Arc::new(crate::task::generate::config::Subscriber::default());
+        let (tx, _rx) = broadcast::channel(100);
+        let cache = Arc::new(MockCache::default());
+
+        let result = SubscriberBuilder::<MockCache>::new()
+            .config(config)
+            .sender(tx)
+            .cache(cache)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Missing required attribute: task_context"));
     }
 
     #[tokio::test]
@@ -359,6 +409,7 @@ mod tests {
             tx,
             current_task_id: 1,
             cache,
+            task_context: create_mock_task_context(),
         };
 
         let handle = tokio::spawn(async move {
@@ -394,6 +445,7 @@ mod tests {
             tx,
             current_task_id: 0,
             cache,
+            task_context: create_mock_task_context(),
         };
 
         tokio::spawn(async move {
@@ -427,6 +479,7 @@ mod tests {
             tx,
             current_task_id: 1,
             cache: cache.clone(),
+            task_context: create_mock_task_context(),
         };
 
         // Run subscriber to completion
@@ -454,6 +507,7 @@ mod tests {
             tx,
             current_task_id: 1,
             cache: cache.clone(),
+            task_context: create_mock_task_context(),
         };
 
         // Run subscriber to completion
