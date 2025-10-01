@@ -165,7 +165,10 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
         self.task_context = Some(task_context);
         self
     }
@@ -192,7 +195,6 @@ mod tests {
     use std::path::PathBuf;
     use tokio::sync::broadcast;
 
-
     #[test]
     fn test_publisher_builder_new() {
         let builder = PublisherBuilder::new();
@@ -212,6 +214,7 @@ mod tests {
     #[test]
     fn test_publisher_builder_config() {
         let config = Arc::new(super::super::config::Publisher {
+            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test stream".to_string()),
@@ -254,6 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_build_missing_receiver() {
         let config = Arc::new(super::super::config::Publisher {
+            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: None,
@@ -276,6 +280,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(super::super::config::Publisher {
+            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test description".to_string()),
@@ -300,6 +305,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_chain() {
         let config = Arc::new(super::super::config::Publisher {
+            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             stream_description: None,

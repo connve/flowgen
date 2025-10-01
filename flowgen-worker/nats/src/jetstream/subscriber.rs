@@ -213,6 +213,7 @@ mod tests {
     #[test]
     fn test_subscriber_builder_config() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
@@ -256,6 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_missing_sender() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
@@ -279,6 +281,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject.*".to_string(),
@@ -304,6 +307,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_chain() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             subject: "chain.subject".to_string(),
@@ -328,6 +332,7 @@ mod tests {
     #[test]
     fn test_subscriber_structure() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "struct_test".to_string(),
             subject: "struct.test".to_string(),

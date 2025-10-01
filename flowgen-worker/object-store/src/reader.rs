@@ -127,7 +127,7 @@ impl<T: Cache> EventHandler<T> {
                 for event_data in event_data_list {
                     // Generate event subject.
                     let subject = generate_subject(
-                        self.config.label.as_deref(),
+                        &self.config.name,
                         DEFAULT_MESSAGE_SUBJECT,
                         SubjectSuffix::Timestamp,
                     );
@@ -265,7 +265,10 @@ where
         self
     }
 
-    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
         self.task_context = Some(task_context);
         self
     }
@@ -339,7 +342,7 @@ mod tests {
     #[test]
     fn test_reader_builder_config() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("test_reader".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
             credentials: None,
             client_options: None,
@@ -405,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_receiver() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("test".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("/tmp/input/"),
             credentials: None,
             client_options: None,
@@ -434,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_sender() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("test".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("gs://bucket/data/"),
             credentials: Some(PathBuf::from("/creds.json")),
             client_options: None,
@@ -463,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_cache() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("test".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("file:///local/files/"),
             credentials: None,
             client_options: None,
@@ -491,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_build_success() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("complete_reader".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("s3://my-bucket/files/"),
             credentials: Some(PathBuf::from("/aws-creds.json")),
             client_options: Some({
@@ -531,7 +534,7 @@ mod tests {
     #[test]
     fn test_reader_builder_chain() {
         let config = Arc::new(crate::config::Reader {
-            label: Some("chain_test".to_string()),
+            name: "test_reader".to_string(),
             path: PathBuf::from("file:///data/input/"),
             credentials: None,
             client_options: None,

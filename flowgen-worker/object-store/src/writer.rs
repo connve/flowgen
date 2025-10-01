@@ -94,7 +94,7 @@ impl EventHandler {
 
         // Generate event subject.
         let subject = generate_subject(
-            self.config.label.as_deref(),
+            &self.config.name,
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -208,7 +208,10 @@ impl WriterBuilder {
         self
     }
 
-    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
         self.task_context = Some(task_context);
         self
     }
@@ -233,7 +236,7 @@ impl WriterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HivePartitionOptions, HiveParitionKeys};
+    use crate::config::{HiveParitionKeys, HivePartitionOptions};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
 
@@ -248,7 +251,7 @@ mod tests {
     #[test]
     fn test_writer_builder_config() {
         let config = Arc::new(crate::config::Writer {
-            label: Some("test_writer".to_string()),
+            name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
             credentials: None,
             client_options: None,
@@ -257,7 +260,10 @@ mod tests {
 
         let builder = WriterBuilder::new().config(config.clone());
         assert!(builder.config.is_some());
-        assert_eq!(builder.config.unwrap().path, PathBuf::from("s3://bucket/path/"));
+        assert_eq!(
+            builder.config.unwrap().path,
+            PathBuf::from("s3://bucket/path/")
+        );
     }
 
     #[test]
@@ -283,13 +289,15 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
+        );
     }
 
     #[tokio::test]
     async fn test_writer_builder_missing_receiver() {
         let config = Arc::new(crate::config::Writer {
-            label: Some("test".to_string()),
+            name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/output/"),
             credentials: None,
             client_options: None,
@@ -303,13 +311,15 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
+        );
     }
 
     #[tokio::test]
     async fn test_writer_builder_build_success() {
         let config = Arc::new(crate::config::Writer {
-            label: Some("complete_writer".to_string()),
+            name: "test_writer".to_string(),
             path: PathBuf::from("gs://my-bucket/data/"),
             credentials: Some(PathBuf::from("/service-account.json")),
             client_options: None,
@@ -343,7 +353,7 @@ mod tests {
     fn test_event_handler_structure() {
         // Test that EventHandler can be constructed with the right types
         let config = Arc::new(crate::config::Writer {
-            label: None,
+            name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/"),
             credentials: None,
             client_options: None,
@@ -354,7 +364,7 @@ mod tests {
             crate::client::ClientBuilder::new()
                 .path(PathBuf::from("/tmp/"))
                 .build()
-                .unwrap()
+                .unwrap(),
         ));
 
         // We can't actually create an EventHandler here because it's private,
@@ -365,7 +375,7 @@ mod tests {
     #[test]
     fn test_writer_builder_chain() {
         let config = Arc::new(crate::config::Writer {
-            label: Some("chain_test".to_string()),
+            name: "test_writer".to_string(),
             path: PathBuf::from("file:///data/output/"),
             credentials: None,
             client_options: None,

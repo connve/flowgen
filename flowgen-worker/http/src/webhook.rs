@@ -134,7 +134,7 @@ impl EventHandler {
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
         let subject = generate_subject(
-            self.config.label.as_deref(),
+            &self.config.name,
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -383,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder_config() {
         let config = Arc::new(crate::config::Processor {
-            label: Some("webhook_test".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/webhook".to_string(),
             method: crate::config::Method::POST,
             payload: None,
@@ -436,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder_build_missing_sender() {
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_webhook".to_string(),
             endpoint: "/test".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -462,7 +462,7 @@ mod tests {
     async fn test_processor_builder_build_missing_http_server() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_webhook".to_string(),
             endpoint: "/test".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -487,7 +487,7 @@ mod tests {
     async fn test_processor_builder_build_success() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: Some("success_webhook".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/success".to_string(),
             method: crate::config::Method::POST,
             payload: Some(crate::config::Payload {
@@ -522,7 +522,7 @@ mod tests {
     async fn test_processor_builder_chain() {
         let (tx, _rx) = broadcast::channel(50);
         let config = Arc::new(crate::config::Processor {
-            label: Some("chain_webhook".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/chain".to_string(),
             method: crate::config::Method::PUT,
             payload: None,

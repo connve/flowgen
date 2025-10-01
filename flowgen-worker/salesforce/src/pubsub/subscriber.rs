@@ -184,7 +184,7 @@ impl<T: Cache> EventHandler<T> {
                                 format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
                             };
                             let subject = generate_subject(
-                                self.config.label.as_deref(),
+                                &self.config.name,
                                 &base_subject,
                                 SubjectSuffix::Id(&event.id),
                             );
@@ -346,7 +346,10 @@ where
     }
 
     /// Sets the task execution context.
-    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
         self.task_context = Some(task_context);
         self
     }
@@ -416,7 +419,7 @@ mod tests {
     #[test]
     fn test_subscriber_builder_config() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test_subscriber".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -472,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -500,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_cache() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -528,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(config::Subscriber {
-            label: Some("complete_subscriber".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "complete_creds".to_string(),
             topic: config::Topic {
                 name: "/data/AccountChangeEvent".to_string(),

@@ -138,7 +138,7 @@ impl EventHandler {
         let data = json!(resp);
 
         let subject = generate_subject(
-            self.config.label.as_deref(),
+            &self.config.name,
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -407,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder_config() {
         let config = Arc::new(crate::config::Processor {
-            label: Some("test_processor".to_string()),
+            name: "test_processor".to_string(),
             endpoint: "https://api.example.com".to_string(),
             method: crate::config::Method::POST,
             payload: None,
@@ -460,7 +460,7 @@ mod tests {
     async fn test_processor_builder_build_missing_receiver() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_processor".to_string(),
             endpoint: "https://test.com".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -486,7 +486,7 @@ mod tests {
     async fn test_processor_builder_build_missing_sender() {
         let (_tx, rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_processor".to_string(),
             endpoint: "https://test.com".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -512,7 +512,7 @@ mod tests {
     async fn test_processor_builder_build_missing_task_context() {
         let (tx, rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: Some("test".to_string()),
+            name: "test_processor".to_string(),
             endpoint: "https://test.com".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -541,7 +541,7 @@ mod tests {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let config = Arc::new(crate::config::Processor {
-            label: Some("success_test".to_string()),
+            name: "test_processor".to_string(),
             endpoint: "https://success.test.com".to_string(),
             method: crate::config::Method::POST,
             payload: Some(crate::config::Payload {
@@ -572,7 +572,7 @@ mod tests {
     async fn test_processor_builder_chain() {
         let (tx, rx) = broadcast::channel(50);
         let config = Arc::new(crate::config::Processor {
-            label: Some("chain_test".to_string()),
+            name: "test_processor".to_string(),
             endpoint: "https://chain.test.com".to_string(),
             method: crate::config::Method::PUT,
             payload: None,

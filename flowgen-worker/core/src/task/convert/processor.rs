@@ -103,7 +103,7 @@ impl EventHandler {
 
         // Generate event subject.
         let subject = generate_subject(
-            self.config.label.as_deref(),
+            &self.config.name,
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -323,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder_build_success() {
         let config = Arc::new(crate::task::convert::config::Processor {
-            label: Some("test".to_string()),
+            name: "test".to_string(),
             target_format: crate::task::convert::config::TargetFormat::Avro,
             schema: Some(r#"{"type": "string"}"#.to_string()),
         });
@@ -434,9 +434,9 @@ mod tests {
     #[tokio::test]
     async fn test_event_handler_json_passthrough() {
         let config = Arc::new(crate::task::convert::config::Processor {
-            label: Some("test".to_string()),
+            name: "test".to_string(),
             target_format: crate::task::convert::config::TargetFormat::Avro,
-            schema: None, // No schema means no conversion
+            schema: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);

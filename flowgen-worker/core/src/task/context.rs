@@ -20,7 +20,7 @@ pub struct TaskContext {
     /// Unique flow identifier.
     pub flow_name: String,
     /// Optional labels for flow metadata and logging.
-    pub flow_labelss: Option<Map<String, Value>>,
+    pub flow_labels: Option<Map<String, Value>>,
     /// Whether Kubernetes features are enabled for this flow.
     pub k8s_enabled: bool,
     /// Kubernetes namespace for resources created by this flow.
@@ -35,7 +35,7 @@ pub struct TaskContextBuilder {
     /// Unique flow name.
     flow_name: Option<String>,
     /// Optional labels for flow metadata.
-    flow_labelss: Option<Map<String, Value>>,
+    flow_labels: Option<Map<String, Value>>,
     /// Whether Kubernetes features are enabled.
     k8s_enabled: bool,
     /// Kubernetes namespace for resources.
@@ -68,7 +68,7 @@ impl TaskContextBuilder {
     /// # Arguments
     /// * `labels` - Optional labels map for metadata and logging
     pub fn flow_labels(mut self, labels: Option<Map<String, Value>>) -> Self {
-        self.flow_labelss = labels;
+        self.flow_labels = labels;
         self
     }
 
@@ -108,7 +108,7 @@ impl TaskContextBuilder {
             flow_name: self
                 .flow_name
                 .ok_or_else(|| Error::MissingRequiredAttribute("flow_name".to_string()))?,
-            flow_labelss: self.flow_labelss,
+            flow_labels: self.flow_labels,
             k8s_enabled: self.k8s_enabled,
             k8s_namespace: self.k8s_namespace,
             metrics_enabled: self.metrics_enabled,
@@ -124,7 +124,7 @@ mod tests {
     fn test_task_context_builder_new() {
         let builder = TaskContextBuilder::new();
         assert!(builder.flow_name.is_none());
-        assert!(builder.flow_labelss.is_none());
+        assert!(builder.flow_labels.is_none());
         assert!(!builder.k8s_enabled);
         assert!(builder.k8s_namespace.is_none());
         assert!(builder.metrics_enabled);
@@ -146,7 +146,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(context.flow_name, "test-flow");
-        assert_eq!(context.flow_labelss, Some(labels));
+        assert_eq!(context.flow_labels, Some(labels));
         assert!(context.k8s_enabled);
         assert_eq!(context.k8s_namespace, Some("flowgen".to_string()));
         assert!(!context.metrics_enabled);
@@ -174,7 +174,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(context.flow_name, "default-test");
-        assert!(context.flow_labelss.is_none());
+        assert!(context.flow_labels.is_none());
         assert!(!context.k8s_enabled);
         assert!(context.k8s_namespace.is_none());
         assert!(context.metrics_enabled);
@@ -199,7 +199,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(context.flow_name, "chain-test");
-        assert_eq!(context.flow_labelss, Some(labels));
+        assert_eq!(context.flow_labels, Some(labels));
         assert!(context.k8s_enabled);
         assert_eq!(context.k8s_namespace, Some("test-namespace".to_string()));
         assert!(context.metrics_enabled);
@@ -221,7 +221,7 @@ mod tests {
 
         let cloned = context.clone();
         assert_eq!(context.flow_name, cloned.flow_name);
-        assert_eq!(context.flow_labelss, cloned.flow_labelss);
+        assert_eq!(context.flow_labels, cloned.flow_labels);
         assert_eq!(context.k8s_enabled, cloned.k8s_enabled);
     }
 }

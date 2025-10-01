@@ -8,8 +8,6 @@ use crate::event::{
 };
 use serde_json::json;
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -59,17 +57,12 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
     async fn run(self) -> Result<(), Error> {
         let mut counter = 0;
 
-        // Generate a cache key based on label or hash.
-        let cron_id = match &self.config.label {
-            Some(label) => label.clone(),
-            None => {
-                let mut hasher = DefaultHasher::new();
-                self.config.hash(&mut hasher);
-                let config_hash = hasher.finish();
-                format!("{config_hash:x}")
-            }
-        };
-        let cache_key = format!("generate.{cron_id}.last_run");
+        // Geberate a cache_key based on flow name and task name.
+        let cache_key = format!(
+            "{task_context}.generate.{task_name}.last_run",
+            task_context = self.task_context.flow_name,
+            task_name = self.config.name
+        );
 
         loop {
             counter += 1;
@@ -100,7 +93,7 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
 
             // Generate event subject.
             let subject = generate_subject(
-                self.config.label.as_deref(),
+                &self.config.name,
                 DEFAULT_MESSAGE_SUBJECT,
                 SubjectSuffix::Timestamp,
             );
@@ -298,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test".to_string(),
             message: Some("test message".to_string()),
             interval: 1,
             count: Some(1),
@@ -401,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_run_with_count() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test".to_string(),
             message: Some("test message".to_string()),
             interval: 0,
             count: Some(2),
@@ -437,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_event_content() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
-            label: None,
+            name: "test".to_string(),
             message: Some("custom message".to_string()),
             interval: 0,
             count: Some(1),
@@ -469,9 +462,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_key_generation_with_label() {
+    async fn test_cache_key_generation() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
-            label: Some("my_task".to_string()),
+            name: "test".to_string(),
             message: None,
             interval: 1,    // Short interval for testing
             count: Some(1), // Only run once
@@ -494,37 +487,5 @@ mod tests {
         // Check that cache key was created with label format
         let cache_data = cache.data.lock().await;
         assert!(cache_data.contains_key("generate.my_task.last_run"));
-    }
-
-    #[tokio::test]
-    async fn test_cache_key_generation_without_label() {
-        let config = Arc::new(crate::task::generate::config::Subscriber {
-            label: None,
-            message: Some("test".to_string()),
-            interval: 1,    // Short interval for testing
-            count: Some(1), // Only run once
-        });
-
-        let (tx, mut _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
-
-        let subscriber = Subscriber {
-            config,
-            tx,
-            current_task_id: 1,
-            cache: cache.clone(),
-            task_context: create_mock_task_context(),
-        };
-
-        // Run subscriber to completion
-        let _ = subscriber.run().await;
-
-        // Check that cache key was created with hash format
-        let cache_data = cache.data.lock().await;
-        let has_hash_key = cache_data.keys().any(|k| {
-            k.starts_with("generate.") && k.ends_with(".last_run") && !k.contains("my_task")
-            // Ensure it's not the label format
-        });
-        assert!(has_hash_key);
     }
 }

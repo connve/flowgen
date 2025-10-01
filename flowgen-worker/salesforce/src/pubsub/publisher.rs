@@ -166,11 +166,8 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 // Generate event subject/
                 let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
                 let base_subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..]);
-                let subject = generate_subject(
-                    self.config.label.as_deref(),
-                    &base_subject,
-                    SubjectSuffix::Timestamp,
-                );
+                let subject =
+                    generate_subject(&self.config.name, &base_subject, SubjectSuffix::Timestamp);
 
                 event!(Level::INFO, "Event processed: {}", subject);
             }
@@ -209,7 +206,10 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn task_context(mut self, task_context: Arc<flowgen_core::task::context::TaskContext>) -> Self {
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
         self.task_context = Some(task_context);
         self
     }
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn test_publisher_builder_config() {
         let config = Arc::new(config::Publisher {
-            label: Some("test".to_string()),
+            name: "test_publisher".to_string(),
             credentials: "test_creds".to_string(),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
@@ -291,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_missing_receiver() {
         let config = Arc::new(config::Publisher {
-            label: Some("test".to_string()),
+            name: "test_publisher".to_string(),
             credentials: "test_creds".to_string(),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
@@ -313,7 +313,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(config::Publisher {
-            label: Some("test_publisher".to_string()),
+            name: "test_publisher".to_string(),
             credentials: "test_creds".to_string(),
             topic: "/event/Test__e".to_string(),
             payload: {
@@ -338,5 +338,4 @@ mod tests {
         assert_eq!(publisher.current_task_id, 5);
         assert_eq!(publisher.config.topic, "/event/Test__e");
     }
-
 }
