@@ -11,7 +11,7 @@ use std::{collections::HashMap, path::PathBuf};
 /// HTTP processor configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Processor {
-    /// Optional label for the processor.
+    /// Optional label for logging.
     pub label: Option<String>,
     /// Target endpoint URL for HTTP requests.
     pub endpoint: String,

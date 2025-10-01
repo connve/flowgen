@@ -14,7 +14,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::broadcast::Sender, time};
-use tracing::{event, Level};
+use tracing::{error, info, warn};
 
 /// Default subject prefix for generated events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
@@ -58,53 +58,39 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
         let mut counter = 0;
 
         // Generate a cache key based on label or hash.
-        let cache_key = match &self.config.label {
-            Some(label) => format!("generate.{label}.last_run"),
+        let cron_id = match &self.config.label {
+            Some(label) => label.clone(),
             None => {
                 let mut hasher = DefaultHasher::new();
                 self.config.hash(&mut hasher);
                 let config_hash = hasher.finish();
-                format!("generate.{config_hash:x}.last_run")
+                format!("{config_hash:x}")
             }
         };
-
-        // Check for last run time from cache and calculate sleep duration.
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let sleep_duration = match self.cache.get(&cache_key).await {
-            Ok(cached_bytes) => {
-                let cached_str = String::from_utf8_lossy(&cached_bytes);
-                match cached_str.parse::<u64>() {
-                    Ok(last_run) => {
-                        let elapsed = now.saturating_sub(last_run);
-                        self.config.interval.saturating_sub(elapsed)
-                    }
-                    Err(_) => self.config.interval,
-                }
-            }
-            Err(_) => self.config.interval,
-        };
-
-        // Sleep for the calculated duration.
-        if sleep_duration > 0 {
-            time::sleep(Duration::from_secs(sleep_duration)).await;
-        }
+        let cache_key = format!("generate.{cron_id}.last_run");
 
         loop {
-            // Get current time for this iteration.
-            let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            counter += 1;
+            // Calculate when the next event should be generated.
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let next_run_time = match self.cache.get(&cache_key).await {
+                Ok(cached_bytes) => {
+                    let cached_str = String::from_utf8_lossy(&cached_bytes);
+                    match cached_str.parse::<u64>() {
+                        Ok(last_run) => last_run + self.config.interval,
+                        Err(_) => now, // Invalid cache, run immediately.
+                    }
+                }
+                Err(_) => now, // No cache entry, run immediately.
+            };
 
-            // Store current time in cache before generating event/
-            if let Err(cache_err) = self
-                .cache
-                .put(&cache_key, current_time.to_string().into())
-                .await
-            {
-                // Log cache error but don't fail the task.
-                event!(Level::WARN, "Failed to update cache: {:?}", cache_err);
+            // Sleep until it's time to generate the next event.
+            if next_run_time > now {
+                let sleep_duration = next_run_time - now;
+                time::sleep(Duration::from_secs(sleep_duration)).await;
             }
 
-            counter += 1;
-
+            // Prepare message data.
             let data = match &self.config.message {
                 Some(message) => json!(message),
                 None => json!(null),
@@ -120,14 +106,22 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
             // Build and send event.
             let e = EventBuilder::new()
                 .data(EventData::Json(data))
-                .subject(subject)
+                .subject(subject.clone())
                 .current_task_id(self.current_task_id)
                 .build()?;
-
-            event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
             self.tx.send(e)?;
+            info!("{}: {}", DEFAULT_LOG_MESSAGE, subject);
 
-            time::sleep(Duration::from_secs(self.config.interval)).await;
+            // Update cache with current time after sending the event.
+            let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+            if let Err(cache_err) = self
+                .cache
+                .put(&cache_key, current_time.to_string().into())
+                .await
+            {
+                // Log warn for cache errors.
+                warn!("Failed to update cache: {:?}", cache_err);
+            }
 
             match self.config.count {
                 Some(count) if count == counter => break,
@@ -374,8 +368,8 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         let event2 = rx.recv().await.unwrap();
 
-        assert!(event1.subject.starts_with("generate.test."));
-        assert!(event2.subject.starts_with("generate.test."));
+        assert!(event1.subject.starts_with("test."));
+        assert!(event2.subject.starts_with("test."));
         assert_eq!(event1.current_task_id, Some(1));
         assert_eq!(event2.current_task_id, Some(1));
 

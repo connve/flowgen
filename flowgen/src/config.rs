@@ -16,8 +16,10 @@ pub struct FlowConfig {
 /// Flow definition with name and task list.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Flow {
-    /// Unique name for this flow.
-    pub name: String,
+    /// Unique id for this flow.
+    pub id: String,
+    /// Optional label for logging.
+    pub label: Option<String>,
     /// List of tasks to execute in this flow.
     pub tasks: Vec<Task>,
 }
@@ -96,12 +98,14 @@ mod tests {
     fn test_flow_config_creation() {
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                id: "test_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         };
 
-        assert_eq!(flow_config.flow.name, "test_flow");
+        assert_eq!(flow_config.flow.id, "test_flow");
+        assert!(flow_config.flow.label.is_none());
         assert!(flow_config.flow.tasks.is_empty());
     }
 
@@ -109,7 +113,8 @@ mod tests {
     fn test_flow_config_serialization() {
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "serialize_test".to_string(),
+                id: "serialize_test".to_string(),
+                label: Some("Serialize Test Flow".to_string()),
                 tasks: vec![],
             },
         };
@@ -122,11 +127,13 @@ mod tests {
     #[test]
     fn test_flow_creation() {
         let flow = Flow {
-            name: "test_flow".to_string(),
+            id: "test_flow".to_string(),
+            label: Some("Test Flow".to_string()),
             tasks: vec![],
         };
 
-        assert_eq!(flow.name, "test_flow");
+        assert_eq!(flow.id, "test_flow");
+        assert_eq!(flow.label, Some("Test Flow".to_string()));
         assert!(flow.tasks.is_empty());
     }
 
@@ -136,11 +143,13 @@ mod tests {
         let task = Task::convert(convert_config);
 
         let flow = Flow {
-            name: "flow_with_tasks".to_string(),
+            id: "flow_with_tasks".to_string(),
+            label: None,
             tasks: vec![task],
         };
 
-        assert_eq!(flow.name, "flow_with_tasks");
+        assert_eq!(flow.id, "flow_with_tasks");
+        assert!(flow.label.is_none());
         assert_eq!(flow.tasks.len(), 1);
         assert!(matches!(flow.tasks[0], Task::convert(_)));
     }
@@ -148,7 +157,8 @@ mod tests {
     #[test]
     fn test_flow_serialization() {
         let flow = Flow {
-            name: "serialize_flow".to_string(),
+            id: "serialize_flow".to_string(),
+            label: Some("Serializable Flow".to_string()),
             tasks: vec![],
         };
 
@@ -160,7 +170,8 @@ mod tests {
     #[test]
     fn test_flow_clone() {
         let flow = Flow {
-            name: "clone_test".to_string(),
+            id: "clone_test".to_string(),
+            label: None,
             tasks: vec![],
         };
 
@@ -322,7 +333,8 @@ mod tests {
 
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "complex_flow".to_string(),
+                id: "complex_flow".to_string(),
+                label: Some("Complex Multi-Task Flow".to_string()),
                 tasks: vec![
                     Task::convert(convert_config),
                     Task::generate(generate_config),
@@ -330,7 +342,8 @@ mod tests {
             },
         };
 
-        assert_eq!(flow_config.flow.name, "complex_flow");
+        assert_eq!(flow_config.flow.id, "complex_flow");
+        assert_eq!(flow_config.flow.label, Some("Complex Multi-Task Flow".to_string()));
         assert_eq!(flow_config.flow.tasks.len(), 2);
         assert!(matches!(flow_config.flow.tasks[0], Task::convert(_)));
         assert!(matches!(flow_config.flow.tasks[1], Task::generate(_)));

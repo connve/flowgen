@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for convert processor tasks that transform event data formats.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Processor {
-    /// Optional label for event subject generation.
+    /// Optional label for logging.
     pub label: Option<String>,
     /// Target format for event data conversion.
     pub target_format: TargetFormat,

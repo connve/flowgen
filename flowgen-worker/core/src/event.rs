@@ -23,22 +23,22 @@ pub enum SubjectSuffix<'a> {
     Id(&'a str),
 }
 
-/// Generates a subject string combining base subject and label with suffix.
+/// Generates a subject string using optional label or base subject with suffix.
 ///
 /// # Arguments
-/// * `label` - Optional label to append to base subject
-/// * `base_subject` - Base subject used as prefix
+/// * `label` - Optional label to use as prefix
+/// * `base_subject` - Base subject to use when label is None
 /// * `suffix` - Suffix type (timestamp or custom ID)
 ///
 /// # Returns
-/// Formatted subject string: base_subject.label.suffix or base_subject.suffix if no label
+/// Formatted subject string with suffix
 pub fn generate_subject(label: Option<&str>, base_subject: &str, suffix: SubjectSuffix) -> String {
     let suffix_str = match suffix {
         SubjectSuffix::Timestamp => Utc::now().timestamp_micros().to_string(),
         SubjectSuffix::Id(id) => id.to_string(),
     };
     match label {
-        Some(label) => format!("{}.{}.{}", base_subject, label.to_lowercase(), suffix_str),
+        Some(label) => format!("{}.{}", label.to_lowercase(), suffix_str),
         None => format!("{base_subject}.{suffix_str}"),
     }
 }
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn test_generate_subject_with_label() {
         let subject = generate_subject(Some("TestLabel"), "base.subject", SubjectSuffix::Id("123"));
-        assert_eq!(subject, "base.subject.testlabel.123");
+        assert_eq!(subject, "testlabel.123");
     }
 
     #[test]
@@ -302,8 +302,8 @@ mod tests {
     #[test]
     fn test_generate_subject_with_timestamp() {
         let subject = generate_subject(Some("Label"), "base.subject", SubjectSuffix::Timestamp);
-        assert!(subject.starts_with("base.subject.label."));
-        assert!(subject.len() > "base.subject.label.".len());
+        assert!(subject.starts_with("label."));
+        assert!(subject.len() > "label.".len());
     }
 
     #[test]

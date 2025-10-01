@@ -165,14 +165,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::ConverProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::ConverProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
 
@@ -195,14 +195,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::GenerateSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::GenerateSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -224,14 +224,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::HttpRequestProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::HttpRequestProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
 
@@ -254,14 +254,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::HttpWebhookProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::HttpWebhookProcessor {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
 
@@ -283,14 +283,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::NatsJetStreamSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::NatsJetStreamSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -310,14 +310,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::NatsJetStreamPublisher {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::NatsJetStreamPublisher {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -339,14 +339,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::SalesforcePubSubSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::SalesforcePubSubSubscriber {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -366,14 +366,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::SalesforcePubsubPublisher {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::SalesforcePubsubPublisher {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -397,14 +397,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::ObjectStoreReader {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::ObjectStoreReader {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -424,14 +424,14 @@ impl Flow<'_> {
                             .await
                             .map_err(|e| Error::ObjectStoreWriter {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?
                             .run()
                             .await
                             .map_err(|e| Error::ObjectStoreWriter {
                                 source: Box::new(e),
-                                flow: flow_config.flow.name.to_owned(),
+                                flow: flow_config.flow.id.to_owned(),
                                 task_id: i,
                             })?;
                         Ok(())
@@ -527,7 +527,8 @@ mod tests {
     fn test_flow_builder_config() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                id: "test_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         });
@@ -570,7 +571,8 @@ mod tests {
     fn test_flow_builder_build_missing_cache_path() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                id: "test_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         });
@@ -591,7 +593,8 @@ mod tests {
     fn test_flow_builder_build_missing_http_server() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                id: "test_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         });
@@ -612,7 +615,8 @@ mod tests {
     fn test_flow_builder_build_success() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "success_flow".to_string(),
+                id: "success_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         });
@@ -636,7 +640,8 @@ mod tests {
     fn test_flow_builder_chain() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "chain_flow".to_string(),
+                id: "chain_flow".to_string(),
+                label: None,
                 tasks: vec![],
             },
         });

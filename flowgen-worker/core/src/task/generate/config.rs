@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for generate subscriber tasks that produce scheduled events.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, Hash)]
 pub struct Subscriber {
-    /// Optional label for event subject generation.
+    /// Optional label for logging.
     pub label: Option<String>,
     /// Optional message content for generated events.
     pub message: Option<String>,
