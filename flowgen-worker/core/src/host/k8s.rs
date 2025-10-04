@@ -89,13 +89,28 @@ impl Host for K8sHost {
                     Error::CreateLease(format!("Failed to get existing lease: {e}"))
                 })?;
 
-                let existing_holder = existing_lease
+                let spec = existing_lease
                     .spec
                     .as_ref()
-                    .and_then(|spec| spec.holder_identity.as_ref())
+                    .ok_or_else(|| {
+                        Error::CreateLease("Existing lease has no spec".to_string())
+                    })?;
+
+                let existing_holder = spec.holder_identity.as_ref()
                     .ok_or_else(|| {
                         Error::CreateLease("Existing lease has no holder identity".to_string())
                     })?;
+
+                // Check if lease is expired.
+                let is_expired = if let (Some(renew_time), Some(duration)) =
+                    (spec.renew_time.as_ref(), spec.lease_duration_seconds) {
+                    let elapsed = chrono::Utc::now()
+                        .signed_duration_since(renew_time.0)
+                        .num_seconds();
+                    elapsed > duration as i64
+                } else {
+                    false
+                };
 
                 if existing_holder == &self.holder_identity {
                     // We're the holder, renew the lease.
@@ -116,8 +131,29 @@ impl Host for K8sHost {
 
                     debug!("Renewed lease: {} in namespace: {}", name, namespace);
                     Ok(())
+                } else if is_expired {
+                    // Lease is expired, take it over.
+                    debug!(
+                        "Lease {} in namespace {} is expired, taking over from {}",
+                        name, namespace, existing_holder
+                    );
+
+                    let takeover_patch = serde_json::json!({
+                        "spec": {
+                            "holderIdentity": self.holder_identity,
+                            "acquireTime": MicroTime(chrono::Utc::now()),
+                            "renewTime": MicroTime(chrono::Utc::now()),
+                        }
+                    });
+
+                    api.patch(name, &PatchParams::default(), &Patch::Merge(takeover_patch))
+                        .await
+                        .map_err(|e| Error::CreateLease(format!("Failed to take over lease: {e}")))?;
+
+                    info!("Took over expired lease: {} in namespace: {}", name, namespace);
+                    Ok(())
                 } else {
-                    // Someone else holds the lease.
+                    // Someone else holds the lease and it's not expired.
                     Err(Error::CreateLease(format!(
                         "Lease {name} is held by another instance: {existing_holder}"
                     )))

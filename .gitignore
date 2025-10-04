@@ -6,3 +6,4 @@
 /examples/data
 *.csv
 /examples/data/*
+/local
