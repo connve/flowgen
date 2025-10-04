@@ -5,8 +5,8 @@
 use crate::client::Client as FlowgenClient;
 use crate::host::{Error, Host};
 use async_trait::async_trait;
-use k8s_openapi::api::coordination::v1::Lease;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use kube::{
     api::{Api, DeleteParams, Patch, PatchParams, PostParams},
     Client,
@@ -29,6 +29,8 @@ pub struct K8sHost {
     namespace: String,
     /// Lease duration in seconds.
     lease_duration_secs: i32,
+    /// Holder identity (typically pod name).
+    holder_identity: String,
 }
 
 impl FlowgenClient for K8sHost {
@@ -55,49 +57,71 @@ impl Host for K8sHost {
 
         let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
 
-        let lease = serde_json::json!({
-            "apiVersion": "coordination.k8s.io/v1",
-            "kind": "Lease",
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
+        let now = MicroTime(chrono::Utc::now());
+        let lease = Lease {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
             },
-            "spec": {
-                "holderIdentity": "flowgen",
-                "leaseDurationSeconds": self.lease_duration_secs,
-                "acquireTime": MicroTime(chrono::Utc::now()),
-                "renewTime": MicroTime(chrono::Utc::now()),
-            }
-        });
+            spec: Some(LeaseSpec {
+                holder_identity: Some(self.holder_identity.clone()),
+                lease_duration_seconds: Some(self.lease_duration_secs),
+                acquire_time: Some(now.clone()),
+                renew_time: Some(now),
+                ..Default::default()
+            }),
+        };
 
-        match api
-            .create(
-                &PostParams::default(),
-                &serde_json::from_value(lease.clone())
-                    .map_err(|e| Error::CreateLease(format!("Failed to deserialize lease: {e}")))?,
-            )
-            .await
-        {
+        match api.create(&PostParams::default(), &lease).await {
             Ok(_) => {
                 info!("Created lease: {} in namespace: {}", name, namespace);
                 Ok(())
             }
             Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
                 debug!(
-                    "Lease already exists: {} in namespace: {}, attempting to patch",
+                    "Lease already exists: {} in namespace: {}, checking holder",
                     name, namespace
                 );
 
-                // Lease already exists, patch it.
-                api.patch(name, &PatchParams::default(), &Patch::Merge(lease))
-                    .await
-                    .map_err(|e| Error::CreateLease(format!("Failed to patch lease: {e}")))?;
+                // Lease already exists, check if we're the holder.
+                let existing_lease = api.get(name).await.map_err(|e| {
+                    Error::CreateLease(format!("Failed to get existing lease: {e}"))
+                })?;
 
-                info!(
-                    "Patched existing lease: {} in namespace: {}",
-                    name, namespace
-                );
-                Ok(())
+                let existing_holder = existing_lease
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.holder_identity.as_ref())
+                    .ok_or_else(|| {
+                        Error::CreateLease("Existing lease has no holder identity".to_string())
+                    })?;
+
+                if existing_holder == &self.holder_identity {
+                    // We're the holder, renew the lease.
+                    debug!(
+                        "We hold the lease: {} in namespace: {}, renewing",
+                        name, namespace
+                    );
+
+                    let renew_patch = serde_json::json!({
+                        "spec": {
+                            "renewTime": MicroTime(chrono::Utc::now()),
+                        }
+                    });
+
+                    api.patch(name, &PatchParams::default(), &Patch::Merge(renew_patch))
+                        .await
+                        .map_err(|e| Error::CreateLease(format!("Failed to renew lease: {e}")))?;
+
+                    debug!("Renewed lease: {} in namespace: {}", name, namespace);
+                    Ok(())
+                } else {
+                    // Someone else holds the lease.
+                    Err(Error::CreateLease(format!(
+                        "Lease {name} is held by another instance: {existing_holder}"
+                    )))
+                }
             }
             Err(e) => Err(Error::CreateLease(e.to_string())),
         }
@@ -146,6 +170,7 @@ impl Host for K8sHost {
 pub struct K8sHostBuilder {
     namespace: String,
     lease_duration_secs: i32,
+    holder_identity: Option<String>,
 }
 
 impl Default for K8sHostBuilder {
@@ -153,6 +178,7 @@ impl Default for K8sHostBuilder {
         Self {
             namespace: DEFAULT_NAMESPACE.to_string(),
             lease_duration_secs: DEFAULT_LEASE_DURATION_SECS,
+            holder_identity: None,
         }
     }
 }
@@ -175,12 +201,21 @@ impl K8sHostBuilder {
         self
     }
 
+    /// Sets the holder identity (typically pod name).
+    pub fn holder_identity(mut self, identity: String) -> Self {
+        self.holder_identity = Some(identity);
+        self
+    }
+
     /// Builds the K8sHost instance without connecting.
-    pub fn build(self) -> K8sHost {
-        K8sHost {
+    pub fn build(self) -> Result<K8sHost, Error> {
+        Ok(K8sHost {
             client: None,
             namespace: self.namespace,
             lease_duration_secs: self.lease_duration_secs,
-        }
+            holder_identity: self
+                .holder_identity
+                .ok_or_else(|| Error::Connection("holder_identity must be set".to_string()))?,
+        })
     }
 }

@@ -68,7 +68,8 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
             "{}.{}.{}",
             self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
         );
-        self.task_context
+        let mut leadership_rx = self
+            .task_context
             .task_manager
             .register(
                 task_id,
@@ -76,7 +77,24 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
             )
             .await?;
 
-        // Geberate a cache_key based on flow name and task name.
+        // Wait for initial leadership status.
+        let initial_status = leadership_rx
+            .recv()
+            .await
+            .ok_or_else(|| Error::Cache("Failed to receive leadership status".to_string()))?;
+
+        match initial_status {
+            crate::task::manager::LeaderElectionResult::Leader
+            | crate::task::manager::LeaderElectionResult::NoElection => {
+                info!("Starting generate task {} as leader", self.config.name);
+            }
+            crate::task::manager::LeaderElectionResult::NotLeader => {
+                info!("Not leader for generate task {}, exiting", self.config.name);
+                return Ok(());
+            }
+        }
+
+        // Generate a cache_key based on flow name and task name.
         let cache_key = format!(
             "{task_context}.{DEFAULT_MESSAGE_SUBJECT}.{task_name}.last_run",
             task_context = self.task_context.flow.name,
@@ -84,25 +102,45 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
         );
 
         loop {
-            counter += 1;
-            // Calculate when the next event should be generated.
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let next_run_time = match self.cache.get(&cache_key).await {
-                Ok(cached_bytes) => {
-                    let cached_str = String::from_utf8_lossy(&cached_bytes);
-                    match cached_str.parse::<u64>() {
-                        Ok(last_run) => last_run + self.config.interval,
-                        Err(_) => now, // Invalid cache, run immediately.
+            // Check for leadership changes.
+            tokio::select! {
+                biased;
+
+                // Priority: Check for leadership changes first.
+                Some(status) = leadership_rx.recv() => {
+                    match status {
+                        crate::task::manager::LeaderElectionResult::NotLeader => {
+                            info!("Lost leadership for generate task {}, exiting", self.config.name);
+                            return Ok(());
+                        }
+                        _ => {
+                            // Still leader or no election, continue.
+                        }
                     }
                 }
-                Err(_) => now, // No cache entry, run immediately.
-            };
 
-            // Sleep until it's time to generate the next event.
-            if next_run_time > now {
-                let sleep_duration = next_run_time - now;
-                time::sleep(Duration::from_secs(sleep_duration)).await;
-            }
+                // Continue with normal event generation logic.
+                _ = async {
+                    counter += 1;
+                    // Calculate when the next event should be generated.
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let next_run_time = match self.cache.get(&cache_key).await {
+                        Ok(cached_bytes) => {
+                            let cached_str = String::from_utf8_lossy(&cached_bytes);
+                            match cached_str.parse::<u64>() {
+                                Ok(last_run) => last_run + self.config.interval,
+                                Err(_) => now, // Invalid cache, run immediately.
+                            }
+                        }
+                        Err(_) => now, // No cache entry, run immediately.
+                    };
+
+                    // Sleep until it's time to generate the next event.
+                    if next_run_time > now {
+                        let sleep_duration = next_run_time - now;
+                        time::sleep(Duration::from_secs(sleep_duration)).await;
+                    }
+                } => {
 
             // Prepare message data.
             let data = match &self.config.message {
@@ -137,9 +175,11 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
                 warn!("Failed to update cache: {:?}", cache_err);
             }
 
-            match self.config.count {
-                Some(count) if count == counter => break,
-                Some(_) | None => continue,
+                    match self.config.count {
+                        Some(count) if count == counter => return Ok(()),
+                        Some(_) | None => {}
+                    }
+                }
             }
         }
         Ok(())

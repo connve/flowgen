@@ -31,6 +31,12 @@ pub enum Error {
     /// Kubernetes host creation error.
     #[error(transparent)]
     Kube(#[from] kube::Error),
+    /// Host coordination error.
+    #[error(transparent)]
+    Host(#[from] flowgen_core::host::Error),
+    /// Environment variable error.
+    #[error(transparent)]
+    Env(#[from] std::env::VarError),
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -77,11 +83,18 @@ impl flowgen_core::task::runner::Runner for App {
         let host_client = if let Some(host_options) = &app_config.host {
             match &host_options.host_type {
                 crate::config::HostType::K8s => {
-                    let mut host_builder = flowgen_core::host::k8s::K8sHostBuilder::new();
+                    // Get holder identity from environment variable.
+                    let holder_identity =
+                        std::env::var("HOSTNAME").or_else(|_| std::env::var("POD_NAME"))?;
+
+                    let mut host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
+                        .holder_identity(holder_identity);
+
                     if let Some(namespace) = &host_options.namespace {
                         host_builder = host_builder.namespace(namespace.clone());
                     }
-                    match host_builder.build().connect().await {
+
+                    match host_builder.build()?.connect().await {
                         Ok(connected_host) => {
                             Some(Arc::new(flowgen_core::task::context::HostClient {
                                 client: std::sync::Arc::new(connected_host),
