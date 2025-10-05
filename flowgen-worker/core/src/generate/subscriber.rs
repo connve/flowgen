@@ -37,8 +37,8 @@ pub enum Error {
     #[error(transparent)]
     SystemTime(#[from] std::time::SystemTimeError),
     /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] crate::host::Error),
+    #[error("Host coordination error")]
+    Host(#[source] crate::host::Error),
     /// Task manager error.
     #[error(transparent)]
     TaskManager(#[from] crate::task::manager::Error),

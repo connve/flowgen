@@ -17,8 +17,8 @@ pub enum Error {
     #[error("Failed to send event: {0}")]
     SendError(#[source] mpsc::error::SendError<TaskRegistration>),
     /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] crate::host::Error),
+    #[error("Host coordination error")]
+    Host(#[source] crate::host::Error),
 }
 /// Leader election options for tasks requiring coordination.
 #[derive(Debug, Clone)]

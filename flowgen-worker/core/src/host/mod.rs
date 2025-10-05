@@ -7,23 +7,8 @@ use async_trait::async_trait;
 
 pub mod k8s;
 
-/// Errors that can occur during host operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    /// Failed to create lease.
-    #[error("Failed to create lease: {0}")]
-    CreateLease(String),
-    /// Failed to delete lease.
-    #[error("Failed to delete lease: {0}")]
-    DeleteLease(String),
-    /// Failed to renew lease.
-    #[error("Failed to renew lease: {0}")]
-    RenewLease(String),
-    /// Failed to connect to host.
-    #[error("Failed to connect to host: {0}")]
-    Connection(String),
-}
+/// Type alias for host errors.
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Trait for host coordination operations.
 #[async_trait]

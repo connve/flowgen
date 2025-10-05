@@ -98,7 +98,12 @@ impl flowgen_core::task::runner::Runner for App {
                     let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
                         .holder_identity(holder_identity);
 
-                    match host_builder.build()?.connect().await {
+                    match host_builder
+                        .build()
+                        .map_err(|e| Error::Host(Box::new(e)))?
+                        .connect()
+                        .await
+                    {
                         Ok(connected_host) => {
                             Some(Arc::new(flowgen_core::task::context::HostClient {
                                 client: std::sync::Arc::new(connected_host),

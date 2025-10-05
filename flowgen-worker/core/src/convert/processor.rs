@@ -38,8 +38,8 @@ pub enum Error {
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] crate::host::Error),
+    #[error("Host coordination error")]
+    Host(#[source] crate::host::Error),
     /// Task manager error.
     #[error(transparent)]
     TaskManager(#[from] crate::task::manager::Error),
