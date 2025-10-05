@@ -14,9 +14,6 @@ use kube::{
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Default namespace for Kubernetes resources.
-const DEFAULT_NAMESPACE: &str = "default";
-
 /// Default lease duration in seconds.
 const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
 
@@ -25,7 +22,7 @@ const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
 pub struct K8sHost {
     /// Kubernetes client.
     client: Option<Arc<Client>>,
-    /// Namespace for Kubernetes resources.
+    /// Namespace for Kubernetes resources (auto-detected from service account).
     namespace: String,
     /// Lease duration in seconds.
     lease_duration_secs: i32,
@@ -40,8 +37,23 @@ impl FlowgenClient for K8sHost {
         let client = Client::try_default()
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
+
+        // Auto-detect namespace from pod's service account.
+        let namespace =
+            tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+                .await
+                .map_err(|e| {
+                    Error::Connection(format!("Failed to detect Kubernetes namespace: {e}"))
+                })?
+                .trim()
+                .to_string();
+
+        self.namespace = namespace.clone();
         self.client = Some(Arc::new(client));
-        info!("Successfully connected to Kubernetes cluster");
+        info!(
+            "Successfully connected to Kubernetes cluster in namespace: {}",
+            namespace
+        );
         Ok(self)
     }
 }
@@ -92,18 +104,16 @@ impl Host for K8sHost {
                 let spec = existing_lease
                     .spec
                     .as_ref()
-                    .ok_or_else(|| {
-                        Error::CreateLease("Existing lease has no spec".to_string())
-                    })?;
+                    .ok_or_else(|| Error::CreateLease("Existing lease has no spec".to_string()))?;
 
-                let existing_holder = spec.holder_identity.as_ref()
-                    .ok_or_else(|| {
-                        Error::CreateLease("Existing lease has no holder identity".to_string())
-                    })?;
+                let existing_holder = spec.holder_identity.as_ref().ok_or_else(|| {
+                    Error::CreateLease("Existing lease has no holder identity".to_string())
+                })?;
 
                 // Check if lease is expired.
                 let is_expired = if let (Some(renew_time), Some(duration)) =
-                    (spec.renew_time.as_ref(), spec.lease_duration_seconds) {
+                    (spec.renew_time.as_ref(), spec.lease_duration_seconds)
+                {
                     let elapsed = chrono::Utc::now()
                         .signed_duration_since(renew_time.0)
                         .num_seconds();
@@ -148,9 +158,14 @@ impl Host for K8sHost {
 
                     api.patch(name, &PatchParams::default(), &Patch::Merge(takeover_patch))
                         .await
-                        .map_err(|e| Error::CreateLease(format!("Failed to take over lease: {e}")))?;
+                        .map_err(|e| {
+                            Error::CreateLease(format!("Failed to take over lease: {e}"))
+                        })?;
 
-                    info!("Took over expired lease: {} in namespace: {}", name, namespace);
+                    info!(
+                        "Took over expired lease: {} in namespace: {}",
+                        name, namespace
+                    );
                     Ok(())
                 } else {
                     // Someone else holds the lease and it's not expired.
@@ -204,7 +219,6 @@ impl Host for K8sHost {
 
 /// Builder for K8sHost.
 pub struct K8sHostBuilder {
-    namespace: String,
     lease_duration_secs: i32,
     holder_identity: Option<String>,
 }
@@ -212,7 +226,6 @@ pub struct K8sHostBuilder {
 impl Default for K8sHostBuilder {
     fn default() -> Self {
         Self {
-            namespace: DEFAULT_NAMESPACE.to_string(),
             lease_duration_secs: DEFAULT_LEASE_DURATION_SECS,
             holder_identity: None,
         }
@@ -223,12 +236,6 @@ impl K8sHostBuilder {
     /// Creates a new K8sHostBuilder.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Sets the namespace for Kubernetes resources.
-    pub fn namespace(mut self, namespace: String) -> Self {
-        self.namespace = namespace;
-        self
     }
 
     /// Sets the lease duration in seconds.
@@ -244,10 +251,11 @@ impl K8sHostBuilder {
     }
 
     /// Builds the K8sHost instance without connecting.
+    /// Namespace will be auto-detected from service account during connect().
     pub fn build(self) -> Result<K8sHost, Error> {
         Ok(K8sHost {
             client: None,
-            namespace: self.namespace,
+            namespace: String::new(), // Will be set during connect()
             lease_duration_secs: self.lease_duration_secs,
             holder_identity: self
                 .holder_identity
