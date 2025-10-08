@@ -14,7 +14,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
@@ -164,6 +164,13 @@ impl<T: Cache> EventHandler<T> {
             info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
             self.tx.send(e)?;
         }
+
+        // Delete file from object store if configured.
+        if self.config.delete_after_read.unwrap_or(false) {
+            context.object_store.delete(&context.path).await?;
+            info!("Successfully deleted file: {}", context.path.as_ref());
+        }
+
         Ok(())
     }
 }
@@ -188,6 +195,7 @@ pub struct Reader<T: Cache> {
 impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     type Error = Error;
 
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Register task with task manager.
         let task_id = format!(
@@ -246,7 +254,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
                                     if let Err(err) = handler.handle(event).await {
                                         error!("{}", err);
                                     }
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                         }
                         Err(_) => return Ok(()),
@@ -398,6 +406,7 @@ mod tests {
             batch_size: Some(500),
             has_header: Some(true),
             cache_options: None,
+            delete_after_read: None,
         });
 
         let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().config(config.clone());
@@ -464,6 +473,7 @@ mod tests {
             batch_size: None,
             has_header: None,
             cache_options: None,
+            delete_after_read: None,
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
@@ -493,6 +503,7 @@ mod tests {
             batch_size: Some(1000),
             has_header: Some(false),
             cache_options: None,
+            delete_after_read: None,
         });
 
         let (_, rx) = broadcast::channel::<Event>(10);
@@ -522,6 +533,7 @@ mod tests {
             batch_size: Some(250),
             has_header: Some(true),
             cache_options: None,
+            delete_after_read: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(10);
@@ -554,6 +566,7 @@ mod tests {
             batch_size: Some(2000),
             has_header: Some(true),
             cache_options: None,
+            delete_after_read: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(50);
@@ -584,6 +597,7 @@ mod tests {
             batch_size: Some(100),
             has_header: Some(false),
             cache_options: None,
+            delete_after_read: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(5);

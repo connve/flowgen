@@ -13,7 +13,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 /// Default subject prefix for converted events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
@@ -145,6 +145,8 @@ pub struct Processor {
 
 impl crate::task::runner::Runner for Processor {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Error> {
         // Register task with task manager.
         let task_id = format!(
@@ -214,7 +216,7 @@ impl crate::task::runner::Runner for Processor {
                                     if let Err(err) = handler.handle(event).await {
                                         error!("{}", err);
                                     }
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                         }
                         Err(_) => return Ok(()),

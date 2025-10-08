@@ -206,6 +206,8 @@ pub struct Processor {
 
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
         // Register task with task manager.
         let task_id = format!(

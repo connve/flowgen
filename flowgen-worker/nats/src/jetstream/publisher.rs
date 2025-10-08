@@ -4,7 +4,7 @@ use flowgen_core::client::Client;
 use flowgen_core::event::{Event, DEFAULT_LOG_MESSAGE};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 /// Default subject prefix for NATS publisher.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_publisher";
@@ -78,6 +78,8 @@ pub struct Publisher {
 
 impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Register task with task manager.
         let task_id = format!(
@@ -160,7 +162,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                         if let Err(err) = handler.handle(event).await {
                                             error!("{}", err);
                                         }
-                                    });
+                                    }.instrument(tracing::Span::current()));
                                 }
                             }
                             Err(_) => return Ok(()),

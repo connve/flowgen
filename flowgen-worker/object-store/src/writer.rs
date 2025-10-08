@@ -7,7 +7,7 @@ use flowgen_core::{client::Client, event::generate_subject};
 use object_store::PutPayload;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_writer";
@@ -146,6 +146,7 @@ pub struct Writer {
 impl flowgen_core::task::runner::Runner for Writer {
     type Error = Error;
 
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Register task with task manager.
         let task_id = format!(
@@ -201,7 +202,7 @@ impl flowgen_core::task::runner::Runner for Writer {
                                     if let Err(err) = handler.handle(event).await {
                                         error!("{}", err);
                                     }
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                         }
                         Err(_) => return Ok(()),

@@ -31,6 +31,8 @@ pub struct Reader {
     pub has_header: Option<bool>,
     /// Caching configuration for performance optimization.
     pub cache_options: Option<CacheOptions>,
+    /// Delete the file from object store after successfully reading it.
+    pub delete_after_read: Option<bool>,
 }
 
 /// Object Store writer configuration.
@@ -88,6 +90,7 @@ mod tests {
             batch_size: Some(500),
             has_header: Some(true),
             cache_options: None,
+            delete_after_read: None,
         };
 
         assert_eq!(reader.name, "test_reader".to_string());
@@ -111,6 +114,7 @@ mod tests {
             batch_size: Some(1000),
             has_header: Some(false),
             cache_options: None,
+            delete_after_read: None,
         };
 
         let json = serde_json::to_string(&reader).unwrap();
@@ -212,6 +216,7 @@ mod tests {
             batch_size: Some(100),
             has_header: Some(true),
             cache_options: None,
+            delete_after_read: None,
         };
 
         let cloned = reader.clone();
@@ -223,5 +228,53 @@ mod tests {
         assert_eq!(DEFAULT_AVRO_EXTENSION, "avro");
         assert_eq!(DEFAULT_CSV_EXTENSION, "csv");
         assert_eq!(DEFAULT_JSON_EXTENSION, "json");
+    }
+
+    #[test]
+    fn test_reader_delete_after_read_enabled() {
+        let reader = Reader {
+            name: "test_reader".to_string(),
+            path: PathBuf::from("s3://bucket/file.csv"),
+            credentials: None,
+            client_options: None,
+            batch_size: None,
+            has_header: None,
+            cache_options: None,
+            delete_after_read: Some(true),
+        };
+
+        assert_eq!(reader.delete_after_read, Some(true));
+    }
+
+    #[test]
+    fn test_reader_delete_after_read_disabled() {
+        let reader = Reader {
+            name: "test_reader".to_string(),
+            path: PathBuf::from("s3://bucket/file.csv"),
+            credentials: None,
+            client_options: None,
+            batch_size: None,
+            has_header: None,
+            cache_options: None,
+            delete_after_read: Some(false),
+        };
+
+        assert_eq!(reader.delete_after_read, Some(false));
+    }
+
+    #[test]
+    fn test_reader_delete_after_read_default() {
+        let reader = Reader {
+            name: "test_reader".to_string(),
+            path: PathBuf::from("s3://bucket/file.csv"),
+            credentials: None,
+            client_options: None,
+            batch_size: None,
+            has_header: None,
+            cache_options: None,
+            delete_after_read: None,
+        };
+
+        assert_eq!(reader.delete_after_read, None);
     }
 }

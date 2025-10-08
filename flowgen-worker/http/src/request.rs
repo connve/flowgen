@@ -16,7 +16,7 @@ use tokio::{
     fs,
     sync::broadcast::{Receiver, Sender},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, Instrument};
 
 /// Default subject for HTTP response events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
@@ -177,6 +177,8 @@ pub struct Processor {
 
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Error> {
         // Register task with task manager.
         let task_id = format!(
@@ -224,7 +226,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     if let Err(err) = handler.handle(event).await {
                                         error!("{}", err);
                                     }
-                                });
+                                }.instrument(tracing::Span::current()));
                             }
                         }
                         Err(_) => return Ok(()),

@@ -60,6 +60,8 @@ pub struct Subscriber<T: crate::cache::Cache> {
 
 impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
         let mut counter = 0;
 

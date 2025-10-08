@@ -75,6 +75,8 @@ pub struct Publisher {
 
 impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Register task with task manager.
         let task_id = format!(
