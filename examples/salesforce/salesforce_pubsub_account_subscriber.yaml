@@ -1,0 +1,20 @@
+flow:
+  name: salesforce_pubsub_account_subscriber
+  tasks:
+    - salesforce_pubsub_subscriber:
+        name: start_subscription
+        credentials: /etc/salesforce/credentials.json
+        topic:
+          name: /data/AccountChangeEvent
+          durable_consumer_options:
+            enabled: true
+            managed_subscription: false
+            name: salesforce_pubsub_account_subscriber
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials: /etc/nats/credentials.json
+        stream: flowgen_events
+        stream_description: Main evenbuts of Flowgen.
+        subjects:
+          - salesforce_pubsub_subscriber.>
+

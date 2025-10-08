@@ -206,7 +206,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                 let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
                                 let base_subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..]);
                                 let subject =
-                                    generate_subject(&self.config.name, &base_subject, SubjectSuffix::Timestamp);
+                                    generate_subject(Some(&self.config.name), &base_subject, SubjectSuffix::Timestamp);
 
                                 info!("Event processed: {}", subject);
                             }

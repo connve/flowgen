@@ -129,7 +129,7 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
 
             // Generate event subject.
             let subject = generate_subject(
-                &self.config.name,
+                Some(&self.config.name),
                 DEFAULT_MESSAGE_SUBJECT,
                 SubjectSuffix::Timestamp,
             );
@@ -454,8 +454,8 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         let event2 = rx.recv().await.unwrap();
 
-        assert!(event1.subject.starts_with("test."));
-        assert!(event2.subject.starts_with("test."));
+        assert!(event1.subject.starts_with("generate.test."));
+        assert!(event2.subject.starts_with("generate.test."));
         assert_eq!(event1.current_task_id, Some(1));
         assert_eq!(event2.current_task_id, Some(1));
 

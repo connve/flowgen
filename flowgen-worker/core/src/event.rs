@@ -29,24 +29,26 @@ pub enum SubjectSuffix<'a> {
 /// The `task_name` is always converted to lowercase.
 ///
 /// # Arguments
-/// * `task_name` - The required name of the task, used as the middle component of the subject.
-///   It is automatically converted to lowercase.
+/// * `task_name` - Optional name of the task. If provided, it is used as a component of the subject
+///   and automatically converted to lowercase. If None, the task name is omitted from the subject.
 /// * `base_subject` - The fixed base prefix for the subject string (e.g., a service or stream name).
 /// * `suffix` - The dynamic suffix type (timestamp or a custom ID).
 ///
 /// # Returns
-/// A three-part, formatted subject string with the dynamic suffix.
-pub fn generate_subject(task_name: &str, base_subject: &str, suffix: SubjectSuffix) -> String {
+/// A formatted subject string with the dynamic suffix, optionally including the task name.
+pub fn generate_subject(
+    task_name: Option<&str>,
+    base_subject: &str,
+    suffix: SubjectSuffix,
+) -> String {
     let suffix_str = match suffix {
         SubjectSuffix::Timestamp => Utc::now().timestamp_micros().to_string(),
         SubjectSuffix::Id(id) => id.to_string(),
     };
-    format!(
-        "{}.{}.{}",
-        base_subject,
-        task_name.to_lowercase(),
-        suffix_str
-    )
+    match task_name {
+        Some(name) => format!("{}.{}.{}", base_subject, name.to_lowercase(), suffix_str),
+        None => format!("{base_subject}.{suffix_str}"),
+    }
 }
 
 /// Errors that can occur during event processing operations.
@@ -295,15 +297,28 @@ mod tests {
 
     #[test]
     fn test_generate_subject_with_id() {
-        let subject = generate_subject("task-name", "base.subject", SubjectSuffix::Id("123"));
+        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Id("123"));
         assert_eq!(subject, "base.subject.task-name.123");
     }
 
     #[test]
+    fn test_generate_subject_with_id_no_task() {
+        let subject = generate_subject(None, "base.subject", SubjectSuffix::Id("123"));
+        assert_eq!(subject, "base.subject.123");
+    }
+
+    #[test]
     fn test_generate_subject_with_timestamp() {
-        let subject = generate_subject("task-name", "base.subject", SubjectSuffix::Timestamp);
+        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Timestamp);
+        assert!(subject.starts_with("base.subject.task-name."));
+        assert!(subject.len() > "base.subject.task-name.".len());
+    }
+
+    #[test]
+    fn test_generate_subject_with_timestamp_no_task() {
+        let subject = generate_subject(None, "base.subject", SubjectSuffix::Timestamp);
         assert!(subject.starts_with("base.subject."));
-        assert!(subject.len() > "task-name.".len());
+        assert!(subject.len() > "base.subject.".len());
     }
 
     #[test]

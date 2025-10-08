@@ -10,7 +10,7 @@ use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest}
 use std::sync::Arc;
 use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
 const DEFAULT_NUM_REQUESTED: i32 = 1000;
@@ -186,11 +186,8 @@ impl<T: Cache> EventHandler<T> {
                             } else {
                                 format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
                             };
-                            let subject = generate_subject(
-                                &self.config.name,
-                                &base_subject,
-                                SubjectSuffix::Id(&event.id),
-                            );
+                            let subject =
+                                generate_subject(None, &base_subject, SubjectSuffix::Id(&event.id));
 
                             // Build and send event.
                             let e = EventBuilder::new()
@@ -307,7 +304,14 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
         };
 
         // Spawn event handler task and wait for completion or leadership loss.
-        let mut handler_task = tokio::spawn(async move { event_handler.handle().await });
+        let mut handler_task = tokio::spawn(
+            async move {
+                if let Err(err) = event_handler.handle().await {
+                    error!("{}", err);
+                }
+            }
+            .instrument(tracing::Span::current()),
+        );
 
         // Wait for leadership changes or handler completion.
         loop {
@@ -325,7 +329,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
 
                 // Wait for handler to complete.
                 result = &mut handler_task => {
-                    return result.map_err(Error::TaskJoin)?;
+                    return result.map_err(Error::TaskJoin);
                 }
             }
         }

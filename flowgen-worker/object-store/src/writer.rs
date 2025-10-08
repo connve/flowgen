@@ -100,7 +100,7 @@ impl EventHandler {
 
         // Generate event subject.
         let subject = generate_subject(
-            &self.config.name,
+            Some(&self.config.name),
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );

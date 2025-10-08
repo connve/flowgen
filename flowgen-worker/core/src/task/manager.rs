@@ -27,7 +27,7 @@ pub struct LeaderElectionOptions {
 }
 
 /// Result of leader election after task registration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LeaderElectionResult {
     /// This instance acquired the lease and is the leader.
     Leader,
@@ -223,10 +223,12 @@ impl TaskManager {
                     .response_tx
                     .send(result)
                     .map_err(|e| {
-                        error!(
-                            "Failed to send leader election result for task: {}, {}",
-                            registration.task_id, e
-                        );
+                        if result != LeaderElectionResult::NoElection {
+                            error!(
+                                "Failed to send leader election result for task: {}, {}",
+                                registration.task_id, e
+                            );
+                        }
                     })
                     .ok();
                 }
