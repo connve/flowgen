@@ -141,5 +141,4 @@ mod tests {
         assert_eq!(service.endpoint, Some("https://example.com".to_string()));
         assert!(service.channel.is_none());
     }
-
 }

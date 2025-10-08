@@ -265,10 +265,12 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
+                .task_manager(task_manager)
                 .build()
                 .unwrap(),
         )
@@ -522,6 +524,6 @@ mod tests {
 
         // Check that cache key was created with label format
         let cache_data = cache.data.lock().await;
-        assert!(cache_data.contains_key("generate.my_task.last_run"));
+        assert!(cache_data.contains_key("test-flow.generate.test.last_run"));
     }
 }

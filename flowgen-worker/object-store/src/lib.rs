@@ -1,4 +1,4 @@
 pub mod client;
 pub mod config;
-pub mod writer;
 pub mod reader;
+pub mod writer;

@@ -214,8 +214,7 @@ mod tests {
     #[test]
     fn test_task_variants() {
         let convert_task = Task::convert(flowgen_core::convert::config::Processor::default());
-        let generate_task =
-            Task::generate(flowgen_core::generate::config::Subscriber::default());
+        let generate_task = Task::generate(flowgen_core::generate::config::Subscriber::default());
 
         assert!(matches!(convert_task, Task::convert(_)));
         assert!(matches!(generate_task, Task::generate(_)));

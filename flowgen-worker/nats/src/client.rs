@@ -53,13 +53,14 @@ impl flowgen_core::client::Client for Client {
     type Error = Error;
     /// Connect to the NATS Server with provided options.
     async fn connect(mut self) -> Result<Self, Error> {
-        let credentials: Credentials = serde_json::from_str(
-            &fs::read_to_string(&self.credentials_path).map_err(|e| Error::IO {
-                path: self.credentials_path.clone(),
-                source: e,
-            })?,
-        )
-        .map_err(Error::ParseCredentials)?;
+        let credentials: Credentials =
+            serde_json::from_str(&fs::read_to_string(&self.credentials_path).map_err(|e| {
+                Error::IO {
+                    path: self.credentials_path.clone(),
+                    source: e,
+                }
+            })?)
+            .map_err(Error::ParseCredentials)?;
 
         let mut connect_options = async_nats::ConnectOptions::new();
         if let Some(configured_nkey) = credentials.nkey {

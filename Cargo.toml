@@ -18,7 +18,7 @@ arrow = { version = "54" }
 arrow-json = { version = "54" }
 chrono = { version = "0.4.39" }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3" }
+tracing-subscriber = { version = "0.3.20" }
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = { version = "1.0.111" }
 tokio = { version = "1.35.1" }

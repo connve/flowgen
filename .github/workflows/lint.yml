@@ -28,7 +28,7 @@ jobs:
           sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   rustfmt:
     runs-on: ubuntu-latest

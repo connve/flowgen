@@ -1,3 +1,5 @@
+#![allow(clippy::doc_lazy_continuation)]
+
 pub mod eventbus {
     pub mod v1 {
         include!(concat!("out", "/eventbus.v1.rs"));

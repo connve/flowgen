@@ -306,10 +306,12 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
+                .task_manager(task_manager)
                 .build()
                 .unwrap(),
         )

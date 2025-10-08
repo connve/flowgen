@@ -125,6 +125,7 @@ impl TaskContextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_task_context_builder_new() {
@@ -139,9 +140,11 @@ mod tests {
         labels.insert("name".to_string(), Value::String("Test Flow".to_string()));
         labels.insert("environment".to_string(), Value::String("test".to_string()));
 
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         let context = TaskContextBuilder::new()
             .flow_name("test-flow".to_string())
             .flow_labels(Some(labels.clone()))
+            .task_manager(task_manager)
             .build()
             .unwrap();
 
@@ -165,8 +168,10 @@ mod tests {
 
     #[test]
     fn test_task_context_builder_defaults() {
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         let context = TaskContextBuilder::new()
             .flow_name("default-test".to_string())
+            .task_manager(task_manager)
             .build()
             .unwrap();
 
@@ -183,9 +188,11 @@ mod tests {
         );
         labels.insert("type".to_string(), Value::String("test".to_string()));
 
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         let context = TaskContextBuilder::new()
             .flow_name("chain-test".to_string())
             .flow_labels(Some(labels.clone()))
+            .task_manager(task_manager)
             .build()
             .unwrap();
 
@@ -201,9 +208,11 @@ mod tests {
             Value::String("Clone Test".to_string()),
         );
 
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
         let context = TaskContextBuilder::new()
             .flow_name("clone-test".to_string())
             .flow_labels(Some(labels.clone()))
+            .task_manager(task_manager)
             .build()
             .unwrap();
 

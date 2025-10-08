@@ -72,12 +72,13 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
 
         // Fixed: Assert the serialized output uses "Avro"
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         let expected_json = json!({
             "name": "serialize_test",
             "target_format": "Avro",
             "schema": null
         });
-        assert_eq!(serialized, serde_json::to_string(&expected_json).unwrap());
+        assert_eq!(parsed, expected_json);
 
         // Test deserialization
         let deserialized: Processor = serde_json::from_str(&serialized).unwrap();
