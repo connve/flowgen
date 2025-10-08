@@ -280,8 +280,27 @@ impl WriterBuilder {
 mod tests {
     use super::*;
     use crate::config::{HiveParitionKeys, HivePartitionOptions};
+    use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Clone Test".to_string()),
+        );
+        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_writer_builder_new() {
@@ -378,6 +397,7 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .current_task_id(99)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 

@@ -317,7 +317,7 @@ mod tests {
     fn test_subscriber_config_default() {
         let subscriber = Subscriber::default();
         assert_eq!(subscriber.name, String::new());
-        assert_eq!(subscriber.credentials, "/tmp/credentials.json");
+        assert_eq!(subscriber.credentials, String::new());
         assert_eq!(subscriber.topic, Topic::default());
         assert_eq!(subscriber.endpoint, None);
     }

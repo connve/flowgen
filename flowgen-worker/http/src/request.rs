@@ -322,10 +322,12 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
+        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
         Arc::new(
             flowgen_core::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
+                .task_manager(task_manager)
                 .build()
                 .unwrap(),
         )
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http.response.out");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http_request");
     }
 
     #[test]
