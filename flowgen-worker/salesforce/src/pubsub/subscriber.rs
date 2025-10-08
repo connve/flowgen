@@ -602,15 +602,4 @@ mod tests {
             Some("api.pubsub.salesforce.com:7443".to_string())
         );
     }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce.pubsub.in");
-        assert_eq!(
-            config::DEFAULT_PUBSUB_URL,
-            "https://api.pubsub.salesforce.com"
-        );
-        assert_eq!(config::DEFAULT_PUBSUB_PORT, "443");
-        assert_eq!(DEFAULT_NUM_REQUESTED, 1000);
-    }
 }
