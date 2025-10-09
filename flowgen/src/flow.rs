@@ -24,7 +24,7 @@ pub enum Error {
     #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     ConverProcessor {
         #[source]
-        source: Box<flowgen_core::convert::processor::Error>,
+        source: Box<flowgen_core::task::convert::processor::Error>,
         flow: String,
         task_id: usize,
     },
@@ -113,7 +113,7 @@ pub enum Error {
     #[error("Flow: {flow}, task_id: {task_id}, source: {source}")]
     GenerateSubscriber {
         #[source]
-        source: Box<flowgen_core::generate::subscriber::Error>,
+        source: Box<flowgen_core::task::generate::subscriber::Error>,
         flow: String,
         task_id: usize,
     },
@@ -144,8 +144,6 @@ pub struct Flow<'a> {
     pub task_list: Option<Vec<JoinHandle<Result<(), Error>>>>,
     /// Shared HTTP server for webhook tasks.
     http_server: Arc<flowgen_http::server::HttpServer>,
-    /// Optional host client for coordination.
-    host: Option<Arc<flowgen_core::task::context::HostClient>>,
 }
 
 impl Flow<'_> {
@@ -167,23 +165,6 @@ impl Flow<'_> {
             .map_err(Error::Cache)?;
         let cache = Arc::new(cache);
 
-        // Create task manager with host if available.
-        let mut task_manager = flowgen_core::task::manager::TaskManagerBuilder::new();
-        if let Some(ref host) = self.host {
-            task_manager = task_manager.host(host.client.clone());
-        }
-        let task_manager = Arc::new(task_manager.build().start().await);
-
-        // Create task context for execution.
-        let task_context = Arc::new(
-            flowgen_core::task::context::TaskContextBuilder::new()
-                .flow_name(self.config.flow.name.clone())
-                .flow_labels(self.config.flow.labels.clone())
-                .task_manager(task_manager)
-                .build()
-                .map_err(|e| Error::MissingRequiredAttribute(e.to_string()))?,
-        );
-
         for (i, task) in self.config.flow.tasks.iter().enumerate() {
             match task {
                 Task::convert(config) => {
@@ -191,14 +172,12 @@ impl Flow<'_> {
                     let rx = tx.subscribe();
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                        flowgen_core::convert::processor::ProcessorBuilder::new()
+                        flowgen_core::task::convert::processor::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::ConverProcessor {
@@ -222,15 +201,11 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
-                    let cache = Arc::clone(&cache);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-                        flowgen_core::generate::subscriber::SubscriberBuilder::new()
+                        flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
-                            .cache(cache)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::GenerateSubscriber {
@@ -254,14 +229,12 @@ impl Flow<'_> {
                     let rx = tx.subscribe();
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_http::request::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::HttpRequestProcessor {
@@ -286,14 +259,12 @@ impl Flow<'_> {
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
                     let http_server = Arc::clone(&self.http_server);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_http::webhook::ProcessorBuilder::new()
                             .config(config)
                             .sender(tx)
                             .current_task_id(i)
                             .http_server(http_server)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::HttpWebhookProcessor {
@@ -381,13 +352,11 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_nats::jetstream::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::NatsJetStreamSubscriber {
@@ -410,13 +379,11 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let flow_config = Arc::clone(&self.config);
                     let rx = tx.subscribe();
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_nats::jetstream::publisher::PublisherBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::NatsJetStreamPublisher {
@@ -440,14 +407,12 @@ impl Flow<'_> {
                     let tx = tx.clone();
                     let cache = Arc::clone(&cache);
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
                             .current_task_id(i)
                             .cache(cache)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::SalesforcePubSubSubscriber {
@@ -470,13 +435,11 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::SalesforcePubsubPublisher {
@@ -501,7 +464,6 @@ impl Flow<'_> {
                     let tx = tx.clone();
                     let cache = Arc::clone(&cache);
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_object_store::reader::ReaderBuilder::new()
                             .config(config)
@@ -509,7 +471,6 @@ impl Flow<'_> {
                             .receiver(rx)
                             .cache(cache)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::ObjectStoreReader {
@@ -532,13 +493,11 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let flow_config = Arc::clone(&self.config);
-                    let task_context = Arc::clone(&task_context);
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                         flowgen_object_store::writer::WriterBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .current_task_id(i)
-                            .task_context(task_context)
                             .build()
                             .await
                             .map_err(|e| Error::ObjectStoreWriter {
@@ -574,8 +533,6 @@ pub struct FlowBuilder<'a> {
     cache_credentials_path: Option<&'a Path>,
     /// Optional shared HTTP server instance.
     http_server: Option<Arc<flowgen_http::server::HttpServer>>,
-    /// Optional host client for coordination.
-    host: Option<Arc<flowgen_core::task::context::HostClient>>,
 }
 
 impl<'a> FlowBuilder<'a> {
@@ -602,12 +559,6 @@ impl<'a> FlowBuilder<'a> {
         self
     }
 
-    /// Sets the host client for coordination.
-    pub fn host(mut self, client: Option<Arc<flowgen_core::task::context::HostClient>>) -> Self {
-        self.host = client;
-        self
-    }
-
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -624,7 +575,6 @@ impl<'a> FlowBuilder<'a> {
             http_server: self
                 .http_server
                 .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
-            host: self.host,
         })
     }
 }
@@ -656,7 +606,6 @@ mod tests {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "test_flow".to_string(),
-                labels: None,
                 tasks: vec![],
             },
         });
@@ -700,7 +649,6 @@ mod tests {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "test_flow".to_string(),
-                labels: None,
                 tasks: vec![],
             },
         });
@@ -722,7 +670,6 @@ mod tests {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "test_flow".to_string(),
-                labels: None,
                 tasks: vec![],
             },
         });
@@ -744,7 +691,6 @@ mod tests {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "success_flow".to_string(),
-                labels: None,
                 tasks: vec![],
             },
         });
@@ -769,7 +715,6 @@ mod tests {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "chain_flow".to_string(),
-                labels: None,
                 tasks: vec![],
             },
         });
@@ -795,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_error_convert_processor() {
-        let convert_error = flowgen_core::convert::processor::Error::MissingRequiredAttribute(
+        let convert_error = flowgen_core::task::convert::processor::Error::MissingRequiredAttribute(
             "test".to_string(),
         );
         let error = Error::ConverProcessor {

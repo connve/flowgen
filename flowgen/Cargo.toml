@@ -2,9 +2,13 @@
 name = "flowgen"
 version = "0.1.0"
 edition = "2021"
+
+
 [[bin]]
 name = "flowgen"
 path = "src/main.rs"
+
+
 [dependencies]
 flowgen_core = { path = "../flowgen-worker/core" }
 flowgen_http = { path = "../flowgen-worker/http" }
@@ -22,6 +26,6 @@ arrow = { workspace = true }
 config = { workspace = true }
 glob = { workspace = true }
 serde_json = { workspace = true }
-kube = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3.8"

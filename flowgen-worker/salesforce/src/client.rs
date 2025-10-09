@@ -12,13 +12,9 @@ use std::path::PathBuf;
 /// Errors that can occur during Salesforce client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    /// Failed to open or read the credentials file.
+    #[error(transparent)]
+    OpenFile(#[from] std::io::Error),
     /// Failed to parse credentials JSON file.
     #[error(transparent)]
     ParseCredentials(#[from] serde_json::Error),
@@ -103,10 +99,7 @@ impl Builder {
     /// provided credentials path is not valid.
     pub fn build(&self) -> Result<Client, Error> {
         let credentials_string =
-            fs::read_to_string(&self.credentials_path).map_err(|e| Error::IO {
-                path: self.credentials_path.clone(),
-                source: e,
-            })?;
+            fs::read_to_string(&self.credentials_path).map_err(Error::OpenFile)?;
         let credentials: Credentials =
             serde_json::from_str(&credentials_string).map_err(Error::ParseCredentials)?;
         let oauth2_client = BasicClient::new(
@@ -144,7 +137,7 @@ mod tests {
     #[test]
     fn test_build_without_credentials() {
         let client = Builder::new().build();
-        assert!(matches!(client, Err(Error::IO { .. })));
+        assert!(matches!(client, Err(Error::OpenFile(..))));
     }
 
     #[test]

@@ -1,18 +1,18 @@
 //! HTTP processor configuration structures and types.
-//!
+//! 
 //! Provides configuration structs for HTTP request processors, including
 //! method types, payload formats, and authentication settings.
 
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 /// HTTP processor configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Processor {
-    /// The unique name / identifier of the task.
-    pub name: String,
+    /// Optional label for the processor.
+    pub label: Option<String>,
     /// Target endpoint URL for HTTP requests.
     pub endpoint: String,
     /// HTTP method to use for requests.
@@ -22,7 +22,7 @@ pub struct Processor {
     /// Optional HTTP headers to include in requests.
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
-    pub credentials: Option<PathBuf>,
+    pub credentials: Option<String>,
 }
 
 impl ConfigExt for Processor {}
@@ -68,24 +68,6 @@ pub enum Method {
     HEAD,
 }
 
-/// Authentication credentials for HTTP requests.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Credentials {
-    /// Bearer token for authorization header.
-    pub bearer_auth: Option<String>,
-    /// Basic authentication credentials.
-    pub basic_auth: Option<BasicAuth>,
-}
-
-/// Basic authentication username and password.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct BasicAuth {
-    /// Username for basic authentication.
-    pub username: String,
-    /// Password for basic authentication.
-    pub password: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,8 +77,8 @@ mod tests {
     #[test]
     fn test_processor_default() {
         let processor = Processor::default();
-        assert_eq!(processor.name, String::new());
-        assert_eq!(processor.endpoint, String::new());
+        assert_eq!(processor.label, None);
+        assert_eq!(processor.endpoint, "");
         assert_eq!(processor.method, Method::GET);
         assert_eq!(processor.payload, None);
         assert_eq!(processor.headers, None);
@@ -120,34 +102,34 @@ mod tests {
         };
 
         let processor = Processor {
-            name: "test_processor".to_string(),
+            label: Some("test_processor".to_string()),
             endpoint: "https://api.example.com/webhook".to_string(),
             method: Method::POST,
             payload: Some(payload),
             headers: Some(headers.clone()),
-            credentials: Some(PathBuf::from("/path/to/creds.json")),
+            credentials: Some("/path/to/creds.json".to_string()),
         };
 
-        assert_eq!(processor.name, "test_processor".to_string());
+        assert_eq!(processor.label, Some("test_processor".to_string()));
         assert_eq!(processor.endpoint, "https://api.example.com/webhook");
         assert_eq!(processor.method, Method::POST);
         assert!(processor.payload.is_some());
         assert_eq!(processor.headers, Some(headers));
         assert_eq!(
             processor.credentials,
-            Some(PathBuf::from("/path/to/creds.json"))
+            Some("/path/to/creds.json".to_string())
         );
     }
 
     #[test]
     fn test_processor_serialization() {
         let processor = Processor {
-            name: "serialize_test".to_string(),
+            label: Some("serialize_test".to_string()),
             endpoint: "https://test.api.com".to_string(),
             method: Method::PUT,
             payload: None,
             headers: None,
-            credentials: Some(PathBuf::from("/test/credentials.json")),
+            credentials: Some("/test/credentials.json".to_string()),
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -158,7 +140,7 @@ mod tests {
     #[test]
     fn test_processor_clone() {
         let processor = Processor {
-            name: "clone_test".to_string(),
+            label: Some("clone_test".to_string()),
             endpoint: "https://clone.test.com".to_string(),
             method: Method::DELETE,
             payload: None,
@@ -307,12 +289,12 @@ mod tests {
         headers.insert("X-Custom-Header".to_string(), "custom-value".to_string());
 
         let processor = Processor {
-            name: "complex_test".to_string(),
+            label: Some("complex_test".to_string()),
             endpoint: "https://complex.example.com/api/v1/endpoint".to_string(),
             method: Method::PATCH,
             payload: Some(payload),
             headers: Some(headers),
-            credentials: Some(PathBuf::from("/secure/path/to/creds.json")),
+            credentials: Some("/secure/path/to/creds.json".to_string()),
         };
 
         let json = serde_json::to_string(&processor).unwrap();

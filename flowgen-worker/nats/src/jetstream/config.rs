@@ -3,8 +3,6 @@ use std::path::PathBuf;
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Subscriber {
-    /// The unique name / identifier of the task.
-    pub name: String,
     pub credentials: PathBuf,
     pub stream: String,
     pub subject: String,
@@ -15,8 +13,6 @@ pub struct Subscriber {
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Publisher {
-    /// The unique name / identifier of the task.
-    pub name: String,
     pub credentials: PathBuf,
     pub stream: String,
     pub stream_description: Option<String>,
@@ -32,7 +28,6 @@ mod tests {
     #[test]
     fn test_subscriber_default() {
         let subscriber = Subscriber::default();
-        assert_eq!(subscriber.name, String::new()); // FIX: Added name check
         assert_eq!(subscriber.credentials, PathBuf::new());
         assert_eq!(subscriber.stream, "");
         assert_eq!(subscriber.subject, "");
@@ -44,7 +39,6 @@ mod tests {
     #[test]
     fn test_subscriber_creation() {
         let subscriber = Subscriber {
-            name: "test_subscriber".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/path/to/nats.creds"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
@@ -53,7 +47,6 @@ mod tests {
             delay_secs: Some(5),
         };
 
-        assert_eq!(subscriber.name, "test_subscriber"); // FIX: Added name assertion
         assert_eq!(subscriber.credentials, PathBuf::from("/path/to/nats.creds"));
         assert_eq!(subscriber.stream, "test_stream");
         assert_eq!(subscriber.subject, "test.subject");
@@ -65,7 +58,6 @@ mod tests {
     #[test]
     fn test_subscriber_serialization() {
         let subscriber = Subscriber {
-            name: "serial_sub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/credentials/nats.jwt"),
             stream: "my_stream".to_string(),
             subject: "my.subject.*".to_string(),
@@ -82,7 +74,6 @@ mod tests {
     #[test]
     fn test_subscriber_clone() {
         let subscriber = Subscriber {
-            name: "clone_sub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "clone_stream".to_string(),
             subject: "clone.subject".to_string(),
@@ -98,7 +89,6 @@ mod tests {
     #[test]
     fn test_publisher_default() {
         let publisher = Publisher::default();
-        assert_eq!(publisher.name, String::new()); // FIX: Added name check
         assert_eq!(publisher.credentials, PathBuf::new());
         assert_eq!(publisher.stream, "");
         assert_eq!(publisher.stream_description, None);
@@ -109,7 +99,6 @@ mod tests {
     #[test]
     fn test_publisher_creation() {
         let publisher = Publisher {
-            name: "test_publisher".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/path/to/pub.creds"),
             stream: "pub_stream".to_string(),
             stream_description: Some("Test publisher stream".to_string()),
@@ -117,13 +106,9 @@ mod tests {
             max_age: Some(3600),
         };
 
-        assert_eq!(publisher.name, "test_publisher"); // FIX: Added name assertion
         assert_eq!(publisher.credentials, PathBuf::from("/path/to/pub.creds"));
         assert_eq!(publisher.stream, "pub_stream");
-        assert_eq!(
-            publisher.stream_description,
-            Some("Test publisher stream".to_string())
-        );
+        assert_eq!(publisher.stream_description, Some("Test publisher stream".to_string()));
         assert_eq!(publisher.subjects, vec!["pub.subject.1", "pub.subject.2"]);
         assert_eq!(publisher.max_age, Some(3600));
     }
@@ -131,7 +116,6 @@ mod tests {
     #[test]
     fn test_publisher_serialization() {
         let publisher = Publisher {
-            name: "serial_pub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/creds/publisher.jwt"),
             stream: "serialization_stream".to_string(),
             stream_description: Some("Serialization test".to_string()),
@@ -147,7 +131,6 @@ mod tests {
     #[test]
     fn test_publisher_clone() {
         let publisher = Publisher {
-            name: "clone_pub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/test/pub.creds"),
             stream: "clone_stream".to_string(),
             stream_description: None,
@@ -162,7 +145,6 @@ mod tests {
     #[test]
     fn test_publisher_empty_subjects() {
         let publisher = Publisher {
-            name: "empty_pub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/empty/subjects.creds"),
             stream: "empty_subjects_stream".to_string(),
             stream_description: Some("No subjects".to_string()),
@@ -177,7 +159,6 @@ mod tests {
     #[test]
     fn test_publisher_multiple_subjects() {
         let publisher = Publisher {
-            name: "multi_pub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/multi/subjects.creds"),
             stream: "multi_stream".to_string(),
             stream_description: None,
@@ -196,7 +177,6 @@ mod tests {
     #[test]
     fn test_config_equality() {
         let sub1 = Subscriber {
-            name: "eq_sub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/path/creds.jwt"),
             stream: "stream1".to_string(),
             subject: "subject1".to_string(),
@@ -206,7 +186,6 @@ mod tests {
         };
 
         let sub2 = Subscriber {
-            name: "eq_sub".to_string(), // FIX: Added name initialization
             credentials: PathBuf::from("/path/creds.jwt"),
             stream: "stream1".to_string(),
             subject: "subject1".to_string(),

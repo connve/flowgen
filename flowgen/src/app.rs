@@ -1,21 +1,13 @@
 use crate::config::{AppConfig, FlowConfig};
-use config::Config;
-use flowgen_core::client::Client;
+use config::{Config, File};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{event, Level};
 
 /// Errors that can occur during application execution.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     /// File system error occurred while globbing flow configuration files.
     #[error(transparent)]
     Glob(#[from] glob::GlobError),
@@ -28,15 +20,6 @@ pub enum Error {
     /// Flow directory path is invalid or cannot be converted to string.
     #[error("Invalid path")]
     InvalidPath,
-    /// Kubernetes host creation error.
-    #[error(transparent)]
-    Kube(#[from] kube::Error),
-    /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
-    /// Environment variable error.
-    #[error(transparent)]
-    Env(#[from] std::env::VarError),
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -64,22 +47,8 @@ impl flowgen_core::task::runner::Runner for App {
         let flow_configs: Vec<FlowConfig> = glob::glob(glob_pattern)?
             .map(|path| -> Result<FlowConfig, Error> {
                 let path = path?;
-                info!("Loading flow: {:?}", path);
-                let contents = std::fs::read_to_string(&path).map_err(|e| Error::IO {
-                    path: path.clone(),
-                    source: e,
-                })?;
-
-                // Determine file format from extension.
-                let file_format = match path.extension().and_then(|s| s.to_str()) {
-                    Some("yaml") | Some("yml") => config::FileFormat::Yaml,
-                    Some("json") => config::FileFormat::Json,
-                    _ => config::FileFormat::Json,
-                };
-
-                let config = Config::builder()
-                    .add_source(config::File::from_str(&contents, file_format))
-                    .build()?;
+                event!(Level::INFO, "Loading flow: {:?}", path);
+                let config = Config::builder().add_source(File::from(path)).build()?;
                 Ok(config.try_deserialize::<FlowConfig>()?)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -87,50 +56,15 @@ impl flowgen_core::task::runner::Runner for App {
         // Create shared HTTP Server.
         let http_server = Arc::new(flowgen_http::server::HttpServer::new());
 
-        // Create host client if configured.
-        let host_client = if let Some(host_options) = &app_config.host {
-            match &host_options.host_type {
-                crate::config::HostType::K8s => {
-                    // Get holder identity from environment variable.
-                    let holder_identity =
-                        std::env::var("HOSTNAME").or_else(|_| std::env::var("POD_NAME"))?;
-
-                    let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
-                        .holder_identity(holder_identity);
-
-                    match host_builder
-                        .build()
-                        .map_err(|e| Error::Host(Box::new(e)))?
-                        .connect()
-                        .await
-                    {
-                        Ok(connected_host) => {
-                            Some(Arc::new(flowgen_core::task::context::HostClient {
-                                client: std::sync::Arc::new(connected_host),
-                            }))
-                        }
-                        Err(e) => {
-                            warn!("{}. Continuing without host coordination.", e);
-                            None
-                        }
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
         // Initialize flows and register routes
         let mut flow_tasks = Vec::new();
         for config in flow_configs {
             let app_config = Arc::clone(&app_config);
             let http_server = Arc::clone(&http_server);
-            let host_client = host_client.as_ref().map(Arc::clone);
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
-                .http_server(http_server)
-                .host(host_client);
+                .http_server(http_server);
 
             if let Some(cache) = &app_config.cache {
                 if cache.enabled {
@@ -142,7 +76,7 @@ impl flowgen_core::task::runner::Runner for App {
             let flow = match flow_builder.build() {
                 Ok(flow) => flow,
                 Err(e) => {
-                    error!("Flow build failed: {}", e);
+                    event!(Level::ERROR, "Flow build failed: {}", e);
                     continue;
                 }
             };
@@ -150,7 +84,7 @@ impl flowgen_core::task::runner::Runner for App {
             let flow = match flow.run().await {
                 Ok(flow) => flow,
                 Err(e) => {
-                    error!("{}", e);
+                    event!(Level::ERROR, "{}", e);
                     continue;
                 }
             };
@@ -162,10 +96,9 @@ impl flowgen_core::task::runner::Runner for App {
         }
 
         // Start server with registered routes
-        let configured_port = app_config.http.as_ref().and_then(|http| http.port);
         let server_handle = tokio::spawn(async move {
-            if let Err(e) = http_server.start_server(configured_port).await {
-                error!("Failed to start HTTP Server: {}", e);
+            if let Err(e) = http_server.start_server().await {
+                event!(Level::ERROR, "Failed to start HTTP Server: {}", e);
             }
         });
 
@@ -194,10 +127,10 @@ fn log_task_error(result: Result<Result<(), super::flow::Error>, tokio::task::Jo
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            error!("{}", error);
+            event!(Level::ERROR, "{}", error);
         }
         Err(error) => {
-            error!("{}", error);
+            event!(Level::ERROR, "{}", error);
         }
     }
 }

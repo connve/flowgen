@@ -1,20 +1,19 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use flowgen_core::buffer::{ContentType, FromReader};
 use flowgen_core::cache::Cache;
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
 use flowgen_core::{client::Client, event::EventData};
-use futures::StreamExt;
 use object_store::GetResultPayload;
-use std::io::{BufReader, Cursor};
+use std::io::BufReader;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{event, Level};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store.reader.in";
@@ -26,7 +25,6 @@ const DEFAULT_HAS_HEADER: bool = true;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
@@ -53,12 +51,6 @@ pub enum Error {
     NoFileExtension(),
     #[error("Cache errors")]
     Cache(),
-    /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -77,7 +69,7 @@ struct EventHandler<T: Cache> {
 
 impl<T: Cache> EventHandler<T> {
     /// Processes an event and writes it to the configured object store.
-    async fn handle(&self, _: Event) -> Result<(), Error> {
+    async fn handle(self, _: Event) -> Result<(), Error> {
         let mut client_guard = self.client.lock().await;
         let context = client_guard
             .context
@@ -92,77 +84,65 @@ impl<T: Cache> EventHandler<T> {
             .extension()
             .ok_or_else(Error::NoFileExtension)?;
 
-        // Determine content type from file extension.
-        let content_type = match extension {
-            DEFAULT_JSON_EXTENSION => ContentType::Json,
-            DEFAULT_CSV_EXTENSION => {
-                let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-                let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
-                ContentType::Csv {
-                    batch_size,
-                    has_header,
-                }
-            }
-            DEFAULT_AVRO_EXTENSION => ContentType::Avro,
-            _ => {
-                warn!("Unsupported file extension: {}", extension);
-                return Ok(());
-            }
-        };
-
-        // Parse payload into event data based on type.
-        let event_data_list = match result.payload {
+        match result.payload {
             GetResultPayload::File(file, _) => {
+                let content_type = match extension {
+                    DEFAULT_JSON_EXTENSION => ContentType::Json,
+                    DEFAULT_CSV_EXTENSION => {
+                        let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                        let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
+
+                        ContentType::Csv {
+                            batch_size,
+                            has_header,
+                        }
+                    }
+                    DEFAULT_AVRO_EXTENSION => ContentType::Avro,
+                    _ => {
+                        event!(Level::WARN, "Unsupported file extension: {}", extension);
+                        return Ok(());
+                    }
+                };
+
                 let reader = BufReader::new(file);
-                EventData::from_reader(reader, content_type.clone())?
-            }
-            GetResultPayload::Stream(mut stream) => {
-                // Collect stream into bytes.
-                let mut buffer = BytesMut::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    buffer.extend_from_slice(&chunk);
-                }
-                let bytes = buffer.freeze();
+                let event_data_list = EventData::from_reader(reader, content_type.clone())?;
 
-                // Parse bytes using Cursor for Seek support.
-                let cursor = Cursor::new(bytes);
-                let reader = BufReader::new(cursor);
-                EventData::from_reader(reader, content_type.clone())?
-            }
-        };
-
-        // Cache schema for CSV if configured.
-        if let ContentType::Csv { .. } = content_type {
-            if let Some(cache_options) = &self.config.cache_options {
-                if let Some(insert_key) = &cache_options.insert_key {
-                    if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
-                        let schema_bytes = Bytes::from(batch.schema().to_string());
-                        self.cache
-                            .put(insert_key.as_str(), schema_bytes)
-                            .await
-                            .map_err(|_| Error::Cache())?;
+                if let ContentType::Csv { .. } = content_type {
+                    if let Some(cache_options) = &self.config.cache_options {
+                        if let Some(insert_key) = &cache_options.insert_key {
+                            if let Some(EventData::ArrowRecordBatch(batch)) =
+                                event_data_list.first()
+                            {
+                                let schema_bytes = Bytes::from(batch.schema().to_string());
+                                self.cache
+                                    .put(insert_key.as_str(), schema_bytes)
+                                    .await
+                                    .map_err(|_| Error::Cache())?;
+                            }
+                        }
                     }
                 }
+
+                for event_data in event_data_list {
+                    // Generate event subject.
+                    let subject = generate_subject(
+                        self.config.label.as_deref(),
+                        DEFAULT_MESSAGE_SUBJECT,
+                        SubjectSuffix::Timestamp,
+                    );
+
+                    // Build and send event.
+                    let e = EventBuilder::new()
+                        .subject(subject)
+                        .data(event_data)
+                        .current_task_id(self.current_task_id)
+                        .build()?;
+
+                    event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+                    self.tx.send(e)?;
+                }
             }
-        }
-
-        // Send events.
-        for event_data in event_data_list {
-            let subject = generate_subject(
-                &self.config.name,
-                DEFAULT_MESSAGE_SUBJECT,
-                SubjectSuffix::Timestamp,
-            );
-
-            let e = EventBuilder::new()
-                .subject(subject)
-                .data(event_data)
-                .current_task_id(self.current_task_id)
-                .build()?;
-
-            info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-            self.tx.send(e)?;
+            GetResultPayload::Stream(_pin) => todo!(),
         }
         Ok(())
     }
@@ -181,28 +161,12 @@ pub struct Reader<T: Cache> {
     current_task_id: usize,
     /// Cache object for storing / retriving data.
     cache: Arc<T>,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
     type Error = Error;
 
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         // Build object store client with conditional configuration
         let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
 
@@ -215,45 +179,29 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
 
-        let event_handler = Arc::new(EventHandler {
-            client,
-            config: Arc::clone(&self.config),
-            tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
-            cache: Arc::clone(&self.cache),
-        });
-
         // Process incoming events, filtering by task ID.
-        loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
+        while let Ok(event) = self.rx.recv().await {
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let client = Arc::clone(&client);
+                let config = Arc::clone(&self.config);
+                let cache = Arc::clone(&self.cache);
+                let tx = self.tx.clone();
+                let current_task_id = self.current_task_id;
+                let event_handler = EventHandler {
+                    client,
+                    config,
+                    tx,
+                    current_task_id,
+                    cache,
+                };
+                tokio::spawn(async move {
+                    if let Err(err) = event_handler.handle(event).await {
+                        event!(Level::ERROR, "{}", err);
                     }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                });
-                            }
-                        }
-                        Err(_) => return Ok(()),
-                    }
-                }
+                });
             }
         }
+        Ok(())
     }
 }
 
@@ -270,8 +218,6 @@ pub struct ReaderBuilder<T: Cache> {
     current_task_id: usize,
     /// Cache object for storing / retriving data.
     cache: Option<Arc<T>>,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl<T: Cache> ReaderBuilder<T>
@@ -314,14 +260,6 @@ where
         self
     }
 
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
     /// Builds the Writer instance, validating required fields.
     pub async fn build(self) -> Result<Reader<T>, Error> {
         Ok(Reader {
@@ -338,9 +276,6 @@ where
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -391,7 +326,7 @@ mod tests {
     #[test]
     fn test_reader_builder_config() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("test_reader".to_string()),
             path: PathBuf::from("s3://bucket/input/"),
             credentials: None,
             client_options: None,
@@ -457,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_receiver() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("test".to_string()),
             path: PathBuf::from("/tmp/input/"),
             credentials: None,
             client_options: None,
@@ -486,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_sender() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("test".to_string()),
             path: PathBuf::from("gs://bucket/data/"),
             credentials: Some(PathBuf::from("/creds.json")),
             client_options: None,
@@ -515,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_missing_cache() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("test".to_string()),
             path: PathBuf::from("file:///local/files/"),
             credentials: None,
             client_options: None,
@@ -543,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn test_reader_builder_build_success() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("complete_reader".to_string()),
             path: PathBuf::from("s3://my-bucket/files/"),
             credentials: Some(PathBuf::from("/aws-creds.json")),
             client_options: Some({
@@ -583,7 +518,7 @@ mod tests {
     #[test]
     fn test_reader_builder_chain() {
         let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
+            label: Some("chain_test".to_string()),
             path: PathBuf::from("file:///data/input/"),
             credentials: None,
             client_options: None,

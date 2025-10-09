@@ -29,6 +29,3 @@ tracing = { workspace = true }
 futures-util = { workspace = true }
 regex = { workspace = true }
 serde_avro_fast = { workspace = true }
-kube = { workspace = true }
-k8s-openapi = { workspace = true }
-async-trait = { workspace = true }

@@ -16,13 +16,9 @@ struct Credentials {
 /// Errors that can occur during NATS client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    /// Failed to open or read the credentials file.
+    #[error(transparent)]
+    OpenFile(#[from] std::io::Error),
     /// Failed to parse credentials JSON file.
     #[error(transparent)]
     ParseCredentials(#[from] serde_json::Error),
@@ -54,10 +50,7 @@ impl flowgen_core::client::Client for Client {
     /// Connect to the NATS Server with provided options.
     async fn connect(mut self) -> Result<Self, Error> {
         let credentials: Credentials = serde_json::from_str(
-            &fs::read_to_string(&self.credentials_path).map_err(|e| Error::IO {
-                path: self.credentials_path.clone(),
-                source: e,
-            })?,
+            &fs::read_to_string(&self.credentials_path).map_err(Error::OpenFile)?,
         )
         .map_err(Error::ParseCredentials)?;
 

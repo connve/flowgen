@@ -3,9 +3,8 @@
 //! Processes events from the pipeline and converts their data between different formats
 //! such as JSON to Avro with schema validation and key normalization.
 
-use crate::event::{
-    generate_subject, AvroData, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
-};
+use super::super::super::event::{Event, EventBuilder, EventData};
+use crate::event::{generate_subject, AvroData, SubjectSuffix, DEFAULT_LOG_MESSAGE};
 use serde_avro_fast::ser;
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -13,7 +12,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info};
+use tracing::{event, Level};
 
 /// Default subject prefix for converted events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
@@ -27,7 +26,7 @@ pub enum Error {
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
     /// Event construction or processing failed.
     #[error(transparent)]
-    Event(#[from] crate::event::Error),
+    Event(#[from] super::super::super::event::Error),
     /// Avro serialization failed.
     #[error(transparent)]
     SerdeAvro(#[from] serde_avro_fast::ser::SerError),
@@ -37,21 +36,19 @@ pub enum Error {
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    /// Host coordination error.
-    #[error("Host coordination error")]
-    Host(#[source] crate::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] crate::task::manager::Error),
 }
 
 /// Transforms JSON object keys by replacing hyphens with underscores.
+///
 /// Required for Avro compatibility as Avro field names cannot contain hyphens.
 fn transform_keys(value: &mut Value) {
     if let Value::Object(map) = value {
         let mut new_map = Map::new();
+
+        // Collect keys that need to be renamed
         let keys_to_rename: Vec<String> = map.keys().filter(|k| k.contains("-")).cloned().collect();
 
+        // Remove old keys and insert with new names
         for old_key in keys_to_rename {
             if let Some(val) = map.remove(&old_key) {
                 let new_key = old_key.replace("-", "_");
@@ -59,6 +56,7 @@ fn transform_keys(value: &mut Value) {
             }
         }
 
+        // Add the new keys to the original map
         for (key, val) in new_map {
             map.insert(key, val);
         }
@@ -87,7 +85,7 @@ struct AvroSerializerOptions {
 
 impl EventHandler {
     /// Processes an event and converts to selected target format.
-    async fn handle(&self, event: Event) -> Result<(), Error> {
+    async fn handle(self, event: Event) -> Result<(), Error> {
         let data = match event.data {
             EventData::Json(mut data) => match &self.serializer {
                 Some(serializer_opts) => {
@@ -110,7 +108,7 @@ impl EventHandler {
 
         // Generate event subject.
         let subject = generate_subject(
-            &self.config.name,
+            self.config.label.as_deref(),
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -122,7 +120,7 @@ impl EventHandler {
             .current_task_id(self.current_task_id)
             .build()?;
 
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+        event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
         self.tx.send(e)?;
         Ok(())
     }
@@ -139,27 +137,11 @@ pub struct Processor {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<crate::task::context::TaskContext>,
 }
 
-impl crate::task::runner::Runner for Processor {
+impl super::super::runner::Runner for Processor {
     type Error = Error;
     async fn run(mut self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(crate::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let serializer = match self.config.target_format {
             super::config::TargetFormat::Avro => {
                 let schema_string = self
@@ -185,43 +167,28 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
-        let event_handler = Arc::new(EventHandler {
-            config: Arc::clone(&self.config),
-            tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
-            serializer,
-        });
+        while let Ok(event) = self.rx.recv().await {
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let config = Arc::clone(&self.config);
+                let tx = self.tx.clone();
+                let current_task_id = self.current_task_id;
+                let serializer = serializer.clone();
 
-        loop {
-            tokio::select! {
-                biased;
+                let event_handler = EventHandler {
+                    config,
+                    current_task_id,
+                    tx,
+                    serializer,
+                };
 
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == crate::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
+                tokio::spawn(async move {
+                    if let Err(err) = event_handler.handle(event).await {
+                        event!(Level::ERROR, "{}", err);
                     }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                });
-                            }
-                        }
-                        Err(_) => return Ok(()),
-                    }
-                }
+                });
             }
         }
+        Ok(())
     }
 }
 
@@ -236,8 +203,6 @@ pub struct ProcessorBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Option<Arc<crate::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -267,11 +232,6 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -284,9 +244,6 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -296,22 +253,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::sync::broadcast;
-
-    /// Creates a mock TaskContext for testing.
-    fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
-        let mut labels = Map::new();
-        labels.insert(
-            "description".to_string(),
-            Value::String("Clone Test".to_string()),
-        );
-        Arc::new(
-            crate::task::context::TaskContextBuilder::new()
-                .flow_name("test-flow".to_string())
-                .flow_labels(Some(labels))
-                .build()
-                .unwrap(),
-        )
-    }
 
     #[test]
     fn test_transform_keys() {
@@ -350,15 +291,14 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
     #[tokio::test]
     async fn test_processor_builder_build_success() {
-        let config = Arc::new(crate::convert::config::Processor {
-            name: "test".to_string(),
-            target_format: crate::convert::config::TargetFormat::Avro,
+        let config = Arc::new(crate::task::convert::config::Processor {
+            label: Some("test".to_string()),
+            target_format: crate::task::convert::config::TargetFormat::Avro,
             schema: Some(r#"{"type": "string"}"#.to_string()),
         });
 
@@ -370,7 +310,6 @@ mod tests {
             .sender(tx)
             .receiver(rx2)
             .current_task_id(1)
-            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
@@ -385,7 +324,6 @@ mod tests {
         let result = ProcessorBuilder::new()
             .sender(tx)
             .receiver(rx)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -398,13 +336,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_missing_sender() {
-        let config = Arc::new(crate::convert::config::Processor::default());
+        let config = Arc::new(crate::task::convert::config::Processor::default());
         let (_, rx) = broadcast::channel(100);
 
         let result = ProcessorBuilder::new()
             .config(config)
             .receiver(rx)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -417,13 +354,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_missing_receiver() {
-        let config = Arc::new(crate::convert::config::Processor::default());
+        let config = Arc::new(crate::task::convert::config::Processor::default());
         let (tx, _) = broadcast::channel(100);
 
         let result = ProcessorBuilder::new()
             .config(config)
             .sender(tx)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -432,25 +368,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Missing required attribute: receiver"));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_context() {
-        let config = Arc::new(crate::convert::config::Processor::default());
-        let (tx, rx) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: task_context"));
     }
 
     #[test]
@@ -467,10 +384,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_handler_json_passthrough() {
-        let config = Arc::new(crate::convert::config::Processor {
-            name: "test".to_string(),
-            target_format: crate::convert::config::TargetFormat::Avro,
-            schema: None,
+        let config = Arc::new(crate::task::convert::config::Processor {
+            label: Some("test".to_string()),
+            target_format: crate::task::convert::config::TargetFormat::Avro,
+            schema: None, // No schema means no conversion
         });
 
         let (tx, mut rx) = broadcast::channel(100);

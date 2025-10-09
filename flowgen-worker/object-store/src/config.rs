@@ -17,8 +17,8 @@ pub const DEFAULT_JSON_EXTENSION: &str = "json";
 /// Object Store reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 pub struct Reader {
-    /// The unique name / identifier of the task.
-    pub name: String,
+    /// Optional label for identifying the reader.
+    pub label: Option<String>,
     /// Path to the object store or file location.
     pub path: PathBuf,
     /// Optional path to credentials file.
@@ -36,8 +36,8 @@ pub struct Reader {
 /// Object Store writer configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 pub struct Writer {
-    /// The unique name / identifier of the task.
-    pub name: String,
+    // Optional label for identifying the writer.
+    pub label: Option<String>,
     /// Path to the object store or output location.
     pub path: PathBuf,
     /// Optional path to credentials file.
@@ -76,12 +76,24 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn test_reader_config_default() {
+        let reader = Reader::default();
+        assert_eq!(reader.label, None);
+        assert_eq!(reader.path, PathBuf::new());
+        assert_eq!(reader.credentials, None);
+        assert_eq!(reader.client_options, None);
+        assert_eq!(reader.batch_size, None);
+        assert_eq!(reader.has_header, None);
+        assert_eq!(reader.cache_options, None);
+    }
+
+    #[test]
     fn test_reader_config_creation() {
         let mut client_options = HashMap::new();
         client_options.insert("region".to_string(), "us-west-2".to_string());
-
+        
         let reader = Reader {
-            name: "test_reader".to_string(),
+            label: Some("test_reader".to_string()),
             path: PathBuf::from("s3://my-bucket/data/"),
             credentials: Some(PathBuf::from("/path/to/creds.json")),
             client_options: Some(client_options.clone()),
@@ -90,12 +102,9 @@ mod tests {
             cache_options: None,
         };
 
-        assert_eq!(reader.name, "test_reader".to_string());
+        assert_eq!(reader.label, Some("test_reader".to_string()));
         assert_eq!(reader.path, PathBuf::from("s3://my-bucket/data/"));
-        assert_eq!(
-            reader.credentials,
-            Some(PathBuf::from("/path/to/creds.json"))
-        );
+        assert_eq!(reader.credentials, Some(PathBuf::from("/path/to/creds.json")));
         assert_eq!(reader.client_options, Some(client_options));
         assert_eq!(reader.batch_size, Some(500));
         assert_eq!(reader.has_header, Some(true));
@@ -104,7 +113,7 @@ mod tests {
     #[test]
     fn test_reader_config_serialization() {
         let reader = Reader {
-            name: "test_reader".to_string(),
+            label: Some("serialization_test".to_string()),
             path: PathBuf::from("gs://my-bucket/files/"),
             credentials: Some(PathBuf::from("/creds.json")),
             client_options: None,
@@ -121,7 +130,7 @@ mod tests {
     #[test]
     fn test_writer_config_default() {
         let writer = Writer::default();
-        assert_eq!(writer.name, String::new());
+        assert_eq!(writer.label, None);
         assert_eq!(writer.path, PathBuf::new());
         assert_eq!(writer.credentials, None);
         assert_eq!(writer.client_options, None);
@@ -131,30 +140,24 @@ mod tests {
     #[test]
     fn test_writer_config_creation() {
         let mut client_options = HashMap::new();
-        client_options.insert(
-            "endpoint".to_string(),
-            "https://s3.amazonaws.com".to_string(),
-        );
-
+        client_options.insert("endpoint".to_string(), "https://s3.amazonaws.com".to_string());
+        
         let hive_options = HivePartitionOptions {
             enabled: true,
             partition_keys: vec![HiveParitionKeys::EventDate],
         };
 
         let writer = Writer {
-            name: "test_writer".to_string(),
+            label: Some("test_writer".to_string()),
             path: PathBuf::from("s3://output-bucket/results/"),
             credentials: Some(PathBuf::from("/service-account.json")),
             client_options: Some(client_options.clone()),
             hive_partition_options: Some(hive_options.clone()),
         };
 
-        assert_eq!(writer.name, "test_writer".to_string());
+        assert_eq!(writer.label, Some("test_writer".to_string()));
         assert_eq!(writer.path, PathBuf::from("s3://output-bucket/results/"));
-        assert_eq!(
-            writer.credentials,
-            Some(PathBuf::from("/service-account.json"))
-        );
+        assert_eq!(writer.credentials, Some(PathBuf::from("/service-account.json")));
         assert_eq!(writer.client_options, Some(client_options));
         assert_eq!(writer.hive_partition_options, Some(hive_options));
     }
@@ -162,7 +165,7 @@ mod tests {
     #[test]
     fn test_writer_config_serialization() {
         let writer = Writer {
-            name: "test_writer".to_string(),
+            label: Some("writer_test".to_string()),
             path: PathBuf::from("/local/path/output/"),
             credentials: None,
             client_options: None,
@@ -205,7 +208,7 @@ mod tests {
     #[test]
     fn test_config_clone() {
         let reader = Reader {
-            name: "test_reader".to_string(),
+            label: Some("clone_test".to_string()),
             path: PathBuf::from("file:///tmp/data"),
             credentials: None,
             client_options: None,

@@ -4,34 +4,48 @@
 //! and various payload formats. Processes events by making HTTP requests
 //! and publishing the responses as new events.
 
-use crate::config::Credentials;
 use flowgen_core::{
     config::ConfigExt,
     event::{generate_subject, Event, EventBuilder, EventData, SubjectSuffix},
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::{
     fs,
     sync::broadcast::{Receiver, Sender},
 };
-use tracing::{debug, error, info};
+use tracing::{event, Level};
 
 /// Default subject for HTTP response events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "http.response.out";
+
+/// Authentication credentials for HTTP requests.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+struct Credentials {
+    /// Bearer token for authorization header.
+    bearer_auth: Option<String>,
+    /// Basic authentication credentials.
+    basic_auth: Option<BasicAuth>,
+}
+
+/// Basic authentication username and password.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+struct BasicAuth {
+    /// Username for basic authentication.
+    username: String,
+    /// Password for basic authentication.
+    password: String,
+}
 
 /// Errors that can occur during HTTP request processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
     /// Failed to send event message.
     #[error(transparent)]
     SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
@@ -59,16 +73,10 @@ pub enum Error {
     /// Payload configuration is invalid.
     #[error("Either payload json or payload input is required")]
     PayloadConfig(),
-    /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Event handler for processing HTTP requests.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct EventHandler {
     /// HTTP client instance.
     client: Arc<reqwest::Client>,
@@ -82,7 +90,7 @@ struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by making an HTTP request.
-    async fn handle(&self, event: Event) -> Result<(), Error> {
+    async fn handle(self, event: Event) -> Result<(), Error> {
         let config = self.config.render(&event.data)?;
 
         let mut client = match config.method {
@@ -121,13 +129,7 @@ impl EventHandler {
         }
 
         if let Some(credentials) = &self.config.credentials {
-            let credentials_string =
-                fs::read_to_string(credentials)
-                    .await
-                    .map_err(|e| Error::IO {
-                        path: credentials.clone(),
-                        source: e,
-                    })?;
+            let credentials_string = fs::read_to_string(credentials).await?;
             let credentials: Credentials = serde_json::from_str(&credentials_string)?;
 
             if let Some(bearer_token) = credentials.bearer_auth {
@@ -144,7 +146,7 @@ impl EventHandler {
         let data = json!(resp);
 
         let subject = generate_subject(
-            &self.config.name,
+            self.config.label.as_deref(),
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
@@ -155,7 +157,7 @@ impl EventHandler {
             .build()?;
 
         self.tx.send(e)?;
-        info!("event processeds: {}", subject);
+        event!(Level::INFO, "event processeds: {}", subject);
         Ok(())
     }
 }
@@ -171,67 +173,36 @@ pub struct Processor {
     rx: Receiver<Event>,
     /// Current task identifier.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     async fn run(mut self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let client = reqwest::ClientBuilder::new().https_only(true).build()?;
+
         let client = Arc::new(client);
 
-        let event_handler = Arc::new(EventHandler {
-            config: Arc::clone(&self.config),
-            current_task_id: self.current_task_id,
-            tx: self.tx.clone(),
-            client,
-        });
+        while let Ok(event) = self.rx.recv().await {
+            if event.current_task_id == Some(self.current_task_id - 1) {
+                let config = Arc::clone(&self.config);
+                let client = Arc::clone(&client);
+                let tx = self.tx.clone();
+                let current_task_id = self.current_task_id;
 
-        loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
+                let event_handler = EventHandler {
+                    config,
+                    current_task_id,
+                    tx,
+                    client,
+                };
+                tokio::spawn(async move {
+                    if let Err(err) = event_handler.handle(event).await {
+                        event!(Level::ERROR, "{}", err);
                     }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                });
-                            }
-                        }
-                        Err(_) => return Ok(()),
-                    }
-                }
+                });
             }
         }
+        Ok(())
     }
 }
 
@@ -246,8 +217,6 @@ pub struct ProcessorBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -277,14 +246,6 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -297,9 +258,6 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -307,27 +265,8 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BasicAuth;
-    use serde_json::Map;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use tokio::sync::broadcast;
-
-    /// Creates a mock TaskContext for testing.
-    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
-        let mut labels = Map::new();
-        labels.insert(
-            "description".to_string(),
-            Value::String("Clone Test".to_string()),
-        );
-        Arc::new(
-            flowgen_core::task::context::TaskContextBuilder::new()
-                .flow_name("test-flow".to_string())
-                .flow_labels(Some(labels))
-                .build()
-                .unwrap(),
-        )
-    }
 
     #[test]
     fn test_credentials_default() {
@@ -400,14 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn test_error_io_structure() {
-        use std::path::PathBuf;
+    fn test_error_from_io_error() {
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error = Error::IO {
-            path: PathBuf::from("/test/file.json"),
-            source: io_error,
-        };
-        assert!(matches!(error, Error::IO { .. }));
+        let error: Error = io_error.into();
+        assert!(matches!(error, Error::IO(_)));
     }
 
     #[test]
@@ -423,7 +358,6 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -433,14 +367,13 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
     #[tokio::test]
     async fn test_processor_builder_config() {
         let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
+            label: Some("test_processor".to_string()),
             endpoint: "https://api.example.com".to_string(),
             method: crate::config::Method::POST,
             payload: None,
@@ -479,7 +412,6 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(1)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -493,7 +425,7 @@ mod tests {
     async fn test_processor_builder_build_missing_receiver() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
+            label: None,
             endpoint: "https://test.com".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -505,7 +437,6 @@ mod tests {
             .config(config)
             .sender(tx)
             .current_task_id(1)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -519,7 +450,7 @@ mod tests {
     async fn test_processor_builder_build_missing_sender() {
         let (_tx, rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
+            label: None,
             endpoint: "https://test.com".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -531,7 +462,6 @@ mod tests {
             .config(config)
             .receiver(rx)
             .current_task_id(1)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -542,39 +472,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_processor_builder_build_missing_task_context() {
-        let (tx, rx) = broadcast::channel(100);
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://test.com".to_string(),
-            method: crate::config::Method::GET,
-            payload: None,
-            headers: None,
-            credentials: None,
-        });
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
-    }
-
-    #[tokio::test]
     async fn test_processor_builder_build_success() {
         let (tx, rx) = broadcast::channel(100);
         let mut headers = HashMap::new();
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
+            label: Some("success_test".to_string()),
             endpoint: "https://success.test.com".to_string(),
             method: crate::config::Method::POST,
             payload: Some(crate::config::Payload {
@@ -583,7 +487,7 @@ mod tests {
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some(headers),
-            credentials: Some(PathBuf::from("/test/creds.json")),
+            credentials: Some("/test/creds.json".to_string()),
         });
 
         let result = ProcessorBuilder::new()
@@ -591,7 +495,6 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(5)
-            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -605,7 +508,7 @@ mod tests {
     async fn test_processor_builder_chain() {
         let (tx, rx) = broadcast::channel(50);
         let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
+            label: Some("chain_test".to_string()),
             endpoint: "https://chain.test.com".to_string(),
             method: crate::config::Method::PUT,
             payload: None,
@@ -618,7 +521,6 @@ mod tests {
             .sender(tx)
             .receiver(rx)
             .current_task_id(10)
-            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();

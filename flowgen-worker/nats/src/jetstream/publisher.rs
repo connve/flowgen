@@ -4,10 +4,7 @@ use flowgen_core::client::Client;
 use flowgen_core::event::{Event, DEFAULT_LOG_MESSAGE};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info};
-
-/// Default subject prefix for NATS publisher.
-const DEFAULT_MESSAGE_SUBJECT: &str = "nats.jetstream.publisher";
+use tracing::{event, Level};
 
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
@@ -36,12 +33,6 @@ pub enum Error {
     /// Client was not properly initialized or is missing.
     #[error("Client is missing or not initialized properly")]
     MissingClient(),
-    /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 struct EventHandler {
@@ -49,10 +40,10 @@ struct EventHandler {
 }
 
 impl EventHandler {
-    async fn handle(&self, event: Event) -> Result<(), Error> {
+    async fn handle(self, event: Event) -> Result<(), Error> {
         let e = event.to_publish()?;
 
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, event.subject);
+        event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, event.subject);
 
         self.jetstream
             .lock()
@@ -72,27 +63,11 @@ pub struct Publisher {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone())
             .build()?
@@ -136,38 +111,16 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
             let jetstream = Arc::new(Mutex::new(jetstream));
 
-            let event_handler = Arc::new(EventHandler {
-                jetstream,
-            });
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    // Check for leadership changes.
-                    Some(status) = task_manager_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Lost leadership for task: {}", self.config.name);
-                            return Ok(());
+            while let Ok(event) = self.rx.recv().await {
+                if event.current_task_id == Some(self.current_task_id - 1) {
+                    let jetstream = Arc::clone(&jetstream);
+                    let event_handler = EventHandler { jetstream };
+                    // Spawn a new asynchronous task to handle event processing.
+                    tokio::spawn(async move {
+                        if let Err(err) = event_handler.handle(event).await {
+                            event!(Level::ERROR, "{}", err);
                         }
-                    }
-
-                    // Process events.
-                    result = self.rx.recv() => {
-                        match result {
-                            Ok(event) => {
-                                if event.current_task_id == Some(self.current_task_id - 1) {
-                                    let handler = Arc::clone(&event_handler);
-                                    tokio::spawn(async move {
-                                        if let Err(err) = handler.handle(event).await {
-                                            error!("{}", err);
-                                        }
-                                    });
-                                }
-                            }
-                            Err(_) => return Ok(()),
-                        }
-                    }
+                    });
                 }
             }
         }
@@ -184,8 +137,6 @@ pub struct PublisherBuilder {
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event processing.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl PublisherBuilder {
@@ -210,14 +161,6 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
     pub async fn build(self) -> Result<Publisher, Error> {
         Ok(Publisher {
             config: self
@@ -227,9 +170,6 @@ impl PublisherBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -239,6 +179,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tokio::sync::broadcast;
+
 
     #[test]
     fn test_publisher_builder_new() {
@@ -259,7 +200,6 @@ mod tests {
     #[test]
     fn test_publisher_builder_config() {
         let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test stream".to_string()),
@@ -302,7 +242,6 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_build_missing_receiver() {
         let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: None,
@@ -325,7 +264,6 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test description".to_string()),
@@ -350,7 +288,6 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_builder_chain() {
         let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
             credentials: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             stream_description: None,

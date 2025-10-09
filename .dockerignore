@@ -4,5 +4,4 @@ docker
 .gitlab-ci.yml
 .git
 .gitmodules
-/target
-/examples
+target

@@ -23,4 +23,3 @@ arrow = { workspace = true }
 apache-avro = { workspace = true }
 url = { workspace = true }
 object_store = { workspace = true }
-futures = { workspace = true }
