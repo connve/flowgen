@@ -14,7 +14,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
@@ -56,9 +56,6 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -188,8 +185,6 @@ pub struct Reader<T: Cache> {
     current_task_id: usize,
     /// Cache object for storing / retriving data.
     cache: Arc<T>,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
@@ -197,20 +192,6 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         // Build object store client with conditional configuration
         let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
 
@@ -233,33 +214,21 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
         // Process incoming events, filtering by task ID.
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    if event.current_task_id == Some(self.current_task_id - 1) {
+                        let handler = Arc::clone(&event_handler);
+                        tokio::spawn(
+                            async move {
+                                if let Err(err) = handler.handle(event).await {
+                                    error!("{}", err);
+                                }
                             }
-                        }
-                        Err(_) => return Ok(()),
+                            .instrument(tracing::Span::current()),
+                        );
                     }
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -346,9 +315,6 @@ where
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

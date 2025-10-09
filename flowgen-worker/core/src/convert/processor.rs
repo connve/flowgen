@@ -13,7 +13,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for converted events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
@@ -40,9 +40,6 @@ pub enum Error {
     /// Host coordination error.
     #[error("Host coordination error")]
     Host(#[source] crate::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] crate::task::manager::Error),
 }
 
 /// Transforms JSON object keys by replacing hyphens with underscores.
@@ -139,8 +136,6 @@ pub struct Processor {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl crate::task::runner::Runner for Processor {
@@ -148,20 +143,6 @@ impl crate::task::runner::Runner for Processor {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(crate::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let serializer = match self.config.target_format {
             super::config::TargetFormat::Avro => {
                 let schema_string = self
@@ -195,33 +176,21 @@ impl crate::task::runner::Runner for Processor {
         });
 
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == crate::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    if event.current_task_id == Some(self.current_task_id - 1) {
+                        let handler = Arc::clone(&event_handler);
+                        tokio::spawn(
+                            async move {
+                                if let Err(err) = handler.handle(event).await {
+                                    error!("{}", err);
+                                }
                             }
-                        }
-                        Err(_) => return Ok(()),
+                            .instrument(tracing::Span::current()),
+                        );
                     }
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -286,9 +255,6 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -436,25 +402,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Missing required attribute: receiver"));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_context() {
-        let config = Arc::new(crate::convert::config::Processor::default());
-        let (tx, rx) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: task_context"));
     }
 
     #[test]

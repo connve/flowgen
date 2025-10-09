@@ -7,7 +7,7 @@ use flowgen_core::{
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Default subject prefix for NATS subscriber.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_subscriber";
@@ -61,9 +61,6 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// NATS JetStream subscriber that consumes messages and converts them to flowgen events.
@@ -75,8 +72,6 @@ pub struct Subscriber {
     tx: Sender<Event>,
     /// Current task identifier for event tagging.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Subscriber {
@@ -84,20 +79,6 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone())
             .build()?
@@ -132,38 +113,22 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             loop {
-                tokio::select! {
-                    biased;
+                if let Some(delay_secs) = self.config.delay_secs {
+                    time::sleep(Duration::from_secs(delay_secs)).await
+                }
 
-                    // Check for leadership changes.
-                    Some(status) = task_manager_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Lost leadership for task: {}", self.config.name);
-                            return Ok(());
-                        }
+                let stream = consumer.messages().await?;
+                let mut batch = stream.take(self.config.batch_size);
+
+                while let Some(message) = batch.next().await {
+                    if let Ok(message) = message {
+                        let mut e = message.to_event()?;
+                        message.ack().await.ok();
+                        e.current_task_id = Some(self.current_task_id);
+
+                        info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+                        self.tx.send(e)?;
                     }
-
-                    // Process messages.
-                    _ = async {
-                        if let Some(delay_secs) = self.config.delay_secs {
-                            time::sleep(Duration::from_secs(delay_secs)).await
-                        }
-
-                        let stream = consumer.messages().await.ok()?;
-                        let mut batch = stream.take(self.config.batch_size);
-
-                        while let Some(message) = batch.next().await {
-                            if let Ok(message) = message {
-                                let mut e = message.to_event().ok()?;
-                                message.ack().await.ok()?;
-                                e.current_task_id = Some(self.current_task_id);
-
-                                info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-                                self.tx.send(e).ok()?;
-                            }
-                        }
-                        Some(())
-                    } => {}
                 }
             }
         }
@@ -223,9 +188,6 @@ impl SubscriberBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -409,7 +371,6 @@ mod tests {
             config: config.clone(),
             tx,
             current_task_id: 0,
-            task_context: create_mock_task_context(),
         };
 
         assert_eq!(subscriber.config, config);

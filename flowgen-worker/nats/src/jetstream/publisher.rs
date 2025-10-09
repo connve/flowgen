@@ -4,7 +4,7 @@ use flowgen_core::client::Client;
 use flowgen_core::event::{Event, DEFAULT_LOG_MESSAGE};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for NATS publisher.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_publisher";
@@ -39,9 +39,6 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 struct EventHandler {
@@ -72,8 +69,6 @@ pub struct Publisher {
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Publisher {
@@ -81,20 +76,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone())
             .build()?
@@ -141,33 +122,21 @@ impl flowgen_core::task::runner::Runner for Publisher {
             let event_handler = Arc::new(EventHandler { jetstream });
 
             loop {
-                tokio::select! {
-                    biased;
-
-                    // Check for leadership changes.
-                    Some(status) = task_manager_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Lost leadership for task: {}", self.config.name);
-                            return Ok(());
-                        }
-                    }
-
-                    // Process events.
-                    result = self.rx.recv() => {
-                        match result {
-                            Ok(event) => {
-                                if event.current_task_id == Some(self.current_task_id - 1) {
-                                    let handler = Arc::clone(&event_handler);
-                                    tokio::spawn(async move {
-                                        if let Err(err) = handler.handle(event).await {
-                                            error!("{}", err);
-                                        }
-                                    }.instrument(tracing::Span::current()));
+                match self.rx.recv().await {
+                    Ok(event) => {
+                        if event.current_task_id == Some(self.current_task_id - 1) {
+                            let handler = Arc::clone(&event_handler);
+                            tokio::spawn(
+                                async move {
+                                    if let Err(err) = handler.handle(event).await {
+                                        error!("{}", err);
+                                    }
                                 }
-                            }
-                            Err(_) => return Ok(()),
+                                .instrument(tracing::Span::current()),
+                            );
                         }
                     }
+                    Err(_) => return Ok(()),
                 }
             }
         }
@@ -227,9 +196,6 @@ impl PublisherBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }

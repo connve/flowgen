@@ -11,7 +11,7 @@ use tokio::{
     sync::broadcast::{Receiver, Sender},
     task::JoinHandle,
 };
-use tracing::{error, Instrument};
+use tracing::{debug, error, info, Instrument};
 
 /// Default cache bucket name for flow caching.
 const DEFAULT_CACHE_NAME: &str = "flowgen_cache";
@@ -103,23 +103,69 @@ impl Flow<'_> {
         }
         let task_manager = Arc::new(task_manager.build().start().await);
 
-        // Create task context for execution.
-        let task_context = Arc::new(
-            flowgen_core::task::context::TaskContextBuilder::new()
-                .flow_name(self.config.flow.name.clone())
-                .flow_labels(self.config.flow.labels.clone())
-                .task_manager(task_manager)
-                .build()
-                .map_err(|e| Error::MissingRequiredAttribute(e.to_string()))?,
-        );
+        // Register flow for leader election.
+        let flow_id = self.config.flow.name.clone();
+        let mut leadership_rx = task_manager
+            .register(
+                flow_id.clone(),
+                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
+            )
+            .await
+            .map_err(|e| {
+                Error::MissingRequiredAttribute(format!(
+                    "Failed to register flow for leader election: {e}"
+                ))
+            })?;
 
+        // Wait for initial leadership status.
+        let initial_status = leadership_rx.recv().await.ok_or_else(|| {
+            Error::MissingRequiredAttribute(
+                "Failed to receive initial leadership status".to_string(),
+            )
+        })?;
+
+        match initial_status {
+            flowgen_core::task::manager::LeaderElectionResult::Leader => {
+                debug!("Flow {} acquired leadership, spawning tasks", flow_id);
+            }
+            flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
+                debug!(
+                    "Flow {} is not leader, waiting for leadership acquisition",
+                    flow_id
+                );
+
+                // Wait for leadership acquisition.
+                loop {
+                    if let Some(status) = leadership_rx.recv().await {
+                        if status == flowgen_core::task::manager::LeaderElectionResult::Leader {
+                            info!(
+                                "Flow {} acquired leadership after retry, spawning tasks",
+                                flow_id
+                            );
+                            break;
+                        }
+                    } else {
+                        return Err(Error::MissingRequiredAttribute(
+                            "Leadership channel closed".to_string(),
+                        ));
+                    }
+                }
+            }
+            flowgen_core::task::manager::LeaderElectionResult::NoElection => {
+                debug!(
+                    "No leader election configured for flow {}, spawning tasks immediately",
+                    flow_id
+                );
+            }
+        }
+
+        // Now spawn all tasks as leader.
         for (i, task) in self.config.flow.tasks.iter().enumerate() {
             match task {
                 Task::convert(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let tx = tx.clone();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -128,7 +174,6 @@ impl Flow<'_> {
                                 .receiver(rx)
                                 .sender(tx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -144,7 +189,6 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let cache = Arc::clone(&cache);
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -153,7 +197,6 @@ impl Flow<'_> {
                                 .sender(tx)
                                 .cache(cache)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -168,7 +211,6 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
                     let tx = tx.clone();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -177,7 +219,6 @@ impl Flow<'_> {
                                 .receiver(rx)
                                 .sender(tx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -193,7 +234,6 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let http_server = Arc::clone(&self.http_server);
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -202,7 +242,6 @@ impl Flow<'_> {
                                 .sender(tx)
                                 .current_task_id(i)
                                 .http_server(http_server)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -218,7 +257,6 @@ impl Flow<'_> {
                 Task::nats_jetstream_subscriber(config) => {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -226,7 +264,6 @@ impl Flow<'_> {
                                 .config(config)
                                 .sender(tx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -240,7 +277,6 @@ impl Flow<'_> {
                 Task::nats_jetstream_publisher(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -248,7 +284,6 @@ impl Flow<'_> {
                                 .config(config)
                                 .receiver(rx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -263,7 +298,6 @@ impl Flow<'_> {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
                     let cache = Arc::clone(&cache);
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -272,7 +306,6 @@ impl Flow<'_> {
                                 .sender(tx)
                                 .current_task_id(i)
                                 .cache(cache)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -286,7 +319,6 @@ impl Flow<'_> {
                 Task::salesforce_pubsub_publisher(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -294,7 +326,6 @@ impl Flow<'_> {
                                 .config(config)
                                 .receiver(rx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -310,7 +341,6 @@ impl Flow<'_> {
                     let rx = tx.subscribe();
                     let tx = tx.clone();
                     let cache = Arc::clone(&cache);
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current().clone();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -320,7 +350,6 @@ impl Flow<'_> {
                                 .receiver(rx)
                                 .cache(cache)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()
@@ -334,7 +363,6 @@ impl Flow<'_> {
                 Task::object_store_writer(config) => {
                     let config = Arc::new(config.to_owned());
                     let rx = tx.subscribe();
-                    let task_context = Arc::clone(&task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                         async move {
@@ -342,7 +370,6 @@ impl Flow<'_> {
                                 .config(config)
                                 .receiver(rx)
                                 .current_task_id(i)
-                                .task_context(task_context)
                                 .build()
                                 .await?
                                 .run()

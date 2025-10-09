@@ -10,7 +10,7 @@ use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest}
 use std::sync::Arc;
 use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
 const DEFAULT_NUM_REQUESTED: i32 = 1000;
@@ -52,9 +52,6 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -227,8 +224,6 @@ pub struct Subscriber<T: Cache> {
     current_task_id: usize,
     /// Cache for replay IDs and schemas
     cache: Arc<T>,
-    /// Task execution context providing metadata and runtime configuration
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
@@ -240,20 +235,6 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
     /// TopicListener task for each configured topic.
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
         // Determine Pub/Sub endpoint
         let endpoint = match &self.config.endpoint {
             Some(endpoint) => endpoint,
@@ -303,8 +284,8 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             pubsub,
         };
 
-        // Spawn event handler task and wait for completion or leadership loss.
-        let mut handler_task = tokio::spawn(
+        // Spawn event handler task and wait for completion.
+        let handler_task = tokio::spawn(
             async move {
                 if let Err(err) = event_handler.handle().await {
                     error!("{}", err);
@@ -313,26 +294,8 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             .instrument(tracing::Span::current()),
         );
 
-        // Wait for leadership changes or handler completion.
-        loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        handler_task.abort();
-                        return Ok(());
-                    }
-                }
-
-                // Wait for handler to complete.
-                result = &mut handler_task => {
-                    return result.map_err(Error::TaskJoin);
-                }
-            }
-        }
+        // Wait for handler to complete.
+        handler_task.await.map_err(Error::TaskJoin)
     }
 }
 
@@ -408,9 +371,6 @@ where
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
