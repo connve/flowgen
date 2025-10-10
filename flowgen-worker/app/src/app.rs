@@ -111,8 +111,13 @@ impl flowgen_core::task::runner::Runner for App {
         let cache: Option<Arc<flowgen_nats::cache::Cache>> =
             if let Some(cache_config) = &app_config.cache {
                 if cache_config.enabled {
+                    let db_name = cache_config
+                        .db_name
+                        .as_deref()
+                        .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
+
                     flowgen_nats::cache::CacheBuilder::new()
-                        .credentials_path(cache_config.credentials_path.clone())
+                        .credentials(cache_config.credentials.clone())
                         .build()
                         .map_err(|e| {
                             warn!("Failed to build cache: {}. Continuing without cache.", e);
@@ -122,7 +127,7 @@ impl flowgen_core::task::runner::Runner for App {
                         .and_then(|builder| {
                             futures::executor::block_on(async {
                                 builder
-                                    .init("flowgen_cache")
+                                    .init(db_name)
                                     .await
                                     .map_err(|e| {
                                         warn!(
@@ -143,31 +148,35 @@ impl flowgen_core::task::runner::Runner for App {
             };
 
         // Create host client if configured.
-        let host_client = if let Some(host_options) = &app_config.host {
-            match &host_options.host_type {
-                crate::config::HostType::K8s => {
-                    // Get holder identity from environment variable.
-                    let holder_identity = std::env::var("HOSTNAME")
-                        .or_else(|_| std::env::var("POD_NAME"))
-                        .map_err(|e| Error::Env { source: e })?;
+        let host_client = if let Some(host) = &app_config.host {
+            if host.enabled {
+                match &host.host_type {
+                    crate::config::HostType::K8s => {
+                        // Get holder identity from environment variable.
+                        let holder_identity = std::env::var("HOSTNAME")
+                            .or_else(|_| std::env::var("POD_NAME"))
+                            .map_err(|e| Error::Env { source: e })?;
 
-                    let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
-                        .holder_identity(holder_identity);
+                        let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
+                            .holder_identity(holder_identity);
 
-                    match host_builder
-                        .build()
-                        .map_err(|e| Error::Host(Box::new(e)))?
-                        .connect()
-                        .await
-                    {
-                        Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
-                            as std::sync::Arc<dyn flowgen_core::host::Host>),
-                        Err(e) => {
-                            warn!("{}. Continuing without host coordination.", e);
-                            None
+                        match host_builder
+                            .build()
+                            .map_err(|e| Error::Host(Box::new(e)))?
+                            .connect()
+                            .await
+                        {
+                            Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
+                                as std::sync::Arc<dyn flowgen_core::host::Host>),
+                            Err(e) => {
+                                warn!("{}. Continuing without host coordination.", e);
+                                None
+                            }
                         }
                     }
                 }
+            } else {
+                None
             }
         } else {
             None

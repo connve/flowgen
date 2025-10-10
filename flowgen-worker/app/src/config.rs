@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+/// Default cache database name.
+pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
+
 /// Top-level configuration for an individual flow.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfig {
@@ -68,13 +71,26 @@ pub struct AppConfig {
     pub host: Option<HostOptions>,
 }
 
+/// Cache type for storage backend.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheType {
+    /// NATS JetStream Key-Value store.
+    Nats,
+}
+
 /// Cache configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct CacheOptions {
     /// Whether caching is enabled.
     pub enabled: bool,
+    /// Cache backend type.
+    #[serde(rename = "type")]
+    pub cache_type: CacheType,
     /// Path to cache credentials file.
-    pub credentials_path: PathBuf,
+    pub credentials: PathBuf,
+    /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
+    pub db_name: Option<String>,
 }
 
 /// Flow loading configuration.
@@ -102,7 +118,10 @@ pub enum HostType {
 /// Host coordination configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HostOptions {
+    /// Whether host coordination is enabled.
+    pub enabled: bool,
     /// Host type for coordination.
+    #[serde(rename = "type")]
     pub host_type: HostType,
     /// Optional namespace for Kubernetes resources.
     pub namespace: Option<String>,
@@ -225,7 +244,9 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: true,
-                credentials_path: PathBuf::from("/test/cache"),
+                cache_type: CacheType::Nats,
+                credentials: PathBuf::from("/test/cache"),
+                db_name: None,
             }),
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/test/flows/*")),
@@ -261,7 +282,9 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: false,
-                credentials_path: PathBuf::from("/serialize/cache"),
+                cache_type: CacheType::Nats,
+                credentials: PathBuf::from("/serialize/cache"),
+                db_name: Some("test_db".to_string()),
             }),
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/serialize/flows/*")),
@@ -280,7 +303,9 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: true,
-                credentials_path: PathBuf::from("/clone/cache"),
+                cache_type: CacheType::Nats,
+                credentials: PathBuf::from("/clone/cache"),
+                db_name: None,
             }),
             flows: FlowOptions { dir: None },
             http: None,
@@ -295,12 +320,14 @@ mod tests {
     fn test_cache_options_creation() {
         let cache_options = CacheOptions {
             enabled: true,
-            credentials_path: PathBuf::from("/test/credentials"),
+            cache_type: CacheType::Nats,
+            credentials: PathBuf::from("/test/credentials"),
+            db_name: None,
         };
 
         assert!(cache_options.enabled);
         assert_eq!(
-            cache_options.credentials_path,
+            cache_options.credentials,
             PathBuf::from("/test/credentials")
         );
     }
@@ -309,21 +336,22 @@ mod tests {
     fn test_cache_options_disabled() {
         let cache_options = CacheOptions {
             enabled: false,
-            credentials_path: PathBuf::from("/disabled/cache"),
+            cache_type: CacheType::Nats,
+            credentials: PathBuf::from("/disabled/cache"),
+            db_name: Some("custom_db".to_string()),
         };
 
         assert!(!cache_options.enabled);
-        assert_eq!(
-            cache_options.credentials_path,
-            PathBuf::from("/disabled/cache")
-        );
+        assert_eq!(cache_options.credentials, PathBuf::from("/disabled/cache"));
     }
 
     #[test]
     fn test_cache_options_serialization() {
         let cache_options = CacheOptions {
             enabled: true,
-            credentials_path: PathBuf::from("/serialize/credentials"),
+            cache_type: CacheType::Nats,
+            credentials: PathBuf::from("/serialize/credentials"),
+            db_name: None,
         };
 
         let serialized = serde_json::to_string(&cache_options).unwrap();

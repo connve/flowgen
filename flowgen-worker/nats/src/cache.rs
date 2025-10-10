@@ -134,7 +134,7 @@ impl flowgen_core::cache::Cache for Cache {
 #[derive(Default)]
 pub struct CacheBuilder {
     /// Optional path to NATS credentials.
-    credentials_path: Option<PathBuf>,
+    credentials: Option<PathBuf>,
 }
 
 impl CacheBuilder {
@@ -150,9 +150,9 @@ impl CacheBuilder {
     /// Used for NATS client authentication.
     ///
     /// # Arguments
-    /// * `credentials_path` - Path to the credentials file.
-    pub fn credentials_path(mut self, credentials_path: PathBuf) -> Self {
-        self.credentials_path = Some(credentials_path);
+    /// * `path` - Path to the credentials file.
+    pub fn credentials(mut self, path: PathBuf) -> Self {
+        self.credentials = Some(path);
         self
     }
 
@@ -162,10 +162,10 @@ impl CacheBuilder {
     ///
     /// # Returns
     /// * `Ok(Cache)` on success.
-    /// * `Err(Error::MissingRequiredAttribute)` if `credentials_path` is missing.
+    /// * `Err(Error::MissingRequiredAttribute)` if `credentials` is missing.
     pub fn build(self) -> Result<Cache, Error> {
         let creds_path = self
-            .credentials_path
+            .credentials
             .ok_or_else(|| Error::MissingRequiredAttribute("credentials".to_string()))?;
 
         Ok(Cache {
@@ -183,14 +183,14 @@ mod tests {
     #[test]
     fn test_cache_builder_new() {
         let builder = CacheBuilder::new();
-        assert!(builder.credentials_path.is_none());
+        assert!(builder.credentials.is_none());
     }
 
     #[test]
     fn test_cache_builder_credentials_path() {
         let path = PathBuf::from("/path/to/creds.jwt");
-        let builder = CacheBuilder::new().credentials_path(path.clone());
-        assert_eq!(builder.credentials_path, Some(path));
+        let builder = CacheBuilder::new().credentials(path.clone());
+        assert_eq!(builder.credentials, Some(path));
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_cache_builder_build_success() {
         let path = PathBuf::from("/valid/path/creds.jwt");
-        let result = CacheBuilder::new().credentials_path(path.clone()).build();
+        let result = CacheBuilder::new().credentials(path.clone()).build();
 
         assert!(result.is_ok());
         let cache = result.unwrap();
@@ -217,7 +217,7 @@ mod tests {
     fn test_cache_builder_chain() {
         let path = PathBuf::from("/chain/test/creds.jwt");
         let cache = CacheBuilder::new()
-            .credentials_path(path.clone())
+            .credentials(path.clone())
             .build()
             .unwrap();
 
