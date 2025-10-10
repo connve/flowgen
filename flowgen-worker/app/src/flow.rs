@@ -5,7 +5,7 @@
 //! propagation, and resource sharing between tasks.
 
 use crate::config::{FlowConfig, Task};
-use flowgen_core::{cache::Cache, event::Event, task::runner::Runner};
+use flowgen_core::{event::Event, task::runner::Runner};
 use std::sync::Arc;
 use tokio::{
     sync::broadcast::{Receiver, Sender},
@@ -73,9 +73,9 @@ pub struct Flow {
     /// Shared HTTP server for webhook tasks.
     http_server: Arc<flowgen_http::server::HttpServer>,
     /// Optional host client for coordination.
-    host: Option<Arc<flowgen_core::task::context::Host>>,
+    host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Optional shared cache for task operations.
-    cache: Option<Arc<dyn Cache>>,
+    cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
 }
 
 impl Flow {
@@ -92,7 +92,7 @@ impl Flow {
         // Create task manager with host if available.
         let mut task_manager = flowgen_core::task::manager::TaskManagerBuilder::new();
         if let Some(ref host) = self.host {
-            task_manager = task_manager.host(host.client.clone());
+            task_manager = task_manager.host(host.clone());
         }
         let task_manager = Arc::new(task_manager.build().start().await);
 
@@ -441,9 +441,9 @@ pub struct FlowBuilder {
     /// Optional shared HTTP server instance.
     http_server: Option<Arc<flowgen_http::server::HttpServer>>,
     /// Optional host client for coordination.
-    host: Option<Arc<flowgen_core::task::context::Host>>,
+    host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Optional shared cache instance.
-    cache: Option<Arc<dyn Cache>>,
+    cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
 }
 
 impl FlowBuilder {
@@ -465,13 +465,13 @@ impl FlowBuilder {
     }
 
     /// Sets the host client for coordination.
-    pub fn host(mut self, client: Option<Arc<flowgen_core::task::context::Host>>) -> Self {
+    pub fn host(mut self, client: Option<Arc<dyn flowgen_core::host::Host>>) -> Self {
         self.host = client;
         self
     }
 
     /// Sets the shared cache instance.
-    pub fn cache(mut self, cache: Option<Arc<dyn Cache>>) -> Self {
+    pub fn cache(mut self, cache: Option<Arc<dyn flowgen_core::cache::Cache>>) -> Self {
         self.cache = cache;
         self
     }

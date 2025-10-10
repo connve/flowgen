@@ -160,9 +160,8 @@ impl flowgen_core::task::runner::Runner for App {
                         .connect()
                         .await
                     {
-                        Ok(connected_host) => Some(Arc::new(flowgen_core::task::context::Host {
-                            client: std::sync::Arc::new(connected_host),
-                        })),
+                        Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
+                            as std::sync::Arc<dyn flowgen_core::host::Host>),
                         Err(e) => {
                             warn!("{}. Continuing without host coordination.", e);
                             None
@@ -174,20 +173,20 @@ impl flowgen_core::task::runner::Runner for App {
             None
         };
 
-        // Initialize flows and register routes
+        // Initialize flows and register routes.
         let mut flow_tasks = Vec::new();
         for config in flow_configs {
             let http_server = Arc::clone(&http_server);
-            let host_client = host_client.as_ref().map(Arc::clone);
-            let cache_clone = cache
+            let host = host_client.as_ref().map(Arc::clone);
+            let cache = cache
                 .as_ref()
                 .map(|c| Arc::clone(c) as Arc<dyn flowgen_core::cache::Cache>);
 
             let flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
                 .http_server(http_server)
-                .host(host_client)
-                .cache(cache_clone);
+                .host(host)
+                .cache(cache);
 
             // Register routes and collect tasks
             let flow = match flow_builder.build() {

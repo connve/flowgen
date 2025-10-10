@@ -34,27 +34,12 @@ pub struct TaskContext {
     pub cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
 }
 
-/// Host client for distributed coordination.
-#[derive(Clone)]
-pub struct Host {
-    /// Arc-wrapped host implementation for shared access.
-    pub client: std::sync::Arc<dyn crate::host::Host>,
-}
-
 impl std::fmt::Debug for TaskContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskContext")
             .field("flow", &self.flow)
             .field("task_manager", &"<TaskManager>")
             .field("cache", &self.cache.as_ref().map(|_| "<Cache>"))
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for Host {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Host")
-            .field("client", &"<dyn Host>")
             .finish()
     }
 }

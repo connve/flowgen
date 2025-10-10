@@ -12,7 +12,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Trait for host coordination operations.
 #[async_trait]
-pub trait Host: Send + Sync {
+pub trait Host: Send + Sync + std::fmt::Debug {
     /// Creates a new lease with the given name.
     async fn create_lease(&self, name: &str) -> Result<(), Error>;
 
