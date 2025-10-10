@@ -1,0 +1,129 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  detect-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.detect-and-tag.outputs.tag }}
+      previous-tag: ${{ steps.detect-and-tag.outputs.previous-tag }}
+      version-changed: ${{ steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Detect and tag new version
+        id: detect-and-tag
+        uses: salsify/action-detect-and-tag-new-version@v2
+        with:
+          version-command: |
+            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
+
+  build-and-push-docker:
+    needs: detect-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Docker tags
+        id: tags
+        run: |
+          VERSION=${{ needs.detect-version.outputs.version }}
+          TAGS="ghcr.io/${{ github.repository }}:latest"
+
+          if [ "${{ needs.detect-version.outputs.version-changed }}" == "true" ]; then
+            TAGS="$TAGS,ghcr.io/${{ github.repository }}:$VERSION"
+
+            # Add major.minor tag (e.g., 0.1)
+            MAJOR_MINOR=$(echo $VERSION | cut -d. -f1,2)
+            TAGS="$TAGS,ghcr.io/${{ github.repository }}:$MAJOR_MINOR"
+
+            # Add major tag (e.g., 0)
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            TAGS="$TAGS,ghcr.io/${{ github.repository }}:$MAJOR"
+          fi
+
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: false
+          sbom: false
+          build-args: |
+            SERVICE_NAME=flowgen
+            COMMIT=${{ github.sha }}
+
+  create-release:
+    needs: [detect-version, build-and-push-docker]
+    if: needs.detect-version.outputs.version-changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }} --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.detect-version.outputs.tag }}
+          release_name: Release ${{ needs.detect-version.outputs.tag }}
+          body: |
+            ## Changes in ${{ needs.detect-version.outputs.tag }}
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Docker Image
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.detect-version.outputs.tag }}
+            ```
+          draft: false
+          prerelease: false

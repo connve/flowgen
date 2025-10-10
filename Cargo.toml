@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 authors = ["CONNVE"]
 license = "MIT"
 edition = "2021"
@@ -18,7 +18,7 @@ arrow = { version = "54" }
 arrow-json = { version = "54" }
 chrono = { version = "0.4.39" }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3" }
+tracing-subscriber = { version = "0.3.20" }
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = { version = "1.0.111" }
 tokio = { version = "1.35.1" }
@@ -41,3 +41,7 @@ glob = "0.3.1"
 apache-avro = "0.19.0"
 regex = "1.11.1"
 axum = "0.8.4"
+base64 = "0.22"
+async-trait = "0.1"
+kube = { version = "0.99", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.24", features = ["v1_32"] }

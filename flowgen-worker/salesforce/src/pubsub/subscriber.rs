@@ -10,11 +10,9 @@ use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest}
 use std::sync::Arc;
 use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
-use tracing::{event, Level};
+use tracing::{debug, error, info, warn, Instrument};
 
-const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce.pubsub.in";
-const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
-const DEFAULT_PUBSUB_PORT: &str = "443";
+const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
 const DEFAULT_NUM_REQUESTED: i32 = 1000;
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
@@ -51,6 +49,12 @@ pub enum Error {
     /// JSON serialization or deserialization error.
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+    /// Host coordination error.
+    #[error(transparent)]
+    Host(#[from] flowgen_core::host::Error),
+    /// Task manager error.
+    #[error(transparent)]
+    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -128,8 +132,7 @@ impl<T: Cache> EventHandler<T> {
                     fetch_request.replay_preset = 2;
                 }
                 Err(_) => {
-                    event!(
-                        Level::WARN,
+                    warn!(
                         "No cache entry found for key: {:?}",
                         &durable_consumer_opts.name
                     );
@@ -183,11 +186,8 @@ impl<T: Cache> EventHandler<T> {
                             } else {
                                 format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
                             };
-                            let subject = generate_subject(
-                                self.config.label.as_deref(),
-                                &base_subject,
-                                SubjectSuffix::Id(&event.id),
-                            );
+                            let subject =
+                                generate_subject(None, &base_subject, SubjectSuffix::Id(&event.id));
 
                             // Build and send event.
                             let e = EventBuilder::new()
@@ -198,7 +198,7 @@ impl<T: Cache> EventHandler<T> {
                                 .build()
                                 .map_err(Error::Event)?;
 
-                            event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+                            info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
                             self.tx.send(e)?;
                         }
                     }
@@ -227,6 +227,8 @@ pub struct Subscriber<T: Cache> {
     current_task_id: usize,
     /// Cache for replay IDs and schemas
     cache: Arc<T>,
+    /// Task execution context providing metadata and runtime configuration
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
@@ -236,11 +238,30 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
     ///
     /// Establishes Salesforce connection, authenticates, and spawns a
     /// TopicListener task for each configured topic.
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
+        // Register task with task manager.
+        let task_id = format!(
+            "{}.{}.{}",
+            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
+        );
+        let mut task_manager_rx = self
+            .task_context
+            .task_manager
+            .register(
+                task_id,
+                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
+            )
+            .await?;
+
         // Determine Pub/Sub endpoint
         let endpoint = match &self.config.endpoint {
             Some(endpoint) => endpoint,
-            None => &format!("{DEFAULT_PUBSUB_URL}:{DEFAULT_PUBSUB_PORT}"),
+            None => &format!(
+                "{}:{}",
+                super::config::DEFAULT_PUBSUB_URL,
+                super::config::DEFAULT_PUBSUB_PORT
+            ),
         };
 
         // Create gRPC service connection
@@ -282,14 +303,36 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Subscriber<T> {
             pubsub,
         };
 
-        // Spawn event handler.
-        tokio::spawn(async move {
-            if let Err(err) = event_handler.handle().await {
-                event!(Level::ERROR, "{}", err);
+        // Spawn event handler task and wait for completion or leadership loss.
+        let mut handler_task = tokio::spawn(
+            async move {
+                if let Err(err) = event_handler.handle().await {
+                    error!("{}", err);
+                }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
 
-        Ok(())
+        // Wait for leadership changes or handler completion.
+        loop {
+            tokio::select! {
+                biased;
+
+                // Check for leadership changes.
+                Some(status) = task_manager_rx.recv() => {
+                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
+                        debug!("Lost leadership for task: {}", self.config.name);
+                        handler_task.abort();
+                        return Ok(());
+                    }
+                }
+
+                // Wait for handler to complete.
+                result = &mut handler_task => {
+                    return result.map_err(Error::TaskJoin);
+                }
+            }
+        }
     }
 }
 
@@ -304,6 +347,8 @@ pub struct SubscriberBuilder<T: Cache> {
     current_task_id: usize,
     /// Cache instance
     cache: Option<Arc<T>>,
+    /// Task execution context providing metadata and runtime configuration
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl<T: Cache> SubscriberBuilder<T>
@@ -341,6 +386,15 @@ where
         self
     }
 
+    /// Sets the task execution context.
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     /// Builds the Subscriber instance.
     pub async fn build(self) -> Result<Subscriber<T>, Error> {
         Ok(Subscriber {
@@ -354,6 +408,9 @@ where
                 .cache
                 .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -363,7 +420,26 @@ mod tests {
     use super::*;
     use crate::pubsub::config;
     use flowgen_core::cache::Cache;
+    use serde_json::{Map, Value};
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Clone Test".to_string()),
+        );
+        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .build()
+                .unwrap(),
+        )
+    }
 
     // Simple mock cache implementation for tests
     #[derive(Debug, Default)]
@@ -403,7 +479,7 @@ mod tests {
     #[test]
     fn test_subscriber_builder_config() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test_subscriber".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -459,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -487,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_cache() {
         let config = Arc::new(config::Subscriber {
-            label: Some("test".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
@@ -515,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(config::Subscriber {
-            label: Some("complete_subscriber".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "complete_creds".to_string(),
             topic: config::Topic {
                 name: "/data/AccountChangeEvent".to_string(),
@@ -537,6 +613,7 @@ mod tests {
             .sender(tx)
             .cache(cache)
             .current_task_id(42)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -548,13 +625,5 @@ mod tests {
             subscriber.config.endpoint,
             Some("api.pubsub.salesforce.com:7443".to_string())
         );
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce.pubsub.in");
-        assert_eq!(DEFAULT_PUBSUB_URL, "https://api.pubsub.salesforce.com");
-        assert_eq!(DEFAULT_PUBSUB_PORT, "443");
-        assert_eq!(DEFAULT_NUM_REQUESTED, 1000);
     }
 }

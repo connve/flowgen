@@ -1,5 +1,5 @@
 # Get service name as build arg.
-FROM rust AS builder
+FROM rust:1.85-bookworm AS builder
 ARG SERVICE_NAME
 
 # Set the working directory in the container to /app.
@@ -14,7 +14,7 @@ RUN apt-get -qq install pkg-config libssl-dev protobuf-compiler
 RUN cargo build --release --bin $SERVICE_NAME
 RUN cp ./target/release/$SERVICE_NAME /bin/$SERVICE_NAME
 
-FROM gcr.io/distroless/cc AS final
+FROM gcr.io/distroless/cc-debian12:latest AS final
 ARG SERVICE_NAME
 
 COPY --from=builder /bin/$SERVICE_NAME /bin/

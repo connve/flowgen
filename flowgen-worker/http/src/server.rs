@@ -6,10 +6,10 @@
 use axum::{routing::MethodRouter, Router};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{event, Level};
+use tracing::{info, warn};
 
 /// Default HTTP port for the server.
-const DEFAULT_HTTP_PORT: &str = "3000";
+const DEFAULT_HTTP_PORT: u16 = 3000;
 
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
@@ -44,31 +44,29 @@ impl HttpServer {
     /// Register a route with the HTTP Server.
     pub async fn register_route(&self, path: String, method_router: MethodRouter) {
         let mut routes = self.routes.write().await;
-        event!(Level::INFO, "Registering HTTP route: {}", path);
+        info!("Registering HTTP route: {}", path);
         routes.insert(path, method_router);
     }
 
     /// Start the HTTP Server with all registered routes.
-    pub async fn start_server(&self) -> Result<(), Error> {
+    pub async fn start_server(&self, port: Option<u16>) -> Result<(), Error> {
         let mut server_started = self.server_started.lock().await;
         if *server_started {
-            event!(Level::WARN, "HTTP Server already started");
+            warn!("HTTP Server already started");
             return Ok(());
         }
 
         let routes = self.routes.read().await;
-        let mut router = Router::new();
+        let mut api_router = Router::new();
 
         for (path, method_router) in routes.iter() {
-            router = router.route(path, method_router.clone());
+            api_router = api_router.route(path, method_router.clone());
         }
-        let listener =
-            tokio::net::TcpListener::bind(format!("0.0.0.0:{DEFAULT_HTTP_PORT}")).await?;
-        event!(
-            Level::INFO,
-            "Starting HTTP Server on port {}",
-            DEFAULT_HTTP_PORT
-        );
+
+        let router = Router::new().nest("/api/flowgen", api_router);
+        let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}")).await?;
+        info!("Starting HTTP Server on port: {}", server_port);
 
         *server_started = true;
         axum::serve(listener, router).await.map_err(Error::IO)
@@ -147,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_HTTP_PORT, "3000");
+        assert_eq!(DEFAULT_HTTP_PORT, 3000);
     }
 
     #[tokio::test]

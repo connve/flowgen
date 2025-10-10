@@ -3,18 +3,20 @@
 //! Processes incoming HTTP webhook requests, extracting headers and payload
 //! data and converting them into events for further processing in the pipeline.
 
+use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 use tokio::sync::broadcast::Sender;
-use tracing::{event, Level};
+use tracing::{error, info};
 
 /// Default subject for webhook events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "http.webhook.in";
+const DEFAULT_MESSAGE_SUBJECT: &str = "http_webhook";
 /// JSON key for HTTP headers in webhook events.
 const DEFAULT_HEADERS_KEY: &str = "headers";
 /// JSON key for HTTP payload in webhook events.
@@ -36,12 +38,24 @@ pub enum Error {
     /// Axum HTTP processing failed.
     #[error(transparent)]
     Axum(#[from] axum::Error),
+    /// Authentication failed - no credentials provided.
+    #[error("No authorization header provided")]
+    NoCredentials,
+    /// Authentication failed - invalid credentials.
+    #[error("Invalid authorization credentials")]
+    InvalidCredentials,
+    /// Authentication failed - malformed authorization header.
+    #[error("Malformed authorization header")]
+    MalformedCredentials,
     /// Input/output operation failed.
     #[error(transparent)]
     IO(#[from] std::io::Error),
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Task manager error.
+    #[error(transparent)]
+    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 impl IntoResponse for Error {
@@ -50,7 +64,7 @@ impl IntoResponse for Error {
             Error::SerdeJson(_) | Error::Axum(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        event!(Level::ERROR, "webhook error: {}", self);
+        error!("webhook error: {}", self);
         status.into_response()
     }
 }
@@ -64,14 +78,79 @@ struct EventHandler {
     tx: Sender<Event>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Pre-loaded authentication credentials.
+    credentials: Option<Credentials>,
 }
 
 impl EventHandler {
+    /// Validate authentication credentials against incoming request headers.
+    fn validate_authentication(&self, headers: &HeaderMap) -> Result<(), Error> {
+        let credentials = match &self.credentials {
+            Some(creds) => creds,
+            None => return Ok(()),
+        };
+
+        let auth_header = match headers.get("authorization") {
+            Some(header) => header,
+            None => return Err(Error::NoCredentials),
+        };
+
+        let auth_value = match auth_header.to_str() {
+            Ok(value) => value,
+            Err(_) => return Err(Error::MalformedCredentials),
+        };
+
+        // Check bearer authentication.
+        if let Some(expected_token) = &credentials.bearer_auth {
+            match auth_value.strip_prefix("Bearer ") {
+                Some(token) if token == expected_token => return Ok(()),
+                Some(_) => return Err(Error::InvalidCredentials),
+                None => {}
+            }
+        }
+
+        // Check basic authentication.
+        if let Some(basic_auth) = &credentials.basic_auth {
+            if let Some(encoded) = auth_value.strip_prefix("Basic ") {
+                match STANDARD.decode(encoded) {
+                    Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                        Ok(decoded_str) => {
+                            let expected =
+                                format!("{}:{}", basic_auth.username, basic_auth.password);
+                            return match decoded_str == expected {
+                                true => Ok(()),
+                                false => Err(Error::InvalidCredentials),
+                            };
+                        }
+                        Err(_) => return Err(Error::MalformedCredentials),
+                    },
+                    Err(_) => return Err(Error::MalformedCredentials),
+                }
+            }
+        }
+        Err(Error::InvalidCredentials)
+    }
+
     async fn handle(
         &self,
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
+        let subject = generate_subject(
+            Some(&self.config.name),
+            DEFAULT_MESSAGE_SUBJECT,
+            SubjectSuffix::Timestamp,
+        );
+
+        // Validate the authentication and return error if request is not authorized.
+        if let Err(auth_error) = self.validate_authentication(&headers) {
+            error!(
+                "Webhook authentication failed for {}: {}",
+                subject, auth_error
+            );
+            return Ok(StatusCode::UNAUTHORIZED);
+        }
+
         let body = axum::body::to_bytes(request.into_body(), usize::MAX).await?;
 
         let json_body = match body.is_empty() {
@@ -79,12 +158,18 @@ impl EventHandler {
             false => serde_json::from_slice(&body)?,
         };
 
+        // Only store headers that are specified in the configuration.
         let mut headers_map = Map::new();
-        for (key, value) in headers.iter() {
-            headers_map.insert(
-                key.as_str().to_string(),
-                Value::String(value.to_str().unwrap_or("").to_string()),
-            );
+        if let Some(configured_headers) = &self.config.headers {
+            for (key, value) in headers.iter() {
+                let header_name = key.as_str();
+                if configured_headers.contains_key(header_name) {
+                    headers_map.insert(
+                        header_name.to_string(),
+                        Value::String(value.to_str().unwrap_or("").to_string()),
+                    );
+                }
+            }
         }
 
         let data = json!({
@@ -92,19 +177,13 @@ impl EventHandler {
             DEFAULT_PAYLOAD_KEY: json_body
         });
 
-        let subject = generate_subject(
-            self.config.label.as_deref(),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
-
         let e = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(subject)
             .current_task_id(self.current_task_id)
             .build()?;
 
-        event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+        info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
         self.tx.send(e)?;
         Ok(StatusCode::OK)
     }
@@ -121,16 +200,41 @@ pub struct Processor {
     current_task_id: usize,
     /// Shared HTTP server instance.
     http_server: Arc<super::server::HttpServer>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
+        // Register task with task manager.
+        let task_id = format!(
+            "{}.{}.{}",
+            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
+        );
+        self.task_context
+            .task_manager
+            .register(task_id, None)
+            .await?;
+
         let config = Arc::clone(&self.config);
+
+        // Load credentials at task creation time
+        let credentials = match &config.credentials {
+            Some(path) => {
+                let content = fs::read_to_string(path)?;
+                Some(serde_json::from_str(&content)?)
+            }
+            None => None,
+        };
+
         let event_handler = EventHandler {
             config: self.config,
             tx: self.tx,
             current_task_id: self.current_task_id,
+            credentials,
         };
 
         let handler = move |headers: HeaderMap, request: Request<Body>| async move {
@@ -146,8 +250,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             crate::config::Method::HEAD => MethodRouter::new().head(handler),
         };
 
+        let webhook_path = format!("/workers{}", config.endpoint);
         self.http_server
-            .register_route(config.endpoint.clone(), method_router)
+            .register_route(webhook_path, method_router)
             .await;
 
         Ok(())
@@ -165,6 +270,8 @@ pub struct ProcessorBuilder {
     current_task_id: usize,
     /// Optional HTTP server instance.
     http_server: Option<Arc<super::server::HttpServer>>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl ProcessorBuilder {
@@ -194,6 +301,14 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -206,6 +321,9 @@ impl ProcessorBuilder {
             http_server: self
                 .http_server
                 .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -213,8 +331,27 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Map, Value};
     use std::collections::HashMap;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Clone Test".to_string()),
+        );
+        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_error_from_serde_json_error() {
@@ -249,6 +386,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
         assert!(builder.http_server.is_none());
+        assert!(builder.task_context.is_none());
     }
 
     #[tokio::test]
@@ -258,12 +396,13 @@ mod tests {
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
         assert!(builder.http_server.is_none());
+        assert!(builder.task_context.is_none());
     }
 
     #[tokio::test]
     async fn test_processor_builder_config() {
         let config = Arc::new(crate::config::Processor {
-            label: Some("webhook_test".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/webhook".to_string(),
             method: crate::config::Method::POST,
             payload: None,
@@ -316,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder_build_missing_sender() {
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_webhook".to_string(),
             endpoint: "/test".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -342,7 +481,7 @@ mod tests {
     async fn test_processor_builder_build_missing_http_server() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: None,
+            name: "test_webhook".to_string(),
             endpoint: "/test".to_string(),
             method: crate::config::Method::GET,
             payload: None,
@@ -367,7 +506,7 @@ mod tests {
     async fn test_processor_builder_build_success() {
         let (tx, _rx) = broadcast::channel(100);
         let config = Arc::new(crate::config::Processor {
-            label: Some("success_webhook".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/success".to_string(),
             method: crate::config::Method::POST,
             payload: Some(crate::config::Payload {
@@ -389,6 +528,7 @@ mod tests {
             .sender(tx)
             .http_server(server.clone())
             .current_task_id(5)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -402,7 +542,7 @@ mod tests {
     async fn test_processor_builder_chain() {
         let (tx, _rx) = broadcast::channel(50);
         let config = Arc::new(crate::config::Processor {
-            label: Some("chain_webhook".to_string()),
+            name: "test_webhook".to_string(),
             endpoint: "/chain".to_string(),
             method: crate::config::Method::PUT,
             payload: None,
@@ -416,6 +556,7 @@ mod tests {
             .sender(tx)
             .http_server(server)
             .current_task_id(10)
+            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
@@ -426,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http.webhook.in");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http_webhook");
         assert_eq!(DEFAULT_HEADERS_KEY, "headers");
         assert_eq!(DEFAULT_PAYLOAD_KEY, "payload");
     }
@@ -440,6 +581,61 @@ mod tests {
             config,
             tx,
             current_task_id: 0,
+            credentials: None,
         };
+    }
+
+    #[test]
+    fn test_event_handler_with_configured_headers() {
+        let mut configured_headers = HashMap::new();
+        configured_headers.insert("x-custom-header".to_string(), "".to_string());
+        configured_headers.insert("x-request-id".to_string(), "".to_string());
+
+        let config = Arc::new(crate::config::Processor {
+            name: "test_webhook".to_string(),
+            endpoint: "/webhook".to_string(),
+            method: crate::config::Method::POST,
+            payload: None,
+            headers: Some(configured_headers),
+            credentials: None,
+        });
+
+        let (tx, _rx) = broadcast::channel(100);
+
+        let handler = EventHandler {
+            config,
+            tx,
+            current_task_id: 1,
+            credentials: None,
+        };
+
+        assert!(handler.config.headers.is_some());
+        let headers = handler.config.headers.as_ref().unwrap();
+        assert_eq!(headers.len(), 2);
+        assert!(headers.contains_key("x-custom-header"));
+        assert!(headers.contains_key("x-request-id"));
+    }
+
+    #[test]
+    fn test_event_handler_without_configured_headers() {
+        let config = Arc::new(crate::config::Processor {
+            name: "test_webhook".to_string(),
+            endpoint: "/webhook".to_string(),
+            method: crate::config::Method::POST,
+            payload: None,
+            headers: None,
+            credentials: None,
+        });
+
+        let (tx, _rx) = broadcast::channel(100);
+
+        let handler = EventHandler {
+            config,
+            tx,
+            current_task_id: 1,
+            credentials: None,
+        };
+
+        assert!(handler.config.headers.is_none());
     }
 }

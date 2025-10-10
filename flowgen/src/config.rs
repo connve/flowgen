@@ -4,6 +4,7 @@
 //! flows. Supports deserialization from TOML files and environment variables.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::PathBuf;
 
 /// Top-level configuration for an individual flow.
@@ -18,6 +19,8 @@ pub struct FlowConfig {
 pub struct Flow {
     /// Unique name for this flow.
     pub name: String,
+    /// Optional label for logging.
+    pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
     pub tasks: Vec<Task>,
 }
@@ -31,13 +34,13 @@ pub struct Flow {
 #[allow(non_camel_case_types)]
 pub enum Task {
     /// Data conversion task.
-    convert(flowgen_core::task::convert::config::Processor),
+    convert(flowgen_core::convert::config::Processor),
     /// Object store reader task.
     object_store_reader(flowgen_object_store::config::Reader),
     /// Object store writer task.
     object_store_writer(flowgen_object_store::config::Writer),
     /// Data generation task.
-    generate(flowgen_core::task::generate::config::Subscriber),
+    generate(flowgen_core::generate::config::Subscriber),
     /// HTTP request task.
     http_request(flowgen_http::config::Processor),
     /// HTTP webhook handler task.
@@ -50,8 +53,6 @@ pub enum Task {
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     /// Salesforce Pub/Sub publisher task.
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
-    salesforce_bulkapi_job_creator(flowgen_salesforce::bulkapi::config::JobCreator),
-    salesforce_bulkapi_job_retriever(flowgen_salesforce::bulkapi::config::JobRetriever),
 }
 
 /// Main application configuration.
@@ -59,8 +60,12 @@ pub enum Task {
 pub struct AppConfig {
     /// Optional cache configuration.
     pub cache: Option<CacheOptions>,
-    /// Flow discovery and loading options.
+    /// Flow discovery options.
     pub flows: FlowOptions,
+    /// Optional HTTP server configuration.
+    pub http: Option<HttpOptions>,
+    /// Optional host coordination configuration.
+    pub host: Option<HostOptions>,
 }
 
 /// Cache configuration options.
@@ -79,6 +84,30 @@ pub struct FlowOptions {
     pub dir: Option<PathBuf>,
 }
 
+/// HTTP server configuration options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct HttpOptions {
+    /// Optional HTTP server port number (defaults to 3000).
+    pub port: Option<u16>,
+}
+
+/// Host type for coordination.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostType {
+    /// Kubernetes host.
+    K8s,
+}
+
+/// Host coordination configuration options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct HostOptions {
+    /// Host type for coordination.
+    pub host_type: HostType,
+    /// Optional namespace for Kubernetes resources.
+    pub namespace: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,19 +119,25 @@ mod tests {
         let flow_config = FlowConfig {
             flow: Flow {
                 name: "test_flow".to_string(),
+                labels: None,
                 tasks: vec![],
             },
         };
 
         assert_eq!(flow_config.flow.name, "test_flow");
+        assert!(flow_config.flow.labels.is_none());
         assert!(flow_config.flow.tasks.is_empty());
     }
 
     #[test]
     fn test_flow_config_serialization() {
+        let mut labels = Map::new();
+        labels.insert("environment".to_string(), Value::String("test".to_string()));
+
         let flow_config = FlowConfig {
             flow: Flow {
                 name: "serialize_test".to_string(),
+                labels: Some(labels),
                 tasks: vec![],
             },
         };
@@ -114,34 +149,48 @@ mod tests {
 
     #[test]
     fn test_flow_creation() {
+        let mut labels = Map::new();
+        labels.insert("type".to_string(), Value::String("test".to_string()));
+
         let flow = Flow {
             name: "test_flow".to_string(),
+            labels: Some(labels.clone()),
             tasks: vec![],
         };
 
         assert_eq!(flow.name, "test_flow");
+        assert_eq!(flow.labels, Some(labels));
         assert!(flow.tasks.is_empty());
     }
 
     #[test]
     fn test_flow_with_tasks() {
-        let convert_config = flowgen_core::task::convert::config::Processor::default();
+        let convert_config = flowgen_core::convert::config::Processor::default();
         let task = Task::convert(convert_config);
 
         let flow = Flow {
             name: "flow_with_tasks".to_string(),
+            labels: None,
             tasks: vec![task],
         };
 
         assert_eq!(flow.name, "flow_with_tasks");
+        assert!(flow.labels.is_none());
         assert_eq!(flow.tasks.len(), 1);
         assert!(matches!(flow.tasks[0], Task::convert(_)));
     }
 
     #[test]
     fn test_flow_serialization() {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Serializable Flow".to_string()),
+        );
+
         let flow = Flow {
             name: "serialize_flow".to_string(),
+            labels: Some(labels),
             tasks: vec![],
         };
 
@@ -154,6 +203,7 @@ mod tests {
     fn test_flow_clone() {
         let flow = Flow {
             name: "clone_test".to_string(),
+            labels: None,
             tasks: vec![],
         };
 
@@ -163,9 +213,8 @@ mod tests {
 
     #[test]
     fn test_task_variants() {
-        let convert_task = Task::convert(flowgen_core::task::convert::config::Processor::default());
-        let generate_task =
-            Task::generate(flowgen_core::task::generate::config::Subscriber::default());
+        let convert_task = Task::convert(flowgen_core::convert::config::Processor::default());
+        let generate_task = Task::generate(flowgen_core::generate::config::Subscriber::default());
 
         assert!(matches!(convert_task, Task::convert(_)));
         assert!(matches!(generate_task, Task::generate(_)));
@@ -181,11 +230,15 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/test/flows/*")),
             },
+            http: None,
+            host: None,
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.dir.is_some());
+        assert!(app_config.http.is_none());
+        assert!(app_config.host.is_none());
     }
 
     #[test]
@@ -195,6 +248,8 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/flows/*")),
             },
+            http: None,
+            host: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -211,6 +266,8 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/serialize/flows/*")),
             },
+            http: None,
+            host: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -226,6 +283,8 @@ mod tests {
                 credentials_path: PathBuf::from("/clone/cache"),
             }),
             flows: FlowOptions { dir: None },
+            http: None,
+            host: None,
         };
 
         let cloned = app_config.clone();
@@ -305,12 +364,20 @@ mod tests {
 
     #[test]
     fn test_complex_flow_config() {
-        let convert_config = flowgen_core::task::convert::config::Processor::default();
-        let generate_config = flowgen_core::task::generate::config::Subscriber::default();
+        let convert_config = flowgen_core::convert::config::Processor::default();
+        let generate_config = flowgen_core::generate::config::Subscriber::default();
+
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Complex Multi-Task Flow".to_string()),
+        );
+        labels.insert("complexity".to_string(), Value::String("high".to_string()));
 
         let flow_config = FlowConfig {
             flow: Flow {
                 name: "complex_flow".to_string(),
+                labels: Some(labels.clone()),
                 tasks: vec![
                     Task::convert(convert_config),
                     Task::generate(generate_config),
@@ -319,8 +386,36 @@ mod tests {
         };
 
         assert_eq!(flow_config.flow.name, "complex_flow");
+        assert_eq!(flow_config.flow.labels, Some(labels));
         assert_eq!(flow_config.flow.tasks.len(), 2);
         assert!(matches!(flow_config.flow.tasks[0], Task::convert(_)));
         assert!(matches!(flow_config.flow.tasks[1], Task::generate(_)));
+    }
+
+    #[test]
+    fn test_http_options_creation() {
+        let http_options = HttpOptions { port: Some(8080) };
+
+        assert_eq!(http_options.port, Some(8080));
+    }
+
+    #[test]
+    fn test_http_options_without_port() {
+        let http_options = HttpOptions { port: None };
+
+        assert!(http_options.port.is_none());
+    }
+
+    #[test]
+    fn test_app_config_with_http_options() {
+        let app_config = AppConfig {
+            cache: None,
+            flows: FlowOptions { dir: None },
+            http: Some(HttpOptions { port: Some(8080) }),
+            host: None,
+        };
+
+        assert!(app_config.http.is_some());
+        assert_eq!(app_config.http.as_ref().unwrap().port, Some(8080));
     }
 }

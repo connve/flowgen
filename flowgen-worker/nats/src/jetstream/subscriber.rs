@@ -7,7 +7,10 @@ use flowgen_core::{
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
-use tracing::{event, Level};
+use tracing::{debug, info};
+
+/// Default subject prefix for NATS subscriber.
+const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_subscriber";
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -55,6 +58,12 @@ pub enum Error {
     /// General subscriber error for wrapped external errors.
     #[error("Other error with subscriber")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Host coordination error.
+    #[error(transparent)]
+    Host(#[from] flowgen_core::host::Error),
+    /// Task manager error.
+    #[error(transparent)]
+    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// NATS JetStream subscriber that consumes messages and converts them to flowgen events.
@@ -66,11 +75,29 @@ pub struct Subscriber {
     tx: Sender<Event>,
     /// Current task identifier for event tagging.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl flowgen_core::task::runner::Runner for Subscriber {
     type Error = Error;
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(self) -> Result<(), Error> {
+        // Register task with task manager.
+        let task_id = format!(
+            "{}.{}.{}",
+            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
+        );
+        let mut task_manager_rx = self
+            .task_context
+            .task_manager
+            .register(
+                task_id,
+                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
+            )
+            .await?;
+
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials.clone())
             .build()?
@@ -105,21 +132,38 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             loop {
-                if let Some(delay_secs) = self.config.delay_secs {
-                    time::sleep(Duration::from_secs(delay_secs)).await
-                }
+                tokio::select! {
+                    biased;
 
-                let mut stream = consumer.messages().await?.take(self.config.batch_size);
-
-                while let Some(message) = stream.next().await {
-                    if let Ok(message) = message {
-                        let mut e = message.to_event()?;
-                        message.ack().await.map_err(Error::Other)?;
-                        e.current_task_id = Some(self.current_task_id);
-
-                        event!(Level::INFO, "{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-                        self.tx.send(e)?;
+                    // Check for leadership changes.
+                    Some(status) = task_manager_rx.recv() => {
+                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
+                            debug!("Lost leadership for task: {}", self.config.name);
+                            return Ok(());
+                        }
                     }
+
+                    // Process messages.
+                    _ = async {
+                        if let Some(delay_secs) = self.config.delay_secs {
+                            time::sleep(Duration::from_secs(delay_secs)).await
+                        }
+
+                        let stream = consumer.messages().await.ok()?;
+                        let mut batch = stream.take(self.config.batch_size);
+
+                        while let Some(message) = batch.next().await {
+                            if let Ok(message) = message {
+                                let mut e = message.to_event().ok()?;
+                                message.ack().await.ok()?;
+                                e.current_task_id = Some(self.current_task_id);
+
+                                info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+                                self.tx.send(e).ok()?;
+                            }
+                        }
+                        Some(())
+                    } => {}
                 }
             }
         }
@@ -136,6 +180,8 @@ pub struct SubscriberBuilder {
     tx: Option<Sender<Event>>,
     /// Current task identifier for event processing.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
 impl SubscriberBuilder {
@@ -160,6 +206,14 @@ impl SubscriberBuilder {
         self
     }
 
+    pub fn task_context(
+        mut self,
+        task_context: Arc<flowgen_core::task::context::TaskContext>,
+    ) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
     pub async fn build(self) -> Result<Subscriber, Error> {
         Ok(Subscriber {
             config: self
@@ -169,6 +223,9 @@ impl SubscriberBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
     }
 }
@@ -176,8 +233,27 @@ impl SubscriberBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
+
+    /// Creates a mock TaskContext for testing.
+    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Clone Test".to_string()),
+        );
+        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .build()
+                .unwrap(),
+        )
+    }
 
     #[test]
     fn test_subscriber_builder_new() {
@@ -198,6 +274,7 @@ mod tests {
     #[test]
     fn test_subscriber_builder_config() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
@@ -241,6 +318,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_missing_sender() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
@@ -264,6 +342,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject.*".to_string(),
@@ -277,6 +356,7 @@ mod tests {
             .config(config.clone())
             .sender(tx)
             .current_task_id(5)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -289,6 +369,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_chain() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             subject: "chain.subject".to_string(),
@@ -302,6 +383,7 @@ mod tests {
             .config(config.clone())
             .sender(tx)
             .current_task_id(10)
+            .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
@@ -313,6 +395,7 @@ mod tests {
     #[test]
     fn test_subscriber_structure() {
         let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
             credentials: PathBuf::from("/test/creds.jwt"),
             stream: "struct_test".to_string(),
             subject: "struct.test".to_string(),
@@ -326,6 +409,7 @@ mod tests {
             config: config.clone(),
             tx,
             current_task_id: 0,
+            task_context: create_mock_task_context(),
         };
 
         assert_eq!(subscriber.config, config);

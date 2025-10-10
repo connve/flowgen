@@ -66,9 +66,7 @@ impl flowgen_core::cache::Cache for Cache {
             .await
             .map_err(Error::ClientAuth)?;
 
-        let jetstream = client
-            .jetstream
-            .ok_or(Error::MissingJetStreamContext())?;
+        let jetstream = client.jetstream.ok_or(Error::MissingJetStreamContext())?;
 
         // Get or create KV store.
         let store = match jetstream.get_key_value(bucket).await {
@@ -189,16 +187,16 @@ mod tests {
     fn test_cache_builder_build_missing_credentials() {
         let result = CacheBuilder::new().build();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials"));
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials")
+        );
     }
 
     #[test]
     fn test_cache_builder_build_success() {
         let path = PathBuf::from("/valid/path/creds.jwt");
-        let result = CacheBuilder::new()
-            .credentials_path(path.clone())
-            .build();
-        
+        let result = CacheBuilder::new().credentials_path(path.clone()).build();
+
         assert!(result.is_ok());
         let cache = result.unwrap();
         assert_eq!(cache.credentials_path, path);
@@ -212,7 +210,7 @@ mod tests {
             .credentials_path(path.clone())
             .build()
             .unwrap();
-        
+
         assert_eq!(cache.credentials_path, path);
     }
 

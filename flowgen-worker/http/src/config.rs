@@ -11,8 +11,8 @@ use std::collections::HashMap;
 /// HTTP processor configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Processor {
-    /// Optional label for the processor.
-    pub label: Option<String>,
+    /// The unique name / identifier of the task.
+    pub name: String,
     /// Target endpoint URL for HTTP requests.
     pub endpoint: String,
     /// HTTP method to use for requests.
@@ -77,8 +77,8 @@ mod tests {
     #[test]
     fn test_processor_default() {
         let processor = Processor::default();
-        assert_eq!(processor.label, None);
-        assert_eq!(processor.endpoint, "");
+        assert_eq!(processor.name, String::new());
+        assert_eq!(processor.endpoint, String::new());
         assert_eq!(processor.method, Method::GET);
         assert_eq!(processor.payload, None);
         assert_eq!(processor.headers, None);
@@ -102,7 +102,7 @@ mod tests {
         };
 
         let processor = Processor {
-            label: Some("test_processor".to_string()),
+            name: "test_processor".to_string(),
             endpoint: "https://api.example.com/webhook".to_string(),
             method: Method::POST,
             payload: Some(payload),
@@ -110,7 +110,7 @@ mod tests {
             credentials: Some("/path/to/creds.json".to_string()),
         };
 
-        assert_eq!(processor.label, Some("test_processor".to_string()));
+        assert_eq!(processor.name, "test_processor".to_string());
         assert_eq!(processor.endpoint, "https://api.example.com/webhook");
         assert_eq!(processor.method, Method::POST);
         assert!(processor.payload.is_some());
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn test_processor_serialization() {
         let processor = Processor {
-            label: Some("serialize_test".to_string()),
+            name: "serialize_test".to_string(),
             endpoint: "https://test.api.com".to_string(),
             method: Method::PUT,
             payload: None,
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn test_processor_clone() {
         let processor = Processor {
-            label: Some("clone_test".to_string()),
+            name: "clone_test".to_string(),
             endpoint: "https://clone.test.com".to_string(),
             method: Method::DELETE,
             payload: None,
@@ -289,7 +289,7 @@ mod tests {
         headers.insert("X-Custom-Header".to_string(), "custom-value".to_string());
 
         let processor = Processor {
-            label: Some("complex_test".to_string()),
+            name: "complex_test".to_string(),
             endpoint: "https://complex.example.com/api/v1/endpoint".to_string(),
             method: Method::PATCH,
             payload: Some(payload),

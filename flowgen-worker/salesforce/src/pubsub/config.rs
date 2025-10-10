@@ -18,6 +18,12 @@
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+/// Default Salesforce Pub/Sub API URL.
+pub const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
+/// Default Salesforce Pub/Sub API port.
+pub const DEFAULT_PUBSUB_PORT: &str = "443";
+
 /// Configuration structure for Salesforce Pub/Sub subscriber operations.
 ///
 /// This structure defines all parameters needed to subscribe to Salesforce Pub/Sub topics,
@@ -82,8 +88,8 @@ use serde_json::{Map, Value};
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Subscriber {
-    /// Optional human-readable label for identifying this subscriber configuration.
-    pub label: Option<String>,
+    /// The unique name / identifier of the task.
+    pub name: String,
     /// Reference to credential store entry containing Salesforce authentication details.
     pub credentials: String,
     /// Topic configuration including name and subscription options.
@@ -232,8 +238,8 @@ pub struct Topic {
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Publisher {
-    /// Optional human-readable label for identifying this publisher configuration.
-    pub label: Option<String>,
+    /// The unique name / identifier of the task.
+    pub name: String,
     /// Reference to credential store entry containing Salesforce authentication details.
     pub credentials: String,
     /// Target topic name for publishing events (e.g., "/event/CustomEvent__e").
@@ -310,8 +316,8 @@ mod tests {
     #[test]
     fn test_subscriber_config_default() {
         let subscriber = Subscriber::default();
-        assert_eq!(subscriber.label, None);
-        assert_eq!(subscriber.credentials, "");
+        assert_eq!(subscriber.name, String::new());
+        assert_eq!(subscriber.credentials, String::new());
         assert_eq!(subscriber.topic, Topic::default());
         assert_eq!(subscriber.endpoint, None);
     }
@@ -319,7 +325,7 @@ mod tests {
     #[test]
     fn test_subscriber_config_serialization() {
         let subscriber = Subscriber {
-            label: Some("test_subscriber".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "test_creds".to_string(),
             topic: Topic {
                 name: "/event/Test__e".to_string(),
@@ -366,7 +372,7 @@ mod tests {
     #[test]
     fn test_publisher_config_default() {
         let publisher = Publisher::default();
-        assert_eq!(publisher.label, None);
+        assert_eq!(publisher.name, String::new());
         assert_eq!(publisher.credentials, "");
         assert_eq!(publisher.topic, "");
         assert!(publisher.payload.is_empty());
@@ -378,9 +384,9 @@ mod tests {
         let mut payload = Map::new();
         payload.insert("Order_ID__c".to_string(), json!("ORD-12345"));
         payload.insert("Status__c".to_string(), json!("Shipped"));
-        
+
         let publisher = Publisher {
-            label: Some("order_publisher".to_string()),
+            name: "order_publisher".to_string(),
             credentials: "sf_creds".to_string(),
             topic: "/event/Order_Status__e".to_string(),
             payload,
@@ -416,7 +422,7 @@ mod tests {
     #[test]
     fn test_config_clone() {
         let subscriber = Subscriber {
-            label: Some("clone_test".to_string()),
+            name: "test_subscriber".to_string(),
             credentials: "creds".to_string(),
             topic: Topic {
                 name: "/event/Clone__e".to_string(),

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Pre-commit hook to automatically format code and run clippy
+
+echo "Running cargo fmt..."
+cargo fmt --all
+
+# Add any formatted files back to the commit
+git diff --name-only --cached | grep '\.rs$' | xargs git add
+
+echo "Running cargo clippy..."
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Error: Clippy found issues. Please fix them before committing."
+    exit 1
+fi
+
+echo "Running cargo test..."
+cargo test --workspace
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Error: Tests failed. Please fix them before committing."
+    exit 1
+fi
+
+# Check if cargo-audit is installed
+if command -v cargo-audit >/dev/null 2>&1; then
+    echo "Running cargo audit..."
+    cargo audit
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "Error: Security vulnerabilities found. Please fix them before committing."
+        exit 1
+    fi
+else
+    echo "Warning: cargo-audit not installed. Skipping security audit."
+    echo "Install with: cargo install cargo-audit"
+fi
+
+exit 0

@@ -4,8 +4,7 @@ use flowgen::config::AppConfig;
 use flowgen_core::task::runner::Runner;
 use std::env;
 use std::process;
-use tracing::event;
-use tracing::Level;
+use tracing::error;
 
 /// Main entry point for the flowgen application.
 ///
@@ -18,11 +17,7 @@ async fn main() {
     let config_path = match env::var("CONFIG_PATH") {
         Ok(path) => path,
         Err(e) => {
-            event!(
-                Level::ERROR,
-                "environment variable CONFIG_PATH should be set: {}",
-                e
-            );
+            error!("Environment variable CONFIG_PATH should be set: {}", e);
             process::exit(1);
         }
     };
@@ -34,7 +29,7 @@ async fn main() {
     {
         Ok(config) => config,
         Err(e) => {
-            event!(Level::ERROR, "failed to build config: {}", e);
+            error!("Failed to build config: {}", e);
             process::exit(1);
         }
     };
@@ -42,13 +37,13 @@ async fn main() {
     let app_config = match config.try_deserialize::<AppConfig>() {
         Ok(config) => config,
         Err(e) => {
-            event!(Level::ERROR, "failed to deserialize app config: {}", e);
+            error!("Failed to deserialize app config: {}", e);
             process::exit(1);
         }
     };
     let app = App { config: app_config };
     if let Err(e) = app.run().await {
-        event!(Level::ERROR, "application failed to run: {}", e);
+        error!("Application failed to run: {}", e);
         process::exit(1);
     }
 }
