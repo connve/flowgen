@@ -1,0 +1,26 @@
+{
+    "flow": {
+        "name": "salesforce_pubsub_account_writer",
+        "tasks": [
+            {
+                "nats_jetstream_subscriber": {
+                    "name": "nats_account_jetstream_subscriber",
+                    "credentials": "/etc/nats/credentials.json",
+                    "stream": "eventbus",
+                    "stream_description": "main streaming event-bus of flowgen",
+                    "subject": "bulkapiretrieve.account.>",
+                    "durable_name": "salesforce_pubsub_query_job_writer",
+                    "batch_size": 100
+                }
+            },
+            {
+                "object_store_writer": {
+                    "name": "account_salesforce_bulkapi_object_store_writer",
+                    "label": "account_salesforce_bulkapi_object_store_writer",
+                    "path": "gs://cnnv-staging-salesforce/bulkapiquery/Account",
+                    "credentials": "/etc/gcp/credentials.json"
+                }
+            }
+        ]
+    }
+}

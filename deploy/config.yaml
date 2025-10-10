@@ -1,0 +1,12 @@
+# Determines if cache service should be used.
+cache:
+  enabled: true
+  credentials_path: "/etc/nats/credentials.json"
+# Points to config directory.
+flows:
+  dir: "/etc/app/flows/*.json"
+http:
+  enabled: true
+  port: 8000
+# host:
+#   host_type: k8s

@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowgen
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: flowgen
+  template:
+    metadata:
+      labels:
+        app: flowgen
+    spec:
+      containers:
+      - image: flowgen:latest
+        name: flowgen
+        command: ["/bin/flowgen"]
+        imagePullPolicy: Never
+        env:
+          - name: CONFIG_PATH
+            value: /etc/app/config.yaml
+          - name: RUST_LOG
+            value: "info,async_nats=warn"
+        ports:
+          - containerPort: 3000
+        volumeMounts:
+        - name: sfdc-credentials
+          mountPath: /etc/sfdc
+          readOnly: true
+        - name: nats-credentials
+          mountPath: /etc/nats
+          readOnly: true
+        - name: gcp-credentials
+          mountPath: /etc/gcp
+          readOnly: true
+        - name: config
+          mountPath: /etc/app
+          readOnly: true
+        - name: flows
+          mountPath: /etc/app/flows
+          readOnly: true
+      imagePullSecrets:
+        - name: regcred
+      volumes:
+        - name: sfdc-credentials
+          secret:
+            secretName: sfdc-credentials
+        - name: gcp-credentials
+          secret:
+            secretName: gcp-credentials
+        - name: nats-credentials
+          secret:
+            secretName: nats-credentials
+        - name: config
+          configMap:
+            name: config
+        - name: flows
+          configMap:
+            name: flows
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowgen
+spec:
+  selector:
+    app: flowgen
+  ports:
+  - port: 3000
+    targetPort: 3000
+    protocol: TCP
+  type: ClusterIP
