@@ -26,6 +26,8 @@ pub struct Flow {
     pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
     pub tasks: Vec<Task>,
+    /// Whether this flow requires lease-based leader election (defaults to false if not specified).
+    pub require_lease_election: Option<bool>,
 }
 
 /// Available task types in the flowgen ecosystem.
@@ -66,7 +68,7 @@ pub struct AppConfig {
     /// Flow discovery options.
     pub flows: FlowOptions,
     /// Optional HTTP server configuration.
-    pub http: Option<HttpOptions>,
+    pub http_server: Option<HttpServerOptions>,
     /// Optional host coordination configuration.
     pub host: Option<HostOptions>,
 }
@@ -102,7 +104,7 @@ pub struct FlowOptions {
 
 /// HTTP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct HttpOptions {
+pub struct HttpServerOptions {
     /// Optional HTTP server port number (defaults to 3000).
     pub port: Option<u16>,
 }
@@ -140,6 +142,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                require_lease_election: None,
             },
         };
 
@@ -158,6 +161,7 @@ mod tests {
                 name: "serialize_test".to_string(),
                 labels: Some(labels),
                 tasks: vec![],
+                require_lease_election: None,
             },
         };
 
@@ -175,6 +179,7 @@ mod tests {
             name: "test_flow".to_string(),
             labels: Some(labels.clone()),
             tasks: vec![],
+            require_lease_election: None,
         };
 
         assert_eq!(flow.name, "test_flow");
@@ -191,6 +196,7 @@ mod tests {
             name: "flow_with_tasks".to_string(),
             labels: None,
             tasks: vec![task],
+            require_lease_election: None,
         };
 
         assert_eq!(flow.name, "flow_with_tasks");
@@ -211,6 +217,7 @@ mod tests {
             name: "serialize_flow".to_string(),
             labels: Some(labels),
             tasks: vec![],
+            require_lease_election: None,
         };
 
         let serialized = serde_json::to_string(&flow).unwrap();
@@ -224,6 +231,7 @@ mod tests {
             name: "clone_test".to_string(),
             labels: None,
             tasks: vec![],
+            require_lease_election: None,
         };
 
         let cloned = flow.clone();
@@ -251,14 +259,14 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/test/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.dir.is_some());
-        assert!(app_config.http.is_none());
+        assert!(app_config.http_server.is_none());
         assert!(app_config.host.is_none());
     }
 
@@ -269,7 +277,7 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
         };
 
@@ -289,7 +297,7 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/serialize/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
         };
 
@@ -308,7 +316,7 @@ mod tests {
                 db_name: None,
             }),
             flows: FlowOptions { dir: None },
-            http: None,
+            http_server: None,
             host: None,
         };
 
@@ -410,6 +418,7 @@ mod tests {
                     Task::convert(convert_config),
                     Task::generate(generate_config),
                 ],
+                require_lease_election: None,
             },
         };
 
@@ -421,29 +430,29 @@ mod tests {
     }
 
     #[test]
-    fn test_http_options_creation() {
-        let http_options = HttpOptions { port: Some(8080) };
+    fn test_http_server_options_creation() {
+        let http_server_options = HttpServerOptions { port: Some(8080) };
 
-        assert_eq!(http_options.port, Some(8080));
+        assert_eq!(http_server_options.port, Some(8080));
     }
 
     #[test]
-    fn test_http_options_without_port() {
-        let http_options = HttpOptions { port: None };
+    fn test_http_server_options_without_port() {
+        let http_server_options = HttpServerOptions { port: None };
 
-        assert!(http_options.port.is_none());
+        assert!(http_server_options.port.is_none());
     }
 
     #[test]
-    fn test_app_config_with_http_options() {
+    fn test_app_config_with_http_server_options() {
         let app_config = AppConfig {
             cache: None,
             flows: FlowOptions { dir: None },
-            http: Some(HttpOptions { port: Some(8080) }),
+            http_server: Some(HttpServerOptions { port: Some(8080) }),
             host: None,
         };
 
-        assert!(app_config.http.is_some());
-        assert_eq!(app_config.http.as_ref().unwrap().port, Some(8080));
+        assert!(app_config.http_server.is_some());
+        assert_eq!(app_config.http_server.as_ref().unwrap().port, Some(8080));
     }
 }

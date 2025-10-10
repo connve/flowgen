@@ -107,13 +107,18 @@ impl Flow {
                 .map_err(|e| Error::MissingRequiredAttribute(e.to_string()))?,
         );
 
-        // Register flow for leader election.
+        // Register flow for leader election if required.
         let flow_id = self.config.flow.name.clone();
+        let require_lease_election = self.config.flow.require_lease_election.unwrap_or(false);
+
+        let leader_election_options = if require_lease_election {
+            Some(flowgen_core::task::manager::LeaderElectionOptions {})
+        } else {
+            None
+        };
+
         let mut leadership_rx = task_manager
-            .register(
-                flow_id.clone(),
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
+            .register(flow_id.clone(), leader_election_options)
             .await
             .map_err(|e| {
                 Error::MissingRequiredAttribute(format!(
@@ -155,30 +160,42 @@ impl Flow {
                 &self.http_server,
             );
 
-            // Monitor for leadership changes while tasks are running.
-            loop {
-                tokio::select! {
-                    biased;
+            // Monitor for leadership changes while tasks are running (only if election enabled).
+            if require_lease_election {
+                loop {
+                    tokio::select! {
+                        biased;
 
-                    // Check for leadership changes.
-                    Some(status) = leadership_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Flow {} lost leadership, aborting all tasks", flow_id);
-                            for task in &task_list {
-                                task.abort();
+                        // Check for leadership changes.
+                        Some(status) = leadership_rx.recv() => {
+                            if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
+                                debug!("Flow {} lost leadership, aborting all tasks", flow_id);
+                                for task in &task_list {
+                                    task.abort();
+                                }
+                                task_list.clear();
+                                break;
                             }
+                        }
+
+                        // Wait for all tasks to complete.
+                        _ = futures::future::join_all(&mut task_list), if !task_list.is_empty() => {
+                            error!("All tasks completed unexpectedly for flow {}", flow_id);
                             task_list.clear();
                             break;
                         }
                     }
-
-                    // Wait for all tasks to complete.
-                    _ = futures::future::join_all(&mut task_list), if !task_list.is_empty() => {
-                        error!("All tasks completed unexpectedly for flow {}", flow_id);
-                        task_list.clear();
-                        break;
-                    }
                 }
+            } else {
+                // No leader election - return immediately to allow HTTP server to start.
+                // Tasks will be monitored by the main app loop.
+                return Ok(Self {
+                    config: self.config,
+                    task_list: Some(task_list),
+                    http_server: self.http_server,
+                    host: self.host,
+                    cache: self.cache,
+                });
             }
         }
     }
@@ -521,6 +538,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                require_lease_election: None,
             },
         });
 
@@ -554,6 +572,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                require_lease_election: None,
             },
         });
 
@@ -572,6 +591,7 @@ mod tests {
                 name: "success_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                require_lease_election: None,
             },
         });
         let server = Arc::new(flowgen_http::server::HttpServer::new());
@@ -595,6 +615,7 @@ mod tests {
                 name: "chain_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                require_lease_election: None,
             },
         });
         let server = Arc::new(flowgen_http::server::HttpServer::new());

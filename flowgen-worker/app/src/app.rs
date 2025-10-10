@@ -2,7 +2,6 @@ use crate::config::{AppConfig, FlowConfig};
 use config::Config;
 use flowgen_core::client::Client;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 use tracing::{error, info, warn, Instrument};
 
 /// Errors that can occur during application execution.
@@ -182,8 +181,8 @@ impl flowgen_core::task::runner::Runner for App {
             None
         };
 
-        // Initialize flows and register routes.
-        let mut flow_tasks = Vec::new();
+        // Initialize flows and spawn each flow's execution.
+        let mut flow_handles = Vec::new();
         for config in flow_configs {
             let http_server = Arc::clone(&http_server);
             let host = host_client.as_ref().map(Arc::clone);
@@ -197,7 +196,7 @@ impl flowgen_core::task::runner::Runner for App {
                 .host(host)
                 .cache(cache);
 
-            // Register routes and collect tasks
+            // Build flow and spawn its execution
             let flow = match flow_builder.build() {
                 Ok(flow) => flow,
                 Err(e) => {
@@ -206,22 +205,20 @@ impl flowgen_core::task::runner::Runner for App {
                 }
             };
 
-            let flow = match flow.run().await {
-                Ok(flow) => flow,
-                Err(e) => {
-                    error!("{}", e);
-                    continue;
+            let span = tracing::Span::current();
+            let flow_handle = tokio::spawn(
+                async move {
+                    if let Err(e) = flow.run().await {
+                        error!("Flow execution failed: {}", e);
+                    }
                 }
-            };
-
-            // Collect tasks for concurrent execution
-            if let Some(tasks) = flow.task_list {
-                flow_tasks.extend(tasks);
-            }
+                .instrument(span),
+            );
+            flow_handles.push(flow_handle);
         }
 
         // Start server with registered routes
-        let configured_port = app_config.http.as_ref().and_then(|http| http.port);
+        let configured_port = app_config.http_server.as_ref().and_then(|http| http.port);
         let span = tracing::Span::current();
         let server_handle = tokio::spawn(
             async move {
@@ -232,36 +229,10 @@ impl flowgen_core::task::runner::Runner for App {
             .instrument(span),
         );
 
-        // Run tasks concurrently with server
-        let flow_handle = tokio::spawn(async move {
-            handle_task_results(flow_tasks).await;
-        });
-
-        // Wait for server and tasks
-        let (_, _) = tokio::join!(server_handle, flow_handle);
+        // Wait for all flows and server
+        flow_handles.push(server_handle);
+        futures_util::future::join_all(flow_handles).await;
 
         Ok(())
-    }
-}
-
-/// Processes task results and logs errors as they complete.
-async fn handle_task_results(mut tasks: Vec<JoinHandle<Result<(), super::flow::Error>>>) {
-    while !tasks.is_empty() {
-        let (result, _index, remaining) = futures_util::future::select_all(tasks).await;
-        log_task_error(result);
-        tasks = remaining;
-    }
-}
-
-/// Logs task execution and logic errors.
-fn log_task_error(result: Result<Result<(), super::flow::Error>, tokio::task::JoinError>) {
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            error!("{}", error);
-        }
-        Err(error) => {
-            error!("{}", error);
-        }
     }
 }
