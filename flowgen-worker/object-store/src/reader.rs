@@ -1,7 +1,6 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
-use flowgen_core::cache::Cache;
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
@@ -59,7 +58,7 @@ pub enum Error {
 }
 
 /// Handles processing of individual events by writing them to object storage.
-struct EventHandler<T: Cache> {
+struct EventHandler {
     /// Writer configuration settings.
     config: Arc<super::config::Reader>,
     /// Object store client for writing data.
@@ -68,13 +67,15 @@ struct EventHandler<T: Cache> {
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Arc<T>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl<T: Cache> EventHandler<T> {
+impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, _: Event) -> Result<(), Error> {
+        // Get cache from task context if available.
+        let cache = self.task_context.cache.as_ref();
         let mut client_guard = self.client.lock().await;
         let context = client_guard
             .context
@@ -135,10 +136,12 @@ impl<T: Cache> EventHandler<T> {
                 if let Some(insert_key) = &cache_options.insert_key {
                     if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
                         let schema_bytes = Bytes::from(batch.schema().to_string());
-                        self.cache
-                            .put(insert_key.as_str(), schema_bytes)
-                            .await
-                            .map_err(|_| Error::Cache())?;
+                        if let Some(cache) = cache {
+                            cache
+                                .put(insert_key.as_str(), schema_bytes)
+                                .await
+                                .map_err(|_| Error::Cache())?;
+                        }
                     }
                 }
             }
@@ -174,7 +177,7 @@ impl<T: Cache> EventHandler<T> {
 
 /// Object store reader that processes events from a broadcast receiver.
 #[derive(Debug)]
-pub struct Reader<T: Cache> {
+pub struct Reader {
     /// Reader configuration settings.
     config: Arc<super::config::Reader>,
     /// Broadcast receiver for incoming events.
@@ -183,13 +186,11 @@ pub struct Reader<T: Cache> {
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Arc<T>,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
+impl flowgen_core::task::runner::Runner for Reader {
     type Error = Error;
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
@@ -211,7 +212,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
-            cache: Arc::clone(&self.cache),
+            task_context: Arc::clone(&self.task_context),
         });
 
         // Process incoming events, filtering by task ID.
@@ -238,7 +239,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
 /// Builder pattern for constructing Writer instances.
 #[derive(Default)]
-pub struct ReaderBuilder<T: Cache> {
+pub struct ReaderBuilder {
     /// Writer configuration settings.
     config: Option<Arc<super::config::Reader>>,
     /// Broadcast receiver for incoming events.
@@ -247,17 +248,12 @@ pub struct ReaderBuilder<T: Cache> {
     tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Option<Arc<T>>,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
-impl<T: Cache> ReaderBuilder<T>
-where
-    T: Default,
-{
-    pub fn new() -> ReaderBuilder<T> {
+impl ReaderBuilder {
+    pub fn new() -> ReaderBuilder {
         ReaderBuilder {
             ..Default::default()
         }
@@ -281,12 +277,6 @@ where
         self
     }
 
-    /// Sets the cache object.
-    pub fn cache(mut self, cache: Arc<T>) -> Self {
-        self.cache = Some(cache);
-        self
-    }
-
     /// Sets the current task identifier.
     pub fn current_task_id(mut self, current_task_id: usize) -> Self {
         self.current_task_id = current_task_id;
@@ -302,7 +292,7 @@ where
     }
 
     /// Builds the Writer instance, validating required fields.
-    pub async fn build(self) -> Result<Reader<T>, Error> {
+    pub async fn build(self) -> Result<Reader, Error> {
         Ok(Reader {
             config: self
                 .config
@@ -313,11 +303,8 @@ where
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            cache: self
-                .cache
-                .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
-            _task_context: self
+            task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -327,7 +314,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowgen_core::cache::Cache;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
@@ -350,39 +336,13 @@ mod tests {
         )
     }
 
-    // Simple mock cache implementation for tests
-    #[derive(Debug, Default)]
-    struct TestCache {}
-
-    impl TestCache {
-        fn new() -> Self {
-            Self {}
-        }
-    }
-
-    impl Cache for TestCache {
-        type Error = String;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn get(&self, _key: &str) -> Result<bytes::Bytes, Self::Error> {
-            Ok(bytes::Bytes::new())
-        }
-    }
-
     #[test]
     fn test_reader_builder_new() {
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new();
+        let builder = ReaderBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.tx.is_none());
-        assert!(builder.cache.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -399,7 +359,7 @@ mod tests {
             delete_after_read: None,
         });
 
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().config(config.clone());
+        let builder = ReaderBuilder::new().config(config.clone());
         assert!(builder.config.is_some());
         assert_eq!(
             builder.config.unwrap().path,
@@ -410,39 +370,31 @@ mod tests {
     #[test]
     fn test_reader_builder_receiver() {
         let (_, rx) = broadcast::channel::<Event>(10);
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().receiver(rx);
+        let builder = ReaderBuilder::new().receiver(rx);
         assert!(builder.rx.is_some());
     }
 
     #[test]
     fn test_reader_builder_sender() {
         let (tx, _) = broadcast::channel::<Event>(10);
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().sender(tx);
+        let builder = ReaderBuilder::new().sender(tx);
         assert!(builder.tx.is_some());
     }
 
     #[test]
-    fn test_reader_builder_cache() {
-        let cache = std::sync::Arc::new(TestCache::new());
-        let builder = ReaderBuilder::new().cache(cache);
-        assert!(builder.cache.is_some());
-    }
-
-    #[test]
     fn test_reader_builder_current_task_id() {
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().current_task_id(123);
+        let builder = ReaderBuilder::new().current_task_id(123);
         assert_eq!(builder.current_task_id, 123);
     }
 
     #[tokio::test]
     async fn test_reader_builder_missing_config() {
         let (tx, rx) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -467,12 +419,11 @@ mod tests {
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config)
             .sender(tx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -497,12 +448,11 @@ mod tests {
         });
 
         let (_, rx) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config)
             .receiver(rx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -510,35 +460,6 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_missing_cache() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("file:///local/files/"),
-            credentials: None,
-            client_options: None,
-            batch_size: Some(250),
-            has_header: Some(true),
-            cache_options: None,
-            delete_after_read: None,
-        });
-
-        let (tx, rx) = broadcast::channel::<Event>(10);
-
-        let result = ReaderBuilder::<TestCache>::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "cache")
         );
     }
 
@@ -560,13 +481,11 @@ mod tests {
         });
 
         let (tx, rx) = broadcast::channel::<Event>(50);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
             .current_task_id(777)
             .task_context(create_mock_task_context())
             .build()
@@ -592,19 +511,16 @@ mod tests {
         });
 
         let (tx, rx) = broadcast::channel::<Event>(5);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let builder = ReaderBuilder::<TestCache>::new()
+        let builder = ReaderBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
             .current_task_id(20);
 
         assert!(builder.config.is_some());
         assert!(builder.rx.is_some());
         assert!(builder.tx.is_some());
-        assert!(builder.cache.is_some());
         assert_eq!(builder.current_task_id, 20);
     }
 
@@ -621,13 +537,11 @@ mod tests {
             delete_after_read: None,
         });
         let (tx, rx) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config)
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
             .current_task_id(1)
             .build()
             .await;

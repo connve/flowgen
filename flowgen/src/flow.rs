@@ -13,8 +13,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, Instrument};
 
-/// Default cache bucket name for flow caching.
-const DEFAULT_CACHE_NAME: &str = "flowgen_cache";
+const DEFAULT_EVENT_BUFFER_SIZE: usize = 1000;
 
 /// Errors that can occur during flow execution.
 #[derive(thiserror::Error, Debug)]
@@ -87,7 +86,8 @@ impl Flow {
     /// event communication.
     #[tracing::instrument(skip(self), fields(flow = %self.config.flow.name))]
     pub async fn run(self) -> Result<Self, Error> {
-        let (tx, _): (Sender<Event>, Receiver<Event>) = tokio::sync::broadcast::channel(1000);
+        let (tx, _): (Sender<Event>, Receiver<Event>) =
+            tokio::sync::broadcast::channel(DEFAULT_EVENT_BUFFER_SIZE);
 
         // Create task manager with host if available.
         let mut task_manager = flowgen_core::task::manager::TaskManagerBuilder::new();
@@ -441,7 +441,7 @@ pub struct FlowBuilder {
     /// Optional shared HTTP server instance.
     http_server: Option<Arc<flowgen_http::server::HttpServer>>,
     /// Optional host client for coordination.
-    host: Option<Arc<flowgen_core::task::context::HostClient>>,
+    host: Option<Arc<flowgen_core::task::context::Host>>,
     /// Optional shared cache instance.
     cache: Option<Arc<dyn Cache>>,
 }
@@ -465,7 +465,7 @@ impl FlowBuilder {
     }
 
     /// Sets the host client for coordination.
-    pub fn host(mut self, client: Option<Arc<flowgen_core::task::context::HostClient>>) -> Self {
+    pub fn host(mut self, client: Option<Arc<flowgen_core::task::context::Host>>) -> Self {
         self.host = client;
         self
     }
@@ -499,13 +499,11 @@ impl FlowBuilder {
 mod tests {
     use super::*;
     use crate::config::{Flow, FlowConfig};
-    use std::path::Path;
 
     #[test]
     fn test_flow_builder_new() {
         let builder = FlowBuilder::new();
         assert!(builder.config.is_none());
-        assert!(builder.cache_credentials_path.is_none());
         assert!(builder.http_server.is_none());
     }
 
@@ -513,7 +511,6 @@ mod tests {
     fn test_flow_builder_default() {
         let builder = FlowBuilder::default();
         assert!(builder.config.is_none());
-        assert!(builder.cache_credentials_path.is_none());
         assert!(builder.http_server.is_none());
     }
 
@@ -532,13 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flow_builder_cache_credentials_path() {
-        let path = Path::new("/test/credentials");
-        let builder = FlowBuilder::new().cache_credentials_path(path);
-        assert_eq!(builder.cache_credentials_path, Some(path));
-    }
-
-    #[test]
     fn test_flow_builder_http_server() {
         let server = Arc::new(flowgen_http::server::HttpServer::new());
         let builder = FlowBuilder::new().http_server(server.clone());
@@ -547,39 +537,13 @@ mod tests {
 
     #[test]
     fn test_flow_builder_build_missing_config() {
-        let path = Path::new("/test/credentials");
         let server = Arc::new(flowgen_http::server::HttpServer::new());
 
-        let result = FlowBuilder::new()
-            .cache_credentials_path(path)
-            .http_server(server)
-            .build();
+        let result = FlowBuilder::new().http_server(server).build();
 
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[test]
-    fn test_flow_builder_build_missing_cache_path() {
-        let flow_config = Arc::new(FlowConfig {
-            flow: Flow {
-                name: "test_flow".to_string(),
-                labels: None,
-                tasks: vec![],
-            },
-        });
-        let server = Arc::new(flowgen_http::server::HttpServer::new());
-
-        let result = FlowBuilder::new()
-            .config(flow_config)
-            .http_server(server)
-            .build();
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "cache_credential_path")
         );
     }
 
@@ -592,12 +556,8 @@ mod tests {
                 tasks: vec![],
             },
         });
-        let path = Path::new("/test/credentials");
 
-        let result = FlowBuilder::new()
-            .config(flow_config)
-            .cache_credentials_path(path)
-            .build();
+        let result = FlowBuilder::new().config(flow_config).build();
 
         assert!(result.is_err());
         assert!(
@@ -614,19 +574,17 @@ mod tests {
                 tasks: vec![],
             },
         });
-        let path = Path::new("/test/credentials");
         let server = Arc::new(flowgen_http::server::HttpServer::new());
 
         let result = FlowBuilder::new()
             .config(flow_config.clone())
-            .cache_credentials_path(path)
             .http_server(server)
             .build();
 
         assert!(result.is_ok());
         let flow = result.unwrap();
         assert_eq!(flow.config, flow_config);
-        assert_eq!(flow.cache_credential_path, path);
+
         assert!(flow.task_list.is_none());
     }
 
@@ -639,18 +597,15 @@ mod tests {
                 tasks: vec![],
             },
         });
-        let path = Path::new("/chain/credentials");
         let server = Arc::new(flowgen_http::server::HttpServer::new());
 
         let flow = FlowBuilder::new()
             .config(flow_config.clone())
-            .cache_credentials_path(path)
             .http_server(server)
             .build()
             .unwrap();
 
         assert_eq!(flow.config, flow_config);
-        assert_eq!(flow.cache_credential_path, path);
     }
 
     #[test]
@@ -665,6 +620,6 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_CACHE_NAME, "flowgen_cache");
+        assert_eq!(DEFAULT_EVENT_BUFFER_SIZE, 1000);
     }
 }

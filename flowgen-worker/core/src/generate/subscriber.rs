@@ -248,41 +248,36 @@ mod tests {
 
     impl std::error::Error for MockError {}
 
+    #[async_trait::async_trait]
     impl crate::cache::Cache for MockCache {
-        type Error = MockError;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
+        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), crate::cache::Error> {
             if self.should_error {
-                Err(MockError)
-            } else {
-                Ok(self)
-            }
-        }
-
-        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Self::Error> {
-            if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
                 self.data.lock().await.insert(key.to_string(), value);
                 Ok(())
             }
         }
 
-        async fn get(&self, key: &str) -> Result<bytes::Bytes, Self::Error> {
+        async fn get(&self, key: &str) -> Result<bytes::Bytes, crate::cache::Error> {
             if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
-                self.data.lock().await.get(key).cloned().ok_or(MockError)
+                self.data
+                    .lock()
+                    .await
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| Box::new(MockError) as crate::cache::Error)
             }
         }
     }
 
     #[test]
     fn test_subscriber_builder_new() {
-        let builder = SubscriberBuilder::<MockCache>::new();
+        let builder = SubscriberBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
-        assert!(builder.cache.is_none());
         assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
@@ -297,13 +292,11 @@ mod tests {
         });
 
         let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
-        let subscriber = SubscriberBuilder::<MockCache>::new()
+        let subscriber = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
             .current_task_id(1)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await
@@ -316,11 +309,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_config() {
         let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::<MockCache>::new()
+        let result = SubscriberBuilder::new()
             .sender(tx)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -335,11 +326,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(crate::generate::config::Subscriber::default());
-        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::<MockCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -352,25 +341,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscriber_builder_missing_cache() {
-        let config = Arc::new(crate::generate::config::Subscriber::default());
-        let (tx, _rx) = broadcast::channel(100);
-
-        let result = SubscriberBuilder::<MockCache>::new()
-            .config(config)
-            .sender(tx)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: cache"));
-    }
-
-    #[tokio::test]
     async fn test_subscriber_run_with_count() {
         let config = Arc::new(crate::generate::config::Subscriber {
             name: "test".to_string(),
@@ -380,13 +350,11 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 1,
-            cache,
             task_context: create_mock_task_context(),
         };
 
@@ -416,13 +384,11 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 0,
-            cache,
             task_context: create_mock_task_context(),
         };
 
@@ -450,21 +416,37 @@ mod tests {
         });
 
         let (tx, mut _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
+        let mock_cache = Arc::new(MockCache::default());
+
+        // Create task context with cache
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Cache Test".to_string()),
+        );
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_context = Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .cache(Some(mock_cache.clone() as Arc<dyn crate::cache::Cache>))
+                .build()
+                .unwrap(),
+        );
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 1,
-            cache: cache.clone(),
-            task_context: create_mock_task_context(),
+            task_context,
         };
 
         // Run subscriber to completion
         let _ = subscriber.run().await;
 
         // Check that cache key was created with label format
-        let cache_data = cache.data.lock().await;
+        let cache_data = mock_cache.data.lock().await;
         assert!(cache_data.contains_key("test-flow.generate.test.last_run"));
     }
 
@@ -472,12 +454,10 @@ mod tests {
     async fn test_subscriber_builder_build_missing_task_context() {
         let config = Arc::new(crate::generate::config::Subscriber::default());
         let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::<MockCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config)
             .sender(tx)
-            .cache(cache)
             .current_task_id(1)
             .build()
             .await;

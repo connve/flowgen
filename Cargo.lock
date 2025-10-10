@@ -1298,6 +1298,7 @@ version = "0.2.0"
 dependencies = [
  "apache-avro",
  "arrow",
+ "async-trait",
  "bytes",
  "chrono",
  "flowgen_core",
@@ -1317,6 +1318,7 @@ version = "0.2.0"
 dependencies = [
  "apache-avro",
  "arrow",
+ "async-trait",
  "bincode",
  "bytes",
  "chrono",

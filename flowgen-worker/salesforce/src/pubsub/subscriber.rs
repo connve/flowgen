@@ -1,5 +1,4 @@
 use flowgen_core::{
-    cache::Cache,
     client::Client,
     event::{
         generate_subject, AvroData, Event, EventBuilder, EventData, SubjectSuffix,
@@ -374,7 +373,6 @@ impl SubscriberBuilder {
 mod tests {
     use super::*;
     use crate::pubsub::config;
-    use flowgen_core::cache::Cache;
     use serde_json::{Map, Value};
     use tokio::sync::broadcast;
 
@@ -396,38 +394,12 @@ mod tests {
         )
     }
 
-    // Simple mock cache implementation for tests
-    #[derive(Debug, Default)]
-    struct TestCache {}
-
-    impl TestCache {
-        fn new() -> Self {
-            Self {}
-        }
-    }
-
-    impl Cache for TestCache {
-        type Error = String;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn get(&self, _key: &str) -> Result<bytes::Bytes, Self::Error> {
-            Ok(bytes::Bytes::new())
-        }
-    }
-
     #[test]
     fn test_subscriber_builder_new() {
-        let builder: SubscriberBuilder<TestCache> = SubscriberBuilder::new();
+        let builder = SubscriberBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
-        assert!(builder.cache.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -444,7 +416,7 @@ mod tests {
             endpoint: None,
         });
 
-        let builder: SubscriberBuilder<TestCache> = SubscriberBuilder::new().config(config.clone());
+        let builder: SubscriberBuilder = SubscriberBuilder::new().config(config.clone());
         assert!(builder.config.is_some());
         assert_eq!(builder.config.unwrap().topic.name, "/event/Test__e");
     }
@@ -452,31 +424,23 @@ mod tests {
     #[test]
     fn test_subscriber_builder_sender() {
         let (tx, _) = broadcast::channel::<Event>(10);
-        let builder: SubscriberBuilder<TestCache> = SubscriberBuilder::new().sender(tx);
+        let builder: SubscriberBuilder = SubscriberBuilder::new().sender(tx);
         assert!(builder.tx.is_some());
     }
 
     #[test]
-    fn test_subscriber_builder_cache() {
-        let cache = std::sync::Arc::new(TestCache::new());
-        let builder = SubscriberBuilder::new().cache(cache);
-        assert!(builder.cache.is_some());
-    }
-
-    #[test]
     fn test_subscriber_builder_current_task_id() {
-        let builder: SubscriberBuilder<TestCache> = SubscriberBuilder::new().current_task_id(99);
+        let builder: SubscriberBuilder = SubscriberBuilder::new().current_task_id(99);
         assert_eq!(builder.current_task_id, 99);
     }
 
     #[tokio::test]
     async fn test_subscriber_builder_missing_config() {
         let (tx, _) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = SubscriberBuilder::<TestCache>::new()
+        let result = SubscriberBuilder::new()
             .sender(tx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -500,11 +464,9 @@ mod tests {
             endpoint: None,
         });
 
-        let cache = std::sync::Arc::new(TestCache::new());
-
-        let result = SubscriberBuilder::<TestCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -512,34 +474,6 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_missing_cache() {
-        let config = Arc::new(config::Subscriber {
-            name: "test_subscriber".to_string(),
-            credentials: "test_creds".to_string(),
-            topic: config::Topic {
-                name: "/event/Test__e".to_string(),
-                durable_consumer_options: None,
-                num_requested: Some(25),
-            },
-            endpoint: None,
-        });
-
-        let (tx, _) = broadcast::channel::<Event>(10);
-
-        let result = SubscriberBuilder::<TestCache>::new()
-            .config(config)
-            .sender(tx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "cache")
         );
     }
 
@@ -561,12 +495,10 @@ mod tests {
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = SubscriberBuilder::<TestCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .cache(cache)
             .current_task_id(42)
             .task_context(create_mock_task_context())
             .build()
@@ -595,12 +527,10 @@ mod tests {
             endpoint: None,
         });
         let (tx, _) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = SubscriberBuilder::<TestCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config)
             .sender(tx)
-            .cache(cache)
             .current_task_id(1)
             .build()
             .await;

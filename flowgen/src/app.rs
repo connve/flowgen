@@ -111,7 +111,7 @@ impl flowgen_core::task::runner::Runner for App {
         let cache: Option<Arc<flowgen_nats::cache::Cache>> =
             if let Some(cache_config) = &app_config.cache {
                 if cache_config.enabled {
-                    match flowgen_nats::cache::CacheBuilder::new()
+                    flowgen_nats::cache::CacheBuilder::new()
                         .credentials_path(cache_config.credentials_path.clone())
                         .build()
                         .map_err(|e| {
@@ -133,10 +133,8 @@ impl flowgen_core::task::runner::Runner for App {
                                     })
                                     .ok()
                             })
-                        }) {
-                        Some(cache) => Some(Arc::new(cache)),
-                        None => None,
-                    }
+                        })
+                        .map(Arc::new)
                 } else {
                     None
                 }
