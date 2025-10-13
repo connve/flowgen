@@ -134,7 +134,7 @@ impl flowgen_core::cache::Cache for Cache {
 #[derive(Default)]
 pub struct CacheBuilder {
     /// Optional path to NATS credentials.
-    credentials: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
 }
 
 impl CacheBuilder {
@@ -151,8 +151,8 @@ impl CacheBuilder {
     ///
     /// # Arguments
     /// * `path` - Path to the credentials file.
-    pub fn credentials(mut self, path: PathBuf) -> Self {
-        self.credentials = Some(path);
+    pub fn credentials_path(mut self, path: PathBuf) -> Self {
+        self.credentials_path = Some(path);
         self
     }
 
@@ -164,12 +164,10 @@ impl CacheBuilder {
     /// * `Ok(Cache)` on success.
     /// * `Err(Error::MissingRequiredAttribute)` if `credentials` is missing.
     pub fn build(self) -> Result<Cache, Error> {
-        let creds_path = self
-            .credentials
-            .ok_or_else(|| Error::MissingRequiredAttribute("credentials".to_string()))?;
-
         Ok(Cache {
-            credentials_path: creds_path,
+            credentials_path: self
+                .credentials_path
+                .ok_or_else(|| Error::MissingRequiredAttribute("credentials_path".to_string()))?,
             store: None,
         })
     }
@@ -183,14 +181,14 @@ mod tests {
     #[test]
     fn test_cache_builder_new() {
         let builder = CacheBuilder::new();
-        assert!(builder.credentials.is_none());
+        assert!(builder.credentials_path.is_none());
     }
 
     #[test]
     fn test_cache_builder_credentials_path() {
         let path = PathBuf::from("/path/to/creds.jwt");
-        let builder = CacheBuilder::new().credentials(path.clone());
-        assert_eq!(builder.credentials, Some(path));
+        let builder = CacheBuilder::new().credentials_path(path.clone());
+        assert_eq!(builder.credentials_path, Some(path));
     }
 
     #[test]
@@ -198,14 +196,14 @@ mod tests {
         let result = CacheBuilder::new().build();
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials")
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path")
         );
     }
 
     #[test]
     fn test_cache_builder_build_success() {
         let path = PathBuf::from("/valid/path/creds.jwt");
-        let result = CacheBuilder::new().credentials(path.clone()).build();
+        let result = CacheBuilder::new().credentials_path(path.clone()).build();
 
         assert!(result.is_ok());
         let cache = result.unwrap();
@@ -217,7 +215,7 @@ mod tests {
     fn test_cache_builder_chain() {
         let path = PathBuf::from("/chain/test/creds.jwt");
         let cache = CacheBuilder::new()
-            .credentials(path.clone())
+            .credentials_path(path.clone())
             .build()
             .unwrap();
 

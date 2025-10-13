@@ -162,8 +162,8 @@ impl flowgen_core::task::runner::Runner for Writer {
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
         }
-        if let Some(credentials) = &self.config.credentials {
-            client_builder = client_builder.credentials(credentials.to_path_buf());
+        if let Some(credentials_path) = &self.config.credentials_path {
+            client_builder = client_builder.credentials(credentials_path.to_path_buf());
         }
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
@@ -310,7 +310,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -356,7 +356,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/output/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -378,7 +378,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("gs://my-bucket/data/"),
-            credentials: Some(PathBuf::from("/service-account.json")),
+            credentials_path: Some(PathBuf::from("/service-account.json")),
             client_options: None,
             hive_partition_options: Some(HivePartitionOptions {
                 enabled: true,
@@ -408,7 +408,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -430,7 +430,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("file:///data/output/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -452,7 +452,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });

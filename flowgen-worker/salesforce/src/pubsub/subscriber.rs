@@ -264,7 +264,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Authenticate with Salesforce
         let sfdc_client = crate::client::Builder::new()
-            .credentials_path(self.config.credentials.clone().into())
+            .credentials_path(self.config.credentials_path.clone())
             .build()
             .map_err(Error::Auth)?
             .connect()
@@ -381,6 +381,7 @@ mod tests {
     use super::*;
     use crate::pubsub::config;
     use serde_json::{Map, Value};
+    use std::path::PathBuf;
     use tokio::sync::broadcast;
 
     /// Creates a mock TaskContext for testing.
@@ -414,7 +415,7 @@ mod tests {
     fn test_subscriber_builder_config() {
         let config = Arc::new(config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
                 durable_consumer_options: None,
@@ -462,7 +463,7 @@ mod tests {
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
                 durable_consumer_options: None,
@@ -488,7 +489,7 @@ mod tests {
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "complete_creds".to_string(),
+            credentials_path: PathBuf::from("complete_creds"),
             topic: config::Topic {
                 name: "/data/AccountChangeEvent".to_string(),
                 durable_consumer_options: Some(config::DurableConsumerOptions {
@@ -525,7 +526,7 @@ mod tests {
     async fn test_subscriber_builder_build_missing_task_context() {
         let config = Arc::new(config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: config::Topic {
                 name: "/event/Test__e".to_string(),
                 durable_consumer_options: None,

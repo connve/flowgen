@@ -89,8 +89,8 @@ pub struct CacheOptions {
     /// Cache backend type.
     #[serde(rename = "type")]
     pub cache_type: CacheType,
-    /// Path to cache credentials file.
-    pub credentials: PathBuf,
+    /// Path to cache credentials_path file.
+    pub credentials_path: PathBuf,
     /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
     pub db_name: Option<String>,
 }
@@ -255,7 +255,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: true,
                 cache_type: CacheType::Nats,
-                credentials: PathBuf::from("/test/cache"),
+                credentials_path: PathBuf::from("/test/cache"),
                 db_name: None,
             }),
             flows: FlowOptions {
@@ -293,7 +293,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: false,
                 cache_type: CacheType::Nats,
-                credentials: PathBuf::from("/serialize/cache"),
+                credentials_path: PathBuf::from("/serialize/cache"),
                 db_name: Some("test_db".to_string()),
             }),
             flows: FlowOptions {
@@ -314,7 +314,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: true,
                 cache_type: CacheType::Nats,
-                credentials: PathBuf::from("/clone/cache"),
+                credentials_path: PathBuf::from("/clone/cache"),
                 db_name: None,
             }),
             flows: FlowOptions { dir: None },
@@ -331,14 +331,14 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: true,
             cache_type: CacheType::Nats,
-            credentials: PathBuf::from("/test/credentials"),
+            credentials_path: PathBuf::from("/test/credentials_path"),
             db_name: None,
         };
 
         assert!(cache_options.enabled);
         assert_eq!(
-            cache_options.credentials,
-            PathBuf::from("/test/credentials")
+            cache_options.credentials_path,
+            PathBuf::from("/test/credentials_path")
         );
     }
 
@@ -347,12 +347,15 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: false,
             cache_type: CacheType::Nats,
-            credentials: PathBuf::from("/disabled/cache"),
+            credentials_path: PathBuf::from("/disabled/cache"),
             db_name: Some("custom_db".to_string()),
         };
 
         assert!(!cache_options.enabled);
-        assert_eq!(cache_options.credentials, PathBuf::from("/disabled/cache"));
+        assert_eq!(
+            cache_options.credentials_path,
+            PathBuf::from("/disabled/cache")
+        );
     }
 
     #[test]
@@ -360,7 +363,7 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: true,
             cache_type: CacheType::Nats,
-            credentials: PathBuf::from("/serialize/credentials"),
+            credentials_path: PathBuf::from("/serialize/credentials_path"),
             db_name: None,
         };
 

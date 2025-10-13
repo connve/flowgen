@@ -18,6 +18,7 @@
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 /// Default Salesforce Pub/Sub API URL.
 pub const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
@@ -90,8 +91,8 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 pub struct Subscriber {
     /// The unique name / identifier of the task.
     pub name: String,
-    /// Reference to credential store entry containing Salesforce authentication details.
-    pub credentials: String,
+    /// Path to credentials file containing Salesforce authentication details.
+    pub credentials_path: PathBuf,
     /// Topic configuration including name and subscription options.
     pub topic: Topic,
     /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
@@ -240,8 +241,8 @@ pub struct Topic {
 pub struct Publisher {
     /// The unique name / identifier of the task.
     pub name: String,
-    /// Reference to credential store entry containing Salesforce authentication details.
-    pub credentials: String,
+    /// Path to credentials file containing Salesforce authentication details.
+    pub credentials_path: PathBuf,
     /// Target topic name for publishing events (e.g., "/event/CustomEvent__e").
     pub topic: String,
     /// Event payload template with static values and dynamic placeholders.
@@ -317,7 +318,7 @@ mod tests {
     fn test_subscriber_config_default() {
         let subscriber = Subscriber::default();
         assert_eq!(subscriber.name, String::new());
-        assert_eq!(subscriber.credentials, String::new());
+        assert_eq!(subscriber.credentials_path, PathBuf::new());
         assert_eq!(subscriber.topic, Topic::default());
         assert_eq!(subscriber.endpoint, None);
     }
@@ -326,7 +327,7 @@ mod tests {
     fn test_subscriber_config_serialization() {
         let subscriber = Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: Topic {
                 name: "/event/Test__e".to_string(),
                 durable_consumer_options: Some(DurableConsumerOptions {
@@ -373,7 +374,7 @@ mod tests {
     fn test_publisher_config_default() {
         let publisher = Publisher::default();
         assert_eq!(publisher.name, String::new());
-        assert_eq!(publisher.credentials, "");
+        assert_eq!(publisher.credentials_path, PathBuf::new());
         assert_eq!(publisher.topic, "");
         assert!(publisher.payload.is_empty());
         assert_eq!(publisher.endpoint, None);
@@ -387,7 +388,7 @@ mod tests {
 
         let publisher = Publisher {
             name: "order_publisher".to_string(),
-            credentials: "sf_creds".to_string(),
+            credentials_path: PathBuf::from("sf_creds"),
             topic: "/event/Order_Status__e".to_string(),
             payload,
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
@@ -423,7 +424,7 @@ mod tests {
     fn test_config_clone() {
         let subscriber = Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: "creds".to_string(),
+            credentials_path: PathBuf::from("creds"),
             topic: Topic {
                 name: "/event/Clone__e".to_string(),
                 durable_consumer_options: None,

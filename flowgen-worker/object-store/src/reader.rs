@@ -210,8 +210,8 @@ impl flowgen_core::task::runner::Runner for Reader {
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
         }
-        if let Some(credentials) = &self.config.credentials {
-            client_builder = client_builder.credentials(credentials.to_path_buf());
+        if let Some(credentials_path) = &self.config.credentials_path {
+            client_builder = client_builder.credentials(credentials_path.to_path_buf());
         }
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
@@ -372,7 +372,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: Some(500),
             has_header: Some(true),
@@ -431,7 +431,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("/tmp/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,
@@ -460,7 +460,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("gs://bucket/data/"),
-            credentials: Some(PathBuf::from("/creds.json")),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             client_options: None,
             batch_size: Some(1000),
             has_header: Some(false),
@@ -489,7 +489,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://my-bucket/files/"),
-            credentials: Some(PathBuf::from("/aws-creds.json")),
+            credentials_path: Some(PathBuf::from("/aws-creds.json")),
             client_options: Some({
                 let mut opts = std::collections::HashMap::new();
                 opts.insert("region".to_string(), "us-west-2".to_string());
@@ -523,7 +523,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("file:///data/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: Some(100),
             has_header: Some(false),
@@ -550,7 +550,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,

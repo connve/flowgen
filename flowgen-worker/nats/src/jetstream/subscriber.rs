@@ -122,7 +122,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     /// - Validating consumer configuration
     async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone())
+            .credentials_path(self.config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
@@ -296,7 +296,7 @@ mod tests {
     fn test_subscriber_builder_config() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -340,7 +340,7 @@ mod tests {
     async fn test_subscriber_builder_build_missing_sender() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -364,7 +364,7 @@ mod tests {
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject.*".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -391,7 +391,7 @@ mod tests {
     async fn test_subscriber_builder_chain() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/chain/test.creds"),
+            credentials_path: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             subject: "chain.subject".to_string(),
             durable_name: "chain_consumer".to_string(),
@@ -417,7 +417,7 @@ mod tests {
     fn test_subscriber_structure() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "struct_test".to_string(),
             subject: "struct.test".to_string(),
             durable_name: "struct_consumer".to_string(),
@@ -477,7 +477,7 @@ mod tests {
     async fn test_subscriber_builder_build_missing_task_context() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
             durable_name: "test_consumer".to_string(),

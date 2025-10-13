@@ -121,12 +121,12 @@ impl EventHandler {
             }
         }
 
-        if let Some(credentials) = &self.config.credentials {
+        if let Some(credentials_path) = &self.config.credentials_path {
             let credentials_string =
-                fs::read_to_string(credentials)
+                fs::read_to_string(credentials_path)
                     .await
                     .map_err(|e| Error::IO {
-                        path: credentials.clone(),
+                        path: credentials_path.clone(),
                         source: e,
                     })?;
             let credentials: Credentials = serde_json::from_str(&credentials_string)?;
@@ -438,7 +438,7 @@ mod tests {
             method: crate::config::Method::POST,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let builder = ProcessorBuilder::new().config(config.clone());
@@ -491,7 +491,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let result = ProcessorBuilder::new()
@@ -517,7 +517,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let result = ProcessorBuilder::new()
@@ -550,7 +550,7 @@ mod tests {
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some(headers),
-            credentials: Some(PathBuf::from("/test/creds.json")),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
         });
 
         let result = ProcessorBuilder::new()
@@ -577,7 +577,7 @@ mod tests {
             method: crate::config::Method::PUT,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let processor = ProcessorBuilder::new()
@@ -621,7 +621,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
         let (tx, rx) = broadcast::channel(100);
 

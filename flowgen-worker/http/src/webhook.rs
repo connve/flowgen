@@ -213,7 +213,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         let config = Arc::clone(&self.config);
 
         // Load credentials at task creation time.
-        let credentials = match &config.credentials {
+        let credentials = match &config.credentials_path {
             Some(path) => {
                 let content = fs::read_to_string(path)?;
                 Some(serde_json::from_str(&content)?)
@@ -415,7 +415,7 @@ mod tests {
             method: crate::config::Method::POST,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let builder = ProcessorBuilder::new().config(config.clone());
@@ -468,7 +468,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
         let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
@@ -494,7 +494,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let result = ProcessorBuilder::new()
@@ -527,7 +527,7 @@ mod tests {
                 headers.insert("X-Webhook".to_string(), "test".to_string());
                 headers
             }),
-            credentials: None,
+            credentials_path: None,
         });
         let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
@@ -555,7 +555,7 @@ mod tests {
             method: crate::config::Method::PUT,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
         let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
@@ -605,7 +605,7 @@ mod tests {
             method: crate::config::Method::POST,
             payload: None,
             headers: Some(configured_headers),
-            credentials: None,
+            credentials_path: None,
         });
 
         let (tx, _rx) = broadcast::channel(100);
@@ -632,7 +632,7 @@ mod tests {
             method: crate::config::Method::POST,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let (tx, _rx) = broadcast::channel(100);

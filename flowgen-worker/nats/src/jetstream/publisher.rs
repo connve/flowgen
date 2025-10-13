@@ -90,7 +90,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
     /// - Creating or updating JetStream stream
     async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone())
+            .credentials_path(self.config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
@@ -276,7 +276,7 @@ mod tests {
     fn test_publisher_builder_config() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test stream".to_string()),
             subjects: vec!["test.subject".to_string()],
@@ -319,7 +319,7 @@ mod tests {
     async fn test_publisher_builder_build_missing_receiver() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: None,
             subjects: vec!["test.subject".to_string()],
@@ -342,7 +342,7 @@ mod tests {
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test description".to_string()),
             subjects: vec!["test.subject.1".to_string(), "test.subject.2".to_string()],
@@ -368,7 +368,7 @@ mod tests {
     async fn test_publisher_builder_chain() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/chain/test.creds"),
+            credentials_path: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             stream_description: None,
             subjects: vec!["chain.subject".to_string()],
@@ -393,7 +393,7 @@ mod tests {
     async fn test_publisher_builder_build_missing_task_context() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: None,
             subjects: vec!["test.subject".to_string()],

@@ -22,7 +22,7 @@ pub struct Processor {
     /// Optional HTTP headers to include in requests.
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
-    pub credentials: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
 }
 
 impl ConfigExt for Processor {}
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(processor.method, Method::GET);
         assert_eq!(processor.payload, None);
         assert_eq!(processor.headers, None);
-        assert_eq!(processor.credentials, None);
+        assert_eq!(processor.credentials_path, None);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
             method: Method::POST,
             payload: Some(payload),
             headers: Some(headers.clone()),
-            credentials: Some(PathBuf::from("/path/to/creds.json")),
+            credentials_path: Some(PathBuf::from("/path/to/creds.json")),
         };
 
         assert_eq!(processor.name, "test_processor".to_string());
@@ -134,7 +134,7 @@ mod tests {
         assert!(processor.payload.is_some());
         assert_eq!(processor.headers, Some(headers));
         assert_eq!(
-            processor.credentials,
+            processor.credentials_path,
             Some(PathBuf::from("/path/to/creds.json"))
         );
     }
@@ -147,7 +147,7 @@ mod tests {
             method: Method::PUT,
             payload: None,
             headers: None,
-            credentials: Some(PathBuf::from("/test/credentials.json")),
+            credentials_path: Some(PathBuf::from("/test/credentials.json")),
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -163,7 +163,7 @@ mod tests {
             method: Method::DELETE,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         };
 
         let cloned = processor.clone();
@@ -312,7 +312,7 @@ mod tests {
             method: Method::PATCH,
             payload: Some(payload),
             headers: Some(headers),
-            credentials: Some(PathBuf::from("/secure/path/to/creds.json")),
+            credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
         };
 
         let json = serde_json::to_string(&processor).unwrap();

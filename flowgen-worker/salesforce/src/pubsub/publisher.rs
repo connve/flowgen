@@ -8,7 +8,7 @@ use flowgen_core::{
 use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
 use serde_avro_fast::{ser, Schema};
 use serde_json::{Map, Value};
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{error, info, Instrument};
 
@@ -150,7 +150,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
     /// - Retrieving topic information and schema
     async fn init(&self) -> Result<EventHandler, Error> {
         let config = self.config.as_ref();
-        let a = Path::new(&config.credentials);
 
         let service = flowgen_core::service::ServiceBuilder::new()
             .endpoint(format!(
@@ -163,7 +162,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await?;
 
         let sfdc_client = crate::client::Builder::new()
-            .credentials_path(a.to_path_buf())
+            .credentials_path(config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
@@ -308,6 +307,7 @@ mod tests {
     use super::*;
     use crate::pubsub::config;
     use serde_json::{json, Map, Value};
+    use std::path::PathBuf;
     use tokio::sync::broadcast;
 
     /// Creates a mock TaskContext for testing.
@@ -340,7 +340,7 @@ mod tests {
     fn test_publisher_builder_config() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
             endpoint: None,
@@ -383,7 +383,7 @@ mod tests {
     async fn test_publisher_builder_missing_receiver() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
             endpoint: None,
@@ -405,7 +405,7 @@ mod tests {
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: {
                 let mut payload = serde_json::Map::new();
@@ -435,7 +435,7 @@ mod tests {
     async fn test_publisher_builder_build_missing_task_context() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
             endpoint: None,

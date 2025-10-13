@@ -121,7 +121,7 @@ impl App {
                         .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
 
                     flowgen_nats::cache::CacheBuilder::new()
-                        .credentials(cache_config.credentials.clone())
+                        .credentials_path(cache_config.credentials_path.clone())
                         .build()
                         .map_err(|e| {
                             warn!("Failed to build cache: {}. Continuing without cache.", e);
