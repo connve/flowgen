@@ -26,8 +26,8 @@ pub struct Flow {
     pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
     pub tasks: Vec<Task>,
-    /// Whether this flow requires lease-based leader election (defaults to false if not specified).
-    pub require_lease_election: Option<bool>,
+    /// Whether this flow requires leader election (defaults to false if not specified).
+    pub required_leader_election: Option<bool>,
 }
 
 /// Available task types in the flowgen ecosystem.
@@ -146,7 +146,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         };
 
@@ -165,7 +165,7 @@ mod tests {
                 name: "serialize_test".to_string(),
                 labels: Some(labels),
                 tasks: vec![],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         };
 
@@ -183,7 +183,7 @@ mod tests {
             name: "test_flow".to_string(),
             labels: Some(labels.clone()),
             tasks: vec![],
-            require_lease_election: None,
+            required_leader_election: None,
         };
 
         assert_eq!(flow.name, "test_flow");
@@ -200,7 +200,7 @@ mod tests {
             name: "flow_with_tasks".to_string(),
             labels: None,
             tasks: vec![task],
-            require_lease_election: None,
+            required_leader_election: None,
         };
 
         assert_eq!(flow.name, "flow_with_tasks");
@@ -221,7 +221,7 @@ mod tests {
             name: "serialize_flow".to_string(),
             labels: Some(labels),
             tasks: vec![],
-            require_lease_election: None,
+            required_leader_election: None,
         };
 
         let serialized = serde_json::to_string(&flow).unwrap();
@@ -235,7 +235,7 @@ mod tests {
             name: "clone_test".to_string(),
             labels: None,
             tasks: vec![],
-            require_lease_election: None,
+            required_leader_election: None,
         };
 
         let cloned = flow.clone();
@@ -425,7 +425,7 @@ mod tests {
                     Task::convert(convert_config),
                     Task::generate(generate_config),
                 ],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         };
 

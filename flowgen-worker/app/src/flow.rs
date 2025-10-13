@@ -72,7 +72,6 @@ pub struct Flow {
     host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// An optional shared cache, passed in from the main application.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
-
     /// The task manager, responsible for leader election. Initialized by `init()`.,
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// The shared context for all tasks in this flow. Initialized by `init()`.
@@ -90,7 +89,7 @@ impl Flow {
     /// Determines if the flow should run with leader election.
     ///
     /// If a flow contains any webhook tasks, it will always be treated as
-    /// non-leader-elected by disregarding the `require_lease_election` flag.
+    /// non-leader-elected by disregarding the `required_leader_election` flag.
     fn is_leader_elected(&self) -> bool {
         let has_webhooks = self
             .config
@@ -100,9 +99,9 @@ impl Flow {
             .any(|task| matches!(task, Task::http_webhook(_)));
 
         if has_webhooks {
-            if self.config.flow.require_lease_election.unwrap_or(false) {
+            if self.config.flow.required_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a webhook; `require_lease_election` flag will be ignored.",
+                    "Flow {} contains a webhook; `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -110,7 +109,7 @@ impl Flow {
         }
 
         // Otherwise, respect the configuration.
-        self.config.flow.require_lease_election.unwrap_or(false)
+        self.config.flow.required_leader_election.unwrap_or(false)
     }
 
     /// Initializes shared resources for the flow, such as the TaskManager and TaskContext.
@@ -661,7 +660,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         });
 
@@ -696,7 +695,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         });
 
@@ -714,7 +713,7 @@ mod tests {
                 name: "success_flow".to_string(),
                 labels: None,
                 tasks: vec![],
-                require_lease_election: None,
+                required_leader_election: None,
             },
         });
         let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
