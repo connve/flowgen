@@ -17,9 +17,19 @@ const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    /// Failed to bind TCP listener on specified port.
+    #[error("Failed to bind TCP listener on port {port}: {source}")]
+    BindListener {
+        port: u16,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failed to serve HTTP requests.
+    #[error("Failed to serve HTTP requests: {source}")]
+    ServeHttp {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Shared HTTP server manager for webhook processors.
@@ -104,12 +114,19 @@ impl HttpServer {
 
         let router = Router::new().nest(&base_path, api_router);
         let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}")).await?;
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
+            .await
+            .map_err(|e| Error::BindListener {
+                port: server_port,
+                source: e,
+            })?;
 
         *server_started = true;
 
         info!("Starting HTTP Server on port: {}", server_port);
-        axum::serve(listener, router).await.map_err(Error::IO)
+        axum::serve(listener, router)
+            .await
+            .map_err(|e| Error::ServeHttp { source: e })
     }
 
     /// Check if server has been started.
@@ -173,10 +190,20 @@ mod tests {
     }
 
     #[test]
-    fn test_error_from_io_error() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: Error = io_error.into();
-        assert!(matches!(error, Error::IO(_)));
+    fn test_error_bind_listener_structure() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let error = Error::BindListener {
+            port: 3000,
+            source: io_error,
+        };
+        assert!(matches!(error, Error::BindListener { .. }));
+    }
+
+    #[test]
+    fn test_error_serve_http_structure() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
+        let error = Error::ServeHttp { source: io_error };
+        assert!(matches!(error, Error::ServeHttp { .. }));
     }
 
     #[test]

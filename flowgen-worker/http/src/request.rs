@@ -25,34 +25,49 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
+    /// Failed to read credentials file.
+    #[error("Failed to read credentials file at {path}: {source}")]
+    ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     /// Failed to send event message.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Event building or processing failed.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// JSON serialization/deserialization failed.
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Configuration template rendering failed.
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
     /// HTTP request failed.
-    #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
+    #[error("HTTP request failed: {source}")]
+    Reqwest {
+        #[source]
+        source: reqwest::Error,
+    },
     /// Invalid HTTP header name.
-    #[error(transparent)]
-    ReqwestInvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
+    #[error("Invalid HTTP header name: {source}")]
+    ReqwestInvalidHeaderName {
+        #[source]
+        source: reqwest::header::InvalidHeaderName,
+    },
     /// Invalid HTTP header value.
-    #[error(transparent)]
-    ReqwestInvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+    #[error("Invalid HTTP header value: {source}")]
+    ReqwestInvalidHeaderValue {
+        #[source]
+        source: reqwest::header::InvalidHeaderValue,
+    },
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -98,8 +113,10 @@ impl EventHandler {
         if let Some(headers) = self.config.headers.to_owned() {
             let mut header_map = HeaderMap::new();
             for (key, value) in headers {
-                let header_name = HeaderName::try_from(key)?;
-                let header_value = HeaderValue::try_from(value)?;
+                let header_name = HeaderName::try_from(key)
+                    .map_err(|e| Error::ReqwestInvalidHeaderName { source: e })?;
+                let header_value = HeaderValue::try_from(value)
+                    .map_err(|e| Error::ReqwestInvalidHeaderValue { source: e })?;
                 header_map.insert(header_name, header_value);
             }
             client = client.headers(header_map);
@@ -109,7 +126,8 @@ impl EventHandler {
             let json = match &payload.object {
                 Some(obj) => Value::Object(obj.to_owned()),
                 None => match &payload.input {
-                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())?,
+                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
+                        .map_err(|e| Error::SerdeJson { source: e })?,
                     None => return Err(Error::PayloadConfig()),
                 },
             };
@@ -125,11 +143,12 @@ impl EventHandler {
             let credentials_string =
                 fs::read_to_string(credentials_path)
                     .await
-                    .map_err(|e| Error::IO {
+                    .map_err(|e| Error::ReadCredentials {
                         path: credentials_path.clone(),
                         source: e,
                     })?;
-            let credentials: Credentials = serde_json::from_str(&credentials_string)?;
+            let credentials: Credentials = serde_json::from_str(&credentials_string)
+                .map_err(|e| Error::SerdeJson { source: e })?;
 
             if let Some(bearer_token) = credentials.bearer_auth {
                 client = client.bearer_auth(bearer_token);
@@ -140,7 +159,13 @@ impl EventHandler {
             }
         };
 
-        let resp = client.send().await?.text().await?;
+        let resp = client
+            .send()
+            .await
+            .map_err(|e| Error::Reqwest { source: e })?
+            .text()
+            .await
+            .map_err(|e| Error::Reqwest { source: e })?;
 
         let data = json!(resp);
 
@@ -155,7 +180,9 @@ impl EventHandler {
             .current_task_id(self.current_task_id)
             .build()?;
 
-        self.tx.send(e)?;
+        self.tx
+            .send(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
         info!("event processeds: {}", subject);
         Ok(())
     }
@@ -183,7 +210,10 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     /// Initializes the processor by building the HTTP client.
     async fn init(&self) -> Result<EventHandler, Error> {
-        let client = reqwest::ClientBuilder::new().https_only(true).build()?;
+        let client = reqwest::ClientBuilder::new()
+            .https_only(true)
+            .build()
+            .map_err(|e| Error::Reqwest { source: e })?;
         let client = Arc::new(client);
 
         let event_handler = EventHandler {
@@ -393,21 +423,21 @@ mod tests {
     }
 
     #[test]
-    fn test_error_io_structure() {
+    fn test_error_read_credentials_structure() {
         use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error = Error::IO {
-            path: PathBuf::from("/test/file.json"),
+        let error = Error::ReadCredentials {
+            path: PathBuf::from("/test/credentials.json"),
             source: io_error,
         };
-        assert!(matches!(error, Error::IO { .. }));
+        assert!(matches!(error, Error::ReadCredentials { .. }));
     }
 
     #[test]
     fn test_error_from_serde_json_error() {
         let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
-        let error: Error = json_error.into();
-        assert!(matches!(error, Error::SerdeJson(_)));
+        let error = Error::SerdeJson { source: json_error };
+        assert!(matches!(error, Error::SerdeJson { .. }));
     }
 
     #[tokio::test]

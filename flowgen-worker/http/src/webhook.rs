@@ -27,17 +27,26 @@ const DEFAULT_PAYLOAD_KEY: &str = "payload";
 #[non_exhaustive]
 pub enum Error {
     /// Failed to send event message.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Event building or processing failed.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// JSON serialization/deserialization failed.
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Axum HTTP processing failed.
-    #[error(transparent)]
-    Axum(#[from] axum::Error),
+    #[error("Axum HTTP processing failed: {source}")]
+    Axum {
+        #[source]
+        source: axum::Error,
+    },
     /// Authentication failed - no credentials provided.
     #[error("No authorization header provided")]
     NoCredentials,
@@ -47,9 +56,13 @@ pub enum Error {
     /// Authentication failed - malformed authorization header.
     #[error("Malformed authorization header")]
     MalformedCredentials,
-    /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    /// Failed to read credentials file.
+    #[error("Failed to read credentials file at {path}: {source}")]
+    ReadCredentials {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -61,7 +74,7 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = match &self {
-            Error::SerdeJson(_) | Error::Axum(_) => StatusCode::BAD_REQUEST,
+            Error::SerdeJson { .. } | Error::Axum { .. } => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error!("webhook error: {}", self);
@@ -151,11 +164,13 @@ impl EventHandler {
             return Ok(StatusCode::UNAUTHORIZED);
         }
 
-        let body = axum::body::to_bytes(request.into_body(), usize::MAX).await?;
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .map_err(|e| Error::Axum { source: e })?;
 
         let json_body = match body.is_empty() {
             true => Value::Null,
-            false => serde_json::from_slice(&body)?,
+            false => serde_json::from_slice(&body).map_err(|e| Error::SerdeJson { source: e })?,
         };
 
         // Only store headers that are specified in the configuration.
@@ -184,7 +199,9 @@ impl EventHandler {
             .build()?;
 
         info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-        self.tx.send(e)?;
+        self.tx
+            .send(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
         Ok(StatusCode::OK)
     }
 }
@@ -213,8 +230,11 @@ impl flowgen_core::task::runner::Runner for Processor {
         // Load credentials at task creation time.
         let credentials = match &config.credentials_path {
             Some(path) => {
-                let content = fs::read_to_string(path)?;
-                Some(serde_json::from_str(&content)?)
+                let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
+                    path: path.clone(),
+                    source: e,
+                })?;
+                Some(serde_json::from_str(&content).map_err(|e| Error::SerdeJson { source: e })?)
             }
             None => None,
         };
@@ -358,23 +378,27 @@ mod tests {
     }
 
     #[test]
-    fn test_error_from_serde_json_error() {
+    fn test_error_serde_json_structure() {
         let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
-        let error: Error = json_error.into();
-        assert!(matches!(error, Error::SerdeJson(_)));
+        let error = Error::SerdeJson { source: json_error };
+        assert!(matches!(error, Error::SerdeJson { .. }));
     }
 
     #[test]
-    fn test_error_from_io_error() {
+    fn test_error_read_credentials_structure() {
+        use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: Error = io_error.into();
-        assert!(matches!(error, Error::IO(_)));
+        let error = Error::ReadCredentials {
+            path: PathBuf::from("/test/credentials.json"),
+            source: io_error,
+        };
+        assert!(matches!(error, Error::ReadCredentials { .. }));
     }
 
     #[test]
     fn test_error_into_response() {
-        let err =
-            Error::SerdeJson(serde_json::from_str::<serde_json::Value>("invalid").unwrap_err());
+        let json_error = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = Error::SerdeJson { source: json_error };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
