@@ -97,8 +97,8 @@ impl ClientBuilder {
         ClientBuilder::default()
     }
     /// Pass credentials file as path to the file.
-    pub fn credentials_path(&mut self, credentials_path: PathBuf) -> &mut ClientBuilder {
-        self.credentials_path = Some(credentials_path);
+    pub fn credentials_path(&mut self, path: PathBuf) -> &mut ClientBuilder {
+        self.credentials_path = Some(path);
         self
     }
 

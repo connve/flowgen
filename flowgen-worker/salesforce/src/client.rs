@@ -132,8 +132,8 @@ impl Builder {
     }
 
     /// Pass path to the file so that credentials can be loaded.
-    pub fn credentials_path(mut self, credentials: PathBuf) -> Self {
-        self.credentials = Some(credentials);
+    pub fn credentials_path(mut self, path: PathBuf) -> Self {
+        self.credentials = Some(path);
         self
     }
 

@@ -163,7 +163,7 @@ impl flowgen_core::task::runner::Runner for Writer {
             client_builder = client_builder.options(options.clone());
         }
         if let Some(credentials_path) = &self.config.credentials_path {
-            client_builder = client_builder.credentials(credentials_path.to_path_buf());
+            client_builder = client_builder.credentials_path(credentials_path.clone());
         }
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));

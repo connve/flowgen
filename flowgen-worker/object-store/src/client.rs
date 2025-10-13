@@ -29,7 +29,7 @@ pub struct Client {
     /// Object store URL path.
     path: PathBuf,
     /// Optional path to service account credentials file.
-    credentials: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     /// Additional connection options for the object store.
     options: Option<HashMap<String, String>>,
     /// Initialized object store context after connection.
@@ -49,10 +49,10 @@ impl flowgen_core::client::Client for Client {
         };
 
         // Add Google Service Account credentials if provided.
-        if let Some(credentials) = &self.credentials {
+        if let Some(credentials_path) = &self.credentials_path {
             parse_opts.insert(
                 "google_service_account".to_string(),
-                credentials.to_string_lossy().to_string(),
+                credentials_path.to_string_lossy().to_string(),
             );
         }
 
@@ -70,7 +70,7 @@ pub struct ClientBuilder {
     /// Object store URL path.
     path: Option<PathBuf>,
     /// Optional path to service account credentials file.
-    credentials: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     /// Additional connection options for the object store.
     pub options: Option<HashMap<String, String>>,
 }
@@ -83,8 +83,8 @@ impl ClientBuilder {
     }
 
     /// Sets the credentials file path.
-    pub fn credentials(mut self, credentials: PathBuf) -> Self {
-        self.credentials = Some(credentials);
+    pub fn credentials_path(mut self, path: PathBuf) -> Self {
+        self.credentials_path = Some(path);
         self
     }
 
@@ -105,7 +105,7 @@ impl ClientBuilder {
             path: self
                 .path
                 .ok_or_else(|| Error::MissingRequiredAttribute("path".to_string()))?,
-            credentials: self.credentials,
+            credentials_path: self.credentials_path,
             options: self.options,
             context: None,
         })
@@ -121,7 +121,7 @@ mod tests {
     fn test_client_builder_new() {
         let builder = ClientBuilder::new();
         assert!(builder.path.is_none());
-        assert!(builder.credentials.is_none());
+        assert!(builder.credentials_path.is_none());
         assert!(builder.options.is_none());
     }
 
@@ -133,10 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn test_client_builder_credentials() {
-        let credentials = PathBuf::from("/path/to/credentials.json");
-        let builder = ClientBuilder::new().credentials(credentials.clone());
-        assert_eq!(builder.credentials, Some(credentials));
+    fn test_client_builder_credentials_path() {
+        let credentials_path = PathBuf::from("/path/to/credentials.json");
+        let builder = ClientBuilder::new().credentials_path(credentials_path.clone());
+        assert_eq!(builder.credentials_path, Some(credentials_path));
     }
 
     #[test]
@@ -164,19 +164,19 @@ mod tests {
     #[test]
     fn test_client_builder_build_success() {
         let path = PathBuf::from("file:///tmp/test/");
-        let credentials = PathBuf::from("/service-account.json");
+        let credentials_path = PathBuf::from("/service-account.json");
         let mut options = HashMap::new();
         options.insert("project_id".to_string(), "my-project".to_string());
 
         let client = ClientBuilder::new()
             .path(path.clone())
-            .credentials(credentials.clone())
+            .credentials_path(credentials_path.clone())
             .options(options.clone())
             .build()
             .unwrap();
 
         assert_eq!(client.path, path);
-        assert_eq!(client.credentials, Some(credentials));
+        assert_eq!(client.credentials_path, Some(credentials_path));
         assert_eq!(client.options, Some(options));
         assert!(client.context.is_none());
     }
@@ -184,19 +184,19 @@ mod tests {
     #[test]
     fn test_client_builder_chain() {
         let path = PathBuf::from("gs://bucket/path/");
-        let credentials = PathBuf::from("/creds.json");
+        let credentials_path = PathBuf::from("/creds.json");
         let mut options = HashMap::new();
         options.insert("timeout".to_string(), "30".to_string());
 
         let client = ClientBuilder::new()
             .path(path.clone())
-            .credentials(credentials.clone())
+            .credentials_path(credentials_path.clone())
             .options(options.clone())
             .build()
             .unwrap();
 
         assert_eq!(client.path, path);
-        assert_eq!(client.credentials, Some(credentials));
+        assert_eq!(client.credentials_path, Some(credentials_path));
         assert_eq!(client.options, Some(options));
     }
 
@@ -206,7 +206,7 @@ mod tests {
         let client = ClientBuilder::new().path(path.clone()).build().unwrap();
 
         assert_eq!(client.path, path);
-        assert!(client.credentials.is_none());
+        assert!(client.credentials_path.is_none());
         assert!(client.options.is_none());
         assert!(client.context.is_none());
     }

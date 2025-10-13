@@ -1,7 +1,7 @@
 # Determines if cache service should be used.
 cache:
   enabled: true
-  credentials: "path_to_credentials"
+  credentials_path: "path_to_credentials"
   type: nats
 # Points to config directory.
 flows:
