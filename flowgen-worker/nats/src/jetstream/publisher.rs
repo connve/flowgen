@@ -31,7 +31,7 @@ pub enum Error {
     #[error(transparent)]
     MessageConversion(#[from] super::message::Error),
     /// Required event attribute is missing.
-    #[error("Missing required event attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Client was not properly initialized or is missing.
     #[error("Client is missing or not initialized properly")]
