@@ -26,7 +26,7 @@ pub enum Error {
     #[error("Missing required value KV Store")]
     MissingKVStore(),
     /// Required configuration attribute missing. Contains attribute name.
-    #[error("Missing required event attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// JetStream context was missing or unavailable.
     #[error("Missing required value JetStream Context")]

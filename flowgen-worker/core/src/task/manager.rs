@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Lease renewal interval in seconds.
 const DEFAULT_LEASE_RENEWAL_INTERVAL_SECS: u64 = 10;
@@ -70,7 +70,7 @@ impl TaskManager {
             async move {
                 while let Some(registration) = rx.recv().await {
                 // Process task registration.
-                debug!("Received task registration: {:?}", registration.task_id);
+                info!("Received task registration: {:?}", registration.task_id);
 
                 let result = if registration.leader_election_options.is_some() {
                     // Leader election is required.
@@ -207,7 +207,7 @@ impl TaskManager {
                         }
                     } else {
                         // No host available.
-                        debug!(
+                        warn!(
                             "Leader election requested for task: {} but no host configured",
                             registration.task_id
                         );

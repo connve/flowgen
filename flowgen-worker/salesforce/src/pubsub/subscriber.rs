@@ -272,10 +272,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .map_err(Error::Auth)?;
 
         // Create Pub/Sub context
-        let pubsub = super::context::ContextBuilder::new(service)
-            .with_client(sfdc_client)
-            .build()
-            .map_err(Error::PubSub)?;
+        let pubsub = super::context::Context::new(service, sfdc_client).map_err(Error::PubSub)?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
         // Create event handler

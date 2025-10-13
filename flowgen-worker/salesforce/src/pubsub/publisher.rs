@@ -44,8 +44,8 @@ pub enum Error {
     /// Flowgen core service error.
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
-    /// Required event attribute is missing.
-    #[error("Missing required event attribute: {}", _0)]
+    /// Required attribute is missing.
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Event data object is empty when content is expected.
     #[error("Empty object")]
@@ -168,9 +168,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .connect()
             .await?;
 
-        let pubsub = super::context::ContextBuilder::new(service)
-            .with_client(sfdc_client)
-            .build()?;
+        let pubsub = super::context::Context::new(service, sfdc_client)?;
 
         let pubsub = Arc::new(Mutex::new(pubsub));
 

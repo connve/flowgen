@@ -66,7 +66,7 @@ impl TaskContextBuilder {
     /// Sets the unique flow name.
     ///
     /// # Arguments
-    /// * `id` - The unique identifier for this flow
+    /// * `name` - The unique name for this flow.
     pub fn flow_name(mut self, name: String) -> Self {
         self.flow_name = Some(name);
         self
