@@ -115,6 +115,7 @@ impl Flow {
 
     /// Initializes shared resources for the flow, such as the TaskManager and TaskContext.
     /// This must be called before any other run methods.
+    #[tracing::instrument(skip(self), name = "flow.init", fields(flow = %self.config.flow.name))]
     pub async fn init(&mut self) -> Result<(), Error> {
         if self.task_manager.is_some() {
             return Ok(()); // Already initialized
@@ -149,6 +150,7 @@ impl Flow {
     /// Spawns initial setup tasks that must complete before the HTTP server starts.
     ///
     /// This is specifically for registering webhooks for non-leader-elected flows.
+    #[tracing::instrument(skip(self), name = "flow.run_http_handlers", fields(flow = %self.config.flow.name))]
     pub async fn run_http_handlers(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
         // Only non-leader-elected flows can have webhook handlers that run at setup.
         if self.is_leader_elected() {
@@ -190,12 +192,12 @@ impl Flow {
     ///
     /// This spawns a single master task that manages the flow's lifecycle,
     /// including leader election and running all background tasks.
-    #[tracing::instrument(skip(self), fields(flow = %self.config.flow.name))]
-    pub fn start(self) -> JoinHandle<()> {
+    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.config.flow.name))]
+    pub fn run(self) -> JoinHandle<()> {
         let flow_name = self.config.flow.name.clone();
         tokio::spawn(
             async move {
-                if let Err(e) = self.run().await {
+                if let Err(e) = self.run_background_tasks().await {
                     error!("Flow {} terminated with an error: {}", flow_name, e);
                 }
             }
@@ -204,7 +206,7 @@ impl Flow {
     }
 
     /// The main internal run loop for the flow.
-    async fn run(self) -> Result<(), Error> {
+    async fn run_background_tasks(self) -> Result<(), Error> {
         let is_leader_elected = self.is_leader_elected();
         let task_manager = self.task_manager.ok_or_else(|| {
             Error::MissingRequiredAttribute("task_manager: init() must be called first".to_string())

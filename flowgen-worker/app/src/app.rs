@@ -64,7 +64,7 @@ impl App {
     /// This method discovers flow configuration files using the glob pattern specified in the app config,
     /// parses each configuration file, builds flow instances, registers HTTP routes, starts the HTTP server,
     /// and finally runs all flow tasks concurrently along with the server.
-    #[tracing::instrument(skip(self), name = "app.start")]
+    #[tracing::instrument(skip(self), name = "app")]
     pub async fn start(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
@@ -217,33 +217,39 @@ impl App {
             };
         }
 
-        // Initialize all flows.
+        // Initialize flow setup.
         for flow in &mut flows {
             if let Err(e) = flow.init().await {
                 error!("Flow initialization failed for {}: {}", flow.name(), e);
             }
         }
 
-        // Run HTTP handlers and wait for them to register.
-        let mut http_handler_tasks = Vec::new();
-        for flow in &flows {
-            match flow.run_http_handlers().await {
-                Ok(handles) => http_handler_tasks.extend(handles),
-                Err(e) => {
-                    error!("Failed to run http handlers for {}: {}", flow.name(), e);
+        // Run HTTP handlers and wait for them to register (only if HTTP server is enabled).
+        if app_config
+            .http_server
+            .as_ref()
+            .is_some_and(|http| http.enabled)
+        {
+            let mut http_handler_tasks = Vec::new();
+            for flow in &flows {
+                match flow.run_http_handlers().await {
+                    Ok(handles) => http_handler_tasks.extend(handles),
+                    Err(e) => {
+                        error!("Failed to run http handlers for {}: {}", flow.name(), e);
+                    }
                 }
             }
-        }
 
-        if !http_handler_tasks.is_empty() {
-            info!(
-                "Waiting for {} HTTP handler(s) to complete setup...",
-                http_handler_tasks.len()
-            );
-            let results = futures_util::future::join_all(http_handler_tasks).await;
-            for result in results {
-                if let Err(e) = result {
-                    error!("HTTP handler setup task panicked: {}", e);
+            if !http_handler_tasks.is_empty() {
+                info!(
+                    "Waiting for {} HTTP handler(s) to complete setup...",
+                    http_handler_tasks.len()
+                );
+                let results = futures_util::future::join_all(http_handler_tasks).await;
+                for result in results {
+                    if let Err(e) = result {
+                        error!("HTTP handler setup task panicked: {}", e);
+                    }
                 }
             }
         }
@@ -274,7 +280,7 @@ impl App {
 
         // Start all background flow tasks.
         for flow in flows {
-            background_handles.push(flow.start());
+            background_handles.push(flow.run());
         }
 
         // Wait for all background flows and the server to complete.

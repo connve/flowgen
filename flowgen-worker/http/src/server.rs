@@ -81,7 +81,7 @@ impl HttpServer {
     }
 
     /// Start the HTTP Server with all registered routes.
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, name = "http_server.start")]
     pub async fn start_server(&self, port: Option<u16>) -> Result<(), Error> {
         let mut server_started = self.server_started.lock().await;
         if *server_started {
