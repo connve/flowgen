@@ -29,6 +29,8 @@ pub mod generate {
 }
 /// Host coordination and lease management.
 pub mod host;
+/// HTTP server trait for task context integration.
+pub mod http_server;
 /// Custom serialization and deserialization utilities.
 pub mod serde;
 /// Service discovery and connection management.

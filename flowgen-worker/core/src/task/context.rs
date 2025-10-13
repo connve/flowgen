@@ -32,6 +32,8 @@ pub struct TaskContext {
     pub task_manager: std::sync::Arc<crate::task::manager::TaskManager>,
     /// Optional shared cache for task operations.
     pub cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
+    /// Optional shared HTTP server for webhook tasks.
+    pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -40,6 +42,10 @@ impl std::fmt::Debug for TaskContext {
             .field("flow", &self.flow)
             .field("task_manager", &"<TaskManager>")
             .field("cache", &self.cache.as_ref().map(|_| "<Cache>"))
+            .field(
+                "http_server",
+                &self.http_server.as_ref().map(|_| "<HttpServer>"),
+            )
             .finish()
     }
 }
@@ -55,6 +61,8 @@ pub struct TaskContextBuilder {
     task_manager: Option<std::sync::Arc<crate::task::manager::TaskManager>>,
     /// Optional shared cache for task operations.
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
+    /// Optional shared HTTP server for webhook tasks.
+    http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
 }
 
 impl TaskContextBuilder {
@@ -102,6 +110,18 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the optional HTTP server for webhook tasks.
+    ///
+    /// # Arguments
+    /// * `http_server` - Optional HTTP server instance
+    pub fn http_server(
+        mut self,
+        http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
+    ) -> Self {
+        self.http_server = http_server;
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -118,6 +138,7 @@ impl TaskContextBuilder {
                 .task_manager
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_manager".to_string()))?,
             cache: self.cache,
+            http_server: self.http_server,
         })
     }
 }

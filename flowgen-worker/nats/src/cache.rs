@@ -162,7 +162,7 @@ impl CacheBuilder {
     ///
     /// # Returns
     /// * `Ok(Cache)` on success.
-    /// * `Err(Error::MissingRequiredAttribute)` if `credentials` is missing.
+    /// * `Err(Error::MissingRequiredAttribute)` if `credentials_path` is missing.
     pub fn build(self) -> Result<Cache, Error> {
         Ok(Cache {
             credentials_path: self

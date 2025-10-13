@@ -89,7 +89,7 @@ pub struct CacheOptions {
     /// Cache backend type.
     #[serde(rename = "type")]
     pub cache_type: CacheType,
-    /// Path to cache credentials_path file.
+    /// Path to cache credentials file.
     pub credentials_path: PathBuf,
     /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
     pub db_name: Option<String>,
@@ -105,6 +105,8 @@ pub struct FlowOptions {
 /// HTTP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HttpServerOptions {
+    /// Whether HTTP server is enabled.
+    pub enabled: bool,
     /// Optional HTTP server port number (defaults to 3000).
     pub port: Option<u16>,
     /// Optional path prefix for all routes (e.g., "/workers").
@@ -437,20 +439,24 @@ mod tests {
     #[test]
     fn test_http_server_options_creation() {
         let http_server_options = HttpServerOptions {
+            enabled: true,
             port: Some(8080),
             routes_prefix: None,
         };
 
+        assert!(http_server_options.enabled);
         assert_eq!(http_server_options.port, Some(8080));
     }
 
     #[test]
     fn test_http_server_options_without_port() {
         let http_server_options = HttpServerOptions {
+            enabled: false,
             port: None,
             routes_prefix: None,
         };
 
+        assert!(!http_server_options.enabled);
         assert!(http_server_options.port.is_none());
     }
 
@@ -460,6 +466,7 @@ mod tests {
             cache: None,
             flows: FlowOptions { dir: None },
             http_server: Some(HttpServerOptions {
+                enabled: true,
                 port: Some(8080),
                 routes_prefix: Some("/workers".to_string()),
             }),
@@ -467,10 +474,9 @@ mod tests {
         };
 
         assert!(app_config.http_server.is_some());
-        assert_eq!(app_config.http_server.as_ref().unwrap().port, Some(8080));
-        assert_eq!(
-            app_config.http_server.as_ref().unwrap().routes_prefix,
-            Some("/workers".to_string())
-        );
+        let http_server = app_config.http_server.as_ref().unwrap();
+        assert!(http_server.enabled);
+        assert_eq!(http_server.port, Some(8080));
+        assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));
     }
 }

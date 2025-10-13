@@ -198,10 +198,8 @@ pub struct Processor {
     tx: Sender<Event>,
     /// Current task identifier.
     current_task_id: usize,
-    /// Shared HTTP server instance.
-    http_server: Arc<super::server::HttpServer>,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 #[async_trait::async_trait]
@@ -259,9 +257,17 @@ impl flowgen_core::task::runner::Runner for Processor {
             crate::config::Method::HEAD => MethodRouter::new().head(handler),
         };
 
-        self.http_server
-            .register_route(config.endpoint.clone(), method_router)
-            .await;
+        if let Some(http_server) = &self.task_context.http_server {
+            // Downcast the trait object to the concrete HttpServer type
+            if let Some(server) = http_server
+                .as_any()
+                .downcast_ref::<super::server::HttpServer>()
+            {
+                server
+                    .register_route(config.endpoint.clone(), method_router)
+                    .await;
+            }
+        }
 
         Ok(())
     }
@@ -276,8 +282,6 @@ pub struct ProcessorBuilder {
     tx: Option<Sender<Event>>,
     /// Current task identifier.
     current_task_id: usize,
-    /// Optional HTTP server instance.
-    http_server: Option<Arc<super::server::HttpServer>>,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
@@ -304,11 +308,6 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn http_server(mut self, server: Arc<super::server::HttpServer>) -> Self {
-        self.http_server = Some(server);
-        self
-    }
-
     pub fn task_context(
         mut self,
         task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -326,10 +325,7 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            http_server: self
-                .http_server
-                .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
-            _task_context: self
+            task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -393,7 +389,6 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
-        assert!(builder.http_server.is_none());
         assert!(builder.task_context.is_none());
     }
 
@@ -403,7 +398,6 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert_eq!(builder.current_task_id, 0);
-        assert!(builder.http_server.is_none());
         assert!(builder.task_context.is_none());
     }
 
@@ -436,21 +430,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_processor_builder_http_server() {
-        let server = Arc::new(crate::server::HttpServerBuilder::new().build());
-        let builder = ProcessorBuilder::new().http_server(server.clone());
-        assert!(builder.http_server.is_some());
-    }
-
-    #[tokio::test]
     async fn test_processor_builder_build_missing_config() {
         let (tx, _rx) = broadcast::channel(100);
-        let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
         let result = ProcessorBuilder::new()
             .sender(tx)
-            .http_server(server)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
@@ -470,43 +456,17 @@ mod tests {
             headers: None,
             credentials_path: None,
         });
-        let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
         let result = ProcessorBuilder::new()
             .config(config)
-            .http_server(server)
             .current_task_id(1)
+            .task_context(create_mock_task_context())
             .build()
             .await;
 
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_http_server() {
-        let (tx, _rx) = broadcast::channel(100);
-        let config = Arc::new(crate::config::Processor {
-            name: "test_webhook".to_string(),
-            endpoint: "/test".to_string(),
-            method: crate::config::Method::GET,
-            payload: None,
-            headers: None,
-            credentials_path: None,
-        });
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "http_server")
         );
     }
 
@@ -529,12 +489,9 @@ mod tests {
             }),
             credentials_path: None,
         });
-        let server = Arc::new(crate::server::HttpServerBuilder::new().build());
-
         let result = ProcessorBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .http_server(server.clone())
             .current_task_id(5)
             .task_context(create_mock_task_context())
             .build()
@@ -557,12 +514,10 @@ mod tests {
             headers: None,
             credentials_path: None,
         });
-        let server = Arc::new(crate::server::HttpServerBuilder::new().build());
 
         let processor = ProcessorBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .http_server(server)
             .current_task_id(10)
             .task_context(create_mock_task_context())
             .build()

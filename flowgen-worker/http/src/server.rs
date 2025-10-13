@@ -66,6 +66,12 @@ impl HttpServerBuilder {
     }
 }
 
+impl flowgen_core::http_server::HttpServer for HttpServer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 impl HttpServer {
     /// Register a route with the HTTP Server.
     pub async fn register_route(&self, path: String, method_router: MethodRouter) {

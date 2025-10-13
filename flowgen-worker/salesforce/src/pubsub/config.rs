@@ -33,8 +33,8 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 /// capture, and custom events.
 ///
 /// # Fields
-/// - `label`: Optional human-readable identifier for this subscriber configuration.
-/// - `credentials`: Reference to credential store entry containing Salesforce OAuth tokens.
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to credentials file containing Salesforce authentication details.
 /// - `topic`: Topic configuration including name and consumer options.
 /// - `endpoint`: Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443").
 ///
@@ -44,8 +44,8 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 /// ```json
 /// {
 ///     "salesforce_subscriber": {
-///         "label": "account_changes_subscriber",
-///         "credentials": "salesforce_prod_creds",
+///         "name": "account_changes_subscriber",
+///         "credentials_path": "/path/to/salesforce_prod_creds.json",
 ///         "topic": {
 ///             "name": "/event/Account_Change__e",
 ///             "num_requested": 10
@@ -58,8 +58,8 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 /// ```json
 /// {
 ///     "salesforce_subscriber": {
-///         "label": "opportunity_cdc_subscriber",
-///         "credentials": "salesforce_prod_creds",
+///         "name": "opportunity_cdc_subscriber",
+///         "credentials_path": "/path/to/salesforce_prod_creds.json",
 ///         "topic": {
 ///             "name": "/data/OpportunityChangeEvent",
 ///             "num_requested": 25,
@@ -78,8 +78,8 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 /// ```json
 /// {
 ///     "salesforce_subscriber": {
-///         "label": "inventory_alerts",
-///         "credentials": "salesforce_inventory_creds",
+///         "name": "inventory_alerts",
+///         "credentials_path": "/path/to/salesforce_inventory_creds.json",
 ///         "topic": {
 ///             "name": "/event/Inventory_Alert__e",
 ///             "num_requested": 5
@@ -154,11 +154,10 @@ pub struct Topic {
 /// dynamic input mappings for runtime data injection.
 ///
 /// # Fields
-/// - `label`: Optional human-readable identifier for this publisher configuration.
-/// - `credentials`: Reference to credential store entry containing Salesforce OAuth tokens.
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to credentials file containing Salesforce authentication details.
 /// - `topic`: Target topic name for publishing events.
 /// - `payload`: Event payload template with static values and placeholders.
-/// - `inputs`: Optional input mappings for dynamic payload population.
 /// - `endpoint`: Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
 ///
 /// # Payload Template
@@ -172,8 +171,8 @@ pub struct Topic {
 /// ```json
 /// {
 ///     "salesforce_publisher": {
-///         "label": "order_status_publisher",
-///         "credentials": "salesforce_prod_creds",
+///         "name": "order_status_publisher",
+///         "credentials_path": "/path/to/salesforce_prod_creds.json",
 ///         "topic": "/event/Order_Status__e",
 ///         "payload": {
 ///             "Order_ID__c": "ORD-12345",
@@ -188,24 +187,14 @@ pub struct Topic {
 /// ```json
 /// {
 ///     "salesforce_publisher": {
-///         "label": "customer_event_publisher",
-///         "credentials": "salesforce_integration_creds",
+///         "name": "customer_event_publisher",
+///         "credentials_path": "/path/to/salesforce_integration_creds.json",
 ///         "topic": "/event/Customer_Update__e",
 ///         "payload": {
 ///             "Customer_ID__c": "{{customer.id}}",
 ///             "Event_Type__c": "{{event.type}}",
 ///             "Data__c": "{{event.data}}",
 ///             "Source_System__c": "External_API"
-///         },
-///         "inputs": {
-///             "customer": {
-///                 "type": "json_path",
-///                 "path": "$.customer"
-///             },
-///             "event": {
-///                 "type": "json_path",
-///                 "path": "$.event_data"
-///             }
 ///         },
 ///         "endpoint": "api.pubsub.salesforce.com:7443"
 ///     }
@@ -216,8 +205,8 @@ pub struct Topic {
 /// ```json
 /// {
 ///     "salesforce_publisher": {
-///         "label": "account_change_simulator",
-///         "credentials": "salesforce_test_creds",
+///         "name": "account_change_simulator",
+///         "credentials_path": "/path/to/salesforce_test_creds.json",
 ///         "topic": "/data/AccountChangeEvent",
 ///         "payload": {
 ///             "Id": "{{account.id}}",
@@ -226,12 +215,6 @@ pub struct Topic {
 ///                 "changeType": "UPDATE",
 ///                 "changedFields": ["Name", "Phone"],
 ///                 "recordIds": ["{{account.id}}"]
-///             }
-///         },
-///         "inputs": {
-///             "account": {
-///                 "type": "previous_event",
-///                 "field": "data"
 ///             }
 ///         }
 ///     }

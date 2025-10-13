@@ -70,8 +70,8 @@ pub struct Flow {
     config: Arc<FlowConfig>,
     /// List of spawned task handles for concurrent execution.
     pub task_list: Option<Vec<JoinHandle<Result<(), Error>>>>,
-    /// Shared HTTP server for webhook tasks.
-    http_server: Arc<flowgen_http::server::HttpServer>,
+    /// Optional shared HTTP server for webhook tasks.
+    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
     /// Optional host client for coordination.
     host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Optional shared cache for task operations.
@@ -120,6 +120,7 @@ impl Flow {
                 .flow_labels(self.config.flow.labels.clone())
                 .task_manager(Arc::clone(&task_manager))
                 .cache(self.cache.clone())
+                .http_server(self.http_server.clone())
                 .build()
                 .map_err(|e| Error::MissingRequiredAttribute(e.to_string()))?,
         );
@@ -170,13 +171,8 @@ impl Flow {
             }
 
             // Spawn all tasks as leader.
-            let (blocking_tasks, background_tasks) = Self::spawn_tasks(
-                &self.config.flow.tasks,
-                &tx,
-                &task_context,
-                &self.http_server,
-            )
-            .await;
+            let (blocking_tasks, background_tasks) =
+                Self::spawn_tasks(&self.config.flow.tasks, &tx, &task_context).await;
 
             // For flows without leader election, wait for blocking tasks to complete
             if !require_lease_election && !blocking_tasks.is_empty() {
@@ -233,7 +229,6 @@ impl Flow {
         tasks: &[Task],
         tx: &Sender<Event>,
         task_context: &Arc<flowgen_core::task::context::TaskContext>,
-        http_server: &Arc<flowgen_http::server::HttpServer>,
     ) -> (
         Vec<JoinHandle<Result<(), Error>>>,
         Vec<JoinHandle<Result<(), Error>>>,
@@ -318,7 +313,6 @@ impl Flow {
                 Task::http_webhook(config) => {
                     let config = Arc::new(config.to_owned());
                     let tx = tx.clone();
-                    let http_server = Arc::clone(http_server);
                     let task_context = Arc::clone(task_context);
                     let span = tracing::Span::current();
                     let task: JoinHandle<Result<(), Error>> = tokio::spawn(
@@ -327,7 +321,6 @@ impl Flow {
                                 .config(config)
                                 .sender(tx)
                                 .current_task_id(i)
-                                .http_server(http_server)
                                 .task_context(task_context)
                                 .build()
                                 .await?
@@ -488,7 +481,7 @@ pub struct FlowBuilder {
     /// Optional flow configuration.
     config: Option<Arc<FlowConfig>>,
     /// Optional shared HTTP server instance.
-    http_server: Option<Arc<flowgen_http::server::HttpServer>>,
+    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
     /// Optional host client for coordination.
     host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Optional shared cache instance.
@@ -508,7 +501,7 @@ impl FlowBuilder {
     }
 
     /// Sets the shared HTTP server instance.
-    pub fn http_server(mut self, server: Arc<flowgen_http::server::HttpServer>) -> Self {
+    pub fn http_server(mut self, server: Arc<dyn flowgen_core::http_server::HttpServer>) -> Self {
         self.http_server = Some(server);
         self
     }
@@ -535,9 +528,7 @@ impl FlowBuilder {
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
             task_list: None,
-            http_server: self
-                .http_server
-                .ok_or_else(|| Error::MissingRequiredAttribute("http_server".to_string()))?,
+            http_server: self.http_server,
             host: self.host,
             cache: self.cache,
         })
@@ -598,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flow_builder_build_missing_http_server() {
+    fn test_flow_builder_build_without_http_server() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
                 name: "test_flow".to_string(),
@@ -610,10 +601,9 @@ mod tests {
 
         let result = FlowBuilder::new().config(flow_config).build();
 
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "http_server")
-        );
+        assert!(result.is_ok());
+        let flow = result.unwrap();
+        assert!(flow.http_server.is_none());
     }
 
     #[test]
