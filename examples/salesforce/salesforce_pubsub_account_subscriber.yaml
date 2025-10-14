@@ -3,7 +3,7 @@ flow:
   tasks:
     - salesforce_pubsub_subscriber:
         name: start_subscription
-        credentials: /etc/salesforce/credentials.json
+        credentials: /etc/sfdc/credentials.json # update to your credentials path
         topic:
           name: /data/AccountChangeEvent
           durable_consumer_options:
@@ -12,7 +12,7 @@ flow:
             name: salesforce_pubsub_account_subscriber
     - nats_jetstream_publisher:
         name: publish_events
-        credentials: /etc/nats/credentials.json
+        credentials: /etc/nats/credentials.json # update to your credentials path
         stream: flowgen_events
         stream_description: Main evenbuts of Flowgen.
         subjects:

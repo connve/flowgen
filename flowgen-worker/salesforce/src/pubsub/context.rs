@@ -16,11 +16,17 @@ pub enum Error {
     /// gRPC service channel is missing or unavailable.
     #[error("Service channel missing")]
     MissingServiceChannel(),
+    /// Required attribute was not provided.
+    #[error("Missing required attribute: {}", _0)]
+    MissingRequiredAttribute(String),
     /// Invalid metadata value for gRPC headers.
-    #[error(transparent)]
-    InvalidMetadataValue(#[from] tonic::metadata::errors::InvalidMetadataValue),
+    #[error("Invalid metadata value for gRPC headers: {source}")]
+    InvalidMetadataValue {
+        #[source]
+        source: tonic::metadata::errors::InvalidMetadataValue,
+    },
     /// gRPC transport or communication error.
-    #[error(transparent)]
+    #[error("gRPC transport error: {0}")]
     Tonic(Box<tonic::Status>),
 }
 
@@ -60,6 +66,47 @@ pub struct Context {
 }
 
 impl Context {
+    /// Creates a new Pub/Sub context with the provided service and authenticated client.
+    pub fn new(
+        service: flowgen_core::service::Service,
+        client: client::Client,
+    ) -> Result<Self, Error> {
+        let auth_header: tonic::metadata::AsciiMetadataValue = client
+            .token_result
+            .as_ref()
+            .ok_or_else(Error::MissingTokenResponse)?
+            .access_token()
+            .secret()
+            .parse()
+            .map_err(|e| Error::InvalidMetadataValue { source: e })?;
+
+        let instance_url: tonic::metadata::AsciiMetadataValue = client
+            .instance_url
+            .as_ref()
+            .ok_or_else(|| Error::MissingRequiredAttribute("instance_url".to_string()))?
+            .parse()
+            .map_err(|e| Error::InvalidMetadataValue { source: e })?;
+
+        let tenant_id: tonic::metadata::AsciiMetadataValue = client
+            .tenant_id
+            .as_ref()
+            .ok_or_else(|| Error::MissingRequiredAttribute("tenant_id".to_string()))?
+            .parse()
+            .map_err(|e| Error::InvalidMetadataValue { source: e })?;
+
+        let interceptor = ContextInterceptor {
+            auth_header,
+            instance_url,
+            tenant_id,
+        };
+
+        let pubsub = PubSubClient::with_interceptor(
+            service.channel.ok_or_else(Error::MissingServiceChannel)?,
+            interceptor,
+        );
+
+        Ok(Context { pubsub })
+    }
     pub async fn get_topic(
         &mut self,
         request: salesforce_pubsub::eventbus::v1::TopicRequest,
@@ -143,58 +190,6 @@ impl Context {
     }
 }
 
-pub struct ContextBuilder {
-    client: Option<client::Client>,
-    service: flowgen_core::service::Service,
-}
-
-impl ContextBuilder {
-    // Creates a new instance of builder..
-    pub fn new(service: flowgen_core::service::Service) -> Self {
-        ContextBuilder {
-            client: None,
-            service,
-        }
-    }
-    /// Pass the Salesforce client.
-    pub fn with_client(&mut self, client: client::Client) -> &mut Self {
-        self.client = Some(client);
-        self
-    }
-
-    /// Generates a new PubSub context.
-    pub fn build(&self) -> Result<Context, Error> {
-        let client = self.client.as_ref().ok_or_else(Error::MissingClient)?;
-
-        let auth_header: tonic::metadata::AsciiMetadataValue = client
-            .token_result
-            .as_ref()
-            .ok_or_else(Error::MissingTokenResponse)?
-            .access_token()
-            .secret()
-            .parse()?;
-
-        let instance_url: tonic::metadata::AsciiMetadataValue = client.instance_url.parse()?;
-
-        let tenant_id: tonic::metadata::AsciiMetadataValue = client.tenant_id.parse()?;
-
-        let interceptor = ContextInterceptor {
-            auth_header,
-            instance_url,
-            tenant_id,
-        };
-
-        let pubsub = PubSubClient::with_interceptor(
-            self.service
-                .channel
-                .to_owned()
-                .ok_or_else(Error::MissingServiceChannel)?,
-            interceptor,
-        );
-
-        Ok(Context { pubsub })
-    }
-}
 #[cfg(test)]
 mod tests {
 
@@ -203,15 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_missing_client() {
-        let service = flowgen_core::service::ServiceBuilder::new()
-            .build()
-            .unwrap();
-        let client = ContextBuilder::new(service).build();
-        assert!(matches!(client, Err(Error::MissingClient(..))));
-    }
-    #[test]
-    fn test_build_missing_token() {
+    fn test_new_missing_token() {
         let service = flowgen_core::service::ServiceBuilder::new()
             .build()
             .unwrap();
@@ -230,7 +217,7 @@ mod tests {
             .build()
             .unwrap();
         let _ = fs::remove_file(path);
-        let pubsub = ContextBuilder::new(service).with_client(client).build();
-        assert!(matches!(pubsub, Err(Error::MissingTokenResponse(..))));
+        let result = Context::new(service, client);
+        assert!(matches!(result, Err(Error::MissingTokenResponse())));
     }
 }

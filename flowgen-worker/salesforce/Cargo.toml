@@ -30,3 +30,4 @@ bytes = { workspace = true }
 apache-avro = { workspace = true }
 reqwest = { workspace = true }
 serde_avro_fast = { workspace = true }
+async-trait.workspace = true

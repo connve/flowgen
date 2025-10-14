@@ -7,7 +7,7 @@ use flowgen_core::{
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
-use tracing::{debug, info};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for NATS subscriber.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_subscriber";
@@ -22,17 +22,29 @@ pub enum Error {
     #[error(transparent)]
     MessageConversion(#[from] crate::jetstream::message::Error),
     /// JetStream consumer operation error.
-    #[error(transparent)]
-    Consumer(#[from] async_nats::jetstream::stream::ConsumerError),
+    #[error("JetStream consumer operation failed: {source}")]
+    Consumer {
+        #[source]
+        source: async_nats::jetstream::stream::ConsumerError,
+    },
     /// JetStream consumer stream error.
-    #[error(transparent)]
-    ConsumerStream(#[from] async_nats::jetstream::consumer::StreamError),
+    #[error("JetStream consumer stream error: {source}")]
+    ConsumerStream {
+        #[source]
+        source: async_nats::jetstream::consumer::StreamError,
+    },
     /// Failed to get JetStream stream.
-    #[error(transparent)]
-    GetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    #[error("Failed to get JetStream stream: {source}")]
+    GetStream {
+        #[source]
+        source: async_nats::jetstream::context::GetStreamError,
+    },
     /// Failed to get JetStream stream information.
-    #[error(transparent)]
-    StreamInfo(#[from] async_nats::jetstream::stream::InfoError),
+    #[error("Failed to get JetStream stream information: {source}")]
+    StreamInfo {
+        #[source]
+        source: async_nats::jetstream::stream::InfoError,
+    },
     /// Failed to retrieve consumer configuration information.
     #[error("Consumer configuration check failed")]
     ConsumerInfoFailed,
@@ -44,14 +56,23 @@ pub enum Error {
         expected: String,
     },
     /// Failed to subscribe to NATS subject.
-    #[error(transparent)]
-    Subscribe(#[from] async_nats::SubscribeError),
+    #[error("Failed to subscribe to NATS subject: {source}")]
+    Subscribe {
+        #[source]
+        source: async_nats::SubscribeError,
+    },
     /// Async task join error.
-    #[error(transparent)]
-    TaskJoin(#[from] tokio::task::JoinError),
+    #[error("Task join error: {source}")]
+    TaskJoin {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     /// Failed to send event through broadcast channel.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}.", _0)]
     MissingRequiredAttribute(String),
@@ -61,9 +82,45 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
+}
+
+/// Event handler for processing NATS messages.
+pub struct EventHandler {
+    consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
+    tx: Sender<Event>,
+    current_task_id: usize,
+    config: Arc<super::config::Subscriber>,
+}
+
+impl EventHandler {
+    /// Processes messages from the NATS JetStream consumer.
+    async fn handle(self) -> Result<(), Error> {
+        loop {
+            if let Some(delay_secs) = self.config.delay_secs {
+                time::sleep(Duration::from_secs(delay_secs)).await
+            }
+
+            let stream = self
+                .consumer
+                .messages()
+                .await
+                .map_err(|e| Error::ConsumerStream { source: e })?;
+            let mut batch = stream.take(self.config.batch_size);
+
+            while let Some(message) = batch.next().await {
+                if let Ok(message) = message {
+                    let mut e = message.to_event()?;
+                    message.ack().await.ok();
+                    e.current_task_id = Some(self.current_task_id);
+
+                    info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+                    self.tx
+                        .send(e)
+                        .map_err(|e| Error::SendMessage { source: e })?;
+                }
+            }
+        }
+    }
 }
 
 /// NATS JetStream subscriber that consumes messages and converts them to flowgen events.
@@ -76,36 +133,32 @@ pub struct Subscriber {
     /// Current task identifier for event tagging.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::task::runner::Runner for Subscriber {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
+    /// Initializes the subscriber by establishing connection and creating consumer.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Connecting to NATS with credentials
+    /// - Getting or creating JetStream stream and consumer
+    /// - Validating consumer configuration
+    async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone())
+            .credentials_path(self.config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
 
         if let Some(jetstream) = client.jetstream {
-            let stream = jetstream.get_stream(self.config.stream.clone()).await?;
+            let stream = jetstream
+                .get_stream(self.config.stream.clone())
+                .await
+                .map_err(|e| Error::GetStream { source: e })?;
 
             let consumer_config = jetstream::consumer::pull::Config {
                 durable_name: Some(self.config.durable_name.clone()),
@@ -115,7 +168,10 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
             let consumer = match stream.get_consumer(&self.config.durable_name).await {
                 Ok(mut existing_consumer) => {
-                    let consumer_info = existing_consumer.info().await?;
+                    let consumer_info = existing_consumer
+                        .info()
+                        .await
+                        .map_err(|e| Error::StreamInfo { source: e })?;
                     let current_filter = consumer_info.config.filter_subject.clone();
 
                     if current_filter != self.config.subject {
@@ -128,45 +184,46 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                         existing_consumer
                     }
                 }
-                Err(_) => stream.create_consumer(consumer_config).await?,
+                Err(_) => stream
+                    .create_consumer(consumer_config)
+                    .await
+                    .map_err(|e| Error::Consumer { source: e })?,
             };
 
-            loop {
-                tokio::select! {
-                    biased;
+            Ok(EventHandler {
+                consumer,
+                tx: self.tx.clone(),
+                current_task_id: self.current_task_id,
+                config: Arc::clone(&self.config),
+            })
+        } else {
+            Err(Error::Other(
+                "JetStream context not available".to_string().into(),
+            ))
+        }
+    }
 
-                    // Check for leadership changes.
-                    Some(status) = task_manager_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Lost leadership for task: {}", self.config.name);
-                            return Ok(());
-                        }
-                    }
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(self) -> Result<(), Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => handler,
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
-                    // Process messages.
-                    _ = async {
-                        if let Some(delay_secs) = self.config.delay_secs {
-                            time::sleep(Duration::from_secs(delay_secs)).await
-                        }
-
-                        let stream = consumer.messages().await.ok()?;
-                        let mut batch = stream.take(self.config.batch_size);
-
-                        while let Some(message) = batch.next().await {
-                            if let Ok(message) = message {
-                                let mut e = message.to_event().ok()?;
-                                message.ack().await.ok()?;
-                                e.current_task_id = Some(self.current_task_id);
-
-                                info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-                                self.tx.send(e).ok()?;
-                            }
-                        }
-                        Some(())
-                    } => {}
+        // Spawn event handler task.
+        tokio::spawn(
+            async move {
+                if let Err(e) = event_handler.handle().await {
+                    error!("{}", e);
                 }
             }
-        }
+            .instrument(tracing::Span::current()),
+        );
+
         Ok(())
     }
 }
@@ -223,7 +280,7 @@ impl SubscriberBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -275,7 +332,7 @@ mod tests {
     fn test_subscriber_builder_config() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -319,7 +376,7 @@ mod tests {
     async fn test_subscriber_builder_build_missing_sender() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -343,7 +400,7 @@ mod tests {
     async fn test_subscriber_builder_build_success() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             subject: "test.subject.*".to_string(),
             durable_name: "test_consumer".to_string(),
@@ -370,7 +427,7 @@ mod tests {
     async fn test_subscriber_builder_chain() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/chain/test.creds"),
+            credentials_path: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             subject: "chain.subject".to_string(),
             durable_name: "chain_consumer".to_string(),
@@ -396,7 +453,7 @@ mod tests {
     fn test_subscriber_structure() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "struct_test".to_string(),
             subject: "struct.test".to_string(),
             durable_name: "struct_consumer".to_string(),
@@ -409,7 +466,7 @@ mod tests {
             config: config.clone(),
             tx,
             current_task_id: 0,
-            task_context: create_mock_task_context(),
+            _task_context: create_mock_task_context(),
         };
 
         assert_eq!(subscriber.config, config);
@@ -450,5 +507,31 @@ mod tests {
         assert!(info_err
             .to_string()
             .contains("Consumer configuration check failed"));
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_builder_build_missing_task_context() {
+        let config = Arc::new(super::super::config::Subscriber {
+            name: "test_subscriber".to_string(),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
+            stream: "test_stream".to_string(),
+            subject: "test.subject".to_string(),
+            durable_name: "test_consumer".to_string(),
+            batch_size: 50,
+            delay_secs: None,
+        });
+        let (tx, _rx) = broadcast::channel(100);
+
+        let result = SubscriberBuilder::new()
+            .config(config)
+            .sender(tx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

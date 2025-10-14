@@ -12,7 +12,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.detect-and-tag.outputs.tag }}
       previous-tag: ${{ steps.detect-and-tag.outputs.previous-tag }}
-      version-changed: ${{ steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
+      version-changed: ${{ steps.detect-and-tag.outputs.tag != '' && steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,7 +21,7 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
-          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
+          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Detect and tag new version
@@ -29,7 +29,7 @@ jobs:
         uses: salsify/action-detect-and-tag-new-version@v2
         with:
           version-command: |
-            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
+            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version'
 
   build-and-push-docker:
     needs: detect-version
@@ -61,13 +61,9 @@ jobs:
           if [ "${{ needs.detect-version.outputs.version-changed }}" == "true" ]; then
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:$VERSION"
 
-            # Add major.minor tag (e.g., 0.1)
+            # Add major.minor tag (e.g., 0.1) for convenience
             MAJOR_MINOR=$(echo $VERSION | cut -d. -f1,2)
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:$MAJOR_MINOR"
-
-            # Add major tag (e.g., 0)
-            MAJOR=$(echo $VERSION | cut -d. -f1)
-            TAGS="$TAGS,ghcr.io/${{ github.repository }}:$MAJOR"
           fi
 
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
@@ -83,7 +79,7 @@ jobs:
           provenance: false
           sbom: false
           build-args: |
-            SERVICE_NAME=flowgen
+            SERVICE_NAME=flowgen_worker
             COMMIT=${{ github.sha }}
 
   create-release:

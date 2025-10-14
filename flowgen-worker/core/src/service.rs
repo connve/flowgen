@@ -7,11 +7,17 @@
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to construct a valid URI from the provided endpoint.
-    #[error("Error resulting from a failed attempt to construct a URI")]
-    InvalidUri(#[source] tonic::codegen::http::uri::InvalidUri),
+    #[error("Failed to construct URI from endpoint: {source}")]
+    InvalidUri {
+        #[source]
+        source: tonic::codegen::http::uri::InvalidUri,
+    },
     /// Transport layer error during connection establishment.
-    #[error("Error that originates from the client or server")]
-    TransportError(#[source] tonic::transport::Error),
+    #[error("Transport error during connection: {source}")]
+    TransportError {
+        #[source]
+        source: tonic::transport::Error,
+    },
     /// Service endpoint was not configured before attempting connection.
     #[error("Service endpoint was not configured")]
     MissingEndpoint(),
@@ -32,12 +38,12 @@ impl super::client::Client for Service {
         if let Some(endpoint) = self.endpoint.take() {
             let tls_config = tonic::transport::ClientTlsConfig::new();
             let channel = tonic::transport::Channel::from_shared(endpoint)
-                .map_err(Error::InvalidUri)?
+                .map_err(|e| Error::InvalidUri { source: e })?
                 .tls_config(tls_config)
-                .map_err(Error::TransportError)?
+                .map_err(|e| Error::TransportError { source: e })?
                 .connect()
                 .await
-                .map_err(Error::TransportError)?;
+                .map_err(|e| Error::TransportError { source: e })?;
             self.channel = Some(channel);
             Ok(self)
         } else {

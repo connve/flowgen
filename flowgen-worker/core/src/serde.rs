@@ -10,11 +10,17 @@ use std::str::FromStr;
 #[non_exhaustive]
 pub enum Error {
     /// JSON serialization or deserialization error.
-    #[error(transparent)]
-    Serde(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    Serde {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Arrow data processing error.
-    #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
+    #[error("Arrow data processing failed: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
 }
 
 /// Extension trait for JSON Map types to enable string serialization.
@@ -31,7 +37,7 @@ where
 {
     type Error = Error;
     fn to_string(&self) -> Result<String, Self::Error> {
-        let string = serde_json::to_string(self).map_err(Error::Serde)?;
+        let string = serde_json::to_string(self).map_err(|e| Error::Serde { source: e })?;
         Ok(string)
     }
 }
@@ -47,7 +53,7 @@ pub trait StringExt {
 impl StringExt for String {
     type Error = Error;
     fn to_value(&self) -> Result<serde_json::Value, Self::Error> {
-        let value = serde_json::Value::from_str(self).map_err(Error::Serde)?;
+        let value = serde_json::Value::from_str(self).map_err(|e| Error::Serde { source: e })?;
         Ok(value)
     }
 }
@@ -65,13 +71,15 @@ impl SerdeValueExt for arrow::record_batch::RecordBatch {
     fn try_from(&self) -> Result<serde_json::Value, Self::Error> {
         let buf = Vec::new();
         let mut writer = arrow_json::ArrayWriter::new(buf);
-        writer.write_batches(&[self]).map_err(Error::Arrow)?;
-        writer.finish().map_err(Error::Arrow)?;
+        writer
+            .write_batches(&[self])
+            .map_err(|e| Error::Arrow { source: e })?;
+        writer.finish().map_err(|e| Error::Arrow { source: e })?;
         let json_data = writer.into_inner();
 
         use serde_json::{Map, Value};
-        let json_rows: Vec<Map<String, Value>> =
-            serde_json::from_reader(json_data.as_slice()).map_err(Error::Serde)?;
+        let json_rows: Vec<Map<String, Value>> = serde_json::from_reader(json_data.as_slice())
+            .map_err(|e| Error::Serde { source: e })?;
         Ok(json_rows.into())
     }
 }

@@ -11,11 +11,17 @@ use serde::{de::DeserializeOwned, Serialize};
 #[non_exhaustive]
 pub enum Error {
     /// Template rendering failed due to invalid syntax or missing variables.
-    #[error(transparent)]
-    Render(#[from] handlebars::RenderError),
+    #[error("Template rendering failed: {source}")]
+    Render {
+        #[source]
+        source: handlebars::RenderError,
+    },
     /// JSON serialization or deserialization error during template processing.
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// Extension trait for configuration types that support template rendering.
@@ -35,13 +41,16 @@ pub trait ConfigExt {
         Self: Serialize + DeserializeOwned + Sized,
         T: Serialize,
     {
-        let template = serde_json::to_string(self)?;
-        let data = serde_json::to_value(data)?;
+        let template = serde_json::to_string(self).map_err(|e| Error::SerdeJson { source: e })?;
+        let data = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
 
         let handlebars = Handlebars::new();
-        let rendered = handlebars.render_template(&template, &data)?;
+        let rendered = handlebars
+            .render_template(&template, &data)
+            .map_err(|e| Error::Render { source: e })?;
 
-        let result: Self = serde_json::from_str(&rendered)?;
+        let result: Self =
+            serde_json::from_str(&rendered).map_err(|e| Error::SerdeJson { source: e })?;
         Ok(result)
     }
 }

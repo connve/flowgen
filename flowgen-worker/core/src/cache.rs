@@ -3,8 +3,12 @@
 //! Provides traits and configuration for key-value caching systems used by
 //! tasks that need to maintain state between runs, such as replay identifiers.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+
+/// Type alias for cache errors.
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Configuration options for cache operations.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
@@ -19,33 +23,14 @@ pub struct CacheOptions {
 ///
 /// Provides a unified interface for different caching backends like NATS JetStream,
 /// Redis, or other persistent storage systems used for workflow state management.
+#[async_trait]
 pub trait Cache: Debug + Send + Sync + 'static {
-    /// Error type for cache operations.
-    type Error: Debug + Send + Sync + 'static;
-
-    /// Initializes the cache with a specific bucket or namespace.
-    ///
-    /// # Arguments
-    /// * `bucket` - The bucket or namespace identifier for this cache instance
-    fn init(
-        self,
-        bucket: &str,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Error>> + Send
-    where
-        Self: Sized;
-
     /// Stores a value in the cache with the given key.
     ///
     /// # Arguments
     /// * `key` - The key to store the value under
     /// * `value` - The binary data to store
-    fn put(
-        &self,
-        key: &str,
-        value: bytes::Bytes,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send
-    where
-        Self: Sized;
+    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Error>;
 
     /// Retrieves a value from the cache by key.
     ///
@@ -54,12 +39,7 @@ pub trait Cache: Debug + Send + Sync + 'static {
     ///
     /// # Returns
     /// The cached binary data or an error if the key is not found
-    fn get(
-        &self,
-        key: &str,
-    ) -> impl std::future::Future<Output = Result<bytes::Bytes, Self::Error>> + Send
-    where
-        Self: Sized;
+    async fn get(&self, key: &str) -> Result<bytes::Bytes, Error>;
 }
 
 #[cfg(test)]
@@ -85,54 +65,23 @@ mod tests {
 
     impl std::error::Error for MockError {}
 
+    #[async_trait]
     impl Cache for MockCache {
-        type Error = MockError;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
+        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Error> {
             if self.should_error {
-                Err(MockError)
-            } else {
-                Ok(self)
-            }
-        }
-
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Self::Error> {
-            if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
                 Ok(())
             }
         }
 
-        async fn get(&self, key: &str) -> Result<bytes::Bytes, Self::Error> {
+        async fn get(&self, key: &str) -> Result<bytes::Bytes, Error> {
             if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
                 Ok(self.data.get(key).cloned().unwrap_or_default())
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_cache_init_success() {
-        let cache = MockCache {
-            data: HashMap::new(),
-            should_error: false,
-        };
-
-        let result = cache.init("test_bucket").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_cache_init_error() {
-        let cache = MockCache {
-            data: HashMap::new(),
-            should_error: true,
-        };
-
-        let result = cache.init("test_bucket").await;
-        assert!(result.is_err());
     }
 
     #[tokio::test]

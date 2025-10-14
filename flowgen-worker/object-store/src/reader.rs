@@ -1,7 +1,6 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
-use flowgen_core::cache::Cache;
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
@@ -14,7 +13,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
@@ -27,42 +26,69 @@ const DEFAULT_HAS_HEADER: bool = true;
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
-    #[error(transparent)]
-    Avro(#[from] apache_avro::Error),
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
-    #[error(transparent)]
-    ObjectStore(#[from] object_store::Error),
+    #[error("IO operation failed: {source}")]
+    IO {
+        #[source]
+        source: std::io::Error,
+    },
+    /// Apache Arrow error.
+    #[error("Arrow operation failed: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
+    /// Apache Avro error.
+    #[error("Avro operation failed: {source}")]
+    Avro {
+        #[source]
+        source: apache_avro::Error,
+    },
+    /// JSON serialization/deserialization error.
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Object store operation error.
+    #[error("Object store operation failed: {source}")]
+    ObjectStore {
+        #[source]
+        source: object_store::Error,
+    },
+    /// Object store client error.
     #[error(transparent)]
     ObjectStoreClient(#[from] super::client::Error),
+    /// Event building or processing error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    /// Failed to send event message.
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
+    /// Configuration template rendering error.
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
+    /// Missing required attribute.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Could not initialize object store context.
     #[error("Could not initialize object store context")]
     NoObjectStoreContext(),
+    /// Could not retrieve file extension.
     #[error("Could not retrieve file extension")]
     NoFileExtension(),
-    #[error("Cache errors")]
+    /// Cache error.
+    #[error("Cache error")]
     Cache(),
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Handles processing of individual events by writing them to object storage.
-struct EventHandler<T: Cache> {
+pub struct EventHandler {
     /// Writer configuration settings.
     config: Arc<super::config::Reader>,
     /// Object store client for writing data.
@@ -71,20 +97,30 @@ struct EventHandler<T: Cache> {
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Arc<T>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl<T: Cache> EventHandler<T> {
+impl EventHandler {
     /// Processes an event and writes it to the configured object store.
-    async fn handle(&self, _: Event) -> Result<(), Error> {
+    async fn handle(&self, event: Event) -> Result<(), Error> {
+        if event.current_task_id != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+
+        // Get cache from task context if available.
+        let cache = self.task_context.cache.as_ref();
         let mut client_guard = self.client.lock().await;
         let context = client_guard
             .context
             .as_mut()
             .ok_or_else(Error::NoObjectStoreContext)?;
 
-        let result = context.object_store.get(&context.path).await?;
+        let result = context
+            .object_store
+            .get(&context.path)
+            .await
+            .map_err(|e| Error::ObjectStore { source: e })?;
 
         let extension = result
             .meta
@@ -120,7 +156,7 @@ impl<T: Cache> EventHandler<T> {
                 // Collect stream into bytes.
                 let mut buffer = BytesMut::new();
                 while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
+                    let chunk = chunk.map_err(|e| Error::ObjectStore { source: e })?;
                     buffer.extend_from_slice(&chunk);
                 }
                 let bytes = buffer.freeze();
@@ -138,10 +174,12 @@ impl<T: Cache> EventHandler<T> {
                 if let Some(insert_key) = &cache_options.insert_key {
                     if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
                         let schema_bytes = Bytes::from(batch.schema().to_string());
-                        self.cache
-                            .put(insert_key.as_str(), schema_bytes)
-                            .await
-                            .map_err(|_| Error::Cache())?;
+                        if let Some(cache) = cache {
+                            cache
+                                .put(insert_key.as_str(), schema_bytes)
+                                .await
+                                .map_err(|_| Error::Cache())?;
+                        }
                     }
                 }
             }
@@ -162,12 +200,18 @@ impl<T: Cache> EventHandler<T> {
                 .build()?;
 
             info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-            self.tx.send(e)?;
+            self.tx
+                .send(e)
+                .map_err(|e| Error::SendMessage { source: e })?;
         }
 
         // Delete file from object store if configured.
         if self.config.delete_after_read.unwrap_or(false) {
-            context.object_store.delete(&context.path).await?;
+            context
+                .object_store
+                .delete(&context.path)
+                .await
+                .map_err(|e| Error::ObjectStore { source: e })?;
             info!("Successfully deleted file: {}", context.path.as_ref());
         }
 
@@ -177,7 +221,7 @@ impl<T: Cache> EventHandler<T> {
 
 /// Object store reader that processes events from a broadcast receiver.
 #[derive(Debug)]
-pub struct Reader<T: Cache> {
+pub struct Reader {
     /// Reader configuration settings.
     config: Arc<super::config::Reader>,
     /// Broadcast receiver for incoming events.
@@ -186,80 +230,69 @@ pub struct Reader<T: Cache> {
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Arc<T>,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Runner for Reader {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
-        // Build object store client with conditional configuration
+    /// Initializes the reader by establishing object store client connection.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Building and connecting the object store client with credentials
+    async fn init(&self) -> Result<EventHandler, Error> {
+        // Build object store client with conditional configuration.
         let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
         }
-        if let Some(credentials) = &self.config.credentials {
-            client_builder = client_builder.credentials(credentials.to_path_buf());
+        if let Some(credentials_path) = &self.config.credentials_path {
+            client_builder = client_builder.credentials_path(credentials_path.clone());
         }
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
 
-        let event_handler = Arc::new(EventHandler {
+        let event_handler = EventHandler {
             client,
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
-            cache: Arc::clone(&self.cache),
-        });
+            task_context: Arc::clone(&self.task_context),
+        };
+
+        Ok(event_handler)
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Self::Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
         // Process incoming events, filtering by task ID.
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
                             }
                         }
-                        Err(_) => return Ok(()),
-                    }
+                        .instrument(tracing::Span::current()),
+                    );
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -267,7 +300,7 @@ impl<T: Cache> flowgen_core::task::runner::Runner for Reader<T> {
 
 /// Builder pattern for constructing Writer instances.
 #[derive(Default)]
-pub struct ReaderBuilder<T: Cache> {
+pub struct ReaderBuilder {
     /// Writer configuration settings.
     config: Option<Arc<super::config::Reader>>,
     /// Broadcast receiver for incoming events.
@@ -276,17 +309,12 @@ pub struct ReaderBuilder<T: Cache> {
     tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
-    /// Cache object for storing / retriving data.
-    cache: Option<Arc<T>>,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
 
-impl<T: Cache> ReaderBuilder<T>
-where
-    T: Default,
-{
-    pub fn new() -> ReaderBuilder<T> {
+impl ReaderBuilder {
+    pub fn new() -> ReaderBuilder {
         ReaderBuilder {
             ..Default::default()
         }
@@ -310,12 +338,6 @@ where
         self
     }
 
-    /// Sets the cache object.
-    pub fn cache(mut self, cache: Arc<T>) -> Self {
-        self.cache = Some(cache);
-        self
-    }
-
     /// Sets the current task identifier.
     pub fn current_task_id(mut self, current_task_id: usize) -> Self {
         self.current_task_id = current_task_id;
@@ -331,7 +353,7 @@ where
     }
 
     /// Builds the Writer instance, validating required fields.
-    pub async fn build(self) -> Result<Reader<T>, Error> {
+    pub async fn build(self) -> Result<Reader, Error> {
         Ok(Reader {
             config: self
                 .config
@@ -342,9 +364,6 @@ where
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            cache: self
-                .cache
-                .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             current_task_id: self.current_task_id,
             task_context: self
                 .task_context
@@ -356,7 +375,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowgen_core::cache::Cache;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
@@ -379,39 +397,13 @@ mod tests {
         )
     }
 
-    // Simple mock cache implementation for tests
-    #[derive(Debug, Default)]
-    struct TestCache {}
-
-    impl TestCache {
-        fn new() -> Self {
-            Self {}
-        }
-    }
-
-    impl Cache for TestCache {
-        type Error = String;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
-
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn get(&self, _key: &str) -> Result<bytes::Bytes, Self::Error> {
-            Ok(bytes::Bytes::new())
-        }
-    }
-
     #[test]
     fn test_reader_builder_new() {
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new();
+        let builder = ReaderBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.tx.is_none());
-        assert!(builder.cache.is_none());
+        assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
 
@@ -420,7 +412,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: Some(500),
             has_header: Some(true),
@@ -428,7 +420,7 @@ mod tests {
             delete_after_read: None,
         });
 
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().config(config.clone());
+        let builder = ReaderBuilder::new().config(config.clone());
         assert!(builder.config.is_some());
         assert_eq!(
             builder.config.unwrap().path,
@@ -439,39 +431,31 @@ mod tests {
     #[test]
     fn test_reader_builder_receiver() {
         let (_, rx) = broadcast::channel::<Event>(10);
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().receiver(rx);
+        let builder = ReaderBuilder::new().receiver(rx);
         assert!(builder.rx.is_some());
     }
 
     #[test]
     fn test_reader_builder_sender() {
         let (tx, _) = broadcast::channel::<Event>(10);
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().sender(tx);
+        let builder = ReaderBuilder::new().sender(tx);
         assert!(builder.tx.is_some());
     }
 
     #[test]
-    fn test_reader_builder_cache() {
-        let cache = std::sync::Arc::new(TestCache::new());
-        let builder = ReaderBuilder::new().cache(cache);
-        assert!(builder.cache.is_some());
-    }
-
-    #[test]
     fn test_reader_builder_current_task_id() {
-        let builder: ReaderBuilder<TestCache> = ReaderBuilder::new().current_task_id(123);
+        let builder = ReaderBuilder::new().current_task_id(123);
         assert_eq!(builder.current_task_id, 123);
     }
 
     #[tokio::test]
     async fn test_reader_builder_missing_config() {
         let (tx, rx) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -487,7 +471,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("/tmp/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,
@@ -496,12 +480,11 @@ mod tests {
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config)
             .sender(tx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -517,7 +500,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("gs://bucket/data/"),
-            credentials: Some(PathBuf::from("/creds.json")),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             client_options: None,
             batch_size: Some(1000),
             has_header: Some(false),
@@ -526,12 +509,11 @@ mod tests {
         });
 
         let (_, rx) = broadcast::channel::<Event>(10);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config)
             .receiver(rx)
-            .cache(cache)
+            .task_context(create_mock_task_context())
             .current_task_id(1)
             .build()
             .await;
@@ -543,40 +525,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reader_builder_missing_cache() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("file:///local/files/"),
-            credentials: None,
-            client_options: None,
-            batch_size: Some(250),
-            has_header: Some(true),
-            cache_options: None,
-            delete_after_read: None,
-        });
-
-        let (tx, rx) = broadcast::channel::<Event>(10);
-
-        let result = ReaderBuilder::<TestCache>::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "cache")
-        );
-    }
-
-    #[tokio::test]
     async fn test_reader_builder_build_success() {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://my-bucket/files/"),
-            credentials: Some(PathBuf::from("/aws-creds.json")),
+            credentials_path: Some(PathBuf::from("/aws-creds.json")),
             client_options: Some({
                 let mut opts = std::collections::HashMap::new();
                 opts.insert("region".to_string(), "us-west-2".to_string());
@@ -589,13 +542,11 @@ mod tests {
         });
 
         let (tx, rx) = broadcast::channel::<Event>(50);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let result = ReaderBuilder::<TestCache>::new()
+        let result = ReaderBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
             .current_task_id(777)
             .task_context(create_mock_task_context())
             .build()
@@ -612,7 +563,7 @@ mod tests {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("file:///data/input/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: Some(100),
             has_header: Some(false),
@@ -621,19 +572,44 @@ mod tests {
         });
 
         let (tx, rx) = broadcast::channel::<Event>(5);
-        let cache = std::sync::Arc::new(TestCache::new());
 
-        let builder = ReaderBuilder::<TestCache>::new()
+        let builder = ReaderBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .cache(cache)
             .current_task_id(20);
 
         assert!(builder.config.is_some());
         assert!(builder.rx.is_some());
         assert!(builder.tx.is_some());
-        assert!(builder.cache.is_some());
         assert_eq!(builder.current_task_id, 20);
+    }
+
+    #[tokio::test]
+    async fn test_reader_builder_build_missing_task_context() {
+        let config = Arc::new(crate::config::Reader {
+            name: "test_reader".to_string(),
+            path: PathBuf::from("s3://bucket/input/"),
+            credentials_path: None,
+            client_options: None,
+            batch_size: None,
+            has_header: None,
+            cache_options: None,
+            delete_after_read: None,
+        });
+        let (tx, rx) = broadcast::channel::<Event>(10);
+
+        let result = ReaderBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .sender(tx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

@@ -10,15 +10,24 @@ pub enum Error {
     /// Client authentication or connection error (transparently wraps `crate::client::Error`).
     #[error(transparent)]
     ClientAuth(#[from] crate::client::Error),
-    /// KV store entry access/processing error (transparently wraps `async_nats::jetstream::kv::EntryError`).
-    #[error(transparent)]
-    KVEntry(#[from] async_nats::jetstream::kv::EntryError),
-    /// KV store `put` operation error (transparently wraps `async_nats::jetstream::kv::PutError`).
-    #[error(transparent)]
-    KVPut(#[from] async_nats::jetstream::kv::PutError),
-    /// KV bucket creation error (transparently wraps `async_nats::jetstream::context::CreateKeyValueError`).
-    #[error(transparent)]
-    KVBucketCreate(#[from] async_nats::jetstream::context::CreateKeyValueError),
+    /// KV store entry access/processing error.
+    #[error("KV store entry access failed: {source}")]
+    KVEntry {
+        #[source]
+        source: async_nats::jetstream::kv::EntryError,
+    },
+    /// KV store `put` operation error.
+    #[error("KV store put operation failed: {source}")]
+    KVPut {
+        #[source]
+        source: async_nats::jetstream::kv::PutError,
+    },
+    /// KV bucket creation error.
+    #[error("KV bucket creation failed: {source}")]
+    KVBucketCreate {
+        #[source]
+        source: async_nats::jetstream::context::CreateKeyValueError,
+    },
     /// Expected non-empty buffer from KV store was empty or missing.
     #[error("No value in provided buffer")]
     EmptyBuffer(),
@@ -26,7 +35,7 @@ pub enum Error {
     #[error("Missing required value KV Store")]
     MissingKVStore(),
     /// Required configuration attribute missing. Contains attribute name.
-    #[error("Missing required event attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// JetStream context was missing or unavailable.
     #[error("Missing required value JetStream Context")]
@@ -44,9 +53,7 @@ pub struct Cache {
     store: Option<async_nats::jetstream::kv::Store>,
 }
 
-impl flowgen_core::cache::Cache for Cache {
-    type Error = Error;
-
+impl Cache {
     /// Connects to NATS and initializes the KV bucket.
     ///
     /// Consumes `self`, returns `Cache` with an active KV store connection.
@@ -56,7 +63,7 @@ impl flowgen_core::cache::Cache for Cache {
     ///
     /// # Errors
     /// If NATS connection, authentication, or KV bucket access/creation fails.
-    async fn init(mut self, bucket: &str) -> Result<Self, Self::Error> {
+    pub async fn init(mut self, bucket: &str) -> Result<Self, Error> {
         // Connect to NATS.
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.credentials_path.clone())
@@ -78,13 +85,16 @@ impl flowgen_core::cache::Cache for Cache {
                     ..Default::default()
                 })
                 .await
-                .map_err(Error::KVBucketCreate)?,
+                .map_err(|e| Error::KVBucketCreate { source: e })?,
         };
 
         self.store = Some(store);
         Ok(self)
     }
+}
 
+#[async_trait::async_trait]
+impl flowgen_core::cache::Cache for Cache {
     /// Puts a key-value pair into the NATS KV store.
     ///
     /// # Arguments
@@ -93,9 +103,15 @@ impl flowgen_core::cache::Cache for Cache {
     ///
     /// # Errors
     /// If store is uninitialized or NATS `put` fails.
-    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Self::Error> {
-        let store = self.store.as_ref().ok_or(Error::MissingKVStore())?;
-        store.put(key, value).await.map_err(Error::KVPut)?;
+    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingKVStore()) as flowgen_core::cache::Error)?;
+        store
+            .put(key, value)
+            .await
+            .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
         Ok(())
     }
 
@@ -106,14 +122,17 @@ impl flowgen_core::cache::Cache for Cache {
     ///
     /// # Errors
     /// If store is uninitialized, NATS `get` fails, or key not found/value empty.
-    async fn get(&self, key: &str) -> Result<bytes::Bytes, Self::Error> {
-        let store = self.store.as_ref().ok_or(Error::MissingKVStore())?;
+    async fn get(&self, key: &str) -> Result<bytes::Bytes, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingKVStore()) as flowgen_core::cache::Error)?;
         // Map Ok(None) (key not found/empty) from NATS to Error::EmptyBuffer.
         let bytes = store
             .get(key)
             .await
-            .map_err(Error::KVEntry)?
-            .ok_or(Error::EmptyBuffer())?;
+            .map_err(|e| Box::new(Error::KVEntry { source: e }) as flowgen_core::cache::Error)?
+            .ok_or_else(|| Box::new(Error::EmptyBuffer()) as flowgen_core::cache::Error)?;
         Ok(bytes)
     }
 }
@@ -140,9 +159,9 @@ impl CacheBuilder {
     /// Used for NATS client authentication.
     ///
     /// # Arguments
-    /// * `credentials_path` - Path to the credentials file.
-    pub fn credentials_path(mut self, credentials_path: PathBuf) -> Self {
-        self.credentials_path = Some(credentials_path);
+    /// * `path` - Path to the credentials file.
+    pub fn credentials_path(mut self, path: PathBuf) -> Self {
+        self.credentials_path = Some(path);
         self
     }
 
@@ -154,12 +173,10 @@ impl CacheBuilder {
     /// * `Ok(Cache)` on success.
     /// * `Err(Error::MissingRequiredAttribute)` if `credentials_path` is missing.
     pub fn build(self) -> Result<Cache, Error> {
-        let creds_path = self
-            .credentials_path
-            .ok_or_else(|| Error::MissingRequiredAttribute("credentials".to_string()))?;
-
         Ok(Cache {
-            credentials_path: creds_path,
+            credentials_path: self
+                .credentials_path
+                .ok_or_else(|| Error::MissingRequiredAttribute("credentials_path".to_string()))?,
             store: None,
         })
     }
@@ -188,7 +205,7 @@ mod tests {
         let result = CacheBuilder::new().build();
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials")
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path")
         );
     }
 

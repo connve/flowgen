@@ -11,16 +11,28 @@ use tracing::{info, warn};
 /// Default HTTP port for the server.
 const DEFAULT_HTTP_PORT: u16 = 3000;
 
+/// Default path prefix for all routes.
+const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
+
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    /// Failed to bind TCP listener on specified port.
+    #[error("Failed to bind TCP listener on port {port}: {source}")]
+    BindListener {
+        port: u16,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failed to serve HTTP requests.
+    #[error("Failed to serve HTTP requests: {source}")]
+    ServeHttp {
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Shared HTTP server manager for webhook processors.
-///
 /// Allows multiple webhook processors to register routes before starting
 /// the server. Routes are stored in a thread-safe HashMap and the server
 /// can only be started once.
@@ -30,17 +42,46 @@ pub struct HttpServer {
     routes: Arc<RwLock<HashMap<String, MethodRouter>>>,
     /// Flag to track if server has been started.
     server_started: Arc<Mutex<bool>>,
+    /// Optional path prefix for all routes (e.g., "/workers").
+    routes_prefix: Option<String>,
+}
+
+/// Builder for constructing HttpServer instances.
+#[derive(Default)]
+pub struct HttpServerBuilder {
+    /// Optional path prefix for all routes.
+    routes_prefix: Option<String>,
+}
+
+impl HttpServerBuilder {
+    /// Creates a new HttpServerBuilder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the routes prefix.
+    pub fn routes_prefix(mut self, prefix: String) -> Self {
+        self.routes_prefix = Some(prefix);
+        self
+    }
+
+    /// Builds the HttpServer instance.
+    pub fn build(self) -> HttpServer {
+        HttpServer {
+            routes: Arc::new(RwLock::new(HashMap::new())),
+            server_started: Arc::new(Mutex::new(false)),
+            routes_prefix: self.routes_prefix,
+        }
+    }
+}
+
+impl flowgen_core::http_server::HttpServer for HttpServer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl HttpServer {
-    /// Create a new HTTP Server.
-    pub fn new() -> Self {
-        Self {
-            routes: Arc::new(RwLock::new(HashMap::new())),
-            server_started: Arc::new(Mutex::new(false)),
-        }
-    }
-
     /// Register a route with the HTTP Server.
     pub async fn register_route(&self, path: String, method_router: MethodRouter) {
         let mut routes = self.routes.write().await;
@@ -49,6 +90,7 @@ impl HttpServer {
     }
 
     /// Start the HTTP Server with all registered routes.
+    #[tracing::instrument(skip_all, name = "http_server.start")]
     pub async fn start_server(&self, port: Option<u16>) -> Result<(), Error> {
         let mut server_started = self.server_started.lock().await;
         if *server_started {
@@ -63,24 +105,32 @@ impl HttpServer {
             api_router = api_router.route(path, method_router.clone());
         }
 
-        let router = Router::new().nest("/api/flowgen", api_router);
+        // Apply routes prefix (use default if not configured)
+        let base_path = self
+            .routes_prefix
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ROUTES_PREFIX.to_string());
+
+        let router = Router::new().nest(&base_path, api_router);
         let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}")).await?;
-        info!("Starting HTTP Server on port: {}", server_port);
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
+            .await
+            .map_err(|e| Error::BindListener {
+                port: server_port,
+                source: e,
+            })?;
 
         *server_started = true;
-        axum::serve(listener, router).await.map_err(Error::IO)
+
+        info!("Starting HTTP Server on port: {}", server_port);
+        axum::serve(listener, router)
+            .await
+            .map_err(|e| Error::ServeHttp { source: e })
     }
 
     /// Check if server has been started.
     pub async fn is_started(&self) -> bool {
         *self.server_started.lock().await
-    }
-}
-
-impl Default for HttpServer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -90,22 +140,24 @@ mod tests {
     use axum::routing::get;
 
     #[test]
-    fn test_http_server_new() {
-        let server = HttpServer::new();
+    fn test_http_server_builder() {
+        let server = HttpServerBuilder::new().build();
         // We can't easily test the internal state, but we can verify it was created
         // The struct should be properly initialized
         assert!(format!("{server:?}").contains("HttpServer"));
     }
 
     #[test]
-    fn test_http_server_default() {
-        let server = HttpServer::default();
+    fn test_http_server_builder_with_prefix() {
+        let server = HttpServerBuilder::new()
+            .routes_prefix("/workers".to_string())
+            .build();
         assert!(format!("{server:?}").contains("HttpServer"));
     }
 
     #[test]
     fn test_http_server_clone() {
-        let server = HttpServer::new();
+        let server = HttpServerBuilder::new().build();
         let cloned = server.clone();
 
         // Both should have the same structure (we can't easily compare internal state)
@@ -115,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_route() {
-        let server = HttpServer::new();
+        let server = HttpServerBuilder::new().build();
         let method_router = get(|| async { "test response" });
 
         // Should not panic when registering a route
@@ -132,15 +184,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_started_initially_false() {
-        let server = HttpServer::new();
+        let server = HttpServerBuilder::new().build();
         assert!(!server.is_started().await);
     }
 
     #[test]
-    fn test_error_from_io_error() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: Error = io_error.into();
-        assert!(matches!(error, Error::IO(_)));
+    fn test_error_bind_listener_structure() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let error = Error::BindListener {
+            port: 3000,
+            source: io_error,
+        };
+        assert!(matches!(error, Error::BindListener { .. }));
+    }
+
+    #[test]
+    fn test_error_serve_http_structure() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
+        let error = Error::ServeHttp { source: io_error };
+        assert!(matches!(error, Error::ServeHttp { .. }));
     }
 
     #[test]
@@ -150,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_multiple_routes_different_paths() {
-        let server = HttpServer::new();
+        let server = HttpServerBuilder::new().build();
 
         let routes = vec![
             ("/api/v1/users", get(|| async { "users" })),
@@ -168,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_route_overwrites_existing() {
-        let server = HttpServer::new();
+        let server = HttpServerBuilder::new().build();
         let path = "/test".to_string();
 
         let method_router1 = get(|| async { "response 1" });

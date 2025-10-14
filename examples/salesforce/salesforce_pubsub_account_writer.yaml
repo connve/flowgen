@@ -3,7 +3,7 @@ flow:
   tasks:
     - nats_jetstream_subscriber:
         name: "start_subscription"
-        credentials: /etc/nats/credentials.json
+        credentials: /etc/nats/credentials.json # update to your credentials path
         stream: flowgen_events
         stream_description: Main evenbuts of Flowgen.
         subject: salesforce_pubsub_subscriber.data.accountchangeevent.>
@@ -12,7 +12,7 @@ flow:
     - object_store_writer:
         name: "write_events"
         path: file:/// # please update with a right path
-        credentials: /etc/gcp/credentials.json
+        credentials: /etc/gcp/credentials.json # update to your credentials path
         hive_partition_options:
           enabled: true
           partition_keys:

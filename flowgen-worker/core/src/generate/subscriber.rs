@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::broadcast::Sender, time};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 /// Default subject prefix for generated events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
@@ -22,8 +22,11 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
 #[non_exhaustive]
 pub enum Error {
     /// Failed to send event through broadcast channel.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Event construction failed.
     #[error(transparent)]
     Event(#[from] crate::event::Error),
@@ -34,93 +37,66 @@ pub enum Error {
     #[error("Cache error: {_0}")]
     Cache(String),
     /// System time error when getting current timestamp.
-    #[error(transparent)]
-    SystemTime(#[from] std::time::SystemTimeError),
+    #[error("System time error: {source}")]
+    SystemTime {
+        #[source]
+        source: std::time::SystemTimeError,
+    },
     /// Host coordination error.
     #[error("Host coordination error")]
     Host(#[source] crate::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] crate::task::manager::Error),
 }
-/// Event generator that produces events at scheduled intervals.
-#[derive(Debug)]
-pub struct Subscriber<T: crate::cache::Cache> {
-    /// Configuration settings for event generation.
+/// Event handler for generating scheduled events.
+pub struct EventHandler {
     config: Arc<super::config::Subscriber>,
-    /// Channel sender for broadcasting generated events.
     tx: Sender<Event>,
-    /// Task identifier for event tracking.
     current_task_id: usize,
-    /// Cache instance for storing last run time.
-    cache: Arc<T>,
-    /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
-impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
-    type Error = Error;
-
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(self) -> Result<(), Error> {
+impl EventHandler {
+    /// Generates events at scheduled intervals.
+    async fn handle(self) -> Result<(), Error> {
         let mut counter = 0;
 
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(crate::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
+        // Get cache from task context if available.
+        let cache = self.task_context.cache.as_ref();
 
         // Generate a cache_key based on flow name and task name.
         let cache_key = format!(
-            "{task_context}.{DEFAULT_MESSAGE_SUBJECT}.{task_name}.last_run",
-            task_context = self.task_context.flow.name,
+            "{flow_name}.{DEFAULT_MESSAGE_SUBJECT}.{task_name}.last_run",
+            flow_name = self.task_context.flow.name,
             task_name = self.config.name
         );
 
         loop {
-            // Check for leadership changes.
-            tokio::select! {
-                biased;
+            // Calculate when the next event should be generated.
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::SystemTime { source: e })?
+                .as_secs();
 
-                // Check for leadership election results.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == crate::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Continue with normal event generation logic.
-                _ = async {
-                    // Calculate when the next event should be generated.
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                    let next_run_time = match self.cache.get(&cache_key).await {
-                        Ok(cached_bytes) => {
-                            let cached_str = String::from_utf8_lossy(&cached_bytes);
-                            match cached_str.parse::<u64>() {
-                                Ok(last_run) => last_run + self.config.interval,
-                                Err(_) => now, // Invalid cache, run immediately.
-                            }
+            let next_run_time = if let Some(cache) = cache {
+                match cache.get(&cache_key).await {
+                    Ok(cached_bytes) => {
+                        let cached_str = String::from_utf8_lossy(&cached_bytes);
+                        match cached_str.parse::<u64>() {
+                            Ok(last_run) => last_run + self.config.interval,
+                            Err(_) => now, // Invalid cache, run immediately.
                         }
-                        Err(_) => now, // No cache entry, run immediately.
-                    };
-
-                    // Sleep until it's time to generate the next event.
-                    if next_run_time > now {
-                        let sleep_duration = next_run_time - now;
-                        time::sleep(Duration::from_secs(sleep_duration)).await;
                     }
-                } =>
-            {
+                    Err(_) => now, // No cache entry, run immediately.
+                }
+            } else {
+                now // No cache available, run immediately.
+            };
+
+            // Sleep until it's time to generate the next event.
+            if next_run_time > now {
+                let sleep_duration = next_run_time - now;
+                time::sleep(Duration::from_secs(sleep_duration)).await;
+            }
+
             // Prepare message data.
             let data = match &self.config.message {
                 Some(message) => json!(message),
@@ -140,51 +116,93 @@ impl<T: crate::cache::Cache> crate::task::runner::Runner for Subscriber<T> {
                 .subject(subject.clone())
                 .current_task_id(self.current_task_id)
                 .build()?;
-            self.tx.send(e)?;
+            self.tx
+                .send(e)
+                .map_err(|e| Error::SendMessage { source: e })?;
             info!("{}: {}", DEFAULT_LOG_MESSAGE, subject);
 
             // Update cache with current time after sending the event.
-            let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            if let Err(cache_err) = self
-                .cache
-                .put(&cache_key, current_time.to_string().into())
-                .await
-            {
-                // Log warn for cache errors.
-                warn!("Failed to update cache: {:?}", cache_err);
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::SystemTime { source: e })?
+                .as_secs();
+            if let Some(cache) = cache {
+                if let Err(cache_err) = cache.put(&cache_key, current_time.to_string().into()).await
+                {
+                    // Log warn for cache errors.
+                    warn!("Failed to update cache: {:?}", cache_err);
+                }
             }
 
-                    counter += 1;
-                    match self.config.count {
-                        Some(count) if count == counter => return Ok(()),
-                        Some(_) | None => {}
-                    }
-                }
+            counter += 1;
+            match self.config.count {
+                Some(count) if count == counter => return Ok(()),
+                Some(_) | None => {}
             }
         }
     }
 }
 
+/// Event generator that produces events at scheduled intervals.
+#[derive(Debug)]
+pub struct Subscriber {
+    /// Configuration settings for event generation.
+    config: Arc<super::config::Subscriber>,
+    /// Channel sender for broadcasting generated events.
+    tx: Sender<Event>,
+    /// Task identifier for event tracking.
+    current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<crate::task::context::TaskContext>,
+}
+
+#[async_trait::async_trait]
+impl crate::task::runner::Runner for Subscriber {
+    type Error = Error;
+    type EventHandler = EventHandler;
+
+    async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
+        Ok(EventHandler {
+            config: Arc::clone(&self.config),
+            tx: self.tx.clone(),
+            current_task_id: self.current_task_id,
+            task_context: Arc::clone(&self.task_context),
+        })
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(self) -> Result<(), Error> {
+        let event_handler = self.init().await?;
+
+        // Spawn event handler task.
+        tokio::spawn(
+            async move {
+                if let Err(e) = event_handler.handle().await {
+                    error!("{}", e);
+                }
+            }
+            .instrument(tracing::Span::current()),
+        );
+
+        Ok(())
+    }
+}
+
 /// Builder for constructing Subscriber instances.
 #[derive(Default)]
-pub struct SubscriberBuilder<T: crate::cache::Cache> {
+pub struct SubscriberBuilder {
     /// Generate task configuration (required for build).
     config: Option<Arc<super::config::Subscriber>>,
     /// Event broadcast sender (required for build).
     tx: Option<Sender<Event>>,
     /// Current task identifier for event tracking.
     current_task_id: usize,
-    /// Cache instance for storing last run time.
-    cache: Option<Arc<T>>,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<crate::task::context::TaskContext>>,
 }
 
-impl<T: crate::cache::Cache> SubscriberBuilder<T>
-where
-    T: Default,
-{
-    pub fn new() -> SubscriberBuilder<T> {
+impl SubscriberBuilder {
+    pub fn new() -> SubscriberBuilder {
         SubscriberBuilder {
             ..Default::default()
         }
@@ -205,17 +223,12 @@ where
         self
     }
 
-    pub fn cache(mut self, cache: Arc<T>) -> Self {
-        self.cache = Some(cache);
-        self
-    }
-
     pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
         self.task_context = Some(task_context);
         self
     }
 
-    pub async fn build(self) -> Result<Subscriber<T>, Error> {
+    pub async fn build(self) -> Result<Subscriber, Error> {
         Ok(Subscriber {
             config: self
                 .config
@@ -224,9 +237,6 @@ where
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            cache: self
-                .cache
-                .ok_or_else(|| Error::MissingRequiredAttribute("cache".to_string()))?,
             task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
@@ -287,41 +297,36 @@ mod tests {
 
     impl std::error::Error for MockError {}
 
+    #[async_trait::async_trait]
     impl crate::cache::Cache for MockCache {
-        type Error = MockError;
-
-        async fn init(self, _bucket: &str) -> Result<Self, Self::Error> {
+        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), crate::cache::Error> {
             if self.should_error {
-                Err(MockError)
-            } else {
-                Ok(self)
-            }
-        }
-
-        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Self::Error> {
-            if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
                 self.data.lock().await.insert(key.to_string(), value);
                 Ok(())
             }
         }
 
-        async fn get(&self, key: &str) -> Result<bytes::Bytes, Self::Error> {
+        async fn get(&self, key: &str) -> Result<bytes::Bytes, crate::cache::Error> {
             if self.should_error {
-                Err(MockError)
+                Err(Box::new(MockError))
             } else {
-                self.data.lock().await.get(key).cloned().ok_or(MockError)
+                self.data
+                    .lock()
+                    .await
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| Box::new(MockError) as crate::cache::Error)
             }
         }
     }
 
     #[test]
     fn test_subscriber_builder_new() {
-        let builder = SubscriberBuilder::<MockCache>::new();
+        let builder = SubscriberBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
-        assert!(builder.cache.is_none());
         assert!(builder.task_context.is_none());
         assert_eq!(builder.current_task_id, 0);
     }
@@ -336,13 +341,11 @@ mod tests {
         });
 
         let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
-        let subscriber = SubscriberBuilder::<MockCache>::new()
+        let subscriber = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
             .current_task_id(1)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await
@@ -355,11 +358,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_config() {
         let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::<MockCache>::new()
+        let result = SubscriberBuilder::new()
             .sender(tx)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -374,11 +375,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscriber_builder_missing_sender() {
         let config = Arc::new(crate::generate::config::Subscriber::default());
-        let cache = Arc::new(MockCache::default());
 
-        let result = SubscriberBuilder::<MockCache>::new()
+        let result = SubscriberBuilder::new()
             .config(config)
-            .cache(cache)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -391,45 +390,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscriber_builder_missing_cache() {
-        let config = Arc::new(crate::generate::config::Subscriber::default());
-        let (tx, _rx) = broadcast::channel(100);
-
-        let result = SubscriberBuilder::<MockCache>::new()
-            .config(config)
-            .sender(tx)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: cache"));
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_missing_task_context() {
-        let config = Arc::new(crate::generate::config::Subscriber::default());
-        let (tx, _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
-
-        let result = SubscriberBuilder::<MockCache>::new()
-            .config(config)
-            .sender(tx)
-            .cache(cache)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: task_context"));
-    }
-
-    #[tokio::test]
     async fn test_subscriber_run_with_count() {
         let config = Arc::new(crate::generate::config::Subscriber {
             name: "test".to_string(),
@@ -439,13 +399,11 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 1,
-            cache,
             task_context: create_mock_task_context(),
         };
 
@@ -475,13 +433,11 @@ mod tests {
         });
 
         let (tx, mut rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 0,
-            cache,
             task_context: create_mock_task_context(),
         };
 
@@ -509,21 +465,58 @@ mod tests {
         });
 
         let (tx, mut _rx) = broadcast::channel(100);
-        let cache = Arc::new(MockCache::default());
+        let mock_cache = Arc::new(MockCache::default());
+
+        // Create task context with cache
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Cache Test".to_string()),
+        );
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_context = Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .cache(Some(mock_cache.clone() as Arc<dyn crate::cache::Cache>))
+                .build()
+                .unwrap(),
+        );
 
         let subscriber = Subscriber {
             config,
             tx,
             current_task_id: 1,
-            cache: cache.clone(),
-            task_context: create_mock_task_context(),
+            task_context,
         };
 
         // Run subscriber to completion
         let _ = subscriber.run().await;
 
+        // Wait a bit for the spawned task to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
         // Check that cache key was created with label format
-        let cache_data = cache.data.lock().await;
+        let cache_data = mock_cache.data.lock().await;
         assert!(cache_data.contains_key("test-flow.generate.test.last_run"));
+    }
+
+    #[tokio::test]
+    async fn test_subscriber_builder_build_missing_task_context() {
+        let config = Arc::new(crate::generate::config::Subscriber::default());
+        let (tx, _rx) = broadcast::channel(100);
+
+        let result = SubscriberBuilder::new()
+            .config(config)
+            .sender(tx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

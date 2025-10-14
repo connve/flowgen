@@ -4,7 +4,7 @@ use flowgen_core::client::Client;
 use flowgen_core::event::{Event, DEFAULT_LOG_MESSAGE};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for NATS publisher.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_publisher";
@@ -16,22 +16,34 @@ pub enum Error {
     #[error(transparent)]
     ClientAuth(#[from] crate::client::Error),
     /// Failed to publish message to JetStream.
-    #[error(transparent)]
-    Publish(#[from] async_nats::jetstream::context::PublishError),
+    #[error("Failed to publish message to JetStream: {source}")]
+    Publish {
+        #[source]
+        source: async_nats::jetstream::context::PublishError,
+    },
     /// Failed to create JetStream stream.
-    #[error(transparent)]
-    CreateStream(#[from] async_nats::jetstream::context::CreateStreamError),
+    #[error("Failed to create JetStream stream: {source}")]
+    CreateStream {
+        #[source]
+        source: async_nats::jetstream::context::CreateStreamError,
+    },
     /// Failed to get existing JetStream stream.
-    #[error(transparent)]
-    GetStream(#[from] async_nats::jetstream::context::GetStreamError),
+    #[error("Failed to get JetStream stream: {source}")]
+    GetStream {
+        #[source]
+        source: async_nats::jetstream::context::GetStreamError,
+    },
     /// Failed to make request to JetStream.
-    #[error(transparent)]
-    Request(#[from] async_nats::jetstream::context::RequestError),
+    #[error("Failed to make request to JetStream: {source}")]
+    Request {
+        #[source]
+        source: async_nats::jetstream::context::RequestError,
+    },
     /// Error converting event to message format.
     #[error(transparent)]
     MessageConversion(#[from] super::message::Error),
     /// Required event attribute is missing.
-    #[error("Missing required event attribute: {}", _0)]
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Client was not properly initialized or is missing.
     #[error("Client is missing or not initialized properly")]
@@ -39,17 +51,19 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
-struct EventHandler {
+pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
+    current_task_id: usize,
 }
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if event.current_task_id != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+
         let e = event.to_publish()?;
 
         info!("{}: {}", DEFAULT_LOG_MESSAGE, event.subject);
@@ -58,7 +72,8 @@ impl EventHandler {
             .lock()
             .await
             .send_publish(event.subject.clone(), e)
-            .await?;
+            .await
+            .map_err(|e| Error::Publish { source: e })?;
         Ok(())
     }
 }
@@ -73,30 +88,22 @@ pub struct Publisher {
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
+    /// Initializes the publisher by establishing connection and creating/updating stream.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Connecting to NATS with credentials
+    /// - Creating or updating JetStream stream
+    async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials.clone())
+            .credentials_path(self.config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
@@ -122,56 +129,72 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
             match stream {
                 Ok(_) => {
-                    let mut subjects = stream?.info().await?.config.subjects.clone();
+                    let mut subjects = stream
+                        .map_err(|e| Error::GetStream { source: e })?
+                        .info()
+                        .await
+                        .map_err(|e| Error::Request { source: e })?
+                        .config
+                        .subjects
+                        .clone();
 
                     subjects.extend(self.config.subjects.clone());
                     subjects.sort();
                     subjects.dedup();
                     stream_config.subjects = subjects;
 
-                    jetstream.update_stream(stream_config).await?;
+                    jetstream
+                        .update_stream(stream_config)
+                        .await
+                        .map_err(|e| Error::CreateStream { source: e })?;
                 }
                 Err(_) => {
-                    jetstream.create_stream(stream_config).await?;
+                    jetstream
+                        .create_stream(stream_config)
+                        .await
+                        .map_err(|e| Error::CreateStream { source: e })?;
                 }
             }
 
             let jetstream = Arc::new(Mutex::new(jetstream));
+            let event_handler = EventHandler {
+                jetstream,
+                current_task_id: self.current_task_id,
+            };
 
-            let event_handler = Arc::new(EventHandler { jetstream });
+            Ok(event_handler)
+        } else {
+            Err(Error::MissingClient())
+        }
+    }
 
-            loop {
-                tokio::select! {
-                    biased;
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Self::Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
-                    // Check for leadership changes.
-                    Some(status) = task_manager_rx.recv() => {
-                        if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                            debug!("Lost leadership for task: {}", self.config.name);
-                            return Ok(());
-                        }
-                    }
-
-                    // Process events.
-                    result = self.rx.recv() => {
-                        match result {
-                            Ok(event) => {
-                                if event.current_task_id == Some(self.current_task_id - 1) {
-                                    let handler = Arc::clone(&event_handler);
-                                    tokio::spawn(async move {
-                                        if let Err(err) = handler.handle(event).await {
-                                            error!("{}", err);
-                                        }
-                                    }.instrument(tracing::Span::current()));
-                                }
+        loop {
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
                             }
-                            Err(_) => return Ok(()),
                         }
-                    }
+                        .instrument(tracing::Span::current()),
+                    );
                 }
+                Err(_) => return Ok(()),
             }
         }
-        Ok(())
     }
 }
 
@@ -227,7 +250,7 @@ impl PublisherBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -279,7 +302,7 @@ mod tests {
     fn test_publisher_builder_config() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test stream".to_string()),
             subjects: vec!["test.subject".to_string()],
@@ -322,7 +345,7 @@ mod tests {
     async fn test_publisher_builder_build_missing_receiver() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: None,
             subjects: vec!["test.subject".to_string()],
@@ -345,7 +368,7 @@ mod tests {
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/test/creds.jwt"),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
             stream: "test_stream".to_string(),
             stream_description: Some("Test description".to_string()),
             subjects: vec!["test.subject.1".to_string(), "test.subject.2".to_string()],
@@ -371,7 +394,7 @@ mod tests {
     async fn test_publisher_builder_chain() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: PathBuf::from("/chain/test.creds"),
+            credentials_path: PathBuf::from("/chain/test.creds"),
             stream: "chain_stream".to_string(),
             stream_description: None,
             subjects: vec!["chain.subject".to_string()],
@@ -390,5 +413,30 @@ mod tests {
 
         assert_eq!(publisher.config, config);
         assert_eq!(publisher.current_task_id, 10);
+    }
+
+    #[tokio::test]
+    async fn test_publisher_builder_build_missing_task_context() {
+        let config = Arc::new(super::super::config::Publisher {
+            name: "test_publisher".to_string(),
+            credentials_path: PathBuf::from("/test/creds.jwt"),
+            stream: "test_stream".to_string(),
+            stream_description: None,
+            subjects: vec!["test.subject".to_string()],
+            max_age: None,
+        });
+        let (_tx, rx) = broadcast::channel(100);
+
+        let result = PublisherBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

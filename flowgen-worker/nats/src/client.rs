@@ -16,22 +16,31 @@ struct Credentials {
 /// Errors that can occur during NATS client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
+    /// Failed to read credentials file.
+    #[error("Failed to read NATS credentials file at {path}: {source}")]
+    ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     /// Failed to parse credentials JSON file.
-    #[error(transparent)]
-    ParseCredentials(#[from] serde_json::Error),
+    #[error("Failed to parse NATS credentials JSON: {source}")]
+    ParseCredentials {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Invalid URL format in credentials or configuration.
-    #[error(transparent)]
-    ParseUrl(#[from] url::ParseError),
-    /// Failed to establish connection to server.
-    #[error(transparent)]
-    Connect(#[from] async_nats::ConnectError),
+    #[error("Invalid NATS URL format: {source}")]
+    ParseUrl {
+        #[source]
+        source: url::ParseError,
+    },
+    /// Failed to establish connection to NATS server.
+    #[error("Failed to connect to NATS server: {source}")]
+    Connect {
+        #[source]
+        source: async_nats::ConnectError,
+    },
     /// Credentials file path was not provided during client creation.
     #[error("Credentials are not provided")]
     CredentialsNotProvided(),
@@ -55,12 +64,12 @@ impl flowgen_core::client::Client for Client {
     async fn connect(mut self) -> Result<Self, Error> {
         let credentials: Credentials =
             serde_json::from_str(&fs::read_to_string(&self.credentials_path).map_err(|e| {
-                Error::IO {
+                Error::ReadCredentials {
                     path: self.credentials_path.clone(),
                     source: e,
                 }
             })?)
-            .map_err(Error::ParseCredentials)?;
+            .map_err(|e| Error::ParseCredentials { source: e })?;
 
         let mut connect_options = async_nats::ConnectOptions::new();
         if let Some(configured_nkey) = credentials.nkey {
@@ -75,7 +84,7 @@ impl flowgen_core::client::Client for Client {
         let nats_client = connect_options
             .connect(host)
             .await
-            .map_err(Error::Connect)?;
+            .map_err(|e| Error::Connect { source: e })?;
 
         let jetstream = async_nats::jetstream::new(nats_client);
 
@@ -97,8 +106,8 @@ impl ClientBuilder {
         ClientBuilder::default()
     }
     /// Pass credentials file as path to the file.
-    pub fn credentials_path(&mut self, credentials_path: PathBuf) -> &mut ClientBuilder {
-        self.credentials_path = Some(credentials_path);
+    pub fn credentials_path(&mut self, path: PathBuf) -> &mut ClientBuilder {
+        self.credentials_path = Some(path);
         self
     }
 

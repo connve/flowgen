@@ -13,7 +13,7 @@ use tokio::sync::{
     broadcast::{Receiver, Sender},
     Mutex,
 };
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for converted events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
@@ -23,26 +23,32 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
 #[non_exhaustive]
 pub enum Error {
     /// Failed to send converted event through broadcast channel.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Event construction or processing failed.
     #[error(transparent)]
     Event(#[from] crate::event::Error),
     /// Avro serialization failed.
-    #[error(transparent)]
-    SerdeAvro(#[from] serde_avro_fast::ser::SerError),
+    #[error("Avro serialization failed: {source}")]
+    SerdeAvro {
+        #[source]
+        source: serde_avro_fast::ser::SerError,
+    },
     /// Avro schema parsing failed.
-    #[error(transparent)]
-    SerdeSchema(#[from] serde_avro_fast::schema::SchemaError),
+    #[error("Avro schema parsing failed: {source}")]
+    SerdeSchema {
+        #[source]
+        source: serde_avro_fast::schema::SchemaError,
+    },
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Host coordination error.
     #[error("Host coordination error")]
     Host(#[source] crate::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] crate::task::manager::Error),
 }
 
 /// Transforms JSON object keys by replacing hyphens with underscores.
@@ -66,7 +72,7 @@ fn transform_keys(value: &mut Value) {
 }
 
 /// Handles individual event conversion operations.
-struct EventHandler {
+pub struct EventHandler {
     /// Processor configuration settings.
     config: Arc<super::config::Processor>,
     /// Channel sender for processed events.
@@ -88,6 +94,10 @@ struct AvroSerializerOptions {
 impl EventHandler {
     /// Processes an event and converts to selected target format.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if event.current_task_id != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+
         let data = match event.data {
             EventData::Json(mut data) => match &self.serializer {
                 Some(serializer_opts) => {
@@ -95,7 +105,8 @@ impl EventHandler {
 
                     let mut serializer_config = serializer_opts.serializer_config.lock().await;
                     let raw_bytes: Vec<u8> =
-                        serde_avro_fast::to_datum_vec(&data, &mut serializer_config)?;
+                        serde_avro_fast::to_datum_vec(&data, &mut serializer_config)
+                            .map_err(|e| Error::SerdeAvro { source: e })?;
 
                     EventData::Avro(AvroData {
                         schema: serializer_opts.schema_string.clone(),
@@ -123,7 +134,9 @@ impl EventHandler {
             .build()?;
 
         info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
-        self.tx.send(e)?;
+        self.tx
+            .send(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
         Ok(())
     }
 }
@@ -140,28 +153,19 @@ pub struct Processor {
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<crate::task::context::TaskContext>,
+    _task_context: Arc<crate::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl crate::task::runner::Runner for Processor {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(crate::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
+    /// Initializes the processor by parsing and configuring the serializer.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Parsing Avro schema if converting to Avro format
+    async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         let serializer = match self.config.target_format {
             super::config::TargetFormat::Avro => {
                 let schema_string = self
@@ -171,9 +175,11 @@ impl crate::task::runner::Runner for Processor {
                     .clone()
                     .ok_or_else(|| Error::MissingRequiredAttribute("schema".to_string()))?;
 
-                let schema: serde_avro_fast::Schema = schema_string.parse()?;
+                let schema: serde_avro_fast::Schema = schema_string
+                    .parse()
+                    .map_err(|e| Error::SerdeSchema { source: e })?;
 
-                // Leak the schema to get a 'static reference
+                // Leak the schema to get a 'static reference.
                 // This is intentional and safe in this context since the schema
                 // is effectively program-lifetime data.
                 let leaked_schema: &'static serde_avro_fast::Schema = Box::leak(Box::new(schema));
@@ -187,41 +193,41 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
-        let event_handler = Arc::new(EventHandler {
+        let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
             serializer,
-        });
+        };
+
+        Ok(event_handler)
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == crate::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
                             }
                         }
-                        Err(_) => return Ok(()),
-                    }
+                        .instrument(tracing::Span::current()),
+                    );
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -286,7 +292,7 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -438,25 +444,6 @@ mod tests {
             .contains("Missing required attribute: receiver"));
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_context() {
-        let config = Arc::new(crate::convert::config::Processor::default());
-        let (tx, rx) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: task_context"));
-    }
-
     #[test]
     fn test_avro_serializer_options_creation() {
         let options = AvroSerializerOptions {
@@ -508,5 +495,24 @@ mod tests {
         }
         assert!(output_event.subject.starts_with("convert.test."));
         assert_eq!(output_event.current_task_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_build_missing_task_context() {
+        let config = Arc::new(crate::convert::config::Processor::default());
+        let (tx, rx) = broadcast::channel(100);
+
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .sender(tx)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

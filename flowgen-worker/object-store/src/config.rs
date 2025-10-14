@@ -22,7 +22,7 @@ pub struct Reader {
     /// Path to the object store or file location.
     pub path: PathBuf,
     /// Optional path to credentials file.
-    pub credentials: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
     /// Number of records to process in each batch.
@@ -43,7 +43,7 @@ pub struct Writer {
     /// Path to the object store or output location.
     pub path: PathBuf,
     /// Optional path to credentials file.
-    pub credentials: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
     /// Hive-style partitioning configuration.
@@ -85,7 +85,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://my-bucket/data/"),
-            credentials: Some(PathBuf::from("/path/to/creds.json")),
+            credentials_path: Some(PathBuf::from("/path/to/creds.json")),
             client_options: Some(client_options.clone()),
             batch_size: Some(500),
             has_header: Some(true),
@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(reader.name, "test_reader".to_string());
         assert_eq!(reader.path, PathBuf::from("s3://my-bucket/data/"));
         assert_eq!(
-            reader.credentials,
+            reader.credentials_path,
             Some(PathBuf::from("/path/to/creds.json"))
         );
         assert_eq!(reader.client_options, Some(client_options));
@@ -109,7 +109,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("gs://my-bucket/files/"),
-            credentials: Some(PathBuf::from("/creds.json")),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             client_options: None,
             batch_size: Some(1000),
             has_header: Some(false),
@@ -127,7 +127,7 @@ mod tests {
         let writer = Writer::default();
         assert_eq!(writer.name, String::new());
         assert_eq!(writer.path, PathBuf::new());
-        assert_eq!(writer.credentials, None);
+        assert_eq!(writer.credentials_path, None);
         assert_eq!(writer.client_options, None);
         assert_eq!(writer.hive_partition_options, None);
     }
@@ -148,7 +148,7 @@ mod tests {
         let writer = Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://output-bucket/results/"),
-            credentials: Some(PathBuf::from("/service-account.json")),
+            credentials_path: Some(PathBuf::from("/service-account.json")),
             client_options: Some(client_options.clone()),
             hive_partition_options: Some(hive_options.clone()),
         };
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(writer.name, "test_writer".to_string());
         assert_eq!(writer.path, PathBuf::from("s3://output-bucket/results/"));
         assert_eq!(
-            writer.credentials,
+            writer.credentials_path,
             Some(PathBuf::from("/service-account.json"))
         );
         assert_eq!(writer.client_options, Some(client_options));
@@ -168,7 +168,7 @@ mod tests {
         let writer = Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("/local/path/output/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: Some(HivePartitionOptions {
                 enabled: false,
@@ -211,7 +211,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("file:///tmp/data"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: Some(100),
             has_header: Some(true),
@@ -235,7 +235,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,
@@ -251,7 +251,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,
@@ -267,7 +267,7 @@ mod tests {
         let reader = Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             batch_size: None,
             has_header: None,

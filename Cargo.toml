@@ -1,10 +1,10 @@
 [workspace]
-members = ["flowgen"]
+members = ["flowgen-worker/app"]
 resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 authors = ["CONNVE"]
 license = "MIT"
 edition = "2021"

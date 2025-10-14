@@ -16,7 +16,7 @@ use tokio::{
     fs,
     sync::broadcast::{Receiver, Sender},
 };
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject for HTTP response events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
@@ -25,34 +25,49 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
-    IO {
+    /// Failed to read credentials file.
+    #[error("Failed to read credentials file at {path}: {source}")]
+    ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     /// Failed to send event message.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Event building or processing failed.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// JSON serialization/deserialization failed.
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Configuration template rendering failed.
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
     /// HTTP request failed.
-    #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
+    #[error("HTTP request failed: {source}")]
+    Reqwest {
+        #[source]
+        source: reqwest::Error,
+    },
     /// Invalid HTTP header name.
-    #[error(transparent)]
-    ReqwestInvalidHeaderName(#[from] reqwest::header::InvalidHeaderName),
+    #[error("Invalid HTTP header name: {source}")]
+    ReqwestInvalidHeaderName {
+        #[source]
+        source: reqwest::header::InvalidHeaderName,
+    },
     /// Invalid HTTP header value.
-    #[error(transparent)]
-    ReqwestInvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+    #[error("Invalid HTTP header value: {source}")]
+    ReqwestInvalidHeaderValue {
+        #[source]
+        source: reqwest::header::InvalidHeaderValue,
+    },
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -62,14 +77,11 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Event handler for processing HTTP requests.
 #[derive(Debug)]
-struct EventHandler {
+pub struct EventHandler {
     /// HTTP client instance.
     client: Arc<reqwest::Client>,
     /// Processor configuration.
@@ -83,6 +95,10 @@ struct EventHandler {
 impl EventHandler {
     /// Processes an event by making an HTTP request.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if event.current_task_id != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+
         let config = self.config.render(&event.data)?;
 
         let mut client = match config.method {
@@ -97,8 +113,10 @@ impl EventHandler {
         if let Some(headers) = self.config.headers.to_owned() {
             let mut header_map = HeaderMap::new();
             for (key, value) in headers {
-                let header_name = HeaderName::try_from(key)?;
-                let header_value = HeaderValue::try_from(value)?;
+                let header_name = HeaderName::try_from(key)
+                    .map_err(|e| Error::ReqwestInvalidHeaderName { source: e })?;
+                let header_value = HeaderValue::try_from(value)
+                    .map_err(|e| Error::ReqwestInvalidHeaderValue { source: e })?;
                 header_map.insert(header_name, header_value);
             }
             client = client.headers(header_map);
@@ -108,7 +126,8 @@ impl EventHandler {
             let json = match &payload.object {
                 Some(obj) => Value::Object(obj.to_owned()),
                 None => match &payload.input {
-                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())?,
+                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
+                        .map_err(|e| Error::SerdeJson { source: e })?,
                     None => return Err(Error::PayloadConfig()),
                 },
             };
@@ -120,15 +139,16 @@ impl EventHandler {
             }
         }
 
-        if let Some(credentials) = &self.config.credentials {
+        if let Some(credentials_path) = &self.config.credentials_path {
             let credentials_string =
-                fs::read_to_string(credentials)
+                fs::read_to_string(credentials_path)
                     .await
-                    .map_err(|e| Error::IO {
-                        path: credentials.clone(),
+                    .map_err(|e| Error::ReadCredentials {
+                        path: credentials_path.clone(),
                         source: e,
                     })?;
-            let credentials: Credentials = serde_json::from_str(&credentials_string)?;
+            let credentials: Credentials = serde_json::from_str(&credentials_string)
+                .map_err(|e| Error::SerdeJson { source: e })?;
 
             if let Some(bearer_token) = credentials.bearer_auth {
                 client = client.bearer_auth(bearer_token);
@@ -139,7 +159,13 @@ impl EventHandler {
             }
         };
 
-        let resp = client.send().await?.text().await?;
+        let resp = client
+            .send()
+            .await
+            .map_err(|e| Error::Reqwest { source: e })?
+            .text()
+            .await
+            .map_err(|e| Error::Reqwest { source: e })?;
 
         let data = json!(resp);
 
@@ -154,7 +180,9 @@ impl EventHandler {
             .current_task_id(self.current_task_id)
             .build()?;
 
-        self.tx.send(e)?;
+        self.tx
+            .send(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
         info!("event processeds: {}", subject);
         Ok(())
     }
@@ -172,66 +200,57 @@ pub struct Processor {
     /// Current task identifier.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
-        let client = reqwest::ClientBuilder::new().https_only(true).build()?;
+    /// Initializes the processor by building the HTTP client.
+    async fn init(&self) -> Result<EventHandler, Error> {
+        let client = reqwest::ClientBuilder::new()
+            .https_only(true)
+            .build()
+            .map_err(|e| Error::Reqwest { source: e })?;
         let client = Arc::new(client);
 
-        let event_handler = Arc::new(EventHandler {
+        let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
             client,
-        });
+        };
+
+        Ok(event_handler)
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
                             }
                         }
-                        Err(_) => return Ok(()),
-                    }
+                        .instrument(tracing::Span::current()),
+                    );
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -299,7 +318,7 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -404,21 +423,21 @@ mod tests {
     }
 
     #[test]
-    fn test_error_io_structure() {
+    fn test_error_read_credentials_structure() {
         use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error = Error::IO {
-            path: PathBuf::from("/test/file.json"),
+        let error = Error::ReadCredentials {
+            path: PathBuf::from("/test/credentials.json"),
             source: io_error,
         };
-        assert!(matches!(error, Error::IO { .. }));
+        assert!(matches!(error, Error::ReadCredentials { .. }));
     }
 
     #[test]
     fn test_error_from_serde_json_error() {
         let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
-        let error: Error = json_error.into();
-        assert!(matches!(error, Error::SerdeJson(_)));
+        let error = Error::SerdeJson { source: json_error };
+        assert!(matches!(error, Error::SerdeJson { .. }));
     }
 
     #[tokio::test]
@@ -449,7 +468,7 @@ mod tests {
             method: crate::config::Method::POST,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let builder = ProcessorBuilder::new().config(config.clone());
@@ -502,7 +521,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let result = ProcessorBuilder::new()
@@ -528,7 +547,7 @@ mod tests {
             method: crate::config::Method::GET,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let result = ProcessorBuilder::new()
@@ -542,32 +561,6 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_task_context() {
-        let (tx, rx) = broadcast::channel(100);
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://test.com".to_string(),
-            method: crate::config::Method::GET,
-            payload: None,
-            headers: None,
-            credentials: None,
-        });
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .current_task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
         );
     }
 
@@ -587,7 +580,7 @@ mod tests {
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some(headers),
-            credentials: Some(PathBuf::from("/test/creds.json")),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
         });
 
         let result = ProcessorBuilder::new()
@@ -614,7 +607,7 @@ mod tests {
             method: crate::config::Method::PUT,
             payload: None,
             headers: None,
-            credentials: None,
+            credentials_path: None,
         });
 
         let processor = ProcessorBuilder::new()
@@ -648,5 +641,31 @@ mod tests {
             tx,
             current_task_id: 0,
         };
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_build_missing_task_context() {
+        let config = Arc::new(crate::config::Processor {
+            name: "test_processor".to_string(),
+            endpoint: "https://test.com".to_string(),
+            method: crate::config::Method::GET,
+            payload: None,
+            headers: None,
+            credentials_path: None,
+        });
+        let (tx, rx) = broadcast::channel(100);
+
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .sender(tx)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

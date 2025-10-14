@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+/// Default cache database name.
+pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
+
 /// Top-level configuration for an individual flow.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfig {
@@ -23,6 +26,8 @@ pub struct Flow {
     pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
     pub tasks: Vec<Task>,
+    /// Whether this flow requires leader election (defaults to false if not specified).
+    pub required_leader_election: Option<bool>,
 }
 
 /// Available task types in the flowgen ecosystem.
@@ -63,9 +68,19 @@ pub struct AppConfig {
     /// Flow discovery options.
     pub flows: FlowOptions,
     /// Optional HTTP server configuration.
-    pub http: Option<HttpOptions>,
+    pub http_server: Option<HttpServerOptions>,
     /// Optional host coordination configuration.
     pub host: Option<HostOptions>,
+    /// Event channel buffer size for all flows (defaults to 10000 if not specified).
+    pub event_buffer_size: Option<usize>,
+}
+
+/// Cache type for storage backend.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheType {
+    /// NATS JetStream Key-Value store.
+    Nats,
 }
 
 /// Cache configuration options.
@@ -73,8 +88,13 @@ pub struct AppConfig {
 pub struct CacheOptions {
     /// Whether caching is enabled.
     pub enabled: bool,
+    /// Cache backend type.
+    #[serde(rename = "type")]
+    pub cache_type: CacheType,
     /// Path to cache credentials file.
     pub credentials_path: PathBuf,
+    /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
+    pub db_name: Option<String>,
 }
 
 /// Flow loading configuration.
@@ -86,9 +106,13 @@ pub struct FlowOptions {
 
 /// HTTP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct HttpOptions {
+pub struct HttpServerOptions {
+    /// Whether HTTP server is enabled.
+    pub enabled: bool,
     /// Optional HTTP server port number (defaults to 3000).
     pub port: Option<u16>,
+    /// Optional path prefix for all routes (e.g., "/workers").
+    pub routes_prefix: Option<String>,
 }
 
 /// Host type for coordination.
@@ -102,7 +126,10 @@ pub enum HostType {
 /// Host coordination configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HostOptions {
+    /// Whether host coordination is enabled.
+    pub enabled: bool,
     /// Host type for coordination.
+    #[serde(rename = "type")]
     pub host_type: HostType,
     /// Optional namespace for Kubernetes resources.
     pub namespace: Option<String>,
@@ -121,6 +148,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![],
+                required_leader_election: None,
             },
         };
 
@@ -139,6 +167,7 @@ mod tests {
                 name: "serialize_test".to_string(),
                 labels: Some(labels),
                 tasks: vec![],
+                required_leader_election: None,
             },
         };
 
@@ -156,6 +185,7 @@ mod tests {
             name: "test_flow".to_string(),
             labels: Some(labels.clone()),
             tasks: vec![],
+            required_leader_election: None,
         };
 
         assert_eq!(flow.name, "test_flow");
@@ -172,6 +202,7 @@ mod tests {
             name: "flow_with_tasks".to_string(),
             labels: None,
             tasks: vec![task],
+            required_leader_election: None,
         };
 
         assert_eq!(flow.name, "flow_with_tasks");
@@ -192,6 +223,7 @@ mod tests {
             name: "serialize_flow".to_string(),
             labels: Some(labels),
             tasks: vec![],
+            required_leader_election: None,
         };
 
         let serialized = serde_json::to_string(&flow).unwrap();
@@ -205,6 +237,7 @@ mod tests {
             name: "clone_test".to_string(),
             labels: None,
             tasks: vec![],
+            required_leader_election: None,
         };
 
         let cloned = flow.clone();
@@ -225,19 +258,22 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: true,
+                cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/test/cache"),
+                db_name: None,
             }),
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/test/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
+            event_buffer_size: None,
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.dir.is_some());
-        assert!(app_config.http.is_none());
+        assert!(app_config.http_server.is_none());
         assert!(app_config.host.is_none());
     }
 
@@ -248,8 +284,9 @@ mod tests {
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
+            event_buffer_size: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -261,13 +298,16 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: false,
+                cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/serialize/cache"),
+                db_name: Some("test_db".to_string()),
             }),
             flows: FlowOptions {
                 dir: Some(PathBuf::from("/serialize/flows/*")),
             },
-            http: None,
+            http_server: None,
             host: None,
+            event_buffer_size: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -280,11 +320,14 @@ mod tests {
         let app_config = AppConfig {
             cache: Some(CacheOptions {
                 enabled: true,
+                cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/clone/cache"),
+                db_name: None,
             }),
             flows: FlowOptions { dir: None },
-            http: None,
+            http_server: None,
             host: None,
+            event_buffer_size: None,
         };
 
         let cloned = app_config.clone();
@@ -295,13 +338,15 @@ mod tests {
     fn test_cache_options_creation() {
         let cache_options = CacheOptions {
             enabled: true,
-            credentials_path: PathBuf::from("/test/credentials"),
+            cache_type: CacheType::Nats,
+            credentials_path: PathBuf::from("/test/credentials_path"),
+            db_name: None,
         };
 
         assert!(cache_options.enabled);
         assert_eq!(
             cache_options.credentials_path,
-            PathBuf::from("/test/credentials")
+            PathBuf::from("/test/credentials_path")
         );
     }
 
@@ -309,7 +354,9 @@ mod tests {
     fn test_cache_options_disabled() {
         let cache_options = CacheOptions {
             enabled: false,
+            cache_type: CacheType::Nats,
             credentials_path: PathBuf::from("/disabled/cache"),
+            db_name: Some("custom_db".to_string()),
         };
 
         assert!(!cache_options.enabled);
@@ -323,7 +370,9 @@ mod tests {
     fn test_cache_options_serialization() {
         let cache_options = CacheOptions {
             enabled: true,
-            credentials_path: PathBuf::from("/serialize/credentials"),
+            cache_type: CacheType::Nats,
+            credentials_path: PathBuf::from("/serialize/credentials_path"),
+            db_name: None,
         };
 
         let serialized = serde_json::to_string(&cache_options).unwrap();
@@ -382,6 +431,7 @@ mod tests {
                     Task::convert(convert_config),
                     Task::generate(generate_config),
                 ],
+                required_leader_election: None,
             },
         };
 
@@ -393,29 +443,47 @@ mod tests {
     }
 
     #[test]
-    fn test_http_options_creation() {
-        let http_options = HttpOptions { port: Some(8080) };
+    fn test_http_server_options_creation() {
+        let http_server_options = HttpServerOptions {
+            enabled: true,
+            port: Some(8080),
+            routes_prefix: None,
+        };
 
-        assert_eq!(http_options.port, Some(8080));
+        assert!(http_server_options.enabled);
+        assert_eq!(http_server_options.port, Some(8080));
     }
 
     #[test]
-    fn test_http_options_without_port() {
-        let http_options = HttpOptions { port: None };
+    fn test_http_server_options_without_port() {
+        let http_server_options = HttpServerOptions {
+            enabled: false,
+            port: None,
+            routes_prefix: None,
+        };
 
-        assert!(http_options.port.is_none());
+        assert!(!http_server_options.enabled);
+        assert!(http_server_options.port.is_none());
     }
 
     #[test]
-    fn test_app_config_with_http_options() {
+    fn test_app_config_with_http_server_options() {
         let app_config = AppConfig {
             cache: None,
             flows: FlowOptions { dir: None },
-            http: Some(HttpOptions { port: Some(8080) }),
+            http_server: Some(HttpServerOptions {
+                enabled: true,
+                port: Some(8080),
+                routes_prefix: Some("/workers".to_string()),
+            }),
             host: None,
+            event_buffer_size: None,
         };
 
-        assert!(app_config.http.is_some());
-        assert_eq!(app_config.http.as_ref().unwrap().port, Some(8080));
+        assert!(app_config.http_server.is_some());
+        let http_server = app_config.http_server.as_ref().unwrap();
+        assert!(http_server.enabled);
+        assert_eq!(http_server.port, Some(8080));
+        assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));
     }
 }

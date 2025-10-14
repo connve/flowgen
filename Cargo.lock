@@ -1199,32 +1199,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "flowgen"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "config",
- "flowgen_core",
- "flowgen_http",
- "flowgen_nats",
- "flowgen_object_store",
- "flowgen_salesforce",
- "futures",
- "futures-util",
- "glob",
- "kube",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "flowgen_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1251,9 +1227,10 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow-json",
+ "async-trait",
  "axum 0.8.4",
  "base64 0.22.1",
  "chrono",
@@ -1270,10 +1247,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-nats",
+ "async-trait",
  "bincode",
  "bytes",
  "chrono",
@@ -1293,10 +1271,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "arrow",
+ "async-trait",
  "bytes",
  "chrono",
  "flowgen_core",
@@ -1312,10 +1291,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "apache-avro",
  "arrow",
+ "async-trait",
  "bincode",
  "bytes",
  "chrono",
@@ -1333,6 +1313,30 @@ dependencies = [
  "tonic",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "flowgen_worker"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "config",
+ "flowgen_core",
+ "flowgen_http",
+ "flowgen_nats",
+ "flowgen_object_store",
+ "flowgen_salesforce",
+ "futures",
+ "futures-util",
+ "glob",
+ "kube",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3587,7 +3591,7 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "salesforce_pubsub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures-util",

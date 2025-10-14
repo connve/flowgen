@@ -7,7 +7,7 @@ use flowgen_core::{client::Client, event::generate_subject};
 use object_store::PutPayload;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, error, info, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_writer";
@@ -16,43 +16,69 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_writer";
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
-    #[error(transparent)]
-    Avro(#[from] apache_avro::Error),
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
-    #[error(transparent)]
-    ObjectStore(#[from] object_store::Error),
+    #[error("IO operation failed: {source}")]
+    IO {
+        #[source]
+        source: std::io::Error,
+    },
+    /// Apache Arrow error.
+    #[error("Arrow operation failed: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
+    /// Apache Avro error.
+    #[error("Avro operation failed: {source}")]
+    Avro {
+        #[source]
+        source: apache_avro::Error,
+    },
+    /// JSON serialization/deserialization error.
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Object store operation error.
+    #[error("Object store operation failed: {source}")]
+    ObjectStore {
+        #[source]
+        source: object_store::Error,
+    },
+    /// Object store client error.
     #[error(transparent)]
     ObjectStoreClient(#[from] super::client::Error),
+    /// Event building or processing error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
-    #[error("Missing required attribute: {}.", _0)]
+    /// Missing required attribute.
+    #[error("Missing required attribute: {0}")]
     MissingRequiredAttribute(String),
+    /// Could not initialize object store context.
     #[error("Could not initialize object store context")]
     NoObjectStoreContext(),
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
 }
 
 /// Handles processing of individual events by writing them to object storage.
-struct EventHandler {
+pub struct EventHandler {
     /// Writer configuration settings.
     config: Arc<super::config::Writer>,
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
+    /// Current task identifier for event filtering.
+    current_task_id: usize,
 }
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if event.current_task_id != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+
         let mut client_guard = self.client.lock().await;
         let context = client_guard
             .context
@@ -96,7 +122,11 @@ impl EventHandler {
 
         // Upload processed data to object store.
         let payload = PutPayload::from_bytes(Bytes::from(writer));
-        let put_result = context.object_store.put(&object_path, payload).await?;
+        let put_result = context
+            .object_store
+            .put(&object_path, payload)
+            .await
+            .map_err(|e| Error::ObjectStore { source: e })?;
 
         // Generate event subject.
         let subject = generate_subject(
@@ -140,74 +170,66 @@ pub struct Writer {
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::task::runner::Runner for Writer {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
-        // Build object store client with conditional configuration
+    /// Initializes the writer by establishing object store client connection.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Building and connecting the object store client with credentials
+    async fn init(&self) -> Result<EventHandler, Error> {
+        // Build object store client with conditional configuration.
         let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
         }
-        if let Some(credentials) = &self.config.credentials {
-            client_builder = client_builder.credentials(credentials.to_path_buf());
+        if let Some(credentials_path) = &self.config.credentials_path {
+            client_builder = client_builder.credentials_path(credentials_path.clone());
         }
 
         let client = Arc::new(Mutex::new(client_builder.build()?.connect().await?));
 
-        let event_handler = Arc::new(EventHandler {
+        let event_handler = EventHandler {
             client,
             config: Arc::clone(&self.config),
-        });
+            current_task_id: self.current_task_id,
+        };
+
+        Ok(event_handler)
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Self::Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
         // Process incoming events, filtering by task ID.
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let handler = Arc::clone(&event_handler);
-                                tokio::spawn(async move {
-                                    if let Err(err) = handler.handle(event).await {
-                                        error!("{}", err);
-                                    }
-                                }.instrument(tracing::Span::current()));
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
                             }
                         }
-                        Err(_) => return Ok(()),
-                    }
+                        .instrument(tracing::Span::current()),
+                    );
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -269,7 +291,7 @@ impl WriterBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -315,7 +337,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -361,7 +383,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/output/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -383,7 +405,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("gs://my-bucket/data/"),
-            credentials: Some(PathBuf::from("/service-account.json")),
+            credentials_path: Some(PathBuf::from("/service-account.json")),
             client_options: None,
             hive_partition_options: Some(HivePartitionOptions {
                 enabled: true,
@@ -413,7 +435,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("/tmp/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -435,7 +457,7 @@ mod tests {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("file:///data/output/"),
-            credentials: None,
+            credentials_path: None,
             client_options: None,
             hive_partition_options: None,
         });
@@ -450,5 +472,29 @@ mod tests {
         assert!(builder.config.is_some());
         assert!(builder.rx.is_some());
         assert_eq!(builder.current_task_id, 10);
+    }
+
+    #[tokio::test]
+    async fn test_writer_builder_build_missing_task_context() {
+        let config = Arc::new(crate::config::Writer {
+            name: "test_writer".to_string(),
+            path: PathBuf::from("s3://bucket/path/"),
+            credentials_path: None,
+            client_options: None,
+            hive_partition_options: None,
+        });
+        let (_, rx) = broadcast::channel::<Event>(10);
+
+        let result = WriterBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

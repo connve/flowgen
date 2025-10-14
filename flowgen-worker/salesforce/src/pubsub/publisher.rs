@@ -8,9 +8,9 @@ use flowgen_core::{
 use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
 use serde_avro_fast::{ser, Schema};
 use serde_json::{Map, Value};
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{debug, info};
+use tracing::{error, info, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_publisher";
 
@@ -27,22 +27,34 @@ pub enum Error {
     #[error(transparent)]
     SerdeExt(#[from] flowgen_core::serde::Error),
     /// Apache Avro serialization error.
-    #[error(transparent)]
-    SerdeAvro(#[from] serde_avro_fast::ser::SerError),
+    #[error("Avro serialization failed: {source}")]
+    SerdeAvro {
+        #[source]
+        source: serde_avro_fast::ser::SerError,
+    },
+    /// Avro schema parsing error.
+    #[error("Avro schema parsing failed: {source}")]
+    SerdeSchema {
+        #[source]
+        source: serde_avro_fast::schema::SchemaError,
+    },
     /// Template rendering error for dynamic configuration.
     #[error(transparent)]
     Render(#[from] flowgen_core::config::Error),
     /// Failed to send event through broadcast channel.
-    #[error(transparent)]
-    SendMessage(#[from] tokio::sync::broadcast::error::SendError<Event>),
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
     /// Flowgen core event system error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// Flowgen core service error.
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
-    /// Required event attribute is missing.
-    #[error("Missing required event attribute: {}", _0)]
+    /// Required attribute is missing.
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
     /// Event data object is empty when content is expected.
     #[error("Empty object")]
@@ -53,9 +65,73 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Task manager error.
-    #[error(transparent)]
-    TaskManager(#[from] flowgen_core::task::manager::Error),
+}
+
+/// Event handler for processing and publishing events to Salesforce Pub/Sub.
+pub struct EventHandler {
+    /// Publisher configuration.
+    config: Arc<super::config::Publisher>,
+    /// Pub/Sub connection context.
+    pubsub: Arc<Mutex<super::context::Context>>,
+    /// Topic name for publishing.
+    topic: String,
+    /// Base subject for event generation.
+    base_subject: String,
+    /// Schema ID for event serialization.
+    schema_id: String,
+    /// Avro serializer configuration.
+    serializer_config: Mutex<ser::SerializerConfig<'static>>,
+    /// Current task identifier.
+    current_task_id: usize,
+}
+
+impl EventHandler {
+    /// Processes an event by publishing it to Salesforce Pub/Sub.
+    async fn handle(&self, event: Event) -> Result<(), Error> {
+        let config = self.config.render(&event.data)?;
+        let payload = config.payload.to_string()?.to_value()?;
+
+        let mut publish_payload: Map<String, Value> = Map::new();
+        for (k, v) in payload.as_object().ok_or_else(Error::EmptyObject)? {
+            publish_payload.insert(k.to_owned(), v.to_owned());
+        }
+        let now = Utc::now().timestamp_millis();
+        publish_payload.insert("CreatedDate".to_string(), Value::Number(now.into()));
+
+        let mut serializer_config = self.serializer_config.lock().await;
+        let serialized_payload: Vec<u8> =
+            serde_avro_fast::to_datum_vec(&publish_payload, &mut serializer_config)
+                .map_err(|e| Error::SerdeAvro { source: e })?;
+
+        let mut events = Vec::new();
+        let pe = ProducerEvent {
+            schema_id: self.schema_id.clone(),
+            payload: serialized_payload,
+            ..Default::default()
+        };
+        events.push(pe);
+
+        let _ = self
+            .pubsub
+            .lock()
+            .await
+            .publish(PublishRequest {
+                topic_name: self.topic.clone(),
+                events,
+                ..Default::default()
+            })
+            .await?;
+
+        // Generate event subject.
+        let subject = generate_subject(
+            Some(&self.config.name),
+            &self.base_subject,
+            SubjectSuffix::Timestamp,
+        );
+
+        info!("Event processed: {}", subject);
+        Ok(())
+    }
 }
 
 /// Salesforce Pub/Sub publisher that receives events and publishes them to configured topics.
@@ -68,30 +144,22 @@ pub struct Publisher {
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::task::runner::Runner for Publisher {
     type Error = Error;
+    type EventHandler = EventHandler;
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
-    async fn run(mut self) -> Result<(), Self::Error> {
-        // Register task with task manager.
-        let task_id = format!(
-            "{}.{}.{}",
-            self.task_context.flow.name, DEFAULT_MESSAGE_SUBJECT, self.config.name
-        );
-        let mut task_manager_rx = self
-            .task_context
-            .task_manager
-            .register(
-                task_id,
-                Some(flowgen_core::task::manager::LeaderElectionOptions {}),
-            )
-            .await?;
-
+    /// Initializes the publisher by establishing connection and retrieving schema.
+    ///
+    /// This method performs all setup operations that can fail, including:
+    /// - Connecting to Salesforce Pub/Sub service
+    /// - Authenticating with credentials
+    /// - Retrieving topic information and schema
+    async fn init(&self) -> Result<EventHandler, Error> {
         let config = self.config.as_ref();
-        let a = Path::new(&config.credentials);
 
         let service = flowgen_core::service::ServiceBuilder::new()
             .endpoint(format!(
@@ -99,24 +167,17 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 super::config::DEFAULT_PUBSUB_URL,
                 super::config::DEFAULT_PUBSUB_PORT
             ))
-            .build()
-            .map_err(Error::Service)?
+            .build()?
             .connect()
-            .await
-            .map_err(Error::Service)?;
+            .await?;
 
         let sfdc_client = crate::client::Builder::new()
-            .credentials_path(a.to_path_buf())
-            .build()
-            .map_err(Error::Auth)?
+            .credentials_path(config.credentials_path.clone())
+            .build()?
             .connect()
-            .await
-            .map_err(Error::Auth)?;
+            .await?;
 
-        let pubsub = super::context::ContextBuilder::new(service)
-            .with_client(sfdc_client)
-            .build()
-            .map_err(Error::PubSub)?;
+        let pubsub = super::context::Context::new(service, sfdc_client)?;
 
         let pubsub = Arc::new(Mutex::new(pubsub));
 
@@ -126,8 +187,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .get_topic(TopicRequest {
                 topic_name: self.config.topic.clone(),
             })
-            .await
-            .map_err(Error::PubSub)?
+            .await?
             .into_inner();
 
         let schema_info = pubsub
@@ -136,84 +196,66 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .get_schema(SchemaRequest {
                 schema_id: topic_info.schema_id,
             })
-            .await
-            .map_err(Error::PubSub)?
+            .await?
             .into_inner();
-
-        let pubsub = pubsub.clone();
-
-        let topic = &self.config.topic;
-        let schema_id = &schema_info.schema_id;
 
         let schema: Schema = schema_info
             .schema_json
             .parse()
-            .map_err(|_| Error::SchemaParse())?;
+            .map_err(|e| Error::SerdeSchema { source: e })?;
 
-        let serializer_config = &mut ser::SerializerConfig::new(&schema);
+        // Leak the schema to get a 'static reference.
+        // This is intentional and safe in this context since the schema
+        // is effectively program-lifetime data.
+        let leaked_schema: &'static Schema = Box::leak(Box::new(schema));
+        let serializer_config = ser::SerializerConfig::new(leaked_schema);
+
+        // Generate base subject.
+        let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
+        let base_subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..]);
+
+        let topic_name = self.config.topic.clone();
+
+        let event_handler = EventHandler {
+            config: Arc::clone(&self.config),
+            pubsub,
+            topic: topic_name,
+            base_subject,
+            schema_id: schema_info.schema_id,
+            serializer_config: Mutex::new(serializer_config),
+            current_task_id: self.current_task_id,
+        };
+
+        Ok(event_handler)
+    }
+
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Self::Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
         loop {
-            tokio::select! {
-                biased;
-
-                // Check for leadership changes.
-                Some(status) = task_manager_rx.recv() => {
-                    if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                        debug!("Lost leadership for task: {}", self.config.name);
-                        return Ok(());
-                    }
-                }
-
-                // Process events.
-                result = self.rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if event.current_task_id == Some(self.current_task_id - 1) {
-                                let config = config.render(&event.data)?;
-                                let payload = config.payload.to_string()?.to_value()?;
-
-                                let mut publish_payload: Map<String, Value> = Map::new();
-                                for (k, v) in payload.as_object().ok_or_else(Error::EmptyObject)? {
-                                    publish_payload.insert(k.to_owned(), v.to_owned());
+            match self.rx.recv().await {
+                Ok(event) => {
+                    if event.current_task_id == event_handler.current_task_id.checked_sub(1) {
+                        let event_handler = Arc::clone(&event_handler);
+                        tokio::spawn(
+                            async move {
+                                if let Err(err) = event_handler.handle(event).await {
+                                    error!("{}", err);
                                 }
-                                let now = Utc::now().timestamp_millis();
-                                publish_payload.insert("CreatedDate".to_string(), Value::Number(now.into()));
-
-                                let serialized_payload: Vec<u8> =
-                                    serde_avro_fast::to_datum_vec(&publish_payload, serializer_config)
-                                        .map_err(Error::SerdeAvro)?;
-
-                                let mut events = Vec::new();
-                                let pe = ProducerEvent {
-                                    schema_id: schema_id.to_string(),
-                                    payload: serialized_payload,
-                                    ..Default::default()
-                                };
-                                events.push(pe);
-
-                                let _ = pubsub
-                                    .lock()
-                                    .await
-                                    .publish(PublishRequest {
-                                        topic_name: topic.to_string(),
-                                        events,
-                                        ..Default::default()
-                                    })
-                                    .await
-                                    .map_err(Error::PubSub)?;
-
-                                // Generate event subject/
-                                let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
-                                let base_subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..]);
-                                let subject =
-                                    generate_subject(Some(&self.config.name), &base_subject, SubjectSuffix::Timestamp);
-
-                                info!("Event processed: {}", subject);
                             }
-                        }
-                        Err(_) => return Ok(()),
+                            .instrument(tracing::Span::current()),
+                        );
                     }
                 }
+                Err(_) => return Ok(()),
             }
         }
     }
@@ -266,7 +308,7 @@ impl PublisherBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             current_task_id: self.current_task_id,
-            task_context: self
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
         })
@@ -278,6 +320,7 @@ mod tests {
     use super::*;
     use crate::pubsub::config;
     use serde_json::{json, Map, Value};
+    use std::path::PathBuf;
     use tokio::sync::broadcast;
 
     /// Creates a mock TaskContext for testing.
@@ -310,7 +353,7 @@ mod tests {
     fn test_publisher_builder_config() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
             endpoint: None,
@@ -353,7 +396,7 @@ mod tests {
     async fn test_publisher_builder_missing_receiver() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: serde_json::Map::new(),
             endpoint: None,
@@ -375,7 +418,7 @@ mod tests {
     async fn test_publisher_builder_build_success() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
-            credentials: "test_creds".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
             payload: {
                 let mut payload = serde_json::Map::new();
@@ -399,5 +442,29 @@ mod tests {
         let publisher = result.unwrap();
         assert_eq!(publisher.current_task_id, 5);
         assert_eq!(publisher.config.topic, "/event/Test__e");
+    }
+
+    #[tokio::test]
+    async fn test_publisher_builder_build_missing_task_context() {
+        let config = Arc::new(config::Publisher {
+            name: "test_publisher".to_string(),
+            credentials_path: PathBuf::from("test_creds"),
+            topic: "/event/Test__e".to_string(),
+            payload: serde_json::Map::new(),
+            endpoint: None,
+        });
+        let (_, rx) = broadcast::channel::<Event>(10);
+
+        let result = PublisherBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .current_task_id(1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+        );
     }
 }

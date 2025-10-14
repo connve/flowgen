@@ -1,7 +1,6 @@
 use config::Config;
-use flowgen::app::App;
-use flowgen::config::AppConfig;
-use flowgen_core::task::runner::Runner;
+use flowgen_worker::app::App;
+use flowgen_worker::config::AppConfig;
 use std::env;
 use std::process;
 use tracing::error;
@@ -42,7 +41,7 @@ async fn main() {
         }
     };
     let app = App { config: app_config };
-    if let Err(e) = app.run().await {
+    if let Err(e) = app.start().await {
         error!("Application failed to run: {}", e);
         process::exit(1);
     }

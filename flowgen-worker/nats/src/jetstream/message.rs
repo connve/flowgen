@@ -8,17 +8,26 @@ use flowgen_core::event::{AvroData, EventBuilder, EventData};
 #[non_exhaustive]
 pub enum Error {
     /// Apache Arrow error during data serialization or deserialization.
-    #[error(transparent)]
-    Arrow(#[from] arrow::error::ArrowError),
+    #[error("Apache Arrow serialization/deserialization failed: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
     /// JSON serialization or deserialization error.
-    #[error(transparent)]
-    SerdeJson(#[from] serde_json::Error),
+    #[error("JSON serialization/deserialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
     /// Flowgen core event system error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// Binary encoding or decoding error.
-    #[error(transparent)]
-    Bincode(#[from] bincode::Error),
+    #[error("Binary encoding/decoding failed: {source}")]
+    Bincode {
+        #[source]
+        source: bincode::Error,
+    },
     /// Expected record batch data is missing or unavailable.
     #[error("Error getting record batch")]
     NoRecordBatch(),
@@ -50,20 +59,26 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
             EventData::ArrowRecordBatch(data) => {
                 let mut buffer = Vec::new();
                 {
-                    let mut stream_writer = StreamWriter::try_new(&mut buffer, &data.schema())?;
-                    stream_writer.write(data)?;
-                    stream_writer.finish()?;
+                    let mut stream_writer = StreamWriter::try_new(&mut buffer, &data.schema())
+                        .map_err(|e| Error::Arrow { source: e })?;
+                    stream_writer
+                        .write(data)
+                        .map_err(|e| Error::Arrow { source: e })?;
+                    stream_writer
+                        .finish()
+                        .map_err(|e| Error::Arrow { source: e })?;
                 }
 
-                let serialized = serialize(&buffer)?;
+                let serialized = serialize(&buffer).map_err(|e| Error::Bincode { source: e })?;
                 event = event.payload(serialized.into());
             }
             EventData::Avro(data) => {
-                let serialized = serialize(data)?;
+                let serialized = serialize(data).map_err(|e| Error::Bincode { source: e })?;
                 event = event.payload(serialized.into());
             }
             EventData::Json(data) => {
-                let serialized = serde_json::to_vec(data)?;
+                let serialized =
+                    serde_json::to_vec(data).map_err(|e| Error::SerdeJson { source: e })?;
                 event = event.payload(serialized.into());
             }
         }
@@ -86,13 +101,17 @@ impl NatsMessageExt for async_nats::Message {
             Err(_) => match serde_json::from_slice(&self.payload) {
                 Ok(data) => EventData::Json(data),
                 Err(_) => {
-                    let arrow_bytes = deserialize::<Vec<u8>>(&self.payload)?;
+                    let arrow_bytes = deserialize::<Vec<u8>>(&self.payload)
+                        .map_err(|e| Error::Bincode { source: e })?;
 
                     let cursor = std::io::Cursor::new(arrow_bytes);
-                    let mut stream_reader =
-                        arrow::ipc::reader::StreamReader::try_new(cursor, None)?;
+                    let mut stream_reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)
+                        .map_err(|e| Error::Arrow { source: e })?;
 
-                    let recordbatch = stream_reader.next().ok_or_else(Error::NoRecordBatch)??;
+                    let recordbatch = stream_reader
+                        .next()
+                        .ok_or_else(Error::NoRecordBatch)?
+                        .map_err(|e| Error::Arrow { source: e })?;
 
                     EventData::ArrowRecordBatch(recordbatch)
                 }

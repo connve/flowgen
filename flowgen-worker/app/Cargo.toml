@@ -1,5 +1,5 @@
 [package]
-name = "flowgen"
+name = "flowgen_worker"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -7,14 +7,15 @@ edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "flowgen"
+name = "flowgen_worker"
 path = "src/main.rs"
+
 [dependencies]
-flowgen_core = { path = "../flowgen-worker/core" }
-flowgen_http = { path = "../flowgen-worker/http" }
-flowgen_salesforce = { path = "../flowgen-worker/salesforce" }
-flowgen_nats = { path = "../flowgen-worker/nats" }
-flowgen_object_store = { path = "../flowgen-worker/object-store" }
+flowgen_core = { path = "../core" }
+flowgen_http = { path = "../http" }
+flowgen_salesforce = { path = "../salesforce" }
+flowgen_nats = { path = "../nats" }
+flowgen_object_store = { path = "../object-store" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 futures-util = { workspace = true }
