@@ -8,6 +8,8 @@ on:
 jobs:
   detect-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.detect-and-tag.outputs.tag }}
