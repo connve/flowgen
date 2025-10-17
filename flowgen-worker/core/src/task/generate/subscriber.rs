@@ -6,6 +6,7 @@
 use crate::event::{
     generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     sync::Arc,
@@ -16,6 +17,17 @@ use tracing::{error, info, warn, Instrument};
 
 /// Default subject prefix for generated events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
+
+/// System information included in generated events for time-based filtering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemInfo {
+    /// Last run time in seconds since UNIX epoch (if available from cache).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_time: Option<u64>,
+    /// Next scheduled run time in seconds since UNIX epoch (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run_time: Option<u64>,
+}
 
 /// Errors that can occur during generate task execution.
 #[derive(thiserror::Error, Debug)]
@@ -97,10 +109,50 @@ impl EventHandler {
                 time::sleep(Duration::from_secs(sleep_duration)).await;
             }
 
-            // Prepare message data.
+            // Get last_run_time from cache for system info
+            let last_run_time = if let Some(cache) = cache {
+                match cache.get(&cache_key).await {
+                    Ok(cached_bytes) => {
+                        let cached_str = String::from_utf8_lossy(&cached_bytes);
+                        cached_str.parse::<u64>().ok()
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
+            // Determine if there will be a next run
+            let next_run_time_val = match self.config.count {
+                Some(count) if count == counter + 1 => None, // This is the last run
+                _ => {
+                    let current_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|e| Error::SystemTime { source: e })?
+                        .as_secs();
+                    Some(current_time + self.config.interval)
+                }
+            };
+
+            // Create system information
+            let system_info = SystemInfo {
+                last_run_time,
+                next_run_time: next_run_time_val,
+            };
+
+            // Prepare message data with system information
             let data = match &self.config.message {
-                Some(message) => json!(message),
-                None => json!(null),
+                Some(message) => {
+                    json!({
+                        "message": message,
+                        "system_info": system_info
+                    })
+                }
+                None => {
+                    json!({
+                        "system_info": system_info
+                    })
+                }
             };
 
             // Generate event subject.
@@ -449,7 +501,11 @@ mod tests {
 
         match event.data {
             EventData::Json(value) => {
-                assert_eq!(value, "custom message");
+                assert_eq!(value["message"], "custom message");
+                assert!(value["system_info"].is_object());
+                // First run with count=1, so no last_run_time and no next_run_time
+                assert!(value["system_info"]["last_run_time"].is_null());
+                assert!(value["system_info"]["next_run_time"].is_null());
             }
             _ => panic!("Expected JSON event data"),
         }

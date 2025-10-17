@@ -37,6 +37,12 @@ pub enum Error {
         #[source]
         source: serde_avro_fast::ser::SerError,
     },
+    /// Avro deserialization failed.
+    #[error("Avro deserialization failed: {source}")]
+    SerdeAvroDe {
+        #[source]
+        source: serde_avro_fast::de::DeError,
+    },
     /// Avro schema parsing failed.
     #[error("Avro schema parsing failed: {source}")]
     SerdeSchema {
@@ -130,11 +136,26 @@ impl EventHandler {
                     ))
                 }
             },
-            EventData::Avro(_) => {
-                return Err(Error::MissingRequiredAttribute(
-                    "Avro conversion not yet supported".to_string(),
-                ))
-            }
+            EventData::Avro(avro_data) => match self.config.target_format {
+                crate::task::convert::config::TargetFormat::Json => {
+                    // Parse the schema
+                    let schema: serde_avro_fast::Schema = avro_data
+                        .schema
+                        .parse()
+                        .map_err(|e| Error::SerdeSchema { source: e })?;
+
+                    // Deserialize Avro bytes to JSON value
+                    let json_value: Value =
+                        serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
+                            .map_err(|e| Error::SerdeAvroDe { source: e })?;
+
+                    EventData::Json(json_value)
+                }
+                crate::task::convert::config::TargetFormat::Avro => {
+                    // Avro to Avro passthrough
+                    EventData::Avro(avro_data)
+                }
+            },
         };
 
         // Generate event subject.
@@ -533,5 +554,106 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
         );
+    }
+
+    #[tokio::test]
+    async fn test_event_handler_avro_to_json() {
+        let config = Arc::new(crate::task::convert::config::Processor {
+            name: "test".to_string(),
+            target_format: crate::task::convert::config::TargetFormat::Json,
+            schema: None,
+        });
+
+        let (tx, mut rx) = broadcast::channel(100);
+
+        let event_handler = EventHandler {
+            config,
+            tx,
+            current_task_id: 1,
+            serializer: None,
+        };
+
+        // Create a simple Avro schema and serialize test data
+        let schema_str = r#"{"type": "string"}"#;
+        let schema: serde_avro_fast::Schema = schema_str.parse().unwrap();
+        let leaked_schema: &'static serde_avro_fast::Schema = Box::leak(Box::new(schema));
+        let mut serializer_config = ser::SerializerConfig::new(leaked_schema);
+
+        let test_data = json!("test_value");
+        let raw_bytes = serde_avro_fast::to_datum_vec(&test_data, &mut serializer_config).unwrap();
+
+        let input_event = Event {
+            data: EventData::Avro(AvroData {
+                schema: schema_str.to_string(),
+                raw_bytes,
+            }),
+            subject: "input.subject".to_string(),
+            current_task_id: Some(0),
+            id: None,
+            timestamp: 123456789,
+        };
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+
+        let output_event = rx.recv().await.unwrap();
+
+        match output_event.data {
+            EventData::Json(value) => {
+                assert_eq!(value, "test_value");
+            }
+            _ => panic!("Expected JSON output from Avro conversion"),
+        }
+        assert!(output_event.subject.starts_with("convert.test."));
+        assert_eq!(output_event.current_task_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_event_handler_avro_passthrough() {
+        let config = Arc::new(crate::task::convert::config::Processor {
+            name: "test".to_string(),
+            target_format: crate::task::convert::config::TargetFormat::Avro,
+            schema: None,
+        });
+
+        let (tx, mut rx) = broadcast::channel(100);
+
+        let event_handler = EventHandler {
+            config,
+            tx,
+            current_task_id: 1,
+            serializer: None,
+        };
+
+        let schema_str = r#"{"type": "string"}"#;
+        let raw_bytes = vec![1, 2, 3, 4];
+
+        let input_event = Event {
+            data: EventData::Avro(AvroData {
+                schema: schema_str.to_string(),
+                raw_bytes: raw_bytes.clone(),
+            }),
+            subject: "input.subject".to_string(),
+            current_task_id: Some(0),
+            id: None,
+            timestamp: 123456789,
+        };
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+
+        let output_event = rx.recv().await.unwrap();
+
+        match output_event.data {
+            EventData::Avro(avro_data) => {
+                assert_eq!(avro_data.schema, schema_str);
+                assert_eq!(avro_data.raw_bytes, raw_bytes);
+            }
+            _ => panic!("Expected Avro passthrough"),
+        }
+        assert!(output_event.subject.starts_with("convert.test."));
+        assert_eq!(output_event.current_task_id, Some(1));
     }
 }
