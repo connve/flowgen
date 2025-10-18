@@ -15,6 +15,8 @@ pub enum ContentType {
         batch_size: usize,
         /// Whether the CSV content has a header row.
         has_header: bool,
+        /// CSV delimiter character (defaults to comma if not specified).
+        delimiter: Option<u8>,
     },
     /// Apache Avro content format.
     Avro,
@@ -65,10 +67,11 @@ mod tests {
         let csv_type = ContentType::Csv {
             batch_size: 100,
             has_header: true,
+            delimiter: None,
         };
         assert_eq!(
             format!("{csv_type:?}"),
-            "Csv { batch_size: 100, has_header: true }"
+            "Csv { batch_size: 100, has_header: true, delimiter: None }"
         );
 
         let avro_type = ContentType::Avro;
@@ -80,6 +83,7 @@ mod tests {
         let csv_type = ContentType::Csv {
             batch_size: 50,
             has_header: false,
+            delimiter: Some(b';'),
         };
         let cloned = csv_type.clone();
 
@@ -87,9 +91,11 @@ mod tests {
             ContentType::Csv {
                 batch_size,
                 has_header,
+                delimiter,
             } => {
                 assert_eq!(batch_size, 50);
                 assert!(!has_header);
+                assert_eq!(delimiter, Some(b';'));
             }
             _ => panic!("Clone should preserve variant"),
         }

@@ -18,7 +18,7 @@ use tracing::{error, info, warn, Instrument};
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
 /// Default batch size for files.
-const DEFAULT_BATCH_SIZE: usize = 1000;
+const DEFAULT_BATCH_SIZE: usize = 10000;
 /// Default files have headers.
 const DEFAULT_HAS_HEADER: bool = true;
 
@@ -134,9 +134,15 @@ impl EventHandler {
             DEFAULT_CSV_EXTENSION => {
                 let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
                 let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
+                let delimiter = self
+                    .config
+                    .delimiter
+                    .as_ref()
+                    .and_then(|d| d.as_bytes().first().copied());
                 ContentType::Csv {
                     batch_size,
                     has_header,
+                    delimiter,
                 }
             }
             DEFAULT_AVRO_EXTENSION => ContentType::Avro,
@@ -418,6 +424,7 @@ mod tests {
             has_header: Some(true),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let builder = ReaderBuilder::new().config(config.clone());
@@ -477,6 +484,7 @@ mod tests {
             has_header: None,
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
@@ -506,6 +514,7 @@ mod tests {
             has_header: Some(false),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (_, rx) = broadcast::channel::<Event>(10);
@@ -539,6 +548,7 @@ mod tests {
             has_header: Some(true),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(50);
@@ -569,6 +579,7 @@ mod tests {
             has_header: Some(false),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(5);
@@ -596,6 +607,7 @@ mod tests {
             has_header: None,
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
         let (tx, rx) = broadcast::channel::<Event>(10);
 

@@ -18,10 +18,13 @@ pub struct Processor {
 
 /// Supported target formats for event data conversion.
 #[derive(PartialEq, Eq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TargetFormat {
     /// Convert to Apache Avro binary format.
     #[default]
     Avro,
+    /// Convert to JSON format.
+    Json,
 }
 
 #[cfg(test)]
@@ -71,11 +74,10 @@ mod tests {
 
         let serialized = serde_json::to_string(&config).unwrap();
 
-        // Fixed: Assert the serialized output uses "Avro"
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         let expected_json = json!({
             "name": "serialize_test",
-            "target_format": "Avro",
+            "target_format": "avro",
             "schema": null
         });
         assert_eq!(parsed, expected_json);
@@ -87,8 +89,7 @@ mod tests {
 
     #[test]
     fn test_target_format_serialization() {
-        // Fixed: Removed Json and Protobuf, only Avro remains
-        let formats = vec![TargetFormat::Avro];
+        let formats = vec![TargetFormat::Avro, TargetFormat::Json];
 
         for format in formats {
             let serialized = serde_json::to_string(&format).unwrap();

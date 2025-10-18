@@ -21,7 +21,10 @@ const DEFAULT_EVENT_BUFFER_SIZE: usize = 10000;
 pub enum Error {
     /// Error in convert processor task.
     #[error(transparent)]
-    ConverProcessor(#[from] flowgen_core::convert::processor::Error),
+    ConverProcessor(#[from] flowgen_core::task::convert::processor::Error),
+    /// Error in iterate processor task.
+    #[error(transparent)]
+    IterateProcessor(#[from] flowgen_core::task::iterate::processor::Error),
     /// Error in Salesforce Pub/Sub subscriber task.
     #[error(transparent)]
     SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsub::subscriber::Error),
@@ -51,7 +54,7 @@ pub enum Error {
     ObjectStoreWriter(#[from] flowgen_object_store::writer::Error),
     /// Error in generate subscriber task.
     #[error(transparent)]
-    GenerateSubscriber(#[from] flowgen_core::generate::subscriber::Error),
+    GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
     /// Error in cache operations.
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),
@@ -348,7 +351,32 @@ async fn spawn_tasks(
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        flowgen_core::convert::processor::ProcessorBuilder::new()
+                        flowgen_core::task::convert::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .receiver(rx)
+                            .sender(tx)
+                            .current_task_id(i)
+                            .task_context(task_context)
+                            .build()
+                            .await?
+                            .run()
+                            .await?;
+
+                        Ok(())
+                    }
+                    .instrument(span),
+                );
+                background_tasks.push(task);
+            }
+            Task::iterate(config) => {
+                let config = Arc::new(config.to_owned());
+                let rx = tx.subscribe();
+                let tx = tx.clone();
+                let task_context = Arc::clone(task_context);
+                let span = tracing::Span::current();
+                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
+                    async move {
+                        flowgen_core::task::iterate::processor::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
@@ -372,7 +400,7 @@ async fn spawn_tasks(
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        flowgen_core::generate::subscriber::SubscriberBuilder::new()
+                        flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
                             .current_task_id(i)
@@ -744,8 +772,9 @@ mod tests {
 
     #[test]
     fn test_error_convert_processor() {
-        let convert_error =
-            flowgen_core::convert::processor::Error::MissingRequiredAttribute("test".to_string());
+        let convert_error = flowgen_core::task::convert::processor::Error::MissingRequiredAttribute(
+            "test".to_string(),
+        );
         let error = Error::ConverProcessor(convert_error);
 
         let error_str = error.to_string();

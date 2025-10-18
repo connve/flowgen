@@ -238,15 +238,20 @@ impl<R: Read + Seek> FromReader<R> for EventData {
             ContentType::Csv {
                 batch_size,
                 has_header,
+                delimiter,
             } => {
+                let delimiter_byte = delimiter.unwrap_or(b',');
+
                 let (schema, _) = Format::default()
                     .with_header(has_header)
+                    .with_delimiter(delimiter_byte)
                     .infer_schema(&mut reader, Some(100))
                     .map_err(|e| Error::Arrow { source: e })?;
                 reader.rewind().map_err(|e| Error::IO { source: e })?;
 
                 let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema))
                     .with_header(has_header)
+                    .with_delimiter(delimiter_byte)
                     .with_batch_size(batch_size)
                     .build(reader)
                     .map_err(|e| Error::Arrow { source: e })?;
