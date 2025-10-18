@@ -77,6 +77,12 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
+    /// Expected JSON input but got different event type.
+    #[error("Expected JSON input, got ArrowRecordBatch")]
+    ExpectedJsonGotArrowRecordBatch,
+    /// Expected JSON input but got Avro.
+    #[error("Expected JSON input, got Avro")]
+    ExpectedJsonGotAvro,
 }
 
 /// Event handler for processing HTTP requests.
@@ -99,7 +105,14 @@ impl EventHandler {
             return Ok(());
         }
 
-        let config = self.config.render(&event.data)?;
+        // Extract JSON data from event
+        let json_data = match &event.data {
+            EventData::Json(data) => data,
+            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
+            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
+        };
+
+        let config = self.config.render(json_data)?;
 
         let mut client = match config.method {
             crate::config::Method::GET => self.client.get(config.endpoint),
@@ -110,7 +123,7 @@ impl EventHandler {
             crate::config::Method::HEAD => self.client.head(config.endpoint),
         };
 
-        if let Some(headers) = self.config.headers.to_owned() {
+        if let Some(headers) = config.headers.to_owned() {
             let mut header_map = HeaderMap::new();
             for (key, value) in headers {
                 let header_name = HeaderName::try_from(key)
@@ -122,14 +135,18 @@ impl EventHandler {
             client = client.headers(header_map);
         }
 
-        if let Some(payload) = &self.config.payload {
-            let json = match &payload.object {
-                Some(obj) => Value::Object(obj.to_owned()),
-                None => match &payload.input {
-                    Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
-                        .map_err(|e| Error::SerdeJson { source: e })?,
-                    None => return Err(Error::PayloadConfig()),
-                },
+        if let Some(payload) = &config.payload {
+            let json = if payload.from_event {
+                json_data.clone()
+            } else {
+                match &payload.object {
+                    Some(obj) => Value::Object(obj.to_owned()),
+                    None => match &payload.input {
+                        Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
+                            .map_err(|e| Error::SerdeJson { source: e })?,
+                        None => return Err(Error::PayloadConfig()),
+                    },
+                }
             };
 
             client = match payload.send_as {
@@ -139,7 +156,7 @@ impl EventHandler {
             }
         }
 
-        if let Some(credentials_path) = &self.config.credentials_path {
+        if let Some(credentials_path) = &config.credentials_path {
             let credentials_string =
                 fs::read_to_string(credentials_path)
                     .await
@@ -183,7 +200,7 @@ impl EventHandler {
         self.tx
             .send(e)
             .map_err(|e| Error::SendMessage { source: e })?;
-        info!("event processeds: {}", subject);
+        info!("Event processed: {}", subject);
         Ok(())
     }
 }
@@ -577,6 +594,7 @@ mod tests {
             payload: Some(crate::config::Payload {
                 object: None,
                 input: Some("{\"test\": \"data\"}".to_string()),
+                from_event: false,
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some(headers),

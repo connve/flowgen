@@ -50,4 +50,18 @@ pub mod task {
         /// Processor implementation for array iteration.
         pub mod processor;
     }
+    /// Script processor for executing Rhai scripts on events.
+    pub mod script {
+        /// Configuration for script processor.
+        pub mod config;
+        /// Processor implementation for script execution.
+        pub mod processor;
+    }
+    /// Log processor for outputting event data to logs.
+    pub mod log {
+        /// Configuration for log processor.
+        pub mod config;
+        /// Processor implementation for logging.
+        pub mod processor;
+    }
 }

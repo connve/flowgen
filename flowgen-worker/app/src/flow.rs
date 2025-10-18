@@ -25,6 +25,12 @@ pub enum Error {
     /// Error in iterate processor task.
     #[error(transparent)]
     IterateProcessor(#[from] flowgen_core::task::iterate::processor::Error),
+    /// Error in log processor task.
+    #[error(transparent)]
+    LogProcessor(#[from] flowgen_core::task::log::processor::Error),
+    /// Error in script processor task.
+    #[error(transparent)]
+    ScriptProcessor(#[from] flowgen_core::task::script::processor::Error),
     /// Error in Salesforce Pub/Sub subscriber task.
     #[error(transparent)]
     SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsub::subscriber::Error),
@@ -377,6 +383,56 @@ async fn spawn_tasks(
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_core::task::iterate::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .receiver(rx)
+                            .sender(tx)
+                            .current_task_id(i)
+                            .task_context(task_context)
+                            .build()
+                            .await?
+                            .run()
+                            .await?;
+
+                        Ok(())
+                    }
+                    .instrument(span),
+                );
+                background_tasks.push(task);
+            }
+            Task::log(config) => {
+                let config = Arc::new(config.to_owned());
+                let rx = tx.subscribe();
+                let tx = tx.clone();
+                let task_context = Arc::clone(task_context);
+                let span = tracing::Span::current();
+                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
+                    async move {
+                        flowgen_core::task::log::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .receiver(rx)
+                            .sender(tx)
+                            .current_task_id(i)
+                            .task_context(task_context)
+                            .build()
+                            .await?
+                            .run()
+                            .await?;
+
+                        Ok(())
+                    }
+                    .instrument(span),
+                );
+                background_tasks.push(task);
+            }
+            Task::script(config) => {
+                let config = Arc::new(config.to_owned());
+                let rx = tx.subscribe();
+                let tx = tx.clone();
+                let task_context = Arc::clone(task_context);
+                let span = tracing::Span::current();
+                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
+                    async move {
+                        flowgen_core::task::script::processor::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)

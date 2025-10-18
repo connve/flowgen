@@ -34,6 +34,9 @@ pub struct Payload {
     pub object: Option<Map<String, Value>>,
     /// Raw JSON string input.
     pub input: Option<String>,
+    /// Use incoming event data as payload.
+    #[serde(default)]
+    pub from_event: bool,
     /// Format for sending the payload.
     pub send_as: PayloadSendAs,
 }
@@ -116,6 +119,7 @@ mod tests {
         let payload = Payload {
             object: Some(payload_object.clone()),
             input: Some("{\"test\": \"input\"}".to_string()),
+            from_event: false,
             send_as: PayloadSendAs::Json,
         };
 
@@ -187,6 +191,7 @@ mod tests {
         let payload = Payload {
             object: Some(object.clone()),
             input: Some("{\"input\": \"data\"}".to_string()),
+            from_event: false,
             send_as: PayloadSendAs::UrlEncoded,
         };
 
@@ -203,6 +208,7 @@ mod tests {
         let payload = Payload {
             object: Some(object),
             input: None,
+            from_event: false,
             send_as: PayloadSendAs::QueryParams,
         };
 
@@ -300,6 +306,7 @@ mod tests {
         let payload = Payload {
             object: Some(object),
             input: Some("{\"alternative\": \"input\"}".to_string()),
+            from_event: false,
             send_as: PayloadSendAs::Json,
         };
 

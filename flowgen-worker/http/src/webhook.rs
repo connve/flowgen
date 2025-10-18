@@ -504,6 +504,7 @@ mod tests {
             payload: Some(crate::config::Payload {
                 object: None,
                 input: Some("{\"webhook\": \"data\"}".to_string()),
+                from_event: false,
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some({

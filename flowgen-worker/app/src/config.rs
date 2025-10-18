@@ -42,6 +42,10 @@ pub enum Task {
     convert(flowgen_core::task::convert::config::Processor),
     /// Iterate over arrays task.
     iterate(flowgen_core::task::iterate::config::Processor),
+    /// Log output task.
+    log(flowgen_core::task::log::config::Processor),
+    /// Script execution task.
+    script(flowgen_core::task::script::config::Processor),
     /// Object store reader task.
     object_store_reader(flowgen_object_store::config::Reader),
     /// Object store writer task.
