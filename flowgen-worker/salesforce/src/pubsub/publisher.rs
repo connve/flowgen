@@ -1,4 +1,4 @@
-use apache_avro::{types::Value as AvroValue, Schema as AvroSchema, Writer};
+use apache_avro::{types::Value as AvroValue, Schema as AvroSchema};
 use chrono::Utc;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
@@ -101,11 +101,9 @@ impl EventHandler {
             .resolve(self.schema.as_ref())
             .map_err(|e| Error::Avro { source: e })?;
 
-        let mut writer = Writer::new(self.schema.as_ref(), Vec::new());
-        writer
-            .append(record)
+        // Serialize the record directly without schema wrapper (Salesforce expects just the data)
+        let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
             .map_err(|e| Error::Avro { source: e })?;
-        let serialized_payload = writer.into_inner().map_err(|e| Error::Avro { source: e })?;
 
         let mut events = Vec::new();
         let pe = ProducerEvent {
