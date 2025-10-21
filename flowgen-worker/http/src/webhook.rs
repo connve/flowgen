@@ -7,13 +7,13 @@ use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::event::{
-    generate_subject, Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE,
+    generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix,
 };
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
 use tokio::sync::broadcast::Sender;
-use tracing::{error, info, Instrument};
+use tracing::{error, Instrument};
 
 /// Default subject for webhook events.
 const DEFAULT_MESSAGE_SUBJECT: &str = "http_webhook";
@@ -198,9 +198,8 @@ impl EventHandler {
             .current_task_id(self.current_task_id)
             .build()?;
 
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
         self.tx
-            .send(e)
+            .send_with_logging(e)
             .map_err(|e| Error::SendMessage { source: e })?;
         Ok(StatusCode::OK)
     }
@@ -504,6 +503,7 @@ mod tests {
             payload: Some(crate::config::Payload {
                 object: None,
                 input: Some("{\"webhook\": \"data\"}".to_string()),
+                from_event: false,
                 send_as: crate::config::PayloadSendAs::Json,
             }),
             headers: Some({

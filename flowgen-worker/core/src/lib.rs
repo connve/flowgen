@@ -11,22 +11,8 @@ pub mod cache;
 pub mod client;
 /// Configuration structures and serialization support.
 pub mod config;
-/// Data conversion and transformation processor.
-pub mod convert {
-    /// Configuration for convert processor.
-    pub mod config;
-    /// Processor implementation for data conversion.
-    pub mod processor;
-}
 /// Event system with data formats, subject generation, and logging.
 pub mod event;
-/// Event generation processor that produces data streams.
-pub mod generate {
-    /// Configuration for generate processor.
-    pub mod config;
-    /// Subscriber implementation for event generation.
-    pub mod subscriber;
-}
 /// Host coordination and lease management.
 pub mod host;
 /// HTTP server trait for task context integration.
@@ -43,4 +29,39 @@ pub mod task {
     pub mod manager;
     /// Base runner trait for all task implementations.
     pub mod runner;
+    /// Data conversion and transformation processor.
+    pub mod convert {
+        /// Configuration for convert processor.
+        pub mod config;
+        /// Processor implementation for data conversion.
+        pub mod processor;
+    }
+    /// Event generation processor that produces data streams.
+    pub mod generate {
+        /// Configuration for generate processor.
+        pub mod config;
+        /// Subscriber implementation for event generation.
+        pub mod subscriber;
+    }
+    /// Iterate processor for iterating over JSON arrays.
+    pub mod iterate {
+        /// Configuration for iterate processor.
+        pub mod config;
+        /// Processor implementation for array iteration.
+        pub mod processor;
+    }
+    /// Script processor for executing Rhai scripts on events.
+    pub mod script {
+        /// Configuration for script processor.
+        pub mod config;
+        /// Processor implementation for script execution.
+        pub mod processor;
+    }
+    /// Log processor for outputting event data to logs.
+    pub mod log {
+        /// Configuration for log processor.
+        pub mod config;
+        /// Processor implementation for logging.
+        pub mod processor;
+    }
 }

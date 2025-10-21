@@ -1,13 +1,37 @@
 use super::message::FlowgenMessageExt;
-use async_nats::jetstream::stream::{Config, DiscardPolicy, RetentionPolicy};
 use flowgen_core::client::Client;
-use flowgen_core::event::{Event, DEFAULT_LOG_MESSAGE};
-use std::{sync::Arc, time::Duration};
-use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{error, info, Instrument};
+use flowgen_core::event::{
+    generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix,
+};
+use std::sync::Arc;
+use tokio::sync::{
+    broadcast::{Receiver, Sender},
+    Mutex,
+};
+use tracing::{error, Instrument};
 
 /// Default subject prefix for NATS publisher.
 const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_publisher";
+
+/// Serializable representation of a NATS JetStream publish acknowledgment.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PublishAck {
+    pub stream: String,
+    pub sequence: u64,
+    pub domain: Option<String>,
+    pub duplicate: bool,
+}
+
+impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
+    fn from(ack: async_nats::jetstream::publish::PublishAck) -> Self {
+        Self {
+            stream: ack.stream,
+            sequence: ack.sequence,
+            domain: Some(ack.domain),
+            duplicate: ack.duplicate,
+        }
+    }
+}
 
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
@@ -21,41 +45,47 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::context::PublishError,
     },
-    /// Failed to create JetStream stream.
-    #[error("Failed to create JetStream stream: {source}")]
-    CreateStream {
-        #[source]
-        source: async_nats::jetstream::context::CreateStreamError,
-    },
-    /// Failed to get existing JetStream stream.
-    #[error("Failed to get JetStream stream: {source}")]
-    GetStream {
-        #[source]
-        source: async_nats::jetstream::context::GetStreamError,
-    },
-    /// Failed to make request to JetStream.
-    #[error("Failed to make request to JetStream: {source}")]
-    Request {
-        #[source]
-        source: async_nats::jetstream::context::RequestError,
-    },
+    /// Stream management error.
+    #[error(transparent)]
+    Stream(#[from] super::stream::Error),
     /// Error converting event to message format.
     #[error(transparent)]
     MessageConversion(#[from] super::message::Error),
     /// Required event attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Stream configuration is missing.
+    #[error("Stream configuration is missing")]
+    NoStream,
     /// Client was not properly initialized or is missing.
     #[error("Client is missing or not initialized properly")]
     MissingClient(),
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
+    /// Failed to send event through broadcast channel.
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
+    /// JSON serialization error.
+    #[error("JSON serialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Event building error.
+    #[error(transparent)]
+    Event(#[from] flowgen_core::event::Error),
 }
 
 pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
     current_task_id: usize,
+    subject: String,
+    tx: Sender<Event>,
+    config: Arc<super::config::Publisher>,
 }
 
 impl EventHandler {
@@ -66,14 +96,34 @@ impl EventHandler {
 
         let e = event.to_publish()?;
 
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, event.subject);
-
-        self.jetstream
+        let ack_future = self
+            .jetstream
             .lock()
             .await
-            .send_publish(event.subject.clone(), e)
+            .send_publish(self.subject.clone(), e)
             .await
             .map_err(|e| Error::Publish { source: e })?;
+
+        let ack = ack_future.await.map_err(|e| Error::Publish { source: e })?;
+        let ack: PublishAck = ack.into();
+        let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
+
+        let subject = generate_subject(
+            Some(&self.config.name),
+            DEFAULT_MESSAGE_SUBJECT,
+            SubjectSuffix::Timestamp,
+        );
+
+        let e = EventBuilder::new()
+            .subject(subject)
+            .data(EventData::Json(ack_json))
+            .current_task_id(self.current_task_id)
+            .build()?;
+
+        self.tx
+            .send_with_logging(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
+
         Ok(())
     }
 }
@@ -85,6 +135,8 @@ pub struct Publisher {
     config: Arc<super::config::Publisher>,
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
+    /// Channel sender for response events.
+    tx: Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -109,57 +161,20 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await?;
 
         if let Some(jetstream) = client.jetstream {
-            let mut max_age = 86400;
-            if let Some(config_max_age) = self.config.max_age {
-                max_age = config_max_age
-            }
+            let stream_opts = self.config.stream.as_ref().ok_or_else(|| Error::NoStream)?;
 
-            let mut stream_config = Config {
-                name: self.config.stream.clone(),
-                description: self.config.stream_description.clone(),
-                max_messages_per_subject: 1,
-                subjects: self.config.subjects.clone(),
-                discard: DiscardPolicy::Old,
-                retention: RetentionPolicy::Limits,
-                max_age: Duration::new(max_age, 0),
-                ..Default::default()
+            let jetstream = match stream_opts.create_or_update {
+                true => super::stream::create_or_update_stream(jetstream, stream_opts).await?,
+                false => jetstream,
             };
-
-            let stream = jetstream.get_stream(self.config.stream.clone()).await;
-
-            match stream {
-                Ok(_) => {
-                    let mut subjects = stream
-                        .map_err(|e| Error::GetStream { source: e })?
-                        .info()
-                        .await
-                        .map_err(|e| Error::Request { source: e })?
-                        .config
-                        .subjects
-                        .clone();
-
-                    subjects.extend(self.config.subjects.clone());
-                    subjects.sort();
-                    subjects.dedup();
-                    stream_config.subjects = subjects;
-
-                    jetstream
-                        .update_stream(stream_config)
-                        .await
-                        .map_err(|e| Error::CreateStream { source: e })?;
-                }
-                Err(_) => {
-                    jetstream
-                        .create_stream(stream_config)
-                        .await
-                        .map_err(|e| Error::CreateStream { source: e })?;
-                }
-            }
 
             let jetstream = Arc::new(Mutex::new(jetstream));
             let event_handler = EventHandler {
                 jetstream,
                 current_task_id: self.current_task_id,
+                subject: self.config.subject.clone(),
+                tx: self.tx.clone(),
+                config: Arc::clone(&self.config),
             };
 
             Ok(event_handler)
@@ -205,6 +220,8 @@ pub struct PublisherBuilder {
     config: Option<Arc<super::config::Publisher>>,
     /// Optional event receiver.
     rx: Option<Receiver<Event>>,
+    /// Optional event sender.
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event processing.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -225,6 +242,11 @@ impl PublisherBuilder {
 
     pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
         self.rx = Some(receiver);
+        self
+    }
+
+    pub fn sender(mut self, sender: Sender<Event>) -> Self {
+        self.tx = Some(sender);
         self
     }
 
@@ -249,6 +271,9 @@ impl PublisherBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+            tx: self
+                .tx
+                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
             _task_context: self
                 .task_context
@@ -303,10 +328,20 @@ mod tests {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
-            stream: "test_stream".to_string(),
-            stream_description: Some("Test stream".to_string()),
-            subjects: vec!["test.subject".to_string()],
-            max_age: Some(3600),
+            subject: "test.subject".to_string(),
+            stream: Some(super::super::config::StreamOptions {
+                name: "test_stream".to_string(),
+                description: Some("Test stream".to_string()),
+                subjects: vec!["test.subject".to_string()],
+                max_age_secs: Some(3600),
+                max_messages_per_subject: Some(1),
+                create_or_update: true,
+                retention: Some(super::super::config::RetentionPolicy::Limits),
+                discard: Some(super::super::config::DiscardPolicy::Old),
+            }),
+            durable_name: None,
+            batch_size: None,
+            delay_secs: None,
         });
 
         let builder = PublisherBuilder::new().config(config.clone());
@@ -346,10 +381,11 @@ mod tests {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
-            stream: "test_stream".to_string(),
-            stream_description: None,
-            subjects: vec!["test.subject".to_string()],
-            max_age: None,
+            subject: "test.subject".to_string(),
+            stream: None,
+            durable_name: None,
+            batch_size: None,
+            delay_secs: None,
         });
 
         let result = PublisherBuilder::new()
@@ -369,16 +405,27 @@ mod tests {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
-            stream: "test_stream".to_string(),
-            stream_description: Some("Test description".to_string()),
-            subjects: vec!["test.subject.1".to_string(), "test.subject.2".to_string()],
-            max_age: Some(86400),
+            subject: "test.subject.1".to_string(),
+            stream: Some(super::super::config::StreamOptions {
+                name: "test_stream".to_string(),
+                description: Some("Test description".to_string()),
+                subjects: vec!["test.subject.1".to_string(), "test.subject.2".to_string()],
+                max_age_secs: Some(86400),
+                max_messages_per_subject: Some(1),
+                create_or_update: true,
+                retention: Some(super::super::config::RetentionPolicy::Limits),
+                discard: Some(super::super::config::DiscardPolicy::Old),
+            }),
+            durable_name: None,
+            batch_size: None,
+            delay_secs: None,
         });
-        let (_tx, rx) = broadcast::channel(100);
+        let (tx, rx) = broadcast::channel(100);
 
         let result = PublisherBuilder::new()
             .config(config.clone())
             .receiver(rx)
+            .sender(tx)
             .current_task_id(5)
             .task_context(create_mock_task_context())
             .build()
@@ -395,16 +442,27 @@ mod tests {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/chain/test.creds"),
-            stream: "chain_stream".to_string(),
-            stream_description: None,
-            subjects: vec!["chain.subject".to_string()],
-            max_age: Some(1800),
+            subject: "chain.subject".to_string(),
+            stream: Some(super::super::config::StreamOptions {
+                name: "chain_stream".to_string(),
+                description: None,
+                subjects: vec!["chain.subject".to_string()],
+                max_age_secs: Some(1800),
+                max_messages_per_subject: None,
+                create_or_update: false,
+                retention: Some(super::super::config::RetentionPolicy::WorkQueue),
+                discard: Some(super::super::config::DiscardPolicy::Old),
+            }),
+            durable_name: None,
+            batch_size: None,
+            delay_secs: None,
         });
-        let (_tx, rx) = broadcast::channel(50);
+        let (tx, rx) = broadcast::channel(50);
 
         let publisher = PublisherBuilder::new()
             .config(config.clone())
             .receiver(rx)
+            .sender(tx)
             .current_task_id(10)
             .task_context(create_mock_task_context())
             .build()
@@ -420,16 +478,18 @@ mod tests {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
-            stream: "test_stream".to_string(),
-            stream_description: None,
-            subjects: vec!["test.subject".to_string()],
-            max_age: None,
+            subject: "test.subject".to_string(),
+            stream: None,
+            durable_name: None,
+            batch_size: None,
+            delay_secs: None,
         });
-        let (_tx, rx) = broadcast::channel(100);
+        let (tx, rx) = broadcast::channel(100);
 
         let result = PublisherBuilder::new()
             .config(config)
             .receiver(rx)
+            .sender(tx)
             .current_task_id(1)
             .build()
             .await;

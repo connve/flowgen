@@ -1,16 +1,12 @@
+use apache_avro::{types::Value as AvroValue, Schema as AvroSchema};
 use chrono::Utc;
-use flowgen_core::{
-    client::Client,
-    config::ConfigExt,
-    event::{generate_subject, Event, SubjectSuffix},
-    serde::{MapExt, StringExt},
-};
+use flowgen_core::client::Client;
+use flowgen_core::config::ConfigExt;
+use flowgen_core::event::{generate_subject, Event, SenderExt, SubjectSuffix};
 use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
-use serde_avro_fast::{ser, Schema};
-use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{error, info, Instrument};
+use tracing::{error, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_publisher";
 
@@ -26,17 +22,11 @@ pub enum Error {
     /// Flowgen core serialization extension error.
     #[error(transparent)]
     SerdeExt(#[from] flowgen_core::serde::Error),
-    /// Apache Avro serialization error.
-    #[error("Avro serialization failed: {source}")]
-    SerdeAvro {
+    /// Apache Avro error.
+    #[error("Avro operation failed: {source}")]
+    Avro {
         #[source]
-        source: serde_avro_fast::ser::SerError,
-    },
-    /// Avro schema parsing error.
-    #[error("Avro schema parsing failed: {source}")]
-    SerdeSchema {
-        #[source]
-        source: serde_avro_fast::schema::SchemaError,
+        source: apache_avro::Error,
     },
     /// Template rendering error for dynamic configuration.
     #[error(transparent)]
@@ -60,11 +50,17 @@ pub enum Error {
     #[error("Empty object")]
     EmptyObject(),
     /// Failed to parse Avro schema from JSON string.
-    #[error("Error parsing Schema Json string to Schema type")]
+    #[error("Error parsing Schema JSON string to Schema type")]
     SchemaParse(),
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
+    /// JSON serialization error.
+    #[error("JSON serialization failed: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// Event handler for processing and publishing events to Salesforce Pub/Sub.
@@ -80,28 +76,34 @@ pub struct EventHandler {
     /// Schema ID for event serialization.
     schema_id: String,
     /// Avro serializer configuration.
-    serializer_config: Mutex<ser::SerializerConfig<'static>>,
+    schema: Arc<AvroSchema>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Channel sender for response events.
+    tx: tokio::sync::broadcast::Sender<Event>,
 }
 
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let config = self.config.render(&event.data)?;
-        let payload = config.payload.to_string()?.to_value()?;
+        let mut publish_payload = config.payload;
 
-        let mut publish_payload: Map<String, Value> = Map::new();
-        for (k, v) in payload.as_object().ok_or_else(Error::EmptyObject)? {
-            publish_payload.insert(k.to_owned(), v.to_owned());
-        }
         let now = Utc::now().timestamp_millis();
-        publish_payload.insert("CreatedDate".to_string(), Value::Number(now.into()));
+        publish_payload.insert(
+            "CreatedDate".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(now)),
+        );
 
-        let mut serializer_config = self.serializer_config.lock().await;
-        let serialized_payload: Vec<u8> =
-            serde_avro_fast::to_datum_vec(&publish_payload, &mut serializer_config)
-                .map_err(|e| Error::SerdeAvro { source: e })?;
+        // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait
+        let json_value = serde_json::Value::Object(publish_payload);
+        let record = AvroValue::from(json_value)
+            .resolve(self.schema.as_ref())
+            .map_err(|e| Error::Avro { source: e })?;
+
+        // Serialize the record directly without schema wrapper (Salesforce expects just the data)
+        let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
+            .map_err(|e| Error::Avro { source: e })?;
 
         let mut events = Vec::new();
         let pe = ProducerEvent {
@@ -111,7 +113,7 @@ impl EventHandler {
         };
         events.push(pe);
 
-        let _ = self
+        let resp = self
             .pubsub
             .lock()
             .await
@@ -120,16 +122,23 @@ impl EventHandler {
                 events,
                 ..Default::default()
             })
-            .await?;
+            .await?
+            .into_inner();
 
-        // Generate event subject.
-        let subject = generate_subject(
-            Some(&self.config.name),
-            &self.base_subject,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(None, &self.base_subject, SubjectSuffix::Id(&resp.rpc_id));
 
-        info!("Event processed: {}", subject);
+        let resp_json = serde_json::to_value(resp).map_err(|e| Error::SerdeJson { source: e })?;
+
+        let e = flowgen_core::event::EventBuilder::new()
+            .data(flowgen_core::event::EventData::Json(resp_json))
+            .subject(subject)
+            .current_task_id(self.current_task_id)
+            .build()?;
+
+        self.tx
+            .send_with_logging(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
+
         Ok(())
     }
 }
@@ -141,6 +150,8 @@ pub struct Publisher {
     config: Arc<super::config::Publisher>,
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
+    /// Channel sender for response events.
+    tx: tokio::sync::broadcast::Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -199,20 +210,16 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await?
             .into_inner();
 
-        let schema: Schema = schema_info
-            .schema_json
-            .parse()
-            .map_err(|e| Error::SerdeSchema { source: e })?;
-
-        // Leak the schema to get a 'static reference.
-        // This is intentional and safe in this context since the schema
-        // is effectively program-lifetime data.
-        let leaked_schema: &'static Schema = Box::leak(Box::new(schema));
-        let serializer_config = ser::SerializerConfig::new(leaked_schema);
+        let schema = AvroSchema::parse_str(&schema_info.schema_json)
+            .map_err(|e| Error::Avro { source: e })?;
 
         // Generate base subject.
         let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
-        let base_subject = format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, &topic[1..]);
+        let base_subject = if let Some(stripped) = topic.strip_prefix('.') {
+            format!("{DEFAULT_MESSAGE_SUBJECT}.{stripped}")
+        } else {
+            format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
+        };
 
         let topic_name = self.config.topic.clone();
 
@@ -222,8 +229,9 @@ impl flowgen_core::task::runner::Runner for Publisher {
             topic: topic_name,
             base_subject,
             schema_id: schema_info.schema_id,
-            serializer_config: Mutex::new(serializer_config),
+            schema: Arc::new(schema),
             current_task_id: self.current_task_id,
+            tx: self.tx.clone(),
         };
 
         Ok(event_handler)
@@ -231,7 +239,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Initialize runner task.
         let event_handler = match self.init().await {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
@@ -265,6 +272,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
 pub struct PublisherBuilder {
     config: Option<Arc<super::config::Publisher>>,
     rx: Option<Receiver<Event>>,
+    tx: Option<tokio::sync::broadcast::Sender<Event>>,
     current_task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
 }
@@ -283,6 +291,11 @@ impl PublisherBuilder {
 
     pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
         self.rx = Some(receiver);
+        self
+    }
+
+    pub fn sender(mut self, sender: tokio::sync::broadcast::Sender<Event>) -> Self {
+        self.tx = Some(sender);
         self
     }
 
@@ -307,6 +320,9 @@ impl PublisherBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+            tx: self
+                .tx
+                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
             _task_context: self
                 .task_context
@@ -428,11 +444,12 @@ mod tests {
             endpoint: None,
         });
 
-        let (_, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = broadcast::channel::<Event>(10);
 
         let result = PublisherBuilder::new()
             .config(config.clone())
             .receiver(rx)
+            .sender(tx)
             .current_task_id(5)
             .task_context(create_mock_task_context())
             .build()
@@ -453,11 +470,12 @@ mod tests {
             payload: serde_json::Map::new(),
             endpoint: None,
         });
-        let (_, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = broadcast::channel::<Event>(10);
 
         let result = PublisherBuilder::new()
             .config(config)
             .receiver(rx)
+            .sender(tx)
             .current_task_id(1)
             .build()
             .await;

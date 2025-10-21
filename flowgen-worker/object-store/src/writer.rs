@@ -2,15 +2,37 @@ use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
 use flowgen_core::buffer::ToWriter;
-use flowgen_core::event::{Event, EventBuilder, EventData, SubjectSuffix, DEFAULT_LOG_MESSAGE};
+use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt, SubjectSuffix};
 use flowgen_core::{client::Client, event::generate_subject};
 use object_store::PutPayload;
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
-use tracing::{error, info, Instrument};
+use tracing::{error, Instrument};
 
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_writer";
+
+/// Status of an object store write operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteStatus {
+    /// Object was successfully written.
+    Success,
+    /// Write operation failed.
+    Failed,
+}
+
+/// Result of a write operation to object storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteResult {
+    /// Status of the operation.
+    pub status: WriteStatus,
+    /// Path where the object was written.
+    pub path: String,
+    /// ETag of the uploaded object.
+    pub e_tag: Option<String>,
+}
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -60,6 +82,12 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
+    /// Failed to send event through broadcast channel.
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: tokio::sync::broadcast::error::SendError<Event>,
+    },
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -70,6 +98,8 @@ pub struct EventHandler {
     client: Arc<Mutex<super::client::Client>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
+    /// Channel sender for response events.
+    tx: tokio::sync::broadcast::Sender<Event>,
 }
 
 impl EventHandler {
@@ -128,24 +158,33 @@ impl EventHandler {
             .await
             .map_err(|e| Error::ObjectStore { source: e })?;
 
-        // Generate event subject.
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        // Create structured result.
+        let result = WriteResult {
+            status: WriteStatus::Success,
+            path: object_path.to_string(),
+            e_tag: put_result.e_tag.clone(),
+        };
+
+        // Generate event subject using e_tag as identifier, or timestamp if unavailable.
+        // Strip quotes from e_tag if present.
+        let suffix = match &put_result.e_tag {
+            Some(e_tag) => SubjectSuffix::Id(e_tag.trim_matches('"')),
+            None => SubjectSuffix::Timestamp,
+        };
+        let subject = generate_subject(Some(&self.config.name), DEFAULT_MESSAGE_SUBJECT, suffix);
 
         // Build and send event.
-        let data = serde_json::json!({
-            "status": "written",
-            "path": object_path.to_string(),
-            "e_tag": put_result.e_tag
-        });
+        let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
         let e = EventBuilder::new()
             .subject(subject)
             .data(EventData::Json(data))
+            .current_task_id(self.current_task_id)
             .build()?;
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
+
+        self.tx
+            .send_with_logging(e)
+            .map_err(|e| Error::SendMessage { source: e })?;
+
         Ok(())
     }
 
@@ -167,6 +206,8 @@ pub struct Writer {
     config: Arc<super::config::Writer>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
+    /// Channel sender for response events.
+    tx: tokio::sync::broadcast::Sender<Event>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -199,6 +240,7 @@ impl flowgen_core::task::runner::Runner for Writer {
             client,
             config: Arc::clone(&self.config),
             current_task_id: self.current_task_id,
+            tx: self.tx.clone(),
         };
 
         Ok(event_handler)
@@ -242,6 +284,8 @@ pub struct WriterBuilder {
     config: Option<Arc<super::config::Writer>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
+    /// Channel sender for response events.
+    tx: Option<tokio::sync::broadcast::Sender<Event>>,
     /// Current task identifier for event filtering.
     current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -264,6 +308,12 @@ impl WriterBuilder {
     /// Sets the event receiver.
     pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
         self.rx = Some(receiver);
+        self
+    }
+
+    /// Sets the event sender.
+    pub fn sender(mut self, sender: tokio::sync::broadcast::Sender<Event>) -> Self {
+        self.tx = Some(sender);
         self
     }
 
@@ -290,6 +340,9 @@ impl WriterBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+            tx: self
+                .tx
+                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
             _task_context: self
                 .task_context
@@ -413,11 +466,12 @@ mod tests {
             }),
         });
 
-        let (_, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = broadcast::channel::<Event>(10);
 
         let result = WriterBuilder::new()
             .config(config.clone())
             .receiver(rx)
+            .sender(tx)
             .current_task_id(99)
             .task_context(create_mock_task_context())
             .build()
@@ -483,11 +537,12 @@ mod tests {
             client_options: None,
             hive_partition_options: None,
         });
-        let (_, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = broadcast::channel::<Event>(10);
 
         let result = WriterBuilder::new()
             .config(config)
             .receiver(rx)
+            .sender(tx)
             .current_task_id(1)
             .build()
             .await;

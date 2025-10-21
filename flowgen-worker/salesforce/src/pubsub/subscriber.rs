@@ -1,15 +1,12 @@
 use flowgen_core::{
     client::Client,
-    event::{
-        generate_subject, AvroData, Event, EventBuilder, EventData, SubjectSuffix,
-        DEFAULT_LOG_MESSAGE,
-    },
+    event::{generate_subject, AvroData, Event, EventBuilder, EventData, SenderExt, SubjectSuffix},
 };
 use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use std::sync::Arc;
 use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, warn, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
 const DEFAULT_NUM_REQUESTED: i32 = 1000;
@@ -212,9 +209,8 @@ impl EventHandler {
                                 .build()
                                 .map_err(Error::Event)?;
 
-                            info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
                             self.tx
-                                .send(e)
+                                .send_with_logging(e)
                                 .map_err(|e| Error::SendMessage { source: e })?;
                         }
                     }

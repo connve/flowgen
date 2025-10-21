@@ -19,6 +19,8 @@ pub mod jetstream {
     pub mod message;
     /// JetStream publisher implementation for reliable message publishing.
     pub mod publisher;
+    /// Stream management utilities for creating and updating JetStream streams.
+    pub mod stream;
     /// JetStream subscriber implementation for reliable message consumption.
     pub mod subscriber;
 }

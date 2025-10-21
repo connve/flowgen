@@ -45,12 +45,9 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Environment variable error.
-    #[error("Failed to read environment variable: {source}")]
-    Env {
-        #[source]
-        source: std::env::VarError,
-    },
+    /// Missing HOSTNAME or POD_NAME environment variable for K8s host coordination.
+    #[error("HOSTNAME or POD_NAME must be set for K8s host coordination")]
+    MissingK8EnvVariables(#[source] std::env::VarError),
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -77,30 +74,51 @@ impl App {
 
         let flow_configs: Vec<FlowConfig> = glob::glob(glob_pattern)
             .map_err(|e| Error::Pattern { source: e })?
-            .map(|path| -> Result<FlowConfig, Error> {
-                let path = path.map_err(|e| Error::Glob { source: e })?;
-                info!("Loading flow: {:?}", path);
-                let contents = std::fs::read_to_string(&path).map_err(|e| Error::IO {
-                    path: path.clone(),
-                    source: e,
-                })?;
+            .filter_map(|path| {
+                match path {
+                    Ok(path) => {
+                        info!("Loading flow: {:?}", path);
+                        let contents = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                error!("Failed to read flow file {:?}: {}. Skipping this flow.", path, e);
+                                return None;
+                            }
+                        };
 
-                // Determine file format from extension.
-                let file_format = match path.extension().and_then(|s| s.to_str()) {
-                    Some("yaml") | Some("yml") => config::FileFormat::Yaml,
-                    Some("json") => config::FileFormat::Json,
-                    _ => config::FileFormat::Json,
-                };
+                        // Determine file format from extension.
+                        let file_format = match path.extension().and_then(|s| s.to_str()) {
+                            Some("yaml") | Some("yml") => config::FileFormat::Yaml,
+                            Some("json") => config::FileFormat::Json,
+                            _ => config::FileFormat::Json,
+                        };
 
-                let config = Config::builder()
-                    .add_source(config::File::from_str(&contents, file_format))
-                    .build()
-                    .map_err(|e| Error::Config { source: e })?;
-                config
-                    .try_deserialize::<FlowConfig>()
-                    .map_err(|e| Error::Config { source: e })
+                        let config = match Config::builder()
+                            .add_source(config::File::from_str(&contents, file_format))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                error!("Failed to parse flow config {:?}: {}. Skipping this flow.", path, e);
+                                return None;
+                            }
+                        };
+
+                        match config.try_deserialize::<FlowConfig>() {
+                            Ok(flow_config) => Some(flow_config),
+                            Err(e) => {
+                                error!("Failed to deserialize flow config {:?}: {}. Skipping this flow.", path, e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read flow path: {}. Skipping.", e);
+                        None
+                    }
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
 
         // Create shared HTTP Server if enabled.
         let http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>> =
@@ -163,7 +181,7 @@ impl App {
                         // Get holder identity from environment variable.
                         let holder_identity = std::env::var("HOSTNAME")
                             .or_else(|_| std::env::var("POD_NAME"))
-                            .map_err(|e| Error::Env { source: e })?;
+                            .map_err(Error::MissingK8EnvVariables)?;
 
                         let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
                             .holder_identity(holder_identity);

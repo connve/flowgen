@@ -39,13 +39,19 @@ pub struct Flow {
 #[allow(non_camel_case_types)]
 pub enum Task {
     /// Data conversion task.
-    convert(flowgen_core::convert::config::Processor),
+    convert(flowgen_core::task::convert::config::Processor),
+    /// Iterate over arrays task.
+    iterate(flowgen_core::task::iterate::config::Processor),
+    /// Log output task.
+    log(flowgen_core::task::log::config::Processor),
+    /// Script execution task.
+    script(flowgen_core::task::script::config::Processor),
     /// Object store reader task.
     object_store_reader(flowgen_object_store::config::Reader),
     /// Object store writer task.
     object_store_writer(flowgen_object_store::config::Writer),
     /// Data generation task.
-    generate(flowgen_core::generate::config::Subscriber),
+    generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
     http_request(flowgen_http::config::Processor),
     /// HTTP webhook handler task.
@@ -199,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_flow_with_tasks() {
-        let convert_config = flowgen_core::convert::config::Processor::default();
+        let convert_config = flowgen_core::task::convert::config::Processor::default();
         let task = Task::convert(convert_config);
 
         let flow = Flow {
@@ -250,8 +256,9 @@ mod tests {
 
     #[test]
     fn test_task_variants() {
-        let convert_task = Task::convert(flowgen_core::convert::config::Processor::default());
-        let generate_task = Task::generate(flowgen_core::generate::config::Subscriber::default());
+        let convert_task = Task::convert(flowgen_core::task::convert::config::Processor::default());
+        let generate_task =
+            Task::generate(flowgen_core::task::generate::config::Subscriber::default());
 
         assert!(matches!(convert_task, Task::convert(_)));
         assert!(matches!(generate_task, Task::generate(_)));
@@ -417,8 +424,8 @@ mod tests {
 
     #[test]
     fn test_complex_flow_config() {
-        let convert_config = flowgen_core::convert::config::Processor::default();
-        let generate_config = flowgen_core::generate::config::Subscriber::default();
+        let convert_config = flowgen_core::task::convert::config::Processor::default();
+        let generate_config = flowgen_core::task::generate::config::Subscriber::default();
 
         let mut labels = Map::new();
         labels.insert(

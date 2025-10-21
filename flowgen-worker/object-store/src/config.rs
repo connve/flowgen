@@ -29,6 +29,8 @@ pub struct Reader {
     pub batch_size: Option<usize>,
     /// Whether the input data has a header row.
     pub has_header: Option<bool>,
+    /// CSV delimiter character (defaults to comma if not specified).
+    pub delimiter: Option<String>,
     /// Caching configuration for performance optimization.
     pub cache_options: Option<CacheOptions>,
     /// Delete the file from object store after successfully reading it.
@@ -89,6 +91,7 @@ mod tests {
             client_options: Some(client_options.clone()),
             batch_size: Some(500),
             has_header: Some(true),
+            delimiter: None,
             cache_options: None,
             delete_after_read: None,
         };
@@ -113,6 +116,7 @@ mod tests {
             client_options: None,
             batch_size: Some(1000),
             has_header: Some(false),
+            delimiter: None,
             cache_options: None,
             delete_after_read: None,
         };
@@ -215,6 +219,7 @@ mod tests {
             client_options: None,
             batch_size: Some(100),
             has_header: Some(true),
+            delimiter: None,
             cache_options: None,
             delete_after_read: None,
         };
@@ -239,6 +244,7 @@ mod tests {
             client_options: None,
             batch_size: None,
             has_header: None,
+            delimiter: None,
             cache_options: None,
             delete_after_read: Some(true),
         };
@@ -255,6 +261,7 @@ mod tests {
             client_options: None,
             batch_size: None,
             has_header: None,
+            delimiter: None,
             cache_options: None,
             delete_after_read: Some(false),
         };
@@ -271,6 +278,7 @@ mod tests {
             client_options: None,
             batch_size: None,
             has_header: None,
+            delimiter: None,
             cache_options: None,
             delete_after_read: None,
         };

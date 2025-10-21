@@ -32,3 +32,4 @@ serde_avro_fast = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 async-trait = { workspace = true }
+rhai = { workspace = true }

@@ -32,8 +32,8 @@ pub enum Error {
         source: url::ParseError,
     },
     /// OAuth2 token exchange failed.
-    #[error("OAuth2 token exchange failed: {0}")]
-    TokenExchange(String),
+    #[error("OAuth2 token exchange failed: {0:?}")]
+    TokenExchange(Box<dyn std::error::Error + Send + Sync>),
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -114,7 +114,7 @@ impl flowgen_core::client::Client for Client {
             .exchange_client_credentials()
             .request_async(async_http_client)
             .await
-            .map_err(|e| Error::TokenExchange(e.to_string()))?;
+            .map_err(|e| Error::TokenExchange(Box::new(e)))?;
 
         self.oauth2_client = Some(oauth2_client);
         self.token_result = Some(token_result);

@@ -11,6 +11,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
+use tracing::info;
 
 /// Default log message format for event processing.
 pub const DEFAULT_LOG_MESSAGE: &str = "Event processed";
@@ -21,6 +22,27 @@ pub enum SubjectSuffix<'a> {
     Timestamp,
     /// Use custom ID as suffix.
     Id(&'a str),
+}
+
+/// Extension trait for broadcast sender with automatic event logging.
+pub trait SenderExt {
+    /// Sends an event and automatically logs it.
+    fn send_with_logging(
+        &self,
+        event: Event,
+    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Event>>;
+}
+
+impl SenderExt for tokio::sync::broadcast::Sender<Event> {
+    fn send_with_logging(
+        &self,
+        event: Event,
+    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Event>> {
+        let subject = event.subject.clone();
+        let result = self.send(event)?;
+        info!("{}: {}", DEFAULT_LOG_MESSAGE, subject);
+        Ok(result)
+    }
 }
 
 /// Generates a structured subject string from a base subject, a required task name, and a suffix.
@@ -238,15 +260,20 @@ impl<R: Read + Seek> FromReader<R> for EventData {
             ContentType::Csv {
                 batch_size,
                 has_header,
+                delimiter,
             } => {
+                let delimiter_byte = delimiter.unwrap_or(b',');
+
                 let (schema, _) = Format::default()
                     .with_header(has_header)
+                    .with_delimiter(delimiter_byte)
                     .infer_schema(&mut reader, Some(100))
                     .map_err(|e| Error::Arrow { source: e })?;
                 reader.rewind().map_err(|e| Error::IO { source: e })?;
 
                 let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema))
                     .with_header(has_header)
+                    .with_delimiter(delimiter_byte)
                     .with_batch_size(batch_size)
                     .build(reader)
                     .map_err(|e| Error::Arrow { source: e })?;

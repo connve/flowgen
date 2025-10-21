@@ -1,9 +1,7 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
-use flowgen_core::event::{
-    generate_subject, Event, EventBuilder, SubjectSuffix, DEFAULT_LOG_MESSAGE,
-};
+use flowgen_core::event::{generate_subject, Event, EventBuilder, SenderExt, SubjectSuffix};
 use flowgen_core::{client::Client, event::EventData};
 use futures::StreamExt;
 use object_store::GetResultPayload;
@@ -18,7 +16,7 @@ use tracing::{error, info, warn, Instrument};
 /// Default subject prefix for logging messages.
 const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
 /// Default batch size for files.
-const DEFAULT_BATCH_SIZE: usize = 1000;
+const DEFAULT_BATCH_SIZE: usize = 10000;
 /// Default files have headers.
 const DEFAULT_HAS_HEADER: bool = true;
 
@@ -134,9 +132,15 @@ impl EventHandler {
             DEFAULT_CSV_EXTENSION => {
                 let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
                 let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
+                let delimiter = self
+                    .config
+                    .delimiter
+                    .as_ref()
+                    .and_then(|d| d.as_bytes().first().copied());
                 ContentType::Csv {
                     batch_size,
                     has_header,
+                    delimiter,
                 }
             }
             DEFAULT_AVRO_EXTENSION => ContentType::Avro,
@@ -199,9 +203,8 @@ impl EventHandler {
                 .current_task_id(self.current_task_id)
                 .build()?;
 
-            info!("{}: {}", DEFAULT_LOG_MESSAGE, e.subject);
             self.tx
-                .send(e)
+                .send_with_logging(e)
                 .map_err(|e| Error::SendMessage { source: e })?;
         }
 
@@ -418,6 +421,7 @@ mod tests {
             has_header: Some(true),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let builder = ReaderBuilder::new().config(config.clone());
@@ -477,6 +481,7 @@ mod tests {
             has_header: None,
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, _) = broadcast::channel::<Event>(10);
@@ -506,6 +511,7 @@ mod tests {
             has_header: Some(false),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (_, rx) = broadcast::channel::<Event>(10);
@@ -539,6 +545,7 @@ mod tests {
             has_header: Some(true),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(50);
@@ -569,6 +576,7 @@ mod tests {
             has_header: Some(false),
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
 
         let (tx, rx) = broadcast::channel::<Event>(5);
@@ -596,6 +604,7 @@ mod tests {
             has_header: None,
             cache_options: None,
             delete_after_read: None,
+            delimiter: None,
         });
         let (tx, rx) = broadcast::channel::<Event>(10);
 
