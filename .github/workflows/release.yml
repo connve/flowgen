@@ -99,8 +99,10 @@ jobs:
         id: changelog
         run: |
           if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.tag }})
+            # For first release, only show commits since the previous commit (not all history)
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -1)
           else
+            # Show commits between previous tag and current tag
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }})
           fi
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
