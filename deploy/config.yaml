@@ -1,0 +1,20 @@
+# Determines if cache service should be used.
+cache:
+  enabled: true
+  credentials_path: "/etc/nats/credentials.json"
+  type: nats
+# Points to config directory.
+flows:
+  dir: "/etc/app/flows/*.json"
+# HTTP server configuration (optional, defaults to port 3000).
+http_server:
+  enabled: true
+  port: 3000
+  # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
+  routes_prefix: "/api/flowgen/workers"
+# Host coordination configuration (optional).
+host:
+  enabled: true
+  type: k8s
+# Event channel buffer size for all flows (optional, defaults to 10000).
+event_buffer_size: 10000
