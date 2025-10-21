@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "config",
@@ -3488,7 +3488,7 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "salesforce_pubsub"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "futures-util",

@@ -24,6 +24,34 @@ pub enum Error {
     },
 }
 
+/// Recursively renders all string values in a JSON value tree that contain Handlebars templates.
+fn render_json_value(
+    value: &mut serde_json::Value,
+    handlebars: &Handlebars,
+    data: &serde_json::Value,
+) -> Result<(), handlebars::RenderError> {
+    match value {
+        serde_json::Value::String(s) => {
+            // Only render if the string contains template syntax
+            if s.contains("{{") {
+                *s = handlebars.render_template(s, data)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                render_json_value(v, handlebars, data)?;
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                render_json_value(item, handlebars, data)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Extension trait for configuration types that support template rendering.
 ///
 /// Enables configuration structures to render themselves as Handlebars templates
@@ -41,17 +69,18 @@ pub trait ConfigExt {
         Self: Serialize + DeserializeOwned + Sized,
         T: Serialize,
     {
-        let template = serde_json::to_string(self).map_err(|e| Error::SerdeJson { source: e })?;
-        let data = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+        let mut config_value =
+            serde_json::to_value(self).map_err(|e| Error::SerdeJson { source: e })?;
+        let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
 
-        let handlebars = Handlebars::new();
-        let rendered = handlebars
-            .render_template(&template, &data)
+        let mut handlebars = Handlebars::new();
+        // Disable HTML escaping since we're rendering JSON, not HTML
+        handlebars.register_escape_fn(handlebars::no_escape);
+
+        render_json_value(&mut config_value, &handlebars, &data_value)
             .map_err(|e| Error::Render { source: e })?;
 
-        let result: Self =
-            serde_json::from_str(&rendered).map_err(|e| Error::SerdeJson { source: e })?;
-        Ok(result)
+        serde_json::from_value(config_value).map_err(|e| Error::SerdeJson { source: e })
     }
 }
 
