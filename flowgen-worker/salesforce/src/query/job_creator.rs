@@ -10,7 +10,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Message subject prefix for bulk API create operations.
-const DEFAULT_MESSAGE_SUBJECT: &str = "bulkapicreate";
+const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_query_job_create";
 /// Salesforce Bulk API endpoint for query jobs (API v61.0).
 const DEFAULT_URI_PATH: &str = "/services/data/v61.0/jobs/query";
 
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "bulkapicreate");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce_query_job_create");
         assert_eq!(DEFAULT_URI_PATH, "/services/data/v61.0/jobs/query");
     }
 
@@ -502,7 +502,10 @@ mod tests {
             None => format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, timestamp),
         };
 
-        assert_eq!(subject, "bulkapicreate.test_label.1234567890123456");
+        assert_eq!(
+            subject,
+            "salesforce_query_job_create.test_label.1234567890123456"
+        );
     }
 
     #[test]
@@ -520,7 +523,7 @@ mod tests {
             None => format!("{}.{}", DEFAULT_MESSAGE_SUBJECT, timestamp),
         };
 
-        assert_eq!(subject, "bulkapicreate.1234567890123456");
+        assert_eq!(subject, "salesforce_query_job_create.1234567890123456");
     }
 
     #[test]
@@ -671,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_message_subject_format() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "bulkapicreate");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce_query_job_create");
         assert!(!DEFAULT_MESSAGE_SUBJECT.contains(" "));
         assert!(!DEFAULT_MESSAGE_SUBJECT.contains("."));
     }

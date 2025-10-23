@@ -14,7 +14,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
 /// Message subject prefix for bulk API retrieve operations.
-const DEFAULT_MESSAGE_SUBJECT: &str = "bulkapiretrieve";
+const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_query_job_retrieve";
 /// Salesforce Bulk API endpoint for job metadata (API v61.0).
 const DEFAULT_JOB_METADATA_URI: &str = "/services/data/v61.0/jobs/query/";
 
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "bulkapiretrieve");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce_query_job_retrieve");
         assert_eq!(DEFAULT_JOB_METADATA_URI, "/services/data/v61.0/jobs/query/");
     }
 
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_message_subject_format() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "bulkapiretrieve");
+        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce_query_job_retrieve");
         assert!(!DEFAULT_MESSAGE_SUBJECT.contains(" "));
         assert!(!DEFAULT_MESSAGE_SUBJECT.contains("."));
     }

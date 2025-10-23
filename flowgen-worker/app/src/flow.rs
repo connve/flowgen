@@ -72,10 +72,10 @@ pub enum Error {
     LeadershipChannelClosed,
     /// Error in Salesforce Bulk API Job Creator task.
     #[error(transparent)]
-    BulkapiJobCreatorError(#[from] flowgen_salesforce::bulkapi::job_creator::Error),
+    BulkapiJobCreatorError(#[from] flowgen_salesforce::query::job_creator::Error),
     /// Error in Salesforce Bulk API Job Retriever task.
     #[error(transparent)]
-    BulkapiJobRetrieverError(#[from] flowgen_salesforce::bulkapi::job_retriever::Error),
+    BulkapiJobRetrieverError(#[from] flowgen_salesforce::query::job_retriever::Error),
 }
 
 pub struct Flow {
@@ -602,7 +602,7 @@ async fn spawn_tasks(
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        flowgen_salesforce::bulkapi::job_creator::ProcessorBuilder::new()
+                        flowgen_salesforce::query::job_creator::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
@@ -625,7 +625,7 @@ async fn spawn_tasks(
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        flowgen_salesforce::bulkapi::job_retriever::ProcessorBuilder::new()
+                        flowgen_salesforce::query::job_retriever::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
