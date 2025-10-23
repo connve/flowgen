@@ -17,7 +17,7 @@
                     "label": "account_salesforce_query_job",
                     "credentials_path": "/etc/sfdc/credentials.json",
                     "operation": "query",
-                    "query": "SELECT Id, Name, CreatedDate, LastModifiedDate FROM Account WHERE SystemModstamp = LAST_N_DAYS:200",
+                    "query": "SELECT Id, Name, CreatedDate, LastModifiedDate FROM Account WHERE SystemModstamp >= system_info.last_run_time",
                     "content_type": "CSV",
                     "column_delimiter": "COMMA",
                     "line_ending": "CRLF"

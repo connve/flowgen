@@ -134,7 +134,7 @@ impl EventHandler {
         // Extract access token from authentication result
         let token_result = sfdc_client
             .token_result
-            .ok_or_else(|| Error::NoSalesforceAuthToken())?;
+            .ok_or_else(Error::NoSalesforceAuthToken)?;
 
         // Construct API payload based on the requested operation type
         let payload = match self.config.operation {
@@ -159,7 +159,7 @@ impl EventHandler {
 
         let instance_url = sfdc_client
             .instance_url
-            .ok_or_else(|| Error::NoSalesforceInstanceURL())?;
+            .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
         // Configure HTTP client with Salesforce endpoint and authentication
         let mut client = self.client.post(instance_url + DEFAULT_URI_PATH);

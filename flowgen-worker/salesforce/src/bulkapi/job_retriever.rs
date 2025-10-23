@@ -3,7 +3,7 @@ use apache_avro::{from_avro_datum, Schema};
 use arrow::csv::reader::Format;
 use flowgen_core::{
     client::Client,
-    event::{generate_subject, Event, EventBuilder, EventData, SubjectSuffix, SenderExt},
+    event::{generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix},
 };
 use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,9 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{event, Level};
 
 /// Default message subject prefix for bulk API retrieve operations
-const DEFAULT_MESSAGE_SUBJECT: &'static str = "bulkapiretrieve";
+const DEFAULT_MESSAGE_SUBJECT: &str = "bulkapiretrieve";
 /// Default Salesforce Bulk API endpoint path for job metadata retrieval (API version 61.0)
-const DEFAULT_JOB_METADATA_URI: &'static str = "/services/data/v61.0/jobs/query/";
+const DEFAULT_JOB_METADATA_URI: &str = "/services/data/v61.0/jobs/query/";
 
 /// Comprehensive error types for Salesforce bulk job retrieval operations.
 ///
@@ -199,18 +199,17 @@ impl EventHandler {
                         Some((_, Value::Union(_, inner_value))) => {
                             match &**inner_value {
                                 Value::String(result_url) => {
-                                    println!("Found ResultUrl: {}", result_url);
-
                                     let instance_url = sfdc_client
                                         .instance_url
-                                        .ok_or_else(|| Error::NoSalesforceInstanceURL())?;
+                                        .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
                                     // Create HTTP client request to download CSV results
-                                    let mut client = self.client.get( format!("{}{}", instance_url, result_url));
+                                    let mut client =
+                                        self.client.get(format!("{}{}", instance_url, result_url));
 
                                     let token_result = sfdc_client
                                         .token_result
-                                        .ok_or_else(|| Error::NoSalesforceAuthToken())?;
+                                        .ok_or_else(Error::NoSalesforceAuthToken)?;
 
                                     client =
                                         client.bearer_auth(token_result.access_token().secret());
@@ -263,16 +262,17 @@ impl EventHandler {
 
                                             let instance_url = sfdc_client
                                                 .instance_url
-                                                .ok_or_else(|| Error::NoSalesforceInstanceURL())?;
+                                                .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
                                             // Request job metadata to get object type
-                                            let mut client = self.client.get(
-                                                format!("{}{}{}", instance_url, DEFAULT_JOB_METADATA_URI, job_id),
-                                            );
+                                            let mut client = self.client.get(format!(
+                                                "{}{}{}",
+                                                instance_url, DEFAULT_JOB_METADATA_URI, job_id
+                                            ));
 
                                             let token_result = sfdc_client
                                                 .token_result
-                                                .ok_or_else(|| Error::NoSalesforceAuthToken())?;
+                                                .ok_or_else(Error::NoSalesforceAuthToken)?;
 
                                             client = client
                                                 .bearer_auth(token_result.access_token().secret());
@@ -313,35 +313,19 @@ impl EventHandler {
                                                 })?;
                                             }
                                         }
-                                        Some((_, _)) => {
-                                            eprintln!(
-                                                "JobIdentifier field found but it is not a String."
-                                            );
-                                        }
-                                        None => {
-                                            eprintln!("JobIdentifier field not found in record.");
-                                        }
+                                        Some((_, _)) => {}
+                                        None => {}
                                     }
                                 }
-                                Value::Null => {
-                                    eprintln!("ResultUrl is null.");
-                                }
-                                _ => {
-                                    eprintln!("ResultUrl field is a Union, but contains an unexpected type.");
-                                }
+                                Value::Null => {}
+                                _ => {}
                             }
                         }
-                        Some((_, _)) => {
-                            eprintln!("ResultUrl field is not a Union as expected.");
-                        }
-                        None => {
-                            eprintln!("ResultUrl field not found in record.");
-                        }
+                        Some((_, _)) => {}
+                        None => {}
                     }
                 }
-                _ => {
-                    eprintln!("The top-level Avro value is not a Record.");
-                }
+                _ => {}
             }
         } else {
             println!("Not an Avro event");
@@ -395,7 +379,6 @@ impl flowgen_core::task::runner::Runner for JobRetriever {
     ///
     /// Returns `Reqwest` error if the HTTP client cannot be initialized.
     /// Individual event processing errors are logged but don't terminate the processor.
-
     async fn init(&self) -> Result<EventHandler, Error> {
         // Initialize secure HTTP client (HTTPS only for security)
         let client = reqwest::ClientBuilder::new()

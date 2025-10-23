@@ -1,11 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Default Salesforce Pub/Sub API URL.
-pub const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
-/// Default Salesforce Pub/Sub API port.
-pub const DEFAULT_PUBSUB_PORT: &str = "443";
-
 /// Processor for creating salesforce account query job.
 /// ```json
 /// {
@@ -36,7 +31,6 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 ///     }
 ///  }
 /// ```
-
 /// Configuration for retrieving existing Salesforce bulk jobs.
 ///
 /// This struct is used to configure a job retrieval operation that can fetch
@@ -248,12 +242,6 @@ mod tests {
     use super::*;
     use serde_json;
     use std::path::PathBuf;
-
-    #[test]
-    fn test_default_constants() {
-        assert_eq!(DEFAULT_PUBSUB_URL, "https://api.pubsub.salesforce.com");
-        assert_eq!(DEFAULT_PUBSUB_PORT, "443");
-    }
 
     #[test]
     fn test_job_retriever_default() {
