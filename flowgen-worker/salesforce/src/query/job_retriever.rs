@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
-use tracing::{event, Level};
+use tracing::{error, Instrument};
 
 /// Message subject prefix for bulk API retrieve operations.
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_query_job_retrieve";
@@ -97,25 +97,17 @@ pub struct JobRetriever {
 pub struct EventHandler {
     /// HTTP client for Salesforce API requests.
     client: Arc<reqwest::Client>,
-    /// Processor configuration.
-    config: Arc<super::config::JobRetriever>,
     /// Channel sender for emitting processed data.
     tx: Sender<Event>,
     /// Task identifier for event correlation.
     current_task_id: usize,
+    /// SFDC client.
+    sfdc_client: crate::client::Client,
 }
 
 impl EventHandler {
     /// Processes job retrieval: extract job info, download CSV, convert to Arrow, emit events.
-    async fn handle(self, event: Event) -> Result<(), Error> {
-        let config = self.config.as_ref();
-
-        let sfdc_client = crate::client::Builder::new()
-            .credentials_path(config.credentials_path.clone())
-            .build()?
-            .connect()
-            .await?;
-
+    async fn handle(&self, event: Event) -> Result<(), Error> {
         // Process only Avro events with job completion data.
         if let EventData::Avro(value) = &event.data {
             // Parse Avro schema from event.
@@ -129,133 +121,109 @@ impl EventHandler {
             // Process deserialized Avro record.
             if let Value::Record(fields) = value {
                 // Extract ResultUrl containing CSV download URL.
-                match fields.iter().find(|(name, _)| name == "ResultUrl") {
-                    Some((_, Value::Union(_, inner_value))) => {
-                        match &**inner_value {
-                            Value::String(result_url) => {
-                                let instance_url = sfdc_client
-                                    .instance_url
-                                    .ok_or_else(Error::NoSalesforceInstanceURL)?;
+                if let Some((_, Value::Union(_, inner_value))) =
+                    fields.iter().find(|(name, _)| name == "ResultUrl")
+                {
+                    if let Value::String(result_url) = &**inner_value {
+                        let instance_url = self
+                            .sfdc_client
+                            .instance_url
+                            .clone()
+                            .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
-                                // Create HTTP request to download CSV results.
-                                let mut client =
-                                    self.client.get(format!("{}{}", instance_url, result_url));
+                        // Create HTTP request to download CSV results.
+                        let mut client = self.client.get(format!("{}{}", instance_url, result_url));
 
-                                let token_result = sfdc_client
-                                    .token_result
-                                    .ok_or_else(Error::NoSalesforceAuthToken)?;
+                        let token_result = self
+                            .sfdc_client
+                            .token_result
+                            .clone()
+                            .ok_or_else(Error::NoSalesforceAuthToken)?;
 
-                                client = client.bearer_auth(token_result.access_token().secret());
+                        client = client.bearer_auth(token_result.access_token().secret());
 
-                                // Download CSV result data.
-                                let resp = client
-                                    .send()
-                                    .await
-                                    .map_err(|e| Error::Reqwest { source: e })?
-                                    .bytes()
-                                    .await
-                                    .map_err(|e| Error::Reqwest { source: e })?;
+                        // Download CSV result data.
+                        let resp = client
+                            .send()
+                            .await
+                            .map_err(|e| Error::Reqwest { source: e })?
+                            .bytes()
+                            .await
+                            .map_err(|e| Error::Reqwest { source: e })?;
 
-                                // Write CSV to temporary file.
-                                // TODO: Consider in-memory processing or configurable paths.
-                                let file_path = "output.csv";
-                                let mut file = File::create(file_path).unwrap();
-                                file.write_all(&resp).map_err(|e| Error::IO { source: e })?;
+                        // Write CSV to temporary file.
+                        let file_path = "output.csv";
+                        let mut file = File::create(file_path).unwrap();
+                        file.write_all(&resp).map_err(|e| Error::IO { source: e })?;
 
-                                // Reopen file for reading and schema inference.
-                                let mut file =
-                                    File::open(file_path).map_err(|e| Error::IO { source: e })?;
+                        // Reopen file for reading and schema inference.
+                        let mut file =
+                            File::open(file_path).map_err(|e| Error::IO { source: e })?;
 
-                                // Infer CSV schema from first 100 rows.
-                                let (schema, _) = Format::default()
-                                    .with_header(true)
-                                    .infer_schema(&file, Some(100))
-                                    .map_err(|e| Error::Arrow { source: e })?;
+                        // Infer CSV schema from first 100 rows.
+                        let (schema, _) = Format::default()
+                            .with_header(true)
+                            .infer_schema(&file, Some(100))
+                            .map_err(|e| Error::Arrow { source: e })?;
 
-                                // Reset file pointer to beginning.
-                                file.rewind().map_err(|e| Error::IO { source: e })?;
+                        // Reset file pointer to beginning.
+                        file.rewind().map_err(|e| Error::IO { source: e })?;
 
-                                // Create Arrow CSV reader.
-                                let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
-                                    .with_header(true)
-                                    .with_batch_size(100)
-                                    .build(&file)
-                                    .map_err(|e| Error::Arrow { source: e })?;
+                        // Create Arrow CSV reader.
+                        let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema.clone()))
+                            .with_header(true)
+                            .with_batch_size(100)
+                            .build(&file)
+                            .map_err(|e| Error::Arrow { source: e })?;
 
-                                // Extract JobIdentifier for metadata retrieval.
-                                match fields.iter().find(|(name, _)| name == "JobIdentifier") {
-                                    Some((_, Value::String(job_id))) => {
-                                        let sfdc_client = crate::client::Builder::new()
-                                            .credentials_path(config.credentials_path.clone())
-                                            .build()?
-                                            .connect()
-                                            .await?;
+                        // Extract JobIdentifier for metadata retrieval.
+                        if let Some((_, Value::String(job_id))) =
+                            fields.iter().find(|(name, _)| name == "JobIdentifier")
+                        {
+                            // Request job metadata to get object type.
+                            let mut client = self.client.get(format!(
+                                "{}{}{}",
+                                instance_url, DEFAULT_JOB_METADATA_URI, job_id
+                            ));
 
-                                        let instance_url = sfdc_client
-                                            .instance_url
-                                            .ok_or_else(Error::NoSalesforceInstanceURL)?;
+                            client = client.bearer_auth(token_result.access_token().secret());
 
-                                        // Request job metadata to get object type.
-                                        let mut client = self.client.get(format!(
-                                            "{}{}{}",
-                                            instance_url, DEFAULT_JOB_METADATA_URI, job_id
-                                        ));
+                            // Retrieve job metadata.
+                            let resp = client
+                                .send()
+                                .await
+                                .map_err(|e| Error::Reqwest { source: e })?
+                                .text()
+                                .await
+                                .map_err(|e| Error::Reqwest { source: e })?;
 
-                                        let token_result = sfdc_client
-                                            .token_result
-                                            .ok_or_else(Error::NoSalesforceAuthToken)?;
+                            let job_metadata: JobResponse = serde_json::from_str(&resp)
+                                .map_err(|e| Error::SerdeJson { source: e })?;
 
-                                        client = client
-                                            .bearer_auth(token_result.access_token().secret());
+                            let subject = generate_subject(
+                                Some(job_metadata.object.to_lowercase().as_str()),
+                                DEFAULT_MESSAGE_SUBJECT,
+                                SubjectSuffix::Timestamp,
+                            );
 
-                                        // Retrieve job metadata.
-                                        let resp = client
-                                            .send()
-                                            .await
-                                            .map_err(|e| Error::Reqwest { source: e })?
-                                            .text()
-                                            .await
-                                            .map_err(|e| Error::Reqwest { source: e })?;
-
-                                        let job_metadata: JobResponse = serde_json::from_str(&resp)
-                                            .map_err(|e| Error::SerdeJson { source: e })?;
-
-                                        let subject = generate_subject(
-                                            Some(job_metadata.object.to_lowercase().as_str()),
-                                            DEFAULT_MESSAGE_SUBJECT,
-                                            SubjectSuffix::Timestamp,
-                                        );
-
-                                        // Process each Arrow record batch and emit as events.
-                                        for data in csv {
-                                            let e = EventBuilder::new()
-                                                .data(EventData::ArrowRecordBatch(
-                                                    data.map_err(|e| Error::Arrow { source: e })?,
-                                                ))
-                                                .subject(subject.clone())
-                                                .current_task_id(self.current_task_id)
-                                                .build()?;
-                                            self.tx
-                                                .send_with_logging(e)
-                                                .map_err(|e| Error::SendMessage { source: e })?;
-                                        }
-                                    }
-                                    Some((_, _)) => {}
-                                    None => {}
-                                }
+                            // Process each Arrow record batch and emit as events.
+                            for data in csv {
+                                let e = EventBuilder::new()
+                                    .data(EventData::ArrowRecordBatch(
+                                        data.map_err(|e| Error::Arrow { source: e })?,
+                                    ))
+                                    .subject(subject.clone())
+                                    .current_task_id(self.current_task_id)
+                                    .build()?;
+                                self.tx
+                                    .send_with_logging(e)
+                                    .map_err(|e| Error::SendMessage { source: e })?;
                             }
-                            Value::Null => {}
-                            _ => {}
                         }
                     }
-                    Some((_, _)) => {}
-                    None => {}
                 }
             }
-        } else {
-            println!("Not an Avro event");
         }
-
         Ok(())
     }
 }
@@ -276,6 +244,7 @@ impl flowgen_core::task::runner::Runner for JobRetriever {
 
     /// Initializes HTTPS client and creates event handler.
     async fn init(&self) -> Result<EventHandler, Error> {
+        let config = self.config.as_ref();
         // Initialize secure HTTP client (HTTPS only).
         let client = reqwest::ClientBuilder::new()
             .https_only(true)
@@ -283,49 +252,49 @@ impl flowgen_core::task::runner::Runner for JobRetriever {
             .map_err(|e| Error::Reqwest { source: e })?;
         let client = Arc::new(client);
 
+        let sfdc_client = crate::client::Builder::new()
+            .credentials_path(config.credentials_path.clone())
+            .build()?
+            .connect()
+            .await?;
+
         let event_handler = EventHandler {
-            config: Arc::clone(&self.config),
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
             client,
+            sfdc_client,
         };
         Ok(event_handler)
     }
 
-    /// Main execution loop: listen for events, filter by task ID, spawn handlers.
-    async fn run(mut self) -> Result<(), Error> {
-        // Initialize secure HTTP client (HTTPS only).
-        let client = reqwest::ClientBuilder::new()
-            .https_only(true)
-            .build()
-            .map_err(|e| Error::Reqwest { source: e })?;
-        let client = Arc::new(client);
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields( task_id = self.current_task_id))]
+    async fn run(mut self) -> Result<(), Self::Error> {
+        // Initialize runner task.
+        let event_handler = match self.init().await {
+            Ok(handler) => Arc::new(handler),
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        };
 
-        // Main event processing loop.
-        while let Ok(event) = self.rx.recv().await {
-            // Filter events by task ID for proper pipeline ordering.
-            if event.current_task_id == Some(self.current_task_id - 1) {
-                let config = Arc::clone(&self.config);
-                let client = Arc::clone(&client);
-                let tx = self.tx.clone();
-                let current_task_id = self.current_task_id;
-
-                let event_handler = EventHandler {
-                    config,
-                    current_task_id,
-                    tx,
-                    client,
-                };
-
-                // Process event asynchronously.
-                tokio::spawn(async move {
-                    if let Err(err) = event_handler.handle(event).await {
-                        event!(Level::ERROR, "{}", err);
-                    }
-                });
+        // Process incoming events, filtering by task ID.
+        loop {
+            match self.rx.recv().await {
+                Ok(event) => {
+                    let event_handler = Arc::clone(&event_handler);
+                    tokio::spawn(
+                        async move {
+                            if let Err(err) = event_handler.handle(event).await {
+                                error!("{}", err);
+                            }
+                        }
+                        .instrument(tracing::Span::current()),
+                    );
+                }
+                Err(_) => return Ok(()),
             }
         }
-        Ok(())
     }
 }
 
@@ -631,27 +600,6 @@ mod tests {
 
         assert_eq!(processor.current_task_id, 7);
         assert_eq!(processor.config.label, Some("struct_test".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_event_handler_creation() {
-        let (tx, _) = broadcast::channel::<Event>(100);
-
-        let config = Arc::new(super::super::config::JobRetriever {
-            label: Some("handler_test".to_string()),
-            credentials_path: PathBuf::from("/test.json"),
-        });
-
-        let client = Arc::new(reqwest::Client::new());
-
-        let handler = EventHandler {
-            client,
-            config,
-            tx,
-            current_task_id: 2,
-        };
-
-        assert_eq!(handler.current_task_id, 2);
     }
 
     #[test]

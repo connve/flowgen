@@ -75,22 +75,18 @@ pub struct EventHandler {
     tx: Sender<Event>,
     /// Task identifier for event correlation.
     current_task_id: usize,
+    /// SFDC client
+    sfdc_client: crate::client::Client,
 }
 
 impl EventHandler {
     /// Processes a job creation request: authenticate, build payload, create job, emit response.
     async fn handle(&self) -> Result<(), Error> {
-        let config = self.config.as_ref();
-
-        let sfdc_client = crate::client::Builder::new()
-            .credentials_path(config.credentials_path.clone())
-            .build()?
-            .connect()
-            .await?;
-
         // Extract access token from authentication result.
-        let token_result = sfdc_client
+        let token_result = self
+            .sfdc_client
             .token_result
+            .clone()
             .ok_or_else(Error::NoSalesforceAuthToken)?;
 
         // Build API payload based on operation type.
@@ -111,8 +107,10 @@ impl EventHandler {
             }
         };
 
-        let instance_url = sfdc_client
+        let instance_url = self
+            .sfdc_client
             .instance_url
+            .clone()
             .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
         // Configure HTTP client with endpoint and auth.
@@ -164,6 +162,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
 
     /// Initializes HTTPS client and creates event handler.
     async fn init(&self) -> Result<EventHandler, Error> {
+        let config = self.config.as_ref();
         // Initialize secure HTTP client (HTTPS only).
         let client = reqwest::ClientBuilder::new()
             .https_only(true)
@@ -171,11 +170,18 @@ impl flowgen_core::task::runner::Runner for JobCreator {
             .map_err(|e| Error::Reqwest { source: e })?;
         let client = Arc::new(client);
 
+        let sfdc_client = crate::client::Builder::new()
+            .credentials_path(config.credentials_path.clone())
+            .build()?
+            .connect()
+            .await?;
+
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
             client,
+            sfdc_client,
         };
         Ok(event_handler)
     }
@@ -561,36 +567,6 @@ mod tests {
 
         assert!(payload.get("operation").is_some());
         assert!(payload.get("query").is_some());
-    }
-
-    #[tokio::test]
-    async fn test_event_handler_creation() {
-        let (tx, _) = broadcast::channel::<Event>(100);
-
-        let config = Arc::new(super::super::config::JobCreator {
-            name: "handler_test".to_string(),
-            label: Some("test".to_string()),
-            credentials_path: PathBuf::from("/test.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
-            object: None,
-            operation: super::super::config::Operation::Query,
-            content_type: Some(super::super::config::ContentType::Csv),
-            column_delimiter: Some(super::super::config::ColumnDelimiter::Comma),
-            line_ending: Some(super::super::config::LineEnding::Lf),
-            assignment_rule_id: None,
-            external_id_field_name: None,
-        });
-
-        let client = Arc::new(reqwest::Client::new());
-
-        let handler = EventHandler {
-            client,
-            config,
-            tx,
-            current_task_id: 1,
-        };
-
-        assert_eq!(handler.current_task_id, 1);
     }
 
     #[test]
