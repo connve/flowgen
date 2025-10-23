@@ -4,6 +4,7 @@ use flowgen_core::{
     event::{Event, EventBuilder, EventData, SenderExt},
 };
 use oauth2::TokenResponse;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -53,6 +54,22 @@ pub enum Error {
     NoSalesforceInstanceURL(),
 }
 
+/// Request payload for Salesforce bulk query job creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryJobPayload {
+    /// Type of operation (query or queryAll).
+    operation: super::config::Operation,
+    /// SOQL query string.
+    query: Option<String>,
+    /// Output file format.
+    content_type: Option<super::config::ContentType>,
+    /// CSV column delimiter.
+    column_delimiter: Option<super::config::ColumnDelimiter>,
+    /// Line ending style.
+    line_ending: Option<super::config::LineEnding>,
+}
+
 /// Processor for creating Salesforce bulk API jobs.
 pub struct JobCreator {
     /// Job configuration and authentication details.
@@ -93,13 +110,13 @@ impl EventHandler {
         let payload = match self.config.operation {
             super::config::Operation::Query | super::config::Operation::QueryAll => {
                 // Query operations require SOQL query and output format specs.
-                json!({
-                    "operation": self.config.operation,
-                    "query": self.config.query,
-                    "contentType": self.config.content_type,
-                    "columnDelimiter": self.config.column_delimiter,
-                    "lineEnding": self.config.line_ending,
-                })
+                QueryJobPayload {
+                    operation: self.config.operation.clone(),
+                    query: self.config.query.clone(),
+                    content_type: self.config.content_type.clone(),
+                    column_delimiter: self.config.column_delimiter.clone(),
+                    line_ending: self.config.line_ending.clone(),
+                }
             }
             _ => {
                 // TODO: Implement Insert, Update, Upsert, Delete, HardDelete operations.
@@ -288,6 +305,54 @@ mod tests {
     fn test_default_constants() {
         assert_eq!(DEFAULT_MESSAGE_SUBJECT, "salesforce_query_job_create");
         assert_eq!(DEFAULT_URI_PATH, "/services/data/v61.0/jobs/query");
+    }
+
+    #[test]
+    fn test_query_job_payload_serialization() {
+        let payload = QueryJobPayload {
+            operation: super::super::config::Operation::Query,
+            query: Some("SELECT Id FROM Account".to_string()),
+            content_type: Some(super::super::config::ContentType::Csv),
+            column_delimiter: Some(super::super::config::ColumnDelimiter::Comma),
+            line_ending: Some(super::super::config::LineEnding::Lf),
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json.get("operation").is_some());
+        assert!(json.get("query").is_some());
+        assert!(json.get("contentType").is_some());
+        assert!(json.get("columnDelimiter").is_some());
+        assert!(json.get("lineEnding").is_some());
+    }
+
+    #[test]
+    fn test_query_job_payload_deserialization() {
+        let json_str = r#"{
+            "operation": "query",
+            "query": "SELECT Id FROM Account",
+            "contentType": "CSV",
+            "columnDelimiter": "COMMA",
+            "lineEnding": "LF"
+        }"#;
+
+        let payload: QueryJobPayload = serde_json::from_str(json_str).unwrap();
+        assert_eq!(payload.operation, super::super::config::Operation::Query);
+        assert_eq!(payload.query, Some("SELECT Id FROM Account".to_string()));
+    }
+
+    #[test]
+    fn test_query_job_payload_clone() {
+        let payload1 = QueryJobPayload {
+            operation: super::super::config::Operation::QueryAll,
+            query: Some("SELECT Id FROM Contact".to_string()),
+            content_type: Some(super::super::config::ContentType::Csv),
+            column_delimiter: Some(super::super::config::ColumnDelimiter::Tab),
+            line_ending: Some(super::super::config::LineEnding::Crlf),
+        };
+
+        let payload2 = payload1.clone();
+        assert_eq!(payload1.operation, payload2.operation);
+        assert_eq!(payload1.query, payload2.query);
     }
 
     #[test]
