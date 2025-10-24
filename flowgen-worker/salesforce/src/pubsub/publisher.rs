@@ -3,7 +3,9 @@ use chrono::Utc;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{generate_subject, Event, SenderExt, SubjectSuffix};
-use salesforce_pubsub::eventbus::v1::{ProducerEvent, PublishRequest, SchemaRequest, TopicRequest};
+use salesforce_pubsub_v1::eventbus::v1::{
+    ProducerEvent, PublishRequest, SchemaRequest, TopicRequest,
+};
 use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{error, Instrument};
@@ -14,14 +16,23 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_publisher";
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Pub/Sub context or gRPC communication error.
-    #[error(transparent)]
-    PubSub(#[from] super::context::Error),
+    #[error("Pub/Sub error: {source}")]
+    PubSub {
+        #[source]
+        source: salesforce_core::pubsub::context::Error,
+    },
     /// Client authentication error.
-    #[error(transparent)]
-    Auth(#[from] crate::client::Error),
+    #[error("Authentication error: {source}")]
+    Auth {
+        #[source]
+        source: salesforce_core::client::Error,
+    },
     /// Flowgen core serialization extension error.
-    #[error(transparent)]
-    SerdeExt(#[from] flowgen_core::serde::Error),
+    #[error("Serialization error: {source}")]
+    SerdeExt {
+        #[source]
+        source: flowgen_core::serde::Error,
+    },
     /// Apache Avro error.
     #[error("Avro operation failed: {source}")]
     Avro {
@@ -29,8 +40,11 @@ pub enum Error {
         source: apache_avro::Error,
     },
     /// Template rendering error for dynamic configuration.
-    #[error(transparent)]
-    Render(#[from] flowgen_core::config::Error),
+    #[error("Render error: {source}")]
+    Render {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
     /// Failed to send event through broadcast channel.
     #[error("Failed to send event message: {source}")]
     SendMessage {
@@ -38,11 +52,17 @@ pub enum Error {
         source: tokio::sync::broadcast::error::SendError<Event>,
     },
     /// Flowgen core event system error.
-    #[error(transparent)]
-    Event(#[from] flowgen_core::event::Error),
+    #[error("Event error: {source}")]
+    Event {
+        #[source]
+        source: flowgen_core::event::Error,
+    },
     /// Flowgen core service error.
-    #[error(transparent)]
-    Service(#[from] flowgen_core::service::Error),
+    #[error("Service error: {source}")]
+    Service {
+        #[source]
+        source: flowgen_core::service::Error,
+    },
     /// Required attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -68,7 +88,7 @@ pub struct EventHandler {
     /// Publisher configuration.
     config: Arc<super::config::Publisher>,
     /// Pub/Sub connection context.
-    pubsub: Arc<Mutex<super::context::Context>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
     /// Topic name for publishing.
     topic: String,
     /// Base subject for event generation.
@@ -86,7 +106,10 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        let config = self.config.render(&event.data)?;
+        let config = self
+            .config
+            .render(&event.data)
+            .map_err(|e| Error::Render { source: e })?;
         let mut publish_payload = config.payload;
 
         let now = Utc::now().timestamp_millis();
@@ -122,7 +145,8 @@ impl EventHandler {
                 events,
                 ..Default::default()
             })
-            .await?
+            .await
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         let subject = generate_subject(None, &self.base_subject, SubjectSuffix::Id(&resp.rpc_id));
@@ -133,7 +157,8 @@ impl EventHandler {
             .data(flowgen_core::event::EventData::Json(resp_json))
             .subject(subject)
             .current_task_id(self.current_task_id)
-            .build()?;
+            .build()
+            .map_err(|e| Error::Event { source: e })?;
 
         self.tx
             .send_with_logging(e)
@@ -178,17 +203,26 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 super::config::DEFAULT_PUBSUB_URL,
                 super::config::DEFAULT_PUBSUB_PORT
             ))
-            .build()?
+            .build()
+            .map_err(|e| Error::Service { source: e })?
             .connect()
-            .await?;
+            .await
+            .map_err(|e| Error::Service { source: e })?;
 
-        let sfdc_client = crate::client::Builder::new()
+        let channel = service.channel.ok_or_else(|| Error::Service {
+            source: flowgen_core::service::Error::MissingEndpoint(),
+        })?;
+
+        let sfdc_client = salesforce_core::client::Builder::new()
             .credentials_path(config.credentials_path.clone())
-            .build()?
+            .build()
+            .map_err(|e| Error::Auth { source: e })?
             .connect()
-            .await?;
+            .await
+            .map_err(|e| Error::Auth { source: e })?;
 
-        let pubsub = super::context::Context::new(service, sfdc_client)?;
+        let pubsub = salesforce_core::pubsub::context::Context::new(channel, sfdc_client)
+            .map_err(|e| Error::PubSub { source: e })?;
 
         let pubsub = Arc::new(Mutex::new(pubsub));
 
@@ -198,7 +232,8 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .get_topic(TopicRequest {
                 topic_name: self.config.topic.clone(),
             })
-            .await?
+            .await
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         let schema_info = pubsub
@@ -207,7 +242,8 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .get_schema(SchemaRequest {
                 schema_id: topic_info.schema_id,
             })
-            .await?
+            .await
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         let schema = AvroSchema::parse_str(&schema_info.schema_json)

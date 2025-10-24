@@ -36,7 +36,8 @@ impl super::client::Client for Service {
     type Error = Error;
     async fn connect(mut self) -> Result<Self, Self::Error> {
         if let Some(endpoint) = self.endpoint.take() {
-            let tls_config = tonic::transport::ClientTlsConfig::new();
+            let tls_config = tonic::transport::ClientTlsConfig::new()
+                .with_native_roots();
             let channel = tonic::transport::Channel::from_shared(endpoint)
                 .map_err(|e| Error::InvalidUri { source: e })?
                 .tls_config(tls_config)

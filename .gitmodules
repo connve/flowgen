@@ -1,5 +1,0 @@
-[submodule "codegen/salesforce_pubsub/proto/pubsub"]
-	path = codegen/salesforce_pubsub/proto/pubsub
-	url = https://github.com/forcedotcom/pub-sub-api
-
-

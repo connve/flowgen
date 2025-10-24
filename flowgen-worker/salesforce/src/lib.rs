@@ -5,15 +5,10 @@
 //! and provides both publisher and subscriber implementations that integrate
 //! with the flowgen event system.
 
-/// Salesforce client authentication and connection management.
-pub mod client;
-
 /// Salesforce Pub/Sub API functionality for real-time messaging.
 pub mod pubsub {
     /// Configuration structures for Salesforce Pub/Sub publishers and subscribers.
     pub mod config;
-    /// Pub/Sub context management and gRPC channel handling.
-    pub mod context;
     /// Salesforce Pub/Sub publisher implementation for event publishing.
     pub mod publisher;
     /// Salesforce Pub/Sub subscriber implementation for event consumption.

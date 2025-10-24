@@ -4,13 +4,15 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
 publish = false
 
 [workspace.dependencies]
+salesforce_core = { git = "https://github.com/connve-labs/salesforce-rs" }
+salesforce_pubsub_v1 = { git = "https://github.com/connve-labs/salesforce-rs" }
 object_store = { version = "0.12.3", features = ["gcp", "fs"] }
 bytes = { version = "1.9.0" }
 handlebars = { version = "6.3.0" }
@@ -30,13 +32,11 @@ reqwest = { version = "0.12.11", features = ["json"] }
 url = { version = "2.5.2" }
 async-nats = { version = "0.35.1" }
 bincode = { version = "1.3.3" }
-tonic = { version = "0.10.2", features = ["tls-roots"] }
-deltalake = { version = "0.25", features = ["datafusion"] }
-deltalake-gcp = "0.9.0"
+tonic = { version = "0.14.2", features = ["tls-native-roots"] }
 config = "0.15.11"
 serde_avro_fast = "2.0.0"
 oauth2 = "4.4.2"
-prost = "0.12.3"
+prost = "0.13"
 glob = "0.3.1"
 apache-avro = "0.19.0"
 regex = "1.11.1"

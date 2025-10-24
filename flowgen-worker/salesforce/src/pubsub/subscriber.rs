@@ -2,28 +2,37 @@ use flowgen_core::{
     client::Client,
     event::{generate_subject, AvroData, Event, EventBuilder, EventData, SenderExt, SubjectSuffix},
 };
-use salesforce_pubsub::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
+use salesforce_pubsub_v1::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use std::sync::Arc;
 use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
 const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
-const DEFAULT_NUM_REQUESTED: i32 = 1000;
+const DEFAULT_NUM_REQUESTED: i32 = 100;
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Pub/Sub context or gRPC communication error.
-    #[error(transparent)]
-    PubSub(#[from] super::context::Error),
+    #[error("Pub/Sub error: {source}")]
+    PubSub {
+        #[source]
+        source: salesforce_core::pubsub::context::Error,
+    },
     /// Client authentication error.
-    #[error(transparent)]
-    Auth(#[from] crate::client::Error),
+    #[error("Authentication error: {source}")]
+    Auth {
+        #[source]
+        source: salesforce_core::client::Error,
+    },
     /// Flowgen core event system error.
-    #[error(transparent)]
-    Event(#[from] flowgen_core::event::Error),
+    #[error("Event error: {source}")]
+    Event {
+        #[source]
+        source: flowgen_core::event::Error,
+    },
     /// Async task join error.
     #[error("Async task join failed: {source}")]
     TaskJoin {
@@ -43,8 +52,11 @@ pub enum Error {
         source: bincode::Error,
     },
     /// Flowgen core service error.
-    #[error(transparent)]
-    Service(#[from] flowgen_core::service::Error),
+    #[error("Service error: {source}")]
+    Service {
+        #[source]
+        source: flowgen_core::service::Error,
+    },
     /// Required configuration attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -68,7 +80,7 @@ pub enum Error {
 /// to the event channel. Supports durable consumers with replay ID caching.
 pub struct EventHandler {
     /// Salesforce Pub/Sub client context
-    pubsub: Arc<Mutex<super::context::Context>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
@@ -96,7 +108,7 @@ impl EventHandler {
                 topic_name: self.config.topic.name.clone(),
             })
             .await
-            .map_err(Error::PubSub)?
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         // Get schema for message deserialization.
@@ -108,7 +120,7 @@ impl EventHandler {
                 schema_id: topic_info.schema_id,
             })
             .await
-            .map_err(Error::PubSub)?
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         // Set batch size for event fetching.
@@ -156,7 +168,7 @@ impl EventHandler {
             .await
             .subscribe(fetch_request)
             .await
-            .map_err(Error::PubSub)?
+            .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
         while let Some(event) = stream.next().await {
@@ -207,7 +219,7 @@ impl EventHandler {
                                 .id(event.id)
                                 .current_task_id(self.current_task_id)
                                 .build()
-                                .map_err(Error::Event)?;
+                                .map_err(|e| Error::Event { source: e })?;
 
                             self.tx
                                 .send_with_logging(e)
@@ -216,7 +228,9 @@ impl EventHandler {
                     }
                 }
                 Err(e) => {
-                    return Err(Error::PubSub(super::context::Error::Tonic(Box::new(e))));
+                    return Err(Error::PubSub {
+                        source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                    });
                 }
             }
         }
@@ -267,22 +281,27 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         let service = flowgen_core::service::ServiceBuilder::new()
             .endpoint(endpoint.to_owned())
             .build()
-            .map_err(Error::Service)?
+            .map_err(|e| Error::Service { source: e })?
             .connect()
             .await
-            .map_err(Error::Service)?;
+            .map_err(|e| Error::Service { source: e })?;
+
+        let channel = service.channel.ok_or_else(|| Error::Service {
+            source: flowgen_core::service::Error::MissingEndpoint(),
+        })?;
 
         // Authenticate with Salesforce
-        let sfdc_client = crate::client::Builder::new()
+        let sfdc_client = salesforce_core::client::Builder::new()
             .credentials_path(self.config.credentials_path.clone())
             .build()
-            .map_err(Error::Auth)?
+            .map_err(|e| Error::Auth { source: e })?
             .connect()
             .await
-            .map_err(Error::Auth)?;
+            .map_err(|e| Error::Auth { source: e })?;
 
         // Create Pub/Sub context
-        let pubsub = super::context::Context::new(service, sfdc_client).map_err(Error::PubSub)?;
+        let pubsub = salesforce_core::pubsub::context::Context::new(channel, sfdc_client)
+            .map_err(|e| Error::PubSub { source: e })?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
         // Create event handler
