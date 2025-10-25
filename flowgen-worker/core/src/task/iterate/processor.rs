@@ -49,15 +49,15 @@ pub struct EventHandler {
     /// Channel sender for processed events.
     tx: Sender<Event>,
     /// Task identifier for event tracking.
-    current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<crate::task::context::TaskContext>,
+    task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
@@ -100,16 +100,12 @@ impl EventHandler {
                 SubjectSuffix::Timestamp,
             );
 
-            let mut event_builder = EventBuilder::new()
+            let e = EventBuilder::new()
                 .data(EventData::Json(element))
                 .subject(subject)
-                .current_task_id(self.current_task_id);
-
-            if let Some(task_type) = self.task_context.task_type {
-                event_builder = event_builder.task_type(task_type);
-            }
-
-            let e = event_builder.build()?;
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()?;
 
             self.tx
                 .send_with_logging(e)
@@ -130,9 +126,11 @@ pub struct Processor {
     /// Channel receiver for incoming events.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<crate::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -145,14 +143,14 @@ impl crate::task::runner::Runner for Processor {
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
-            task_context: Arc::clone(&self._task_context),
+            task_id: self.task_id,
+            task_type: self.task_type,
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
     async fn run(mut self) -> Result<(), Error> {
         let event_handler = match self.init().await {
             Ok(handler) => Arc::new(handler),
@@ -191,9 +189,11 @@ pub struct ProcessorBuilder {
     /// Event broadcast receiver (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<crate::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl ProcessorBuilder {
@@ -218,13 +218,18 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
     pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -239,10 +244,13 @@ impl ProcessorBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -265,7 +273,6 @@ mod tests {
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
-                .task_type("test")
                 .build()
                 .unwrap(),
         )
@@ -278,7 +285,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -295,13 +302,13 @@ mod tests {
             .config(config)
             .sender(tx)
             .receiver(rx2)
-            .current_task_id(1)
+            .task_id(1)
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(loop_proc.current_task_id, 1);
+        assert_eq!(loop_proc.task_id, 1);
     }
 
     #[tokio::test]
@@ -334,14 +341,14 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
             data: EventData::Json(json!([{"id": 1}, {"id": 2}, {"id": 3}])),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: Some(0),
             id: None,
             timestamp: 123456789,
             task_type: "test",
@@ -380,7 +387,7 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             task_context: create_mock_task_context(),
         };
 
@@ -390,7 +397,7 @@ mod tests {
                 "total": 2
             })),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: Some(0),
             id: None,
             timestamp: 123456789,
             task_type: "test",
@@ -429,14 +436,14 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
             data: EventData::Json(json!({"items": [1, 2, 3]})),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: Some(0),
             id: None,
             timestamp: 123456789,
             task_type: "test",
@@ -459,14 +466,14 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
             data: EventData::Json(json!({"not": "an array"})),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: Some(0),
             id: None,
             timestamp: 123456789,
             task_type: "test",

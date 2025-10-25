@@ -89,15 +89,15 @@ pub enum Error {
 
 pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
-    current_task_id: usize,
+    task_id: usize,
     tx: Sender<Event>,
     config: Arc<super::config::Publisher>,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_type: &'static str,
 }
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
@@ -133,16 +133,12 @@ impl EventHandler {
             SubjectSuffix::Timestamp,
         );
 
-        let mut event_builder = EventBuilder::new()
+        let e = EventBuilder::new()
             .subject(subject)
             .data(EventData::Json(ack_json))
-            .current_task_id(self.current_task_id);
-
-        if let Some(task_type) = self.task_context.task_type {
-            event_builder = event_builder.task_type(task_type);
-        }
-
-        let e = event_builder.build()?;
+            .task_id(self.task_id)
+            .task_type(self.task_type)
+            .build()?;
 
         self.tx
             .send_with_logging(e)
@@ -162,9 +158,11 @@ pub struct Publisher {
     /// Channel sender for response events.
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -195,10 +193,10 @@ impl flowgen_core::task::runner::Runner for Publisher {
             let jetstream = Arc::new(Mutex::new(jetstream));
             let event_handler = EventHandler {
                 jetstream,
-                current_task_id: self.current_task_id,
+                task_id: self.task_id,
                 tx: self.tx.clone(),
                 config: Arc::clone(&self.config),
-                task_context: Arc::clone(&self._task_context),
+                task_type: self.task_type,
             };
 
             Ok(event_handler)
@@ -207,7 +205,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         }
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -247,9 +245,11 @@ pub struct PublisherBuilder {
     /// Optional event sender.
     tx: Option<Sender<Event>>,
     /// Current task identifier for event processing.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl PublisherBuilder {
@@ -274,8 +274,8 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
@@ -284,6 +284,11 @@ impl PublisherBuilder {
         task_context: Arc<flowgen_core::task::context::TaskContext>,
     ) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -298,10 +303,13 @@ impl PublisherBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -336,7 +344,7 @@ mod tests {
         let builder = PublisherBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.rx.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -344,7 +352,7 @@ mod tests {
         let builder = PublisherBuilder::default();
         assert!(builder.config.is_none());
         assert!(builder.rx.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -380,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn test_publisher_builder_current_task_id() {
-        let builder = PublisherBuilder::new().current_task_id(42);
-        assert_eq!(builder.current_task_id, 42);
+    fn test_publisher_builder_task_id() {
+        let builder = PublisherBuilder::new().task_id(42);
+        assert_eq!(builder.task_id, 42);
     }
 
     #[tokio::test]
@@ -390,7 +398,7 @@ mod tests {
         let (_tx, rx) = broadcast::channel(100);
         let result = PublisherBuilder::new()
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -414,7 +422,7 @@ mod tests {
 
         let result = PublisherBuilder::new()
             .config(config)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -450,7 +458,7 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .current_task_id(5)
+            .task_id(5)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -458,7 +466,7 @@ mod tests {
         assert!(result.is_ok());
         let publisher = result.unwrap();
         assert_eq!(publisher.config, config);
-        assert_eq!(publisher.current_task_id, 5);
+        assert_eq!(publisher.task_id, 5);
     }
 
     #[tokio::test]
@@ -487,14 +495,14 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .current_task_id(10)
+            .task_id(10)
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
         assert_eq!(publisher.config, config);
-        assert_eq!(publisher.current_task_id, 10);
+        assert_eq!(publisher.task_id, 10);
     }
 
     #[tokio::test]
@@ -514,7 +522,7 @@ mod tests {
             .config(config)
             .receiver(rx)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 

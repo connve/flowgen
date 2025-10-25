@@ -349,21 +349,13 @@ async fn spawn_tasks(
     for (i, task) in tasks.iter() {
         let i = *i; // Copy the index value so it can be moved into async blocks
 
-        // Create per-task context with task type
-        let task_context = Arc::new(flowgen_core::task::context::TaskContext {
-            flow: task_context.flow.clone(),
-            task_manager: Arc::clone(&task_context.task_manager),
-            cache: task_context.cache.clone(),
-            http_server: task_context.http_server.clone(),
-            task_type: Some(task.as_str()),
-        });
-
         match task {
             TaskType::convert(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -371,7 +363,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -388,7 +381,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -396,7 +390,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -413,7 +408,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -421,7 +417,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -438,7 +435,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -446,7 +444,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -462,14 +461,16 @@ async fn spawn_tasks(
             TaskType::generate(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -485,7 +486,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -493,7 +495,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -509,14 +512,16 @@ async fn spawn_tasks(
             TaskType::http_webhook(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_http::webhook::ProcessorBuilder::new()
                             .config(config)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -533,14 +538,16 @@ async fn spawn_tasks(
             TaskType::nats_jetstream_subscriber(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_nats::jetstream::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -556,7 +563,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -564,7 +572,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -579,14 +588,16 @@ async fn spawn_tasks(
             TaskType::salesforce_pubsub_subscriber(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -602,7 +613,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -610,7 +622,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -626,7 +639,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current().clone();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -634,7 +648,8 @@ async fn spawn_tasks(
                             .config(config)
                             .sender(tx)
                             .receiver(rx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?
@@ -650,7 +665,8 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(&task_context);
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -658,7 +674,8 @@ async fn spawn_tasks(
                             .config(config)
                             .receiver(rx)
                             .sender(tx)
-                            .current_task_id(i)
+                            .task_id(i)
+                            .task_type(task_type)
                             .task_context(task_context)
                             .build()
                             .await?

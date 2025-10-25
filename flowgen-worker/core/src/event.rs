@@ -117,12 +117,12 @@ pub struct Event {
     pub data: EventData,
     /// Subject identifier for event routing and filtering.
     pub subject: String,
-    /// Task identifier for tracking event flow through pipeline stages.
-    pub current_task_id: Option<usize>,
     /// Optional unique identifier for the event.
     pub id: Option<String>,
     /// Event creation timestamp in microseconds since Unix epoch.
     pub timestamp: i64,
+    /// Task identifier for tracking event flow through pipeline stages.
+    pub task_id: usize,
     /// Task type for categorization and logging.
     pub task_type: &'static str,
 }
@@ -140,7 +140,7 @@ impl Event {
             "data": data_value,
             "id": self.id,
             "timestamp": self.timestamp,
-            "current_task_id": self.current_task_id,
+            "task_id": self.task_id,
             "task_type": self.task_type,
         }))
     }
@@ -216,12 +216,12 @@ pub struct EventBuilder {
     pub extensions: Option<arrow::array::RecordBatch>,
     /// Event subject for routing (required for build).
     pub subject: Option<String>,
-    /// Current task identifier for pipeline tracking.
-    pub current_task_id: Option<usize>,
     /// Optional unique event identifier.
     pub id: Option<String>,
     /// Event timestamp, defaults to current time.
-    pub timestamp: i64,
+    pub timestamp: Option<i64>,
+    /// Current task identifier for pipeline tracking.
+    pub task_id: Option<usize>,
     /// Task type for categorization and logging (required for build).
     pub task_type: Option<&'static str>,
 }
@@ -229,7 +229,7 @@ pub struct EventBuilder {
 impl EventBuilder {
     pub fn new() -> Self {
         EventBuilder {
-            timestamp: Utc::now().timestamp_micros(),
+            timestamp: Some(Utc::now().timestamp_micros()),
             ..Default::default()
         }
     }
@@ -241,16 +241,16 @@ impl EventBuilder {
         self.subject = Some(subject);
         self
     }
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = Some(current_task_id);
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = Some(task_id);
         self
     }
     pub fn id(mut self, id: String) -> Self {
         self.id = Some(id);
         self
     }
-    pub fn time(mut self, timestamp: i64) -> Self {
-        self.timestamp = timestamp;
+    pub fn timestamp(mut self, timestamp: i64) -> Self {
+        self.timestamp = Some(timestamp);
         self
     }
     pub fn task_type(mut self, task_type: &'static str) -> Self {
@@ -267,8 +267,12 @@ impl EventBuilder {
                 .subject
                 .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,
             id: self.id,
-            timestamp: self.timestamp,
-            current_task_id: self.current_task_id,
+            timestamp: self
+                .timestamp
+                .ok_or_else(|| Error::MissingRequiredAttribute("timestamp".to_string()))?,
+            task_id: self
+                .task_id
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,
             task_type: self
                 .task_type
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
@@ -412,14 +416,14 @@ mod tests {
             .data(EventData::Json(json!({"test": "value"})))
             .subject("test.subject".to_string())
             .id("test-id".to_string())
-            .current_task_id(1)
+            .task_id(1)
             .task_type("test")
             .build()
             .unwrap();
 
         assert_eq!(event.subject, "test.subject");
         assert_eq!(event.id, Some("test-id".to_string()));
-        assert_eq!(event.current_task_id, Some(1));
+        assert_eq!(event.task_id, 0);
         assert!(event.timestamp > 0);
 
         match event.data {

@@ -85,9 +85,9 @@ pub enum Error {
 pub struct EventHandler {
     consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
     tx: Sender<Event>,
-    current_task_id: usize,
+    task_id: usize,
     config: Arc<super::config::Subscriber>,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_type: &'static str,
 }
 
 impl EventHandler {
@@ -108,9 +108,9 @@ impl EventHandler {
 
             while let Some(message) = batch.next().await {
                 if let Ok(message) = message {
-                    let mut e = message.to_event(self.task_context.task_type)?;
+                    let mut e = message.to_event(Some(self.task_type))?;
                     message.ack().await.ok();
-                    e.current_task_id = Some(self.current_task_id);
+                    e.task_id = self.task_id;
 
                     self.tx
                         .send_with_logging(e)
@@ -128,10 +128,12 @@ pub struct Subscriber {
     config: Arc<super::config::Subscriber>,
     /// Sender for forwarding converted events.
     tx: Sender<Event>,
-    /// Current task identifier for event tagging.
-    current_task_id: usize,
+    /// Task identifier for event tagging.
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -204,9 +206,9 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             Ok(EventHandler {
                 consumer,
                 tx: self.tx.clone(),
-                current_task_id: self.current_task_id,
+                task_id: self.task_id,
                 config: Arc::clone(&self.config),
-                task_context: Arc::clone(&self._task_context),
+                task_type: self.task_type,
             })
         } else {
             Err(Error::Other(
@@ -215,7 +217,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         }
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
     async fn run(self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -247,10 +249,12 @@ pub struct SubscriberBuilder {
     config: Option<Arc<super::config::Subscriber>>,
     /// Optional event sender.
     tx: Option<Sender<Event>>,
-    /// Current task identifier for event processing.
-    current_task_id: usize,
+    /// Task identifier for event processing.
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    /// Task type for event categorization.
+    task_type: Option<&'static str>,
 }
 
 impl SubscriberBuilder {
@@ -270,8 +274,8 @@ impl SubscriberBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
@@ -283,6 +287,11 @@ impl SubscriberBuilder {
         self
     }
 
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
+        self
+    }
+
     pub async fn build(self) -> Result<Subscriber, Error> {
         Ok(Subscriber {
             config: self
@@ -291,10 +300,13 @@ impl SubscriberBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -329,7 +341,7 @@ mod tests {
         let builder = SubscriberBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -337,7 +349,7 @@ mod tests {
         let builder = SubscriberBuilder::default();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -373,9 +385,9 @@ mod tests {
     }
 
     #[test]
-    fn test_subscriber_builder_current_task_id() {
-        let builder = SubscriberBuilder::new().current_task_id(42);
-        assert_eq!(builder.current_task_id, 42);
+    fn test_subscriber_builder_task_id() {
+        let builder = SubscriberBuilder::new().task_id(42);
+        assert_eq!(builder.task_id, 42);
     }
 
     #[tokio::test]
@@ -383,7 +395,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(100);
         let result = SubscriberBuilder::new()
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -416,7 +428,7 @@ mod tests {
 
         let result = SubscriberBuilder::new()
             .config(config)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -451,15 +463,16 @@ mod tests {
         let result = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .current_task_id(5)
+            .task_id(5)
             .task_context(create_mock_task_context())
+            .task_type("test_task")
             .build()
             .await;
 
         assert!(result.is_ok());
         let subscriber = result.unwrap();
         assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.current_task_id, 5);
+        assert_eq!(subscriber.task_id, 5);
     }
 
     #[tokio::test]
@@ -487,14 +500,15 @@ mod tests {
         let subscriber = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .current_task_id(10)
+            .task_id(10)
             .task_context(create_mock_task_context())
+            .task_type("test_task")
             .build()
             .await
             .unwrap();
 
         assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.current_task_id, 10);
+        assert_eq!(subscriber.task_id, 10);
     }
 
     #[test]
@@ -522,12 +536,13 @@ mod tests {
         let subscriber = Subscriber {
             config: config.clone(),
             tx,
-            current_task_id: 0,
+            task_id: 0,
             _task_context: create_mock_task_context(),
+            task_type: "test_task",
         };
 
         assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.current_task_id, 0);
+        assert_eq!(subscriber.task_id, 0);
     }
 
     #[test]
@@ -591,7 +606,7 @@ mod tests {
         let result = SubscriberBuilder::new()
             .config(config)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 

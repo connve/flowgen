@@ -22,13 +22,13 @@ pub struct EventHandler {
     /// Processor configuration settings.
     config: Arc<super::config::Processor>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
 }
 
 impl EventHandler {
     /// Processes an event by logging its data.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
@@ -106,9 +106,11 @@ pub struct Processor {
     /// Channel receiver for incoming events to log.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<crate::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -120,13 +122,13 @@ impl crate::task::runner::Runner for Processor {
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
     async fn run(mut self) -> Result<(), Error> {
         let event_handler = match self.init().await {
             Ok(handler) => Arc::new(handler),
@@ -165,9 +167,11 @@ pub struct ProcessorBuilder {
     /// Event broadcast receiver (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<crate::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl ProcessorBuilder {
@@ -192,13 +196,18 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
     pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -213,10 +222,13 @@ impl ProcessorBuilder {
             _tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -252,7 +264,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -270,13 +282,13 @@ mod tests {
             .config(config)
             .sender(tx)
             .receiver(rx2)
-            .current_task_id(1)
+            .task_id(1)
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(processor.current_task_id, 1);
+        assert_eq!(processor.task_id, 1);
     }
 
     #[tokio::test]
@@ -307,14 +319,13 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            current_task_id: 1,
+            task_id: 1,
         };
 
         let input_event = EventBuilder::new()
             .data(EventData::Json(json!({"message": "test log"})))
             .subject("test.subject".to_string())
-            .current_task_id(0)
-            .task_type("test")
+            .task_id(0)
             .build()
             .unwrap();
 
@@ -332,14 +343,13 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            current_task_id: 1,
+            task_id: 1,
         };
 
         let input_event = EventBuilder::new()
             .data(EventData::Json(json!({"message": "test log"})))
             .subject("test.subject".to_string())
-            .current_task_id(5)
-            .task_type("test")
+            .task_id(5)
             .build()
             .unwrap();
 
