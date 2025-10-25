@@ -38,9 +38,10 @@ impl SenderExt for tokio::sync::broadcast::Sender<Event> {
         &self,
         event: Event,
     ) -> Result<usize, tokio::sync::broadcast::error::SendError<Event>> {
+        let task_type = event.task_type;
         let subject = event.subject.clone();
         let result = self.send(event)?;
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, subject);
+        info!("{}: [{}] {}", DEFAULT_LOG_MESSAGE, task_type, subject);
         Ok(result)
     }
 }
@@ -122,9 +123,28 @@ pub struct Event {
     pub id: Option<String>,
     /// Event creation timestamp in microseconds since Unix epoch.
     pub timestamp: i64,
+    /// Task type for categorization and logging.
+    pub task_type: &'static str,
 }
 
-impl Event {}
+impl Event {
+    /// Creates a JSON representation of the event for template rendering.
+    ///
+    /// Returns a JSON object with event fields that can be used in Handlebars templates.
+    /// The event data is converted to JSON format regardless of its internal representation.
+    pub fn to_template_data(&self) -> Result<serde_json::Value, Error> {
+        let data_value = serde_json::Value::try_from(&self.data)?;
+
+        Ok(serde_json::json!({
+            "subject": self.subject,
+            "data": data_value,
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "current_task_id": self.current_task_id,
+            "task_type": self.task_type,
+        }))
+    }
+}
 
 /// Event data payload supporting multiple serialization formats.
 #[derive(Debug, Clone)]
@@ -202,6 +222,8 @@ pub struct EventBuilder {
     pub id: Option<String>,
     /// Event timestamp, defaults to current time.
     pub timestamp: i64,
+    /// Task type for categorization and logging (required for build).
+    pub task_type: Option<&'static str>,
 }
 
 impl EventBuilder {
@@ -231,6 +253,10 @@ impl EventBuilder {
         self.timestamp = timestamp;
         self
     }
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
+        self
+    }
 
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
@@ -243,6 +269,9 @@ impl EventBuilder {
             id: self.id,
             timestamp: self.timestamp,
             current_task_id: self.current_task_id,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }

@@ -1,5 +1,6 @@
 use super::message::FlowgenMessageExt;
 use flowgen_core::client::Client;
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{
     generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix,
 };
@@ -78,12 +79,17 @@ pub enum Error {
     /// Event building error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
+    /// Configuration rendering error.
+    #[error("Configuration rendering failed: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
 }
 
 pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
     current_task_id: usize,
-    subject: String,
     tx: Sender<Event>,
     config: Arc<super::config::Publisher>,
 }
@@ -94,13 +100,25 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Render config with event data to support templates like "pubsub.{{event.subject}}"
+        let event_data = event.to_template_data().map_err(Error::Event)?;
+
+        let render_data = serde_json::json!({
+            "event": event_data
+        });
+
+        let rendered_config = self
+            .config
+            .render(&render_data)
+            .map_err(|e| Error::ConfigRender { source: e })?;
+
         let e = event.to_publish()?;
 
         let ack_future = self
             .jetstream
             .lock()
             .await
-            .send_publish(self.subject.clone(), e)
+            .send_publish(rendered_config.subject, e)
             .await
             .map_err(|e| Error::Publish { source: e })?;
 
@@ -172,7 +190,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
             let event_handler = EventHandler {
                 jetstream,
                 current_task_id: self.current_task_id,
-                subject: self.config.subject.clone(),
                 tx: self.tx.clone(),
                 config: Arc::clone(&self.config),
             };

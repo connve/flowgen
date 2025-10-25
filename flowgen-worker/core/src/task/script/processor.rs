@@ -56,6 +56,8 @@ pub struct EventHandler {
     current_task_id: usize,
     /// Rhai script engine instance.
     engine: Engine,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -117,6 +119,7 @@ impl EventHandler {
             .data(EventData::Json(data))
             .subject(subject)
             .current_task_id(self.current_task_id)
+            .task_type(self.task_context.task_type)
             .build()?;
 
         self.tx
@@ -169,6 +172,7 @@ impl crate::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
             engine,
+            task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
@@ -289,6 +293,7 @@ mod tests {
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .task_type("test")
                 .build()
                 .unwrap(),
         )
@@ -361,6 +366,7 @@ mod tests {
             tx: tx.clone(),
             current_task_id: 1,
             engine: Engine::new(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -369,6 +375,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         // Drop the original tx so recv can complete
@@ -403,11 +410,13 @@ mod tests {
             tx: tx_clone,
             current_task_id: 1,
             engine: Engine::new(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
             data: EventData::Json(json!({"age": 15})),
             subject: "input.subject".to_string(),
+            task_type: "test",
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
@@ -438,6 +447,7 @@ mod tests {
             tx,
             current_task_id: 1,
             engine: Engine::new(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -446,6 +456,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -486,6 +497,7 @@ mod tests {
             tx,
             current_task_id: 1,
             engine: Engine::new(),
+            task_context: create_mock_task_context(),
         };
 
         // Create an ArrowRecordBatch event
@@ -506,6 +518,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         let result = event_handler.handle(input_event).await;

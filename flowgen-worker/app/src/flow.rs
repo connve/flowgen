@@ -4,7 +4,7 @@
 //! tasks from different processor types. Handles task lifecycle, error
 //! propagation, and resource sharing between tasks.
 
-use crate::config::{FlowConfig, Task};
+use crate::config::{FlowConfig, TaskType};
 use flowgen_core::{event::Event, task::runner::Runner};
 use std::sync::Arc;
 use tokio::{
@@ -107,7 +107,7 @@ impl Flow {
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, Task::http_webhook(_)));
+            .any(|task| matches!(task, TaskType::http_webhook(_)));
 
         if has_webhooks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
@@ -175,13 +175,13 @@ impl Flow {
             Error::MissingRequiredAttribute("tx: init() must be called first".to_string())
         })?;
 
-        let webhook_task_configs: Vec<(usize, Task)> = self
+        let webhook_task_configs: Vec<(usize, TaskType)> = self
             .config
             .flow
             .tasks
             .iter()
             .enumerate()
-            .filter(|(_, task)| matches!(task, Task::http_webhook(_)))
+            .filter(|(_, task)| matches!(task, TaskType::http_webhook(_)))
             .map(|(i, task)| (i, task.clone()))
             .collect();
 
@@ -231,13 +231,13 @@ impl Flow {
 
         // Determine which tasks to run in the main phase.
         // Setup-only tasks (i.e., non-elected webhooks) are excluded from this phase.
-        let main_tasks_configs: Vec<(usize, Task)> = if !is_leader_elected {
+        let main_tasks_configs: Vec<(usize, TaskType)> = if !is_leader_elected {
             self.config
                 .flow
                 .tasks
                 .iter()
                 .enumerate()
-                .filter(|(_, task)| !matches!(task, Task::http_webhook(_)))
+                .filter(|(_, task)| !matches!(task, TaskType::http_webhook(_)))
                 .map(|(i, task)| (i, task.clone()))
                 .collect()
         } else {
@@ -336,7 +336,7 @@ impl Flow {
 /// and must be awaited before the application is ready (e.g., webhooks registering routes),
 /// while background_tasks run indefinitely.
 async fn spawn_tasks(
-    tasks: &[(usize, Task)],
+    tasks: &[(usize, TaskType)],
     tx: &Sender<Event>,
     task_context: &Arc<flowgen_core::task::context::TaskContext>,
 ) -> (
@@ -348,12 +348,22 @@ async fn spawn_tasks(
 
     for (i, task) in tasks.iter() {
         let i = *i; // Copy the index value so it can be moved into async blocks
+
+        // Create per-task context with task type
+        let task_context = Arc::new(flowgen_core::task::context::TaskContext {
+            flow: task_context.flow.clone(),
+            task_manager: Arc::clone(&task_context.task_manager),
+            cache: task_context.cache.clone(),
+            http_server: task_context.http_server.clone(),
+            task_type: task.as_str(),
+        });
+
         match task {
-            Task::convert(config) => {
+            TaskType::convert(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -374,11 +384,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::iterate(config) => {
+            TaskType::iterate(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -399,11 +409,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::log(config) => {
+            TaskType::log(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -424,11 +434,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::script(config) => {
+            TaskType::script(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -449,10 +459,10 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::generate(config) => {
+            TaskType::generate(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -471,11 +481,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::http_request(config) => {
+            TaskType::http_request(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -496,10 +506,10 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::http_webhook(config) => {
+            TaskType::http_webhook(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -520,10 +530,10 @@ async fn spawn_tasks(
                 blocking_tasks.push(task);
             }
 
-            Task::nats_jetstream_subscriber(config) => {
+            TaskType::nats_jetstream_subscriber(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -542,11 +552,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::nats_jetstream_publisher(config) => {
+            TaskType::nats_jetstream_publisher(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -566,10 +576,10 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::salesforce_pubsub_subscriber(config) => {
+            TaskType::salesforce_pubsub_subscriber(config) => {
                 let config = Arc::new(config.to_owned());
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -588,11 +598,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::salesforce_pubsub_publisher(config) => {
+            TaskType::salesforce_pubsub_publisher(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -612,11 +622,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::object_store_reader(config) => {
+            TaskType::object_store_reader(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current().clone();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
@@ -636,11 +646,11 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            Task::object_store_writer(config) => {
+            TaskType::object_store_writer(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
-                let task_context = Arc::clone(task_context);
+                let task_context = Arc::clone(&task_context);
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {

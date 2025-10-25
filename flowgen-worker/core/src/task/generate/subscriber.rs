@@ -165,6 +165,7 @@ impl EventHandler {
                 .data(EventData::Json(data))
                 .subject(subject.clone())
                 .current_task_id(self.current_task_id)
+                .task_type(self.task_context.task_type)
                 .build()?;
             self.tx
                 .send_with_logging(e)

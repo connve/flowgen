@@ -218,6 +218,7 @@ impl EventHandler {
                                 .subject(subject)
                                 .id(event.id)
                                 .current_task_id(self.current_task_id)
+                                .task_type(self.task_context.task_type)
                                 .build()
                                 .map_err(|e| Error::Event { source: e })?;
 

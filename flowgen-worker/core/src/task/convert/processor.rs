@@ -87,6 +87,8 @@ pub struct EventHandler {
     current_task_id: usize,
     /// Optional Avro serialization configuration.
     serializer: Option<Arc<AvroSerializerOptions>>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 /// Avro serialization configuration with schema and thread-safe serializer.
@@ -170,6 +172,7 @@ impl EventHandler {
             .data(data)
             .subject(subject)
             .current_task_id(self.current_task_id)
+            .task_type(self.task_context.task_type)
             .build()?;
 
         self.tx
@@ -237,6 +240,7 @@ impl crate::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
             serializer,
+            task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
@@ -357,6 +361,7 @@ mod tests {
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .task_type("test")
                 .build()
                 .unwrap(),
         )
@@ -510,6 +515,7 @@ mod tests {
             tx,
             current_task_id: 1,
             serializer: None,
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -518,6 +524,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -570,6 +577,7 @@ mod tests {
             tx,
             current_task_id: 1,
             serializer: None,
+            task_context: create_mock_task_context(),
         };
 
         // Create a simple Avro schema and serialize test data
@@ -590,6 +598,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -623,6 +632,7 @@ mod tests {
             tx,
             current_task_id: 1,
             serializer: None,
+            task_context: create_mock_task_context(),
         };
 
         let schema_str = r#"{"type": "string"}"#;
@@ -637,6 +647,7 @@ mod tests {
             current_task_id: Some(0),
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
