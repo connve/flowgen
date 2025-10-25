@@ -35,7 +35,7 @@ pub struct TaskContext {
     /// Optional shared HTTP server for webhook tasks.
     pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
     /// Task type for event categorization and logging.
-    pub task_type: &'static str,
+    pub task_type: Option<&'static str>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -152,9 +152,7 @@ impl TaskContextBuilder {
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_manager".to_string()))?,
             cache: self.cache,
             http_server: self.http_server,
-            task_type: self
-                .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+            task_type: self.task_type,
         })
     }
 }

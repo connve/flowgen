@@ -314,6 +314,7 @@ mod tests {
             .data(EventData::Json(json!({"message": "test log"})))
             .subject("test.subject".to_string())
             .current_task_id(0)
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -338,6 +339,7 @@ mod tests {
             .data(EventData::Json(json!({"message": "test log"})))
             .subject("test.subject".to_string())
             .current_task_id(5)
+            .task_type("test")
             .build()
             .unwrap();
 

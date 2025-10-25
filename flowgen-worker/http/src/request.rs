@@ -96,6 +96,8 @@ pub struct EventHandler {
     tx: Sender<Event>,
     /// Current task identifier.
     current_task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -192,11 +194,16 @@ impl EventHandler {
             DEFAULT_MESSAGE_SUBJECT,
             SubjectSuffix::Timestamp,
         );
-        let e = EventBuilder::new()
+        let mut event_builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(subject.clone())
-            .current_task_id(self.current_task_id)
-            .build()?;
+            .current_task_id(self.current_task_id);
+
+        if let Some(task_type) = self.task_context.task_type {
+            event_builder = event_builder.task_type(task_type);
+        }
+
+        let e = event_builder.build()?;
 
         self.tx
             .send_with_logging(e)
@@ -238,6 +245,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
             client,
+            task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
@@ -658,6 +666,7 @@ mod tests {
             config,
             tx,
             current_task_id: 0,
+            task_context: create_mock_task_context(),
         };
     }
 

@@ -44,7 +44,10 @@ pub trait FlowgenMessageExt {
 pub trait NatsMessageExt {
     type Error;
     /// Convert a NATS message to a flowgen event.
-    fn to_event(&self) -> Result<flowgen_core::event::Event, Self::Error>;
+    fn to_event(
+        &self,
+        task_type: Option<&'static str>,
+    ) -> Result<flowgen_core::event::Event, Self::Error>;
 }
 
 impl FlowgenMessageExt for flowgen_core::event::Event {
@@ -88,12 +91,19 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
 
 impl NatsMessageExt for async_nats::Message {
     type Error = Error;
-    fn to_event(&self) -> Result<flowgen_core::event::Event, Self::Error> {
-        let mut event = EventBuilder::new().subject(self.subject.to_string());
+    fn to_event(
+        &self,
+        task_type: Option<&'static str>,
+    ) -> Result<flowgen_core::event::Event, Self::Error> {
+        let mut event_builder = EventBuilder::new().subject(self.subject.to_string());
         if let Some(headers) = &self.headers {
             if let Some(id) = headers.get(async_nats::header::NATS_MESSAGE_ID) {
-                event = event.id(id.to_string());
+                event_builder = event_builder.id(id.to_string());
             }
+        }
+
+        if let Some(tt) = task_type {
+            event_builder = event_builder.task_type(tt);
         }
 
         let event_data = match deserialize::<AvroData>(&self.payload) {
@@ -118,7 +128,7 @@ impl NatsMessageExt for async_nats::Message {
             },
         };
 
-        event.data(event_data).build().map_err(Error::Event)
+        event_builder.data(event_data).build().map_err(Error::Event)
     }
 }
 
@@ -140,6 +150,7 @@ mod tests {
             .subject("test.subject".to_string())
             .id("test-id-123".to_string())
             .data(EventData::Json(json_data))
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -160,6 +171,7 @@ mod tests {
         let event = EventBuilder::new()
             .subject("avro.test".to_string())
             .data(EventData::Avro(avro_data))
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -174,6 +186,7 @@ mod tests {
         let event = EventBuilder::new()
             .subject("test.no.id".to_string())
             .data(EventData::Json(json_data))
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -196,7 +209,7 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event(None);
         assert!(result.is_ok());
 
         let event = result.unwrap();
@@ -224,7 +237,7 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event(None);
         assert!(result.is_ok());
 
         let event = result.unwrap();
@@ -251,7 +264,7 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event(None);
         assert!(result.is_ok());
 
         let event = result.unwrap();
@@ -269,6 +282,7 @@ mod tests {
         let event = EventBuilder::new()
             .subject("trait.test".to_string())
             .data(EventData::Json(json_data))
+            .task_type("test")
             .build()
             .unwrap();
 

@@ -413,6 +413,7 @@ mod tests {
             .subject("test.subject".to_string())
             .id("test-id".to_string())
             .current_task_id(1)
+            .task_type("test")
             .build()
             .unwrap();
 

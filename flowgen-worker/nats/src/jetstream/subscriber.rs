@@ -87,6 +87,7 @@ pub struct EventHandler {
     tx: Sender<Event>,
     current_task_id: usize,
     config: Arc<super::config::Subscriber>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -107,7 +108,7 @@ impl EventHandler {
 
             while let Some(message) = batch.next().await {
                 if let Ok(message) = message {
-                    let mut e = message.to_event()?;
+                    let mut e = message.to_event(self.task_context.task_type)?;
                     message.ack().await.ok();
                     e.current_task_id = Some(self.current_task_id);
 
@@ -205,6 +206,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 tx: self.tx.clone(),
                 current_task_id: self.current_task_id,
                 config: Arc::clone(&self.config),
+                task_context: Arc::clone(&self._task_context),
             })
         } else {
             Err(Error::Other(

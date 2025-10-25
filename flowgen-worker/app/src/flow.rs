@@ -355,7 +355,7 @@ async fn spawn_tasks(
             task_manager: Arc::clone(&task_context.task_manager),
             cache: task_context.cache.clone(),
             http_server: task_context.http_server.clone(),
-            task_type: task.as_str(),
+            task_type: Some(task.as_str()),
         });
 
         match task {

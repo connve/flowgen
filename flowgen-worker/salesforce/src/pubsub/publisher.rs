@@ -101,6 +101,7 @@ pub struct EventHandler {
     current_task_id: usize,
     /// Channel sender for response events.
     tx: tokio::sync::broadcast::Sender<Event>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -153,10 +154,16 @@ impl EventHandler {
 
         let resp_json = serde_json::to_value(resp).map_err(|e| Error::SerdeJson { source: e })?;
 
-        let e = flowgen_core::event::EventBuilder::new()
+        let mut event_builder = flowgen_core::event::EventBuilder::new()
             .data(flowgen_core::event::EventData::Json(resp_json))
             .subject(subject)
-            .current_task_id(self.current_task_id)
+            .current_task_id(self.current_task_id);
+
+        if let Some(task_type) = self.task_context.task_type {
+            event_builder = event_builder.task_type(task_type);
+        }
+
+        let e = event_builder
             .build()
             .map_err(|e| Error::Event { source: e })?;
 
@@ -268,6 +275,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             schema: Arc::new(schema),
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
+            task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)

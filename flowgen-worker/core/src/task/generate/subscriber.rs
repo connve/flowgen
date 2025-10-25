@@ -161,12 +161,16 @@ impl EventHandler {
             );
 
             // Build and send event.
-            let e = EventBuilder::new()
+            let mut event_builder = EventBuilder::new()
                 .data(EventData::Json(data))
                 .subject(subject.clone())
-                .current_task_id(self.current_task_id)
-                .task_type(self.task_context.task_type)
-                .build()?;
+                .current_task_id(self.current_task_id);
+
+            if let Some(task_type) = self.task_context.task_type {
+                event_builder = event_builder.task_type(task_type);
+            }
+
+            let e = event_builder.build()?;
             self.tx
                 .send_with_logging(e)
                 .map_err(|e| Error::SendMessage { source: e })?;
@@ -331,6 +335,7 @@ mod tests {
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .task_type("test")
                 .build()
                 .unwrap(),
         )

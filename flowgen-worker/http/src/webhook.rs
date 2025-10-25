@@ -93,6 +93,8 @@ pub struct EventHandler {
     current_task_id: usize,
     /// Pre-loaded authentication credentials.
     credentials: Option<Credentials>,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -192,11 +194,16 @@ impl EventHandler {
             DEFAULT_PAYLOAD_KEY: json_body
         });
 
-        let e = EventBuilder::new()
+        let mut event_builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(subject)
-            .current_task_id(self.current_task_id)
-            .build()?;
+            .current_task_id(self.current_task_id);
+
+        if let Some(task_type) = self.task_context.task_type {
+            event_builder = event_builder.task_type(task_type);
+        }
+
+        let e = event_builder.build()?;
 
         self.tx
             .send_with_logging(e)
@@ -243,6 +250,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             current_task_id: self.current_task_id,
             credentials,
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)
@@ -569,6 +577,7 @@ mod tests {
             tx,
             current_task_id: 0,
             credentials: None,
+            task_context: create_mock_task_context(),
         };
     }
 
@@ -594,6 +603,7 @@ mod tests {
             tx,
             current_task_id: 1,
             credentials: None,
+            task_context: create_mock_task_context(),
         };
 
         assert!(handler.config.headers.is_some());
@@ -621,6 +631,7 @@ mod tests {
             tx,
             current_task_id: 1,
             credentials: None,
+            task_context: create_mock_task_context(),
         };
 
         assert!(handler.config.headers.is_none());

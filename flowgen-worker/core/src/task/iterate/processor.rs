@@ -100,12 +100,16 @@ impl EventHandler {
                 SubjectSuffix::Timestamp,
             );
 
-            let e = EventBuilder::new()
+            let mut event_builder = EventBuilder::new()
                 .data(EventData::Json(element))
                 .subject(subject)
-                .current_task_id(self.current_task_id)
-                .task_type(self.task_context.task_type)
-                .build()?;
+                .current_task_id(self.current_task_id);
+
+            if let Some(task_type) = self.task_context.task_type {
+                event_builder = event_builder.task_type(task_type);
+            }
+
+            let e = event_builder.build()?;
 
             self.tx
                 .send_with_logging(e)
