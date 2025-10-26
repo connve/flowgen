@@ -13,9 +13,6 @@ use std::{
 use tokio::{sync::broadcast::Sender, time};
 use tracing::{error, warn, Instrument};
 
-/// Default subject prefix for generated events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
-
 /// System information included in generated events for time-based filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
@@ -35,7 +32,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: tokio::sync::broadcast::error::SendError<Event>,
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
     /// Event construction failed.
     #[error(transparent)]
@@ -60,8 +57,9 @@ pub enum Error {
 pub struct EventHandler {
     config: Arc<crate::task::generate::config::Subscriber>,
     tx: Sender<Event>,
-    current_task_id: usize,
+    task_id: usize,
     task_context: Arc<crate::task::context::TaskContext>,
+    task_type: &'static str,
 }
 
 impl EventHandler {
@@ -72,10 +70,11 @@ impl EventHandler {
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
 
-        // Generate a cache_key based on flow name and task name.
+        // Generate a cache_key based on flow name, task type, and task name.
         let cache_key = format!(
-            "{flow_name}.{DEFAULT_MESSAGE_SUBJECT}.{task_name}.last_run",
+            "{flow_name}.{task_type}.{task_name}.last_run",
             flow_name = self.task_context.flow.name,
+            task_type = self.task_type,
             task_name = self.config.name
         );
 
@@ -154,21 +153,18 @@ impl EventHandler {
             };
 
             // Generate event subject.
-            let subject = generate_subject(
-                Some(&self.config.name),
-                DEFAULT_MESSAGE_SUBJECT,
-                SubjectSuffix::Timestamp,
-            );
+            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
             // Build and send event.
             let e = EventBuilder::new()
                 .data(EventData::Json(data))
                 .subject(subject.clone())
-                .current_task_id(self.current_task_id)
+                .task_id(self.task_id)
+                .task_type(self.task_type)
                 .build()?;
             self.tx
                 .send_with_logging(e)
-                .map_err(|e| Error::SendMessage { source: e })?;
+                .map_err(|source| Error::SendMessage { source })?;
 
             // Update cache with current time after sending the event.
             let current_time = SystemTime::now()
@@ -200,9 +196,11 @@ pub struct Subscriber {
     /// Channel sender for broadcasting generated events.
     tx: Sender<Event>,
     /// Task identifier for event tracking.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -214,12 +212,13 @@ impl crate::task::runner::Runner for Subscriber {
         Ok(EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             task_context: Arc::clone(&self.task_context),
+            task_type: self.task_type,
         })
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let event_handler = self.init().await?;
 
@@ -244,10 +243,12 @@ pub struct SubscriberBuilder {
     config: Option<Arc<crate::task::generate::config::Subscriber>>,
     /// Event broadcast sender (required for build).
     tx: Option<Sender<Event>>,
-    /// Current task identifier for event tracking.
-    current_task_id: usize,
+    /// Task identifier for event tracking.
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<crate::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl SubscriberBuilder {
@@ -267,13 +268,18 @@ impl SubscriberBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
     pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -285,10 +291,13 @@ impl SubscriberBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -377,7 +386,7 @@ mod tests {
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -394,13 +403,14 @@ mod tests {
         let subscriber = SubscriberBuilder::new()
             .config(config.clone())
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(subscriber.current_task_id, 1);
+        assert_eq!(subscriber.task_id, 1);
         assert_eq!(subscriber.config.interval, 1);
     }
 
@@ -452,7 +462,8 @@ mod tests {
         let subscriber = Subscriber {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
+            task_type: "test",
             task_context: create_mock_task_context(),
         };
 
@@ -463,10 +474,10 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         let event2 = rx.recv().await.unwrap();
 
-        assert!(event1.subject.starts_with("generate.test."));
-        assert!(event2.subject.starts_with("generate.test."));
-        assert_eq!(event1.current_task_id, Some(1));
-        assert_eq!(event2.current_task_id, Some(1));
+        assert!(event1.subject.starts_with("test."));
+        assert!(event2.subject.starts_with("test."));
+        assert_eq!(event1.task_id, 1);
+        assert_eq!(event2.task_id, 1);
 
         let _ = handle.await;
         assert!(rx.try_recv().is_err());
@@ -486,7 +497,8 @@ mod tests {
         let subscriber = Subscriber {
             config,
             tx,
-            current_task_id: 0,
+            task_id: 0,
+            task_type: "test",
             task_context: create_mock_task_context(),
         };
 
@@ -540,7 +552,8 @@ mod tests {
         let subscriber = Subscriber {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
+            task_type: "test",
             task_context,
         };
 
@@ -550,9 +563,9 @@ mod tests {
         // Wait a bit for the spawned task to complete
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Check that cache key was created with label format
+        // Check that cache key was created with flow.task_type.task format
         let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("test-flow.generate.test.last_run"));
+        assert!(cache_data.contains_key("test-flow.test.test.last_run"));
     }
 
     #[tokio::test]
@@ -563,7 +576,7 @@ mod tests {
         let result = SubscriberBuilder::new()
             .config(config)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
