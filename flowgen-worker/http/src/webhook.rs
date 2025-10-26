@@ -15,8 +15,6 @@ use std::{fs, sync::Arc};
 use tokio::sync::broadcast::Sender;
 use tracing::{error, Instrument};
 
-/// Default subject for webhook events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "http_webhook";
 /// JSON key for HTTP headers in webhook events.
 const DEFAULT_HEADERS_KEY: &str = "headers";
 /// JSON key for HTTP payload in webhook events.
@@ -153,11 +151,7 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
         // Validate the authentication and return error if request is not authorized.
         if let Err(auth_error) = self.validate_authentication(&headers) {
@@ -257,7 +251,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -575,7 +569,6 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http_webhook");
         assert_eq!(DEFAULT_HEADERS_KEY, "headers");
         assert_eq!(DEFAULT_PAYLOAD_KEY, "payload");
     }

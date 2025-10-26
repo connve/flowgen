@@ -11,9 +11,6 @@ use tokio::sync::{
 };
 use tracing::{error, Instrument};
 
-/// Default subject prefix for NATS publisher.
-const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_publisher";
-
 /// Serializable representation of a NATS JetStream publish acknowledgment.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PublishAck {
@@ -127,11 +124,7 @@ impl EventHandler {
         let ack: PublishAck = ack.into();
         let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
         let e = EventBuilder::new()
             .subject(subject)
@@ -205,7 +198,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         }
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {

@@ -8,7 +8,6 @@ use tokio::sync::{broadcast::Sender, Mutex};
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
-const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_subscriber";
 const DEFAULT_NUM_REQUESTED: i32 = 100;
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
@@ -205,14 +204,16 @@ impl EventHandler {
                             // Normalize topic name.
                             let topic = topic_name.replace('/', ".").to_lowercase();
 
-                            // Generate event subject.
-                            let base_subject = if let Some(stripped) = topic.strip_prefix('.') {
-                                format!("{DEFAULT_MESSAGE_SUBJECT}.{stripped}")
+                            // Generate event subject prefix from topic name.
+                            let subject_prefix = if let Some(stripped) = topic.strip_prefix('.') {
+                                stripped.to_string()
                             } else {
-                                format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
+                                topic
                             };
-                            let subject =
-                                generate_subject(None, &base_subject, SubjectSuffix::Id(&event.id));
+                            let subject = generate_subject(
+                                &subject_prefix,
+                                Some(SubjectSuffix::Id(&event.id)),
+                            );
 
                             // Build and send event.
                             let e = EventBuilder::new()
@@ -321,7 +322,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     }
 
     /// Runs the subscriber by initializing and spawning the event handler task.
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {

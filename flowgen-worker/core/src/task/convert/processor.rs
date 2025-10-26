@@ -15,9 +15,6 @@ use tokio::sync::{
 };
 use tracing::{error, Instrument};
 
-/// Default subject prefix for converted events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
-
 /// Errors that can occur during event conversion operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -163,11 +160,7 @@ impl EventHandler {
         };
 
         // Generate event subject.
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
         // Build and send event.
         let e = EventBuilder::new()
@@ -251,7 +244,7 @@ impl crate::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -555,7 +548,7 @@ mod tests {
             }
             _ => panic!("Expected JSON passthrough"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
+        assert!(output_event.subject.starts_with("test."));
         assert_eq!(output_event.task_id, 1);
     }
 
@@ -630,7 +623,7 @@ mod tests {
             }
             _ => panic!("Expected JSON output from Avro conversion"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
+        assert!(output_event.subject.starts_with("test."));
         assert_eq!(output_event.task_id, 1);
     }
 
@@ -681,7 +674,7 @@ mod tests {
             }
             _ => panic!("Expected Avro passthrough"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
+        assert!(output_event.subject.starts_with("test."));
         assert_eq!(output_event.task_id, 1);
     }
 }

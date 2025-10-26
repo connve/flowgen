@@ -13,9 +13,6 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
-/// Default log message format for event processing.
-pub const DEFAULT_LOG_MESSAGE: &str = "Event processed";
-
 /// Subject suffix options for event subjects.
 pub enum SubjectSuffix<'a> {
     /// Use current timestamp as suffix.
@@ -38,39 +35,35 @@ impl SenderExt for tokio::sync::broadcast::Sender<Event> {
         &self,
         event: Event,
     ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>> {
-        let task_type = event.task_type;
         let subject = event.subject.clone();
         let result = self.send(event).map_err(Box::new)?;
-        info!("{}: [{}] {}", DEFAULT_LOG_MESSAGE, task_type, subject);
+        info!("Event processed: {}", subject);
         Ok(result)
     }
 }
 
-/// Generates a structured subject string from a base subject, a required task name, and a suffix.
+/// Generates a structured subject string from a prefix and an optional suffix.
 ///
-/// The resulting subject is formatted as: `<base_subject>.<task_name>.<suffix_value>`.
-/// The `task_name` is always converted to lowercase.
+/// The resulting subject is formatted as:
+/// - With suffix: `<prefix>.<suffix_value>`
+/// - Without suffix: `<prefix>`
 ///
 /// # Arguments
-/// * `task_name` - Optional name of the task. If provided, it is used as a component of the subject
-///   and automatically converted to lowercase. If None, the task name is omitted from the subject.
-/// * `base_subject` - The fixed base prefix for the subject string (e.g., a service or stream name).
-/// * `suffix` - The dynamic suffix type (timestamp or a custom ID).
+/// * `prefix` - The subject prefix (e.g., task name, topic name, or identifier).
+/// * `suffix` - Optional dynamic suffix for uniqueness (timestamp or custom ID).
 ///
 /// # Returns
-/// A formatted subject string with the dynamic suffix, optionally including the task name.
-pub fn generate_subject(
-    task_name: Option<&str>,
-    base_subject: &str,
-    suffix: SubjectSuffix,
-) -> String {
-    let suffix_str = match suffix {
-        SubjectSuffix::Timestamp => Utc::now().timestamp_micros().to_string(),
-        SubjectSuffix::Id(id) => id.to_string(),
-    };
-    match task_name {
-        Some(name) => format!("{}.{}.{}", base_subject, name.to_lowercase(), suffix_str),
-        None => format!("{base_subject}.{suffix_str}"),
+/// A formatted subject string with the optional suffix.
+pub fn generate_subject(prefix: &str, suffix: Option<SubjectSuffix>) -> String {
+    match suffix {
+        Some(SubjectSuffix::Timestamp) => {
+            let timestamp = Utc::now().timestamp_micros();
+            format!("{prefix}.{timestamp}")
+        }
+        Some(SubjectSuffix::Id(id)) => {
+            format!("{prefix}.{id}")
+        }
+        None => prefix.to_string(),
     }
 }
 
@@ -386,28 +379,27 @@ mod tests {
 
     #[test]
     fn test_generate_subject_with_id() {
-        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Id("123"));
-        assert_eq!(subject, "base.subject.task-name.123");
+        let subject = generate_subject("task-name", Some(SubjectSuffix::Id("123")));
+        assert_eq!(subject, "task-name.123");
     }
 
     #[test]
-    fn test_generate_subject_with_id_no_task() {
-        let subject = generate_subject(None, "base.subject", SubjectSuffix::Id("123"));
-        assert_eq!(subject, "base.subject.123");
+    fn test_generate_subject_no_suffix() {
+        let subject = generate_subject("task-name", None);
+        assert_eq!(subject, "task-name");
     }
 
     #[test]
     fn test_generate_subject_with_timestamp() {
-        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Timestamp);
-        assert!(subject.starts_with("base.subject.task-name."));
-        assert!(subject.len() > "base.subject.task-name.".len());
+        let subject = generate_subject("task-name", Some(SubjectSuffix::Timestamp));
+        assert!(subject.starts_with("task-name."));
+        assert!(subject.len() > "task-name.".len());
     }
 
     #[test]
-    fn test_generate_subject_with_timestamp_no_task() {
-        let subject = generate_subject(None, "base.subject", SubjectSuffix::Timestamp);
-        assert!(subject.starts_with("base.subject."));
-        assert!(subject.len() > "base.subject.".len());
+    fn test_generate_subject_with_topic_prefix() {
+        let subject = generate_subject("event.myevent__e", Some(SubjectSuffix::Id("evt123")));
+        assert_eq!(subject, "event.myevent__e.evt123");
     }
 
     #[test]

@@ -13,9 +13,6 @@ use std::{
 use tokio::{sync::broadcast::Sender, time};
 use tracing::{error, warn, Instrument};
 
-/// Default subject prefix for generated events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "generate";
-
 /// System information included in generated events for time-based filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
@@ -73,10 +70,11 @@ impl EventHandler {
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
 
-        // Generate a cache_key based on flow name and task name.
+        // Generate a cache_key based on flow name, task type, and task name.
         let cache_key = format!(
-            "{flow_name}.{DEFAULT_MESSAGE_SUBJECT}.{task_name}.last_run",
+            "{flow_name}.{task_type}.{task_name}.last_run",
             flow_name = self.task_context.flow.name,
+            task_type = self.task_type,
             task_name = self.config.name
         );
 
@@ -155,11 +153,7 @@ impl EventHandler {
             };
 
             // Generate event subject.
-            let subject = generate_subject(
-                Some(&self.config.name),
-                DEFAULT_MESSAGE_SUBJECT,
-                SubjectSuffix::Timestamp,
-            );
+            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
             // Build and send event.
             let e = EventBuilder::new()
@@ -224,7 +218,7 @@ impl crate::task::runner::Runner for Subscriber {
         })
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let event_handler = self.init().await?;
 
@@ -480,8 +474,8 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         let event2 = rx.recv().await.unwrap();
 
-        assert!(event1.subject.starts_with("generate.test."));
-        assert!(event2.subject.starts_with("generate.test."));
+        assert!(event1.subject.starts_with("test."));
+        assert!(event2.subject.starts_with("test."));
         assert_eq!(event1.task_id, 1);
         assert_eq!(event2.task_id, 1);
 
@@ -569,9 +563,9 @@ mod tests {
         // Wait a bit for the spawned task to complete
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Check that cache key was created with label format
+        // Check that cache key was created with flow.task_type.task format
         let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("test-flow.generate.test.last_run"));
+        assert!(cache_data.contains_key("test-flow.test.test.last_run"));
     }
 
     #[tokio::test]

@@ -10,9 +10,6 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{error, Instrument};
 
-/// Default subject prefix for logging messages.
-const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_writer";
-
 /// Status of an object store write operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -173,7 +170,7 @@ impl EventHandler {
             Some(e_tag) => SubjectSuffix::Id(e_tag.trim_matches('"')),
             None => SubjectSuffix::Timestamp,
         };
-        let subject = generate_subject(Some(&self.config.name), DEFAULT_MESSAGE_SUBJECT, suffix);
+        let subject = generate_subject(&self.config.name, Some(suffix));
 
         // Build and send event.
         let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
@@ -252,7 +249,7 @@ impl flowgen_core::task::runner::Runner for Writer {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {

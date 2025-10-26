@@ -18,9 +18,6 @@ use tokio::{
 };
 use tracing::{error, Instrument};
 
-/// Default subject for HTTP response events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
-
 /// Errors that can occur during HTTP request processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -191,11 +188,7 @@ impl EventHandler {
         // Try to parse as JSON, fall back to string if it fails
         let data = serde_json::from_str::<Value>(&resp).unwrap_or_else(|_| json!(resp));
 
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
         let e = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(subject.clone())
@@ -252,7 +245,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -661,11 +654,6 @@ mod tests {
 
         assert_eq!(processor.config, config);
         assert_eq!(processor.task_id, 10);
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http_request");
     }
 
     #[test]

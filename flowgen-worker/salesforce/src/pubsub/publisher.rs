@@ -10,8 +10,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{error, Instrument};
 
-const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_publisher";
-
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -91,8 +89,8 @@ pub struct EventHandler {
     pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
     /// Topic name for publishing.
     topic: String,
-    /// Base subject for event generation.
-    base_subject: String,
+    /// Subject prefix for event generation (derived from topic name).
+    subject_prefix: String,
     /// Schema ID for event serialization.
     schema_id: String,
     /// Avro serializer configuration.
@@ -151,7 +149,7 @@ impl EventHandler {
             .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
-        let subject = generate_subject(None, &self.base_subject, SubjectSuffix::Id(&resp.rpc_id));
+        let subject = generate_subject(&self.subject_prefix, Some(SubjectSuffix::Id(&resp.rpc_id)));
 
         let resp_json = serde_json::to_value(resp).map_err(|e| Error::SerdeJson { source: e })?;
 
@@ -254,12 +252,12 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let schema = AvroSchema::parse_str(&schema_info.schema_json)
             .map_err(|e| Error::Avro { source: e })?;
 
-        // Generate base subject.
+        // Generate subject prefix from topic name.
         let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
-        let base_subject = if let Some(stripped) = topic.strip_prefix('.') {
-            format!("{DEFAULT_MESSAGE_SUBJECT}.{stripped}")
+        let subject_prefix = if let Some(stripped) = topic.strip_prefix('.') {
+            stripped.to_string()
         } else {
-            format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
+            topic
         };
 
         let topic_name = self.config.topic.clone();
@@ -268,7 +266,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             config: Arc::clone(&self.config),
             pubsub,
             topic: topic_name,
-            base_subject,
+            subject_prefix,
             schema_id: schema_info.schema_id,
             schema: Arc::new(schema),
             task_id: self.task_id,
@@ -279,7 +277,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let event_handler = match self.init().await {
             Ok(handler) => Arc::new(handler),

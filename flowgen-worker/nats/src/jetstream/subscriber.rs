@@ -9,9 +9,6 @@ use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
 use tracing::{error, Instrument};
 
-/// Default subject prefix for NATS subscriber.
-const DEFAULT_MESSAGE_SUBJECT: &str = "nats_jetstream_subscriber";
-
 /// Default batch size for fetching messages.
 const DEFAULT_BATCH_SIZE: usize = 100;
 
@@ -216,7 +213,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         }
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {

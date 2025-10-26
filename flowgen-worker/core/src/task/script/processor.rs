@@ -10,9 +10,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
 
-/// Default subject prefix for script-transformed events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "script";
-
 /// Errors that can occur during script execution.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -111,11 +108,7 @@ impl EventHandler {
 
     /// Emits a single event with the given data.
     async fn emit_event(&self, data: Value) -> Result<(), Error> {
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
         let e = EventBuilder::new()
             .data(EventData::Json(data))
@@ -183,7 +176,7 @@ impl crate::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
