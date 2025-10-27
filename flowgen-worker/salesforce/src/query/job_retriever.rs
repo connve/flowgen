@@ -90,6 +90,8 @@ pub struct JobRetriever {
     rx: Receiver<Event>,
     /// Unique identifier for tracking events.
     current_task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 /// Event handler for processing individual job retrieval requests.
@@ -102,6 +104,8 @@ pub struct EventHandler {
     current_task_id: usize,
     /// SFDC client.
     sfdc_client: salesforce_core::client::Client,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 impl EventHandler {
@@ -212,6 +216,7 @@ impl EventHandler {
                                     ))
                                     .subject(subject.clone())
                                     .task_id(self.current_task_id)
+                                    .task_type(self.task_type)
                                     .build()?;
                                 self.tx
                                     .send_with_logging(e)
@@ -233,6 +238,7 @@ pub struct ProcessorBuilder {
     tx: Option<Sender<Event>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
+    task_type: Option<&'static str>,
 }
 
 #[async_trait::async_trait]
@@ -261,6 +267,7 @@ impl flowgen_core::task::runner::Runner for JobRetriever {
             tx: self.tx.clone(),
             client,
             sfdc_client,
+            task_type: self.task_type,
         };
         Ok(event_handler)
     }
@@ -328,6 +335,12 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Sets the task type.
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
+        self
+    }
+
     /// Builds JobRetriever after validating required fields.
     pub async fn build(self) -> Result<JobRetriever, Error> {
         Ok(JobRetriever {
@@ -341,6 +354,9 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -594,6 +610,7 @@ mod tests {
             tx: tx.clone(),
             rx,
             current_task_id: 7,
+            task_type: "",
         };
 
         assert_eq!(processor.current_task_id, 7);

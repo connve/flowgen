@@ -80,6 +80,8 @@ pub struct JobCreator {
     rx: Receiver<Event>,
     /// Unique identifier for tracking events.
     current_task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 /// Event handler for processing individual job creation requests.
@@ -94,6 +96,8 @@ pub struct EventHandler {
     current_task_id: usize,
     /// SFDC client
     sfdc_client: salesforce_core::client::Client,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 impl EventHandler {
@@ -164,6 +168,7 @@ impl EventHandler {
             .data(EventData::Json(data))
             .subject(subject.clone())
             .task_id(self.current_task_id)
+            .task_type(self.task_type)
             .build()
             .map_err(|e| Error::Event { source: e })?;
         self.tx
@@ -200,6 +205,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
             tx: self.tx.clone(),
             client,
             sfdc_client,
+            task_type: self.task_type,
         };
         Ok(event_handler)
     }
@@ -243,6 +249,7 @@ pub struct ProcessorBuilder {
     tx: Option<Sender<Event>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
+    task_type: Option<&'static str>,
 }
 
 impl ProcessorBuilder {
@@ -277,6 +284,11 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
+        self
+    }
+
     /// Builds JobCreator after validating required fields.
     pub async fn build(self) -> Result<JobCreator, Error> {
         Ok(JobCreator {
@@ -290,6 +302,9 @@ impl ProcessorBuilder {
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             current_task_id: self.current_task_id,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -701,6 +716,7 @@ mod tests {
             tx: tx.clone(),
             rx,
             current_task_id: 5,
+            task_type: "",
         };
 
         assert_eq!(processor.current_task_id, 5);
