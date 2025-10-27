@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -13,12 +13,12 @@ publish = false
 [workspace.dependencies]
 salesforce_core = { git = "https://github.com/connve-labs/salesforce-rs" }
 salesforce_pubsub_v1 = { git = "https://github.com/connve-labs/salesforce-rs" }
-object_store = { version = "0.12.3", features = ["gcp", "fs"] }
-bytes = { version = "1.9.0" }
-handlebars = { version = "6.3.0" }
-arrow = { version = "54" }
-arrow-json = { version = "54" }
-chrono = { version = "0.4.39" }
+object_store = { version = "0.12", features = ["gcp", "fs"] }
+bytes = { version = "1.10" }
+handlebars = { version = "6.3" }
+arrow = { version = "54.3" }
+arrow-json = { version = "54.3" }
+chrono = { version = "0.4" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3.20" }
 serde = { version = "1.0.195", features = ["derive"] }

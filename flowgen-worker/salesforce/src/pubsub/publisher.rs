@@ -10,8 +10,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast::Receiver, Mutex};
 use tracing::{error, Instrument};
 
-const DEFAULT_MESSAGE_SUBJECT: &str = "salesforce_pubsub_publisher";
-
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -49,7 +47,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: tokio::sync::broadcast::error::SendError<Event>,
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
     /// Flowgen core event system error.
     #[error("Event error: {source}")]
@@ -91,16 +89,18 @@ pub struct EventHandler {
     pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
     /// Topic name for publishing.
     topic: String,
-    /// Base subject for event generation.
-    base_subject: String,
+    /// Subject prefix for event generation (derived from topic name).
+    subject_prefix: String,
     /// Schema ID for event serialization.
     schema_id: String,
     /// Avro serializer configuration.
     schema: Arc<AvroSchema>,
     /// Current task identifier.
-    current_task_id: usize,
+    task_id: usize,
     /// Channel sender for response events.
     tx: tokio::sync::broadcast::Sender<Event>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 impl EventHandler {
@@ -149,20 +149,21 @@ impl EventHandler {
             .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
-        let subject = generate_subject(None, &self.base_subject, SubjectSuffix::Id(&resp.rpc_id));
+        let subject = generate_subject(&self.subject_prefix, Some(SubjectSuffix::Id(&resp.rpc_id)));
 
         let resp_json = serde_json::to_value(resp).map_err(|e| Error::SerdeJson { source: e })?;
 
         let e = flowgen_core::event::EventBuilder::new()
             .data(flowgen_core::event::EventData::Json(resp_json))
             .subject(subject)
-            .current_task_id(self.current_task_id)
+            .task_id(self.task_id)
+            .task_type(self.task_type)
             .build()
             .map_err(|e| Error::Event { source: e })?;
 
         self.tx
             .send_with_logging(e)
-            .map_err(|e| Error::SendMessage { source: e })?;
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }
@@ -178,9 +179,11 @@ pub struct Publisher {
     /// Channel sender for response events.
     tx: tokio::sync::broadcast::Sender<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -249,12 +252,12 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let schema = AvroSchema::parse_str(&schema_info.schema_json)
             .map_err(|e| Error::Avro { source: e })?;
 
-        // Generate base subject.
+        // Generate subject prefix from topic name.
         let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
-        let base_subject = if let Some(stripped) = topic.strip_prefix('.') {
-            format!("{DEFAULT_MESSAGE_SUBJECT}.{stripped}")
+        let subject_prefix = if let Some(stripped) = topic.strip_prefix('.') {
+            stripped.to_string()
         } else {
-            format!("{DEFAULT_MESSAGE_SUBJECT}.{topic}")
+            topic
         };
 
         let topic_name = self.config.topic.clone();
@@ -263,17 +266,18 @@ impl flowgen_core::task::runner::Runner for Publisher {
             config: Arc::clone(&self.config),
             pubsub,
             topic: topic_name,
-            base_subject,
+            subject_prefix,
             schema_id: schema_info.schema_id,
             schema: Arc::new(schema),
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             tx: self.tx.clone(),
+            task_type: self.task_type,
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let event_handler = match self.init().await {
             Ok(handler) => Arc::new(handler),
@@ -286,7 +290,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         loop {
             match self.rx.recv().await {
                 Ok(event) => {
-                    if event.current_task_id == event_handler.current_task_id.checked_sub(1) {
+                    if Some(event.task_id) == event_handler.task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
                         tokio::spawn(
                             async move {
@@ -309,8 +313,9 @@ pub struct PublisherBuilder {
     config: Option<Arc<super::config::Publisher>>,
     rx: Option<Receiver<Event>>,
     tx: Option<tokio::sync::broadcast::Sender<Event>>,
-    current_task_id: usize,
+    task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    task_type: Option<&'static str>,
 }
 
 impl PublisherBuilder {
@@ -335,8 +340,8 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
@@ -345,6 +350,11 @@ impl PublisherBuilder {
         task_context: Arc<flowgen_core::task::context::TaskContext>,
     ) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -359,10 +369,13 @@ impl PublisherBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -398,7 +411,7 @@ mod tests {
         let builder = PublisherBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.rx.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -424,9 +437,9 @@ mod tests {
     }
 
     #[test]
-    fn test_publisher_builder_current_task_id() {
-        let builder = PublisherBuilder::new().current_task_id(42);
-        assert_eq!(builder.current_task_id, 42);
+    fn test_publisher_builder_task_id() {
+        let builder = PublisherBuilder::new().task_id(42);
+        assert_eq!(builder.task_id, 42);
     }
 
     #[tokio::test]
@@ -434,7 +447,7 @@ mod tests {
         let (_, rx) = broadcast::channel::<Event>(10);
         let result = PublisherBuilder::new()
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -456,7 +469,7 @@ mod tests {
 
         let result = PublisherBuilder::new()
             .config(config)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -486,14 +499,15 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .current_task_id(5)
+            .task_id(5)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
 
         assert!(result.is_ok());
         let publisher = result.unwrap();
-        assert_eq!(publisher.current_task_id, 5);
+        assert_eq!(publisher.task_id, 5);
         assert_eq!(publisher.config.topic, "/event/Test__e");
     }
 
@@ -512,7 +526,7 @@ mod tests {
             .config(config)
             .receiver(rx)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 

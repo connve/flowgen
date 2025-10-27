@@ -1,3 +1,4 @@
+use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -9,6 +10,8 @@ pub struct Config {
     /// Path to credentials file containing NATS authentication details.
     pub credentials_path: PathBuf,
     /// Subject to publish/subscribe to/from.
+    /// For publisher: supports handlebars templates like "pubsub.{{event.subject}}" which renders with event data.
+    /// For subscriber: the subject pattern to subscribe to.
     pub subject: String,
     /// Optional stream configuration. If provided for publisher, ensures stream exists.
     /// Required for subscriber as the stream name to consume from.
@@ -26,6 +29,8 @@ pub type Publisher = Config;
 
 /// Type alias for backward compatibility with subscriber code.
 pub type Subscriber = Config;
+
+impl ConfigExt for Config {}
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct StreamOptions {
@@ -83,7 +88,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.name, String::new());
         assert_eq!(config.credentials_path, PathBuf::new());
-        assert_eq!(config.subject, "");
+        assert_eq!(config.subject, String::new());
         assert_eq!(config.stream, None);
         assert_eq!(config.durable_name, None);
         assert_eq!(config.batch_size, None);

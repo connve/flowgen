@@ -11,6 +11,26 @@ const DEFAULT_LEASE_RENEWAL_INTERVAL_SECS: u64 = 10;
 /// Lease acquisition retry interval in seconds.
 const DEFAULT_LEASE_RETRY_INTERVAL_SECS: u64 = 5;
 
+/// Spawns a task to continuously renew a Kubernetes lease.
+fn spawn_renewal_task(
+    task_id: String,
+    lease_name: String,
+    host: Arc<dyn crate::host::Host>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(DEFAULT_LEASE_RENEWAL_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            if let Err(e) = host.renew_lease(&lease_name, None).await {
+                error!("Failed to renew lease for task: {}, {}", task_id, e);
+            } else {
+                debug!("Successfully renewed lease for task: {}", task_id);
+            }
+        }
+    })
+}
+
 /// Task manager errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -69,41 +89,19 @@ impl TaskManager {
         tokio::spawn(
             async move {
                 while let Some(registration) = rx.recv().await {
-                // Process task registration.
                 info!("Received task registration: {:?}", registration.task_id);
-
                 let result = if registration.leader_election_options.is_some() {
-                    // Leader election is required.
                     if let Some(ref host_client) = host {
                         // Sanitize task_id to be DNS-safe (RFC 1123): replace underscores with hyphens.
                         let lease_name = registration.task_id.replace('_', "-").to_lowercase();
                         match host_client.create_lease(&lease_name).await {
                             Ok(_) => {
                                 // Successfully acquired the lease, spawn renewal task.
-                                let task_id = registration.task_id.clone();
-                                let lease_name_clone = lease_name.clone();
-                                let host = host_client.clone();
-                                let renewal_handle = tokio::spawn(async move {
-                                    let mut interval = tokio::time::interval(Duration::from_secs(
-                                        DEFAULT_LEASE_RENEWAL_INTERVAL_SECS,
-                                    ));
-                                    loop {
-                                        interval.tick().await;
-                                        if let Err(e) =
-                                            host.renew_lease(&lease_name_clone, None).await
-                                        {
-                                            error!(
-                                                "Failed to renew lease for task: {}, {}",
-                                                task_id, e
-                                            );
-                                        } else {
-                                            debug!(
-                                                "Successfully renewed lease for task: {}",
-                                                task_id
-                                            );
-                                        }
-                                    }
-                                });
+                                let renewal_handle = spawn_renewal_task(
+                                    registration.task_id.clone(),
+                                    lease_name.clone(),
+                                    host_client.clone(),
+                                );
 
                                 // Store the renewal handle.
                                 active_leases
@@ -141,34 +139,13 @@ impl TaskManager {
                                                 );
 
                                                 // Spawn renewal task.
-                                                let task_id_clone = task_id.clone();
-                                                let lease_name_renewal = lease_name_clone.clone();
-                                                let host_renewal = host.clone();
-                                                let renewal_handle = tokio::spawn(async move {
-                                                    let mut interval =
-                                                        tokio::time::interval(Duration::from_secs(
-                                                            DEFAULT_LEASE_RENEWAL_INTERVAL_SECS,
-                                                        ));
-                                                    loop {
-                                                        interval.tick().await;
-                                                        if let Err(e) = host_renewal
-                                                            .renew_lease(&lease_name_renewal, None)
-                                                            .await
-                                                        {
-                                                            error!(
-                                                                "Failed to renew lease for task, {}, {}",
-                                                                task_id_clone, e
-                                                            );
-                                                        } else {
-                                                            debug!(
-                                                                "Successfully renewed lease for task: {}",
-                                                                task_id_clone
-                                                            );
-                                                        }
-                                                    }
-                                                });
+                                                let renewal_handle = spawn_renewal_task(
+                                                    task_id.clone(),
+                                                    lease_name_clone.clone(),
+                                                    host.clone(),
+                                                );
 
-                                                // Store the renewal handle.
+                                                // Store the renewal handle, replacing the retry handle.
                                                 active_leases_clone
                                                     .lock()
                                                     .await
@@ -202,7 +179,9 @@ impl TaskManager {
                                     .await
                                     .insert(registration.task_id.clone(), retry_handle);
 
-                                LeaderElectionResult::NotLeader
+                                // Don't send any result now - the retry task will send Leader when it succeeds.
+                                // This prevents duplicate task spawning.
+                                continue;
                             }
                         }
                     } else {
@@ -223,12 +202,10 @@ impl TaskManager {
                     .response_tx
                     .send(result)
                     .map_err(|e| {
-                        if result != LeaderElectionResult::NoElection {
-                            error!(
-                                "Failed to send leader election result for task: {}, {}",
-                                registration.task_id, e
-                            );
-                        }
+                        error!(
+                            "Failed to send leader election result for task: {}, {}",
+                            registration.task_id, e
+                        );
                     })
                     .ok();
                 }

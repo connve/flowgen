@@ -25,7 +25,7 @@ pub struct Flow {
     /// Optional label for logging.
     pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
-    pub tasks: Vec<Task>,
+    pub tasks: Vec<TaskType>,
     /// Whether this flow requires leader election (defaults to false if not specified).
     pub require_leader_election: Option<bool>,
 }
@@ -37,7 +37,7 @@ pub struct Flow {
 /// within each variant.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[allow(non_camel_case_types)]
-pub enum Task {
+pub enum TaskType {
     /// Data conversion task.
     convert(flowgen_core::task::convert::config::Processor),
     /// Iterate over arrays task.
@@ -68,6 +68,33 @@ pub enum Task {
     salesforce_bulkapi_job_creator(flowgen_salesforce::query::config::JobCreator),
     /// Salesforce Bulk API Job retriever task.
     salesforce_bulkapi_job_retriever(flowgen_salesforce::query::config::JobRetriever),
+}
+
+impl TaskType {
+    /// Returns the task type as a static string for event categorization.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            TaskType::convert(_) => "convert",
+            TaskType::iterate(_) => "iterate",
+            TaskType::log(_) => "log",
+            TaskType::script(_) => "script",
+            TaskType::object_store_reader(_) => "object_store_reader",
+            TaskType::object_store_writer(_) => "object_store_writer",
+            TaskType::generate(_) => "generate",
+            TaskType::http_request(_) => "http_request",
+            TaskType::http_webhook(_) => "http_webhook",
+            TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
+            TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
+            TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
+            TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
+        }
+    }
+}
+
+impl std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// Main application configuration.
@@ -206,7 +233,7 @@ mod tests {
     #[test]
     fn test_flow_with_tasks() {
         let convert_config = flowgen_core::task::convert::config::Processor::default();
-        let task = Task::convert(convert_config);
+        let task = TaskType::convert(convert_config);
 
         let flow = Flow {
             name: "flow_with_tasks".to_string(),
@@ -218,7 +245,7 @@ mod tests {
         assert_eq!(flow.name, "flow_with_tasks");
         assert!(flow.labels.is_none());
         assert_eq!(flow.tasks.len(), 1);
-        assert!(matches!(flow.tasks[0], Task::convert(_)));
+        assert!(matches!(flow.tasks[0], TaskType::convert(_)));
     }
 
     #[test]
@@ -256,12 +283,13 @@ mod tests {
 
     #[test]
     fn test_task_variants() {
-        let convert_task = Task::convert(flowgen_core::task::convert::config::Processor::default());
+        let convert_task =
+            TaskType::convert(flowgen_core::task::convert::config::Processor::default());
         let generate_task =
-            Task::generate(flowgen_core::task::generate::config::Subscriber::default());
+            TaskType::generate(flowgen_core::task::generate::config::Subscriber::default());
 
-        assert!(matches!(convert_task, Task::convert(_)));
-        assert!(matches!(generate_task, Task::generate(_)));
+        assert!(matches!(convert_task, TaskType::convert(_)));
+        assert!(matches!(generate_task, TaskType::generate(_)));
     }
 
     #[test]
@@ -439,8 +467,8 @@ mod tests {
                 name: "complex_flow".to_string(),
                 labels: Some(labels.clone()),
                 tasks: vec![
-                    Task::convert(convert_config),
-                    Task::generate(generate_config),
+                    TaskType::convert(convert_config),
+                    TaskType::generate(generate_config),
                 ],
                 require_leader_election: None,
             },
@@ -449,8 +477,8 @@ mod tests {
         assert_eq!(flow_config.flow.name, "complex_flow");
         assert_eq!(flow_config.flow.labels, Some(labels));
         assert_eq!(flow_config.flow.tasks.len(), 2);
-        assert!(matches!(flow_config.flow.tasks[0], Task::convert(_)));
-        assert!(matches!(flow_config.flow.tasks[1], Task::generate(_)));
+        assert!(matches!(flow_config.flow.tasks[0], TaskType::convert(_)));
+        assert!(matches!(flow_config.flow.tasks[1], TaskType::generate(_)));
     }
 
     #[test]

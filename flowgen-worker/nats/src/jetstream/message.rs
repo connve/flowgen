@@ -44,7 +44,11 @@ pub trait FlowgenMessageExt {
 pub trait NatsMessageExt {
     type Error;
     /// Convert a NATS message to a flowgen event.
-    fn to_event(&self) -> Result<flowgen_core::event::Event, Self::Error>;
+    fn to_event(
+        &self,
+        task_type: &'static str,
+        task_id: usize,
+    ) -> Result<flowgen_core::event::Event, Self::Error>;
 }
 
 impl FlowgenMessageExt for flowgen_core::event::Event {
@@ -88,11 +92,19 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
 
 impl NatsMessageExt for async_nats::Message {
     type Error = Error;
-    fn to_event(&self) -> Result<flowgen_core::event::Event, Self::Error> {
-        let mut event = EventBuilder::new().subject(self.subject.to_string());
+    fn to_event(
+        &self,
+        task_type: &'static str,
+        task_id: usize,
+    ) -> Result<flowgen_core::event::Event, Self::Error> {
+        let mut event_builder = EventBuilder::new()
+            .subject(self.subject.to_string())
+            .task_id(task_id)
+            .task_type(task_type);
+
         if let Some(headers) = &self.headers {
             if let Some(id) = headers.get(async_nats::header::NATS_MESSAGE_ID) {
-                event = event.id(id.to_string());
+                event_builder = event_builder.id(id.to_string());
             }
         }
 
@@ -118,7 +130,7 @@ impl NatsMessageExt for async_nats::Message {
             },
         };
 
-        event.data(event_data).build().map_err(Error::Event)
+        event_builder.data(event_data).build().map_err(Error::Event)
     }
 }
 
@@ -140,6 +152,8 @@ mod tests {
             .subject("test.subject".to_string())
             .id("test-id-123".to_string())
             .data(EventData::Json(json_data))
+            .task_id(0)
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -160,6 +174,8 @@ mod tests {
         let event = EventBuilder::new()
             .subject("avro.test".to_string())
             .data(EventData::Avro(avro_data))
+            .task_id(0)
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -174,6 +190,8 @@ mod tests {
         let event = EventBuilder::new()
             .subject("test.no.id".to_string())
             .data(EventData::Json(json_data))
+            .task_id(0)
+            .task_type("test")
             .build()
             .unwrap();
 
@@ -196,12 +214,14 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event("test", 0);
         assert!(result.is_ok());
 
         let event = result.unwrap();
         assert_eq!(event.subject, "test.subject");
         assert!(event.id.is_none()); // No headers provided
+        assert_eq!(event.task_id, 0);
+        assert_eq!(event.task_type, "test");
 
         // Verify the data is JSON type
         assert!(matches!(event.data, EventData::Json(_)));
@@ -224,12 +244,14 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event("test", 1);
         assert!(result.is_ok());
 
         let event = result.unwrap();
         assert_eq!(event.subject, "test.headers");
         assert_eq!(event.id, Some("msg-123".to_string()));
+        assert_eq!(event.task_id, 1);
+        assert_eq!(event.task_type, "test");
     }
 
     #[test]
@@ -251,11 +273,13 @@ mod tests {
             length: 0,
         };
 
-        let result = message.to_event();
+        let result = message.to_event("test", 2);
         assert!(result.is_ok());
 
         let event = result.unwrap();
         assert_eq!(event.subject, "avro.test");
+        assert_eq!(event.task_id, 2);
+        assert_eq!(event.task_type, "test");
         assert!(matches!(event.data, EventData::Avro(_)));
     }
 
@@ -269,6 +293,8 @@ mod tests {
         let event = EventBuilder::new()
             .subject("trait.test".to_string())
             .data(EventData::Json(json_data))
+            .task_id(0)
+            .task_type("test")
             .build()
             .unwrap();
 

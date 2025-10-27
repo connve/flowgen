@@ -13,9 +13,6 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
-/// Default log message format for event processing.
-pub const DEFAULT_LOG_MESSAGE: &str = "Event processed";
-
 /// Subject suffix options for event subjects.
 pub enum SubjectSuffix<'a> {
     /// Use current timestamp as suffix.
@@ -30,46 +27,43 @@ pub trait SenderExt {
     fn send_with_logging(
         &self,
         event: Event,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Event>>;
+    ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>>;
 }
 
 impl SenderExt for tokio::sync::broadcast::Sender<Event> {
     fn send_with_logging(
         &self,
         event: Event,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Event>> {
+    ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>> {
         let subject = event.subject.clone();
-        let result = self.send(event)?;
-        info!("{}: {}", DEFAULT_LOG_MESSAGE, subject);
+        let result = self.send(event).map_err(Box::new)?;
+        info!("Event processed: {}", subject);
         Ok(result)
     }
 }
 
-/// Generates a structured subject string from a base subject, a required task name, and a suffix.
+/// Generates a structured subject string from a prefix and an optional suffix.
 ///
-/// The resulting subject is formatted as: `<base_subject>.<task_name>.<suffix_value>`.
-/// The `task_name` is always converted to lowercase.
+/// The resulting subject is formatted as:
+/// - With suffix: `<prefix>.<suffix_value>`
+/// - Without suffix: `<prefix>`
 ///
 /// # Arguments
-/// * `task_name` - Optional name of the task. If provided, it is used as a component of the subject
-///   and automatically converted to lowercase. If None, the task name is omitted from the subject.
-/// * `base_subject` - The fixed base prefix for the subject string (e.g., a service or stream name).
-/// * `suffix` - The dynamic suffix type (timestamp or a custom ID).
+/// * `prefix` - The subject prefix (e.g., task name, topic name, or identifier).
+/// * `suffix` - Optional dynamic suffix for uniqueness (timestamp or custom ID).
 ///
 /// # Returns
-/// A formatted subject string with the dynamic suffix, optionally including the task name.
-pub fn generate_subject(
-    task_name: Option<&str>,
-    base_subject: &str,
-    suffix: SubjectSuffix,
-) -> String {
-    let suffix_str = match suffix {
-        SubjectSuffix::Timestamp => Utc::now().timestamp_micros().to_string(),
-        SubjectSuffix::Id(id) => id.to_string(),
-    };
-    match task_name {
-        Some(name) => format!("{}.{}.{}", base_subject, name.to_lowercase(), suffix_str),
-        None => format!("{base_subject}.{suffix_str}"),
+/// A formatted subject string with the optional suffix.
+pub fn generate_subject(prefix: &str, suffix: Option<SubjectSuffix>) -> String {
+    match suffix {
+        Some(SubjectSuffix::Timestamp) => {
+            let timestamp = Utc::now().timestamp_micros();
+            format!("{prefix}.{timestamp}")
+        }
+        Some(SubjectSuffix::Id(id)) => {
+            format!("{prefix}.{id}")
+        }
+        None => prefix.to_string(),
     }
 }
 
@@ -116,15 +110,34 @@ pub struct Event {
     pub data: EventData,
     /// Subject identifier for event routing and filtering.
     pub subject: String,
-    /// Task identifier for tracking event flow through pipeline stages.
-    pub current_task_id: Option<usize>,
     /// Optional unique identifier for the event.
     pub id: Option<String>,
     /// Event creation timestamp in microseconds since Unix epoch.
     pub timestamp: i64,
+    /// Task identifier for tracking event flow through pipeline stages.
+    pub task_id: usize,
+    /// Task type for categorization and logging.
+    pub task_type: &'static str,
 }
 
-impl Event {}
+impl Event {
+    /// Creates a JSON representation of the event for template rendering.
+    ///
+    /// Returns a JSON object with event fields that can be used in Handlebars templates.
+    /// The event data is converted to JSON format regardless of its internal representation.
+    pub fn to_template_data(&self) -> Result<serde_json::Value, Error> {
+        let data_value = serde_json::Value::try_from(&self.data)?;
+
+        Ok(serde_json::json!({
+            "subject": self.subject,
+            "data": data_value,
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "task_id": self.task_id,
+            "task_type": self.task_type,
+        }))
+    }
+}
 
 /// Event data payload supporting multiple serialization formats.
 #[derive(Debug, Clone)]
@@ -196,18 +209,20 @@ pub struct EventBuilder {
     pub extensions: Option<arrow::array::RecordBatch>,
     /// Event subject for routing (required for build).
     pub subject: Option<String>,
-    /// Current task identifier for pipeline tracking.
-    pub current_task_id: Option<usize>,
     /// Optional unique event identifier.
     pub id: Option<String>,
     /// Event timestamp, defaults to current time.
-    pub timestamp: i64,
+    pub timestamp: Option<i64>,
+    /// Current task identifier for pipeline tracking.
+    pub task_id: Option<usize>,
+    /// Task type for categorization and logging (required for build).
+    pub task_type: Option<&'static str>,
 }
 
 impl EventBuilder {
     pub fn new() -> Self {
         EventBuilder {
-            timestamp: Utc::now().timestamp_micros(),
+            timestamp: Some(Utc::now().timestamp_micros()),
             ..Default::default()
         }
     }
@@ -219,16 +234,20 @@ impl EventBuilder {
         self.subject = Some(subject);
         self
     }
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = Some(current_task_id);
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = Some(task_id);
         self
     }
     pub fn id(mut self, id: String) -> Self {
         self.id = Some(id);
         self
     }
-    pub fn time(mut self, timestamp: i64) -> Self {
-        self.timestamp = timestamp;
+    pub fn timestamp(mut self, timestamp: i64) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -241,8 +260,15 @@ impl EventBuilder {
                 .subject
                 .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,
             id: self.id,
-            timestamp: self.timestamp,
-            current_task_id: self.current_task_id,
+            timestamp: self
+                .timestamp
+                .ok_or_else(|| Error::MissingRequiredAttribute("timestamp".to_string()))?,
+            task_id: self
+                .task_id
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -353,28 +379,27 @@ mod tests {
 
     #[test]
     fn test_generate_subject_with_id() {
-        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Id("123"));
-        assert_eq!(subject, "base.subject.task-name.123");
+        let subject = generate_subject("task-name", Some(SubjectSuffix::Id("123")));
+        assert_eq!(subject, "task-name.123");
     }
 
     #[test]
-    fn test_generate_subject_with_id_no_task() {
-        let subject = generate_subject(None, "base.subject", SubjectSuffix::Id("123"));
-        assert_eq!(subject, "base.subject.123");
+    fn test_generate_subject_no_suffix() {
+        let subject = generate_subject("task-name", None);
+        assert_eq!(subject, "task-name");
     }
 
     #[test]
     fn test_generate_subject_with_timestamp() {
-        let subject = generate_subject(Some("task-name"), "base.subject", SubjectSuffix::Timestamp);
-        assert!(subject.starts_with("base.subject.task-name."));
-        assert!(subject.len() > "base.subject.task-name.".len());
+        let subject = generate_subject("task-name", Some(SubjectSuffix::Timestamp));
+        assert!(subject.starts_with("task-name."));
+        assert!(subject.len() > "task-name.".len());
     }
 
     #[test]
-    fn test_generate_subject_with_timestamp_no_task() {
-        let subject = generate_subject(None, "base.subject", SubjectSuffix::Timestamp);
-        assert!(subject.starts_with("base.subject."));
-        assert!(subject.len() > "base.subject.".len());
+    fn test_generate_subject_with_topic_prefix() {
+        let subject = generate_subject("event.myevent__e", Some(SubjectSuffix::Id("evt123")));
+        assert_eq!(subject, "event.myevent__e.evt123");
     }
 
     #[test]
@@ -383,13 +408,14 @@ mod tests {
             .data(EventData::Json(json!({"test": "value"})))
             .subject("test.subject".to_string())
             .id("test-id".to_string())
-            .current_task_id(1)
+            .task_id(1)
+            .task_type("test")
             .build()
             .unwrap();
 
         assert_eq!(event.subject, "test.subject");
         assert_eq!(event.id, Some("test-id".to_string()));
-        assert_eq!(event.current_task_id, Some(1));
+        assert_eq!(event.task_id, 1);
         assert!(event.timestamp > 0);
 
         match event.data {

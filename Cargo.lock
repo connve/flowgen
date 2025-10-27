@@ -576,9 +576,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.41"
+version = "1.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac9fe6cdbb24b6ade63616c0a0688e45bb56732262c158df3c0c4bea4ca47cb7"
+checksum = "739eb0f94557554b3ca9a86d2d37bebd49c5e6d0c1d2bda35ba5bdac830befc2"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -616,7 +616,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1113,9 +1113,9 @@ dependencies = [
 
 [[package]]
 name = "flate2"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc5a4e564e38c699f2880d3fda590bedc2e69f3f84cd48b457bd892ce61d0aa9"
+checksum = "bfe33edd8e85a12a67454e37f8c75e730830d83e313556ab9ebf9ee7fbeb3bfb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "config",
@@ -1557,11 +1557,11 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "home"
-version = "0.5.11"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
+checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4664,15 +4664,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

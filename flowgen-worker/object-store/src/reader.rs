@@ -13,8 +13,6 @@ use tokio::sync::{
 };
 use tracing::{error, info, warn, Instrument};
 
-/// Default subject prefix for logging messages.
-const DEFAULT_MESSAGE_SUBJECT: &str = "object_store_reader";
 /// Default batch size for files.
 const DEFAULT_BATCH_SIZE: usize = 10000;
 /// Default files have headers.
@@ -63,7 +61,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: tokio::sync::broadcast::error::SendError<Event>,
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
     /// Configuration template rendering error.
     #[error(transparent)]
@@ -94,20 +92,20 @@ pub struct EventHandler {
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
-        // Get cache from task context if available.
-        let cache = self.task_context.cache.as_ref();
+        // Get cache from task context if available (not available for reader).
+        let cache: Option<&Arc<dyn flowgen_core::cache::Cache>> = None;
         let mut client_guard = self.client.lock().await;
         let context = client_guard
             .context
@@ -191,21 +189,18 @@ impl EventHandler {
 
         // Send events.
         for event_data in event_data_list {
-            let subject = generate_subject(
-                Some(&self.config.name),
-                DEFAULT_MESSAGE_SUBJECT,
-                SubjectSuffix::Timestamp,
-            );
+            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
             let e = EventBuilder::new()
                 .subject(subject)
                 .data(event_data)
-                .current_task_id(self.current_task_id)
+                .task_id(self.task_id)
+                .task_type(self.task_type)
                 .build()?;
 
             self.tx
                 .send_with_logging(e)
-                .map_err(|e| Error::SendMessage { source: e })?;
+                .map_err(|source| Error::SendMessage { source })?;
         }
 
         // Delete file from object store if configured.
@@ -232,9 +227,11 @@ pub struct Reader {
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -263,14 +260,14 @@ impl flowgen_core::task::runner::Runner for Reader {
             client,
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
-            task_context: Arc::clone(&self.task_context),
+            task_id: self.task_id,
+            task_type: self.task_type,
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -311,9 +308,11 @@ pub struct ReaderBuilder {
     /// Event channel sender
     tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl ReaderBuilder {
@@ -342,8 +341,8 @@ impl ReaderBuilder {
     }
 
     /// Sets the current task identifier.
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
@@ -352,6 +351,11 @@ impl ReaderBuilder {
         task_context: Arc<flowgen_core::task::context::TaskContext>,
     ) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -367,10 +371,13 @@ impl ReaderBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
-            task_context: self
+            task_id: self.task_id,
+            _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -407,7 +414,7 @@ mod tests {
         assert!(builder.rx.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[test]
@@ -447,9 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_builder_current_task_id() {
-        let builder = ReaderBuilder::new().current_task_id(123);
-        assert_eq!(builder.current_task_id, 123);
+    fn test_reader_builder_task_id() {
+        let builder = ReaderBuilder::new().task_id(123);
+        assert_eq!(builder.task_id, 123);
     }
 
     #[tokio::test]
@@ -460,7 +467,7 @@ mod tests {
             .receiver(rx)
             .sender(tx)
             .task_context(create_mock_task_context())
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -490,7 +497,7 @@ mod tests {
             .config(config)
             .sender(tx)
             .task_context(create_mock_task_context())
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -520,7 +527,7 @@ mod tests {
             .config(config)
             .receiver(rx)
             .task_context(create_mock_task_context())
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -554,14 +561,15 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .current_task_id(777)
+            .task_id(777)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
 
         assert!(result.is_ok());
         let reader = result.unwrap();
-        assert_eq!(reader.current_task_id, 777);
+        assert_eq!(reader.task_id, 777);
         assert_eq!(reader.config.path, PathBuf::from("s3://my-bucket/files/"));
     }
 
@@ -585,12 +593,12 @@ mod tests {
             .config(config.clone())
             .receiver(rx)
             .sender(tx)
-            .current_task_id(20);
+            .task_id(20);
 
         assert!(builder.config.is_some());
         assert!(builder.rx.is_some());
         assert!(builder.tx.is_some());
-        assert_eq!(builder.current_task_id, 20);
+        assert_eq!(builder.task_id, 20);
     }
 
     #[tokio::test]
@@ -612,7 +620,7 @@ mod tests {
             .config(config)
             .receiver(rx)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 

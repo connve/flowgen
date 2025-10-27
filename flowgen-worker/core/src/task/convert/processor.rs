@@ -15,9 +15,6 @@ use tokio::sync::{
 };
 use tracing::{error, Instrument};
 
-/// Default subject prefix for converted events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "convert";
-
 /// Errors that can occur during event conversion operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -26,7 +23,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: tokio::sync::broadcast::error::SendError<Event>,
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
     /// Event construction or processing failed.
     #[error(transparent)]
@@ -52,6 +49,9 @@ pub enum Error {
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// ArrowRecordBatch to Avro conversion is not supported directly.
+    #[error("ArrowRecordBatch to Avro conversion requires Json intermediate step")]
+    ArrowToAvroNotSupported,
     /// Host coordination error.
     #[error("Host coordination error")]
     Host(#[source] crate::host::Error),
@@ -84,9 +84,13 @@ pub struct EventHandler {
     /// Channel sender for processed events.
     tx: Sender<Event>,
     /// Task identifier for event tracking.
-    current_task_id: usize,
+    task_id: usize,
     /// Optional Avro serialization configuration.
     serializer: Option<Arc<AvroSerializerOptions>>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
+    /// Task context (unused but kept for consistency).
+    _task_context: Arc<crate::task::context::TaskContext>,
 }
 
 /// Avro serialization configuration with schema and thread-safe serializer.
@@ -100,7 +104,7 @@ struct AvroSerializerOptions {
 impl EventHandler {
     /// Processes an event and converts to selected target format.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
@@ -130,10 +134,7 @@ impl EventHandler {
                     EventData::Json(json_value)
                 }
                 crate::task::convert::config::TargetFormat::Avro => {
-                    return Err(Error::MissingRequiredAttribute(
-                        "ArrowRecordBatch to Avro conversion requires Json intermediate step"
-                            .to_string(),
-                    ))
+                    return Err(Error::ArrowToAvroNotSupported)
                 }
             },
             EventData::Avro(avro_data) => match self.config.target_format {
@@ -159,22 +160,19 @@ impl EventHandler {
         };
 
         // Generate event subject.
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
 
         // Build and send event.
         let e = EventBuilder::new()
             .data(data)
             .subject(subject)
-            .current_task_id(self.current_task_id)
+            .task_id(self.task_id)
+            .task_type(self.task_type)
             .build()?;
 
         self.tx
             .send_with_logging(e)
-            .map_err(|e| Error::SendMessage { source: e })?;
+            .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
 }
@@ -189,9 +187,11 @@ pub struct Processor {
     /// Channel receiver for incoming events to convert.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<crate::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -235,14 +235,16 @@ impl crate::task::runner::Runner for Processor {
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             serializer,
+            task_type: self.task_type,
+            _task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -282,9 +284,11 @@ pub struct ProcessorBuilder {
     /// Event broadcast receiver (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<crate::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl ProcessorBuilder {
@@ -309,13 +313,18 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
     pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -330,10 +339,13 @@ impl ProcessorBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -400,7 +412,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -418,13 +430,14 @@ mod tests {
             .config(config)
             .sender(tx)
             .receiver(rx2)
-            .current_task_id(1)
+            .task_id(1)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
-        assert_eq!(processor.current_task_id, 1);
+        assert_eq!(processor.task_id, 1);
     }
 
     #[tokio::test]
@@ -508,16 +521,19 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             serializer: None,
+            task_type: "test",
+            _task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
             data: EventData::Json(json!({"test": "value"})),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: 0,
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -532,8 +548,8 @@ mod tests {
             }
             _ => panic!("Expected JSON passthrough"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
-        assert_eq!(output_event.current_task_id, Some(1));
+        assert!(output_event.subject.starts_with("test."));
+        assert_eq!(output_event.task_id, 1);
     }
 
     #[tokio::test]
@@ -545,7 +561,7 @@ mod tests {
             .config(config)
             .sender(tx)
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
@@ -568,8 +584,10 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             serializer: None,
+            task_type: "test",
+            _task_context: create_mock_task_context(),
         };
 
         // Create a simple Avro schema and serialize test data
@@ -587,9 +605,10 @@ mod tests {
                 raw_bytes,
             }),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: 0,
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -604,8 +623,8 @@ mod tests {
             }
             _ => panic!("Expected JSON output from Avro conversion"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
-        assert_eq!(output_event.current_task_id, Some(1));
+        assert!(output_event.subject.starts_with("test."));
+        assert_eq!(output_event.task_id, 1);
     }
 
     #[tokio::test]
@@ -621,8 +640,10 @@ mod tests {
         let event_handler = EventHandler {
             config,
             tx,
-            current_task_id: 1,
+            task_id: 1,
             serializer: None,
+            task_type: "test",
+            _task_context: create_mock_task_context(),
         };
 
         let schema_str = r#"{"type": "string"}"#;
@@ -634,9 +655,10 @@ mod tests {
                 raw_bytes: raw_bytes.clone(),
             }),
             subject: "input.subject".to_string(),
-            current_task_id: Some(0),
+            task_id: 0,
             id: None,
             timestamp: 123456789,
+            task_type: "test",
         };
 
         tokio::spawn(async move {
@@ -652,7 +674,7 @@ mod tests {
             }
             _ => panic!("Expected Avro passthrough"),
         }
-        assert!(output_event.subject.starts_with("convert.test."));
-        assert_eq!(output_event.current_task_id, Some(1));
+        assert!(output_event.subject.starts_with("test."));
+        assert_eq!(output_event.task_id, 1);
     }
 }

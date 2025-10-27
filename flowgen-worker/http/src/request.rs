@@ -18,9 +18,6 @@ use tokio::{
 };
 use tracing::{error, Instrument};
 
-/// Default subject for HTTP response events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "http_request";
-
 /// Errors that can occur during HTTP request processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -36,7 +33,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: tokio::sync::broadcast::error::SendError<Event>,
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
     /// Event building or processing failed.
     #[error(transparent)]
@@ -95,13 +92,17 @@ pub struct EventHandler {
     /// Event sender channel.
     tx: Sender<Event>,
     /// Current task identifier.
-    current_task_id: usize,
+    task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
+    /// Task execution context providing metadata and runtime configuration.
+    _task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event by making an HTTP request.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if event.current_task_id != self.current_task_id.checked_sub(1) {
+        if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
         }
 
@@ -187,20 +188,17 @@ impl EventHandler {
         // Try to parse as JSON, fall back to string if it fails
         let data = serde_json::from_str::<Value>(&resp).unwrap_or_else(|_| json!(resp));
 
-        let subject = generate_subject(
-            Some(&self.config.name),
-            DEFAULT_MESSAGE_SUBJECT,
-            SubjectSuffix::Timestamp,
-        );
+        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
         let e = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(subject.clone())
-            .current_task_id(self.current_task_id)
+            .task_id(self.task_id)
+            .task_type(self.task_type)
             .build()?;
 
         self.tx
             .send_with_logging(e)
-            .map_err(|e| Error::SendMessage { source: e })?;
+            .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
 }
@@ -215,9 +213,11 @@ pub struct Processor {
     /// Event receiver channel.
     rx: Receiver<Event>,
     /// Current task identifier.
-    current_task_id: usize,
+    task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
 }
 
 #[async_trait::async_trait]
@@ -235,15 +235,17 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             tx: self.tx.clone(),
             client,
+            task_type: self.task_type,
+            _task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.current_task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         // Initialize runner task.
         let event_handler = match self.init().await {
@@ -282,10 +284,12 @@ pub struct ProcessorBuilder {
     tx: Option<Sender<Event>>,
     /// Optional event receiver.
     rx: Option<Receiver<Event>>,
-    /// Current task identifier.
-    current_task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    /// Current task identifier.
+    task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
 }
 
 impl ProcessorBuilder {
@@ -310,8 +314,8 @@ impl ProcessorBuilder {
         self
     }
 
-    pub fn current_task_id(mut self, current_task_id: usize) -> Self {
-        self.current_task_id = current_task_id;
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
         self
     }
 
@@ -320,6 +324,11 @@ impl ProcessorBuilder {
         task_context: Arc<flowgen_core::task::context::TaskContext>,
     ) -> Self {
         self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
         self
     }
 
@@ -334,10 +343,13 @@ impl ProcessorBuilder {
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
-            current_task_id: self.current_task_id,
+            task_id: self.task_id,
             _task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -464,7 +476,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -474,7 +486,7 @@ mod tests {
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
         assert!(builder.task_context.is_none());
-        assert_eq!(builder.current_task_id, 0);
+        assert_eq!(builder.task_id, 0);
     }
 
     #[tokio::test]
@@ -507,9 +519,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_processor_builder_current_task_id() {
-        let builder = ProcessorBuilder::new().current_task_id(42);
-        assert_eq!(builder.current_task_id, 42);
+    async fn test_processor_builder_task_id() {
+        let builder = ProcessorBuilder::new().task_id(42);
+        assert_eq!(builder.task_id, 42);
     }
 
     #[tokio::test]
@@ -518,7 +530,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .sender(tx)
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -544,7 +556,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .config(config)
             .sender(tx)
-            .current_task_id(1)
+            .task_id(1)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -570,7 +582,7 @@ mod tests {
         let result = ProcessorBuilder::new()
             .config(config)
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -605,7 +617,8 @@ mod tests {
             .config(config.clone())
             .sender(tx)
             .receiver(rx)
-            .current_task_id(5)
+            .task_id(5)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
@@ -613,7 +626,7 @@ mod tests {
         assert!(result.is_ok());
         let processor = result.unwrap();
         assert_eq!(processor.config, config);
-        assert_eq!(processor.current_task_id, 5);
+        assert_eq!(processor.task_id, 5);
     }
 
     #[tokio::test]
@@ -632,19 +645,15 @@ mod tests {
             .config(config.clone())
             .sender(tx)
             .receiver(rx)
-            .current_task_id(10)
+            .task_id(10)
+            .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await
             .unwrap();
 
         assert_eq!(processor.config, config);
-        assert_eq!(processor.current_task_id, 10);
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_MESSAGE_SUBJECT, "http_request");
+        assert_eq!(processor.task_id, 10);
     }
 
     #[test]
@@ -657,7 +666,9 @@ mod tests {
             client,
             config,
             tx,
-            current_task_id: 0,
+            task_id: 0,
+            task_type: "test",
+            _task_context: create_mock_task_context(),
         };
     }
 
@@ -677,7 +688,7 @@ mod tests {
             .config(config)
             .sender(tx)
             .receiver(rx)
-            .current_task_id(1)
+            .task_id(1)
             .build()
             .await;
 
