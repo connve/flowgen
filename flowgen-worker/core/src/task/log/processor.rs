@@ -1,6 +1,6 @@
 //! Log processor for outputting event data to application logs.
 
-use crate::event::Event;
+use crate::event::{Event, SenderExt};
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn, Instrument};
@@ -15,6 +15,12 @@ pub enum Error {
     /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    /// Failed to send event through channel.
+    #[error("Failed to send event message: {source}")]
+    SendMessage {
+        #[source]
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+    },
 }
 
 /// Handles individual log operations.
@@ -23,6 +29,8 @@ pub struct EventHandler {
     config: Arc<super::config::Processor>,
     /// Current task identifier for event filtering.
     task_id: usize,
+    /// Event sender for passing through logged events.
+    tx: Sender<Event>,
     /// Task type identifier (unused but kept for consistency).
     _task_type: &'static str,
     /// Task context (unused but kept for consistency).
@@ -30,7 +38,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Processes an event by logging its data.
+    /// Processes an event by logging its data and passing it through.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if Some(event.task_id) != self.task_id.checked_sub(1) {
             return Ok(());
@@ -96,6 +104,11 @@ impl EventHandler {
             }
         }
 
+        // Pass the event through to the next task
+        self.tx
+            .send_with_logging(event)
+            .map_err(|source| Error::SendMessage { source })?;
+
         Ok(())
     }
 }
@@ -105,8 +118,8 @@ impl EventHandler {
 pub struct Processor {
     /// Log task configuration.
     config: Arc<super::config::Processor>,
-    /// Channel sender for events (not used but kept for consistency).
-    _tx: Sender<Event>,
+    /// Channel sender for passing through events.
+    tx: Sender<Event>,
     /// Channel receiver for incoming events to log.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -127,6 +140,7 @@ impl crate::task::runner::Runner for Processor {
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             task_id: self.task_id,
+            tx: self.tx.clone(),
             _task_type: self.task_type,
             _task_context: Arc::clone(&self._task_context),
         };
@@ -225,7 +239,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            _tx: self
+            tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
             task_id: self.task_id,
@@ -324,9 +338,12 @@ mod tests {
             structured: false,
         });
 
+        let (tx, _rx) = broadcast::channel(100);
+
         let event_handler = EventHandler {
             config,
             task_id: 1,
+            tx,
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };
@@ -351,9 +368,12 @@ mod tests {
             structured: false,
         });
 
+        let (tx, _rx) = broadcast::channel(100);
+
         let event_handler = EventHandler {
             config,
             task_id: 1,
+            tx,
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };

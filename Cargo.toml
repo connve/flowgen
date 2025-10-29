@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"

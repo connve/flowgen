@@ -32,26 +32,45 @@ pub type Subscriber = Config;
 
 impl ConfigExt for Config {}
 
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct StreamOptions {
     /// Stream name.
     pub name: String,
     /// Stream description.
     pub description: Option<String>,
     /// Subject patterns for the stream (can include wildcards). Required for publisher when creating stream.
-    #[serde(default)]
     pub subjects: Vec<String>,
     /// Maximum age of messages in seconds.
     pub max_age_secs: Option<u64>,
     /// Maximum number of messages per subject.
     pub max_messages_per_subject: Option<i64>,
+    /// Maximum number of messages in the stream.
+    pub max_messages: Option<i64>,
+    /// Maximum bytes the stream can store.
+    pub max_bytes: Option<i64>,
+    /// Maximum message size in bytes.
+    pub max_message_size: Option<i32>,
+    /// Maximum number of consumers allowed.
+    pub max_consumers: Option<i32>,
     /// Whether to create or update the stream if it doesn't exist or differs.
-    #[serde(default)]
     pub create_or_update: bool,
     /// Retention policy for the stream. If None during update, keeps existing value.
     pub retention: Option<RetentionPolicy>,
     /// Discard policy for when stream limits are reached. If None during update, keeps existing value.
     pub discard: Option<DiscardPolicy>,
+    /// Duplicate window in seconds. Prevents duplicate messages within this time window.
+    pub duplicate_window_secs: Option<u64>,
+    /// Allow batch publish (allows publishing multiple messages at once).
+    pub allow_batch_publish: Option<bool>,
+    /// Allow message delete (allows deleting individual messages).
+    pub allow_direct: Option<bool>,
+    /// Allow rollup headers (allows messages to be compacted/rolled up).
+    pub allow_rollup: Option<bool>,
+    /// Deny delete (disables message deletion).
+    pub deny_delete: Option<bool>,
+    /// Deny purge (disables stream purge).
+    pub deny_purge: Option<bool>,
 }
 
 /// NATS JetStream retention policies.
@@ -103,13 +122,11 @@ mod tests {
             subject: "test.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "test_stream".to_string(),
-                description: None,
                 subjects: vec!["test.>".to_string()],
-                max_age_secs: None,
-                max_messages_per_subject: None,
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: Some("test_consumer".to_string()),
             batch_size: Some(100),
@@ -136,13 +153,11 @@ mod tests {
             subject: "my.subject.*".to_string(),
             stream: Some(StreamOptions {
                 name: "my_stream".to_string(),
-                description: None,
                 subjects: vec!["my.>".to_string()],
-                max_age_secs: None,
-                max_messages_per_subject: None,
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: Some("my_durable".to_string()),
             batch_size: Some(50),
@@ -162,13 +177,11 @@ mod tests {
             subject: "clone.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "clone_stream".to_string(),
-                description: None,
                 subjects: vec!["clone.>".to_string()],
-                max_age_secs: None,
-                max_messages_per_subject: None,
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: Some("clone_consumer".to_string()),
             batch_size: Some(25),
@@ -202,6 +215,7 @@ mod tests {
             create_or_update: true,
             retention: Some(RetentionPolicy::Limits),
             discard: Some(DiscardPolicy::Old),
+            ..Default::default()
         };
 
         let publisher = Publisher {
@@ -240,10 +254,10 @@ mod tests {
                 description: Some("Serialization test".to_string()),
                 subjects: vec!["test.serialize".to_string()],
                 max_age_secs: Some(7200),
-                max_messages_per_subject: None,
                 create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: None,
             batch_size: None,
@@ -263,13 +277,13 @@ mod tests {
             subject: "clone.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "clone_stream".to_string(),
-                description: None,
                 subjects: vec!["clone.subject".to_string()],
                 max_age_secs: Some(1800),
                 max_messages_per_subject: Some(1),
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::WorkQueue),
                 discard: Some(DiscardPolicy::New),
+                ..Default::default()
             }),
             durable_name: None,
             batch_size: None,
@@ -300,17 +314,16 @@ mod tests {
     fn test_stream_with_multiple_subjects() {
         let stream_opts = StreamOptions {
             name: "multi_stream".to_string(),
-            description: None,
             subjects: vec![
                 "subject.1".to_string(),
                 "subject.2".to_string(),
                 "subject.3".to_string(),
             ],
             max_age_secs: Some(86400),
-            max_messages_per_subject: None,
             create_or_update: true,
             retention: Some(RetentionPolicy::Interest),
             discard: Some(DiscardPolicy::Old),
+            ..Default::default()
         };
 
         let publisher = Publisher {
@@ -338,13 +351,11 @@ mod tests {
             subject: "subject1".to_string(),
             stream: Some(StreamOptions {
                 name: "stream1".to_string(),
-                description: None,
                 subjects: vec!["subject1".to_string()],
-                max_age_secs: None,
-                max_messages_per_subject: None,
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: Some("consumer1".to_string()),
             batch_size: Some(10),
@@ -357,13 +368,11 @@ mod tests {
             subject: "subject1".to_string(),
             stream: Some(StreamOptions {
                 name: "stream1".to_string(),
-                description: None,
                 subjects: vec!["subject1".to_string()],
-                max_age_secs: None,
-                max_messages_per_subject: None,
-                create_or_update: false,
+                create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: Some("consumer1".to_string()),
             batch_size: Some(10),

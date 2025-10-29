@@ -48,7 +48,7 @@ pub enum Error {
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
     /// HTTP request failed.
-    #[error("HTTP request failed: {source}")]
+    #[error("HTTP request failed: {source}. This may be caused by invalid headers, malformed URL, unsupported request body format, or network issues")]
     Reqwest {
         #[source]
         source: reqwest::Error,
@@ -154,7 +154,7 @@ impl EventHandler {
                 crate::config::PayloadSendAs::Json => client.json(&json),
                 crate::config::PayloadSendAs::UrlEncoded => client.form(&json),
                 crate::config::PayloadSendAs::QueryParams => client.query(&json),
-            }
+            };
         }
 
         if let Some(credentials_path) = &config.credentials_path {

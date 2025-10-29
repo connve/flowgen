@@ -1,12 +1,6 @@
 use async_nats::jetstream::{self, stream::Config};
 use std::time::Duration;
 
-/// Default maximum age for messages in seconds (24 hours).
-const DEFAULT_MAX_AGE_SECS: u64 = 86400;
-
-/// Default maximum messages per subject.
-const DEFAULT_MAX_MESSAGES_PER_SUBJECT: i64 = 1;
-
 /// Errors that can occur during stream operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -57,11 +51,14 @@ pub async fn create_or_update_stream(
                 .config
                 .clone();
 
-            // Merge subjects
+            // Merge subjects - additive update: new subjects are added to existing ones
+            // If stream_opts.subjects is empty, existing subjects are preserved
             let mut subjects = existing_config.subjects.clone();
-            subjects.extend(stream_opts.subjects.clone());
-            subjects.sort();
-            subjects.dedup();
+            if !stream_opts.subjects.is_empty() {
+                subjects.extend(stream_opts.subjects.clone());
+                subjects.sort();
+                subjects.dedup();
+            }
 
             // Use new values if provided, otherwise keep existing
             let retention = stream_opts
@@ -103,14 +100,56 @@ pub async fn create_or_update_stream(
                 .clone()
                 .or(existing_config.description);
 
+            let max_messages = stream_opts
+                .max_messages
+                .unwrap_or(existing_config.max_messages);
+
+            let max_bytes = stream_opts.max_bytes.unwrap_or(existing_config.max_bytes);
+
+            let max_message_size = stream_opts
+                .max_message_size
+                .unwrap_or(existing_config.max_message_size);
+
+            let max_consumers = stream_opts
+                .max_consumers
+                .unwrap_or(existing_config.max_consumers);
+
+            let duplicate_window = stream_opts
+                .duplicate_window_secs
+                .map(Duration::from_secs)
+                .unwrap_or(existing_config.duplicate_window);
+
+            let deny_delete = stream_opts
+                .deny_delete
+                .unwrap_or(existing_config.deny_delete);
+
+            let deny_purge = stream_opts.deny_purge.unwrap_or(existing_config.deny_purge);
+
+            let allow_rollup = stream_opts
+                .allow_rollup
+                .unwrap_or(existing_config.allow_rollup);
+
+            let allow_direct = stream_opts
+                .allow_direct
+                .unwrap_or(existing_config.allow_direct);
+
             let updated_config = Config {
                 name: stream_opts.name.clone(),
                 description,
                 max_messages_per_subject,
+                max_messages,
+                max_bytes,
+                max_message_size,
+                max_consumers,
                 subjects,
                 discard,
                 retention,
                 max_age,
+                duplicate_window,
+                deny_delete,
+                deny_purge,
+                allow_rollup,
+                allow_direct,
                 ..existing_config
             };
 
@@ -120,11 +159,30 @@ pub async fn create_or_update_stream(
                 .map_err(|e| Error::CreateStream { source: e })?;
         }
         Err(_) => {
-            // Stream doesn't exist, create it with defaults for unspecified values
-            let retention = stream_opts
-                .retention
-                .as_ref()
-                .map(|r| match r {
+            // Stream doesn't exist, create it
+            // Only set values if they're explicitly configured, otherwise let NATS use its defaults
+
+            // Default to wildcard if no subjects specified
+            let subjects = if stream_opts.subjects.is_empty() {
+                vec![">".to_string()]
+            } else {
+                stream_opts.subjects.clone()
+            };
+
+            // Start with default config
+            let mut stream_config = Config {
+                name: stream_opts.name.clone(),
+                subjects,
+                ..Default::default()
+            };
+
+            // Only set values if explicitly configured
+            if let Some(desc) = &stream_opts.description {
+                stream_config.description = Some(desc.clone());
+            }
+
+            if let Some(retention) = &stream_opts.retention {
+                stream_config.retention = match retention {
                     super::config::RetentionPolicy::Limits => {
                         jetstream::stream::RetentionPolicy::Limits
                     }
@@ -134,44 +192,59 @@ pub async fn create_or_update_stream(
                     super::config::RetentionPolicy::WorkQueue => {
                         jetstream::stream::RetentionPolicy::WorkQueue
                     }
-                })
-                .unwrap_or(jetstream::stream::RetentionPolicy::Limits);
+                };
+            }
 
-            let discard = stream_opts
-                .discard
-                .as_ref()
-                .map(|d| match d {
+            if let Some(discard) = &stream_opts.discard {
+                stream_config.discard = match discard {
                     super::config::DiscardPolicy::Old => jetstream::stream::DiscardPolicy::Old,
                     super::config::DiscardPolicy::New => jetstream::stream::DiscardPolicy::New,
-                })
-                .unwrap_or(jetstream::stream::DiscardPolicy::Old);
+                };
+            }
 
-            let max_age = stream_opts
-                .max_age_secs
-                .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_secs(DEFAULT_MAX_AGE_SECS));
+            if let Some(max_age_secs) = stream_opts.max_age_secs {
+                stream_config.max_age = Duration::from_secs(max_age_secs);
+            }
 
-            let max_messages_per_subject = stream_opts
-                .max_messages_per_subject
-                .unwrap_or(DEFAULT_MAX_MESSAGES_PER_SUBJECT);
+            if let Some(max_msgs_per_subject) = stream_opts.max_messages_per_subject {
+                stream_config.max_messages_per_subject = max_msgs_per_subject;
+            }
 
-            // Default to wildcard if no subjects specified
-            let subjects = if stream_opts.subjects.is_empty() {
-                vec![">".to_string()]
-            } else {
-                stream_opts.subjects.clone()
-            };
+            if let Some(max_msgs) = stream_opts.max_messages {
+                stream_config.max_messages = max_msgs;
+            }
 
-            let stream_config = Config {
-                name: stream_opts.name.clone(),
-                description: stream_opts.description.clone(),
-                max_messages_per_subject,
-                subjects,
-                discard,
-                retention,
-                max_age,
-                ..Default::default()
-            };
+            if let Some(max_bytes) = stream_opts.max_bytes {
+                stream_config.max_bytes = max_bytes;
+            }
+
+            if let Some(max_msg_size) = stream_opts.max_message_size {
+                stream_config.max_message_size = max_msg_size;
+            }
+
+            if let Some(max_cons) = stream_opts.max_consumers {
+                stream_config.max_consumers = max_cons;
+            }
+
+            if let Some(dup_window_secs) = stream_opts.duplicate_window_secs {
+                stream_config.duplicate_window = Duration::from_secs(dup_window_secs);
+            }
+
+            if let Some(deny_del) = stream_opts.deny_delete {
+                stream_config.deny_delete = deny_del;
+            }
+
+            if let Some(deny_pur) = stream_opts.deny_purge {
+                stream_config.deny_purge = deny_pur;
+            }
+
+            if let Some(allow_roll) = stream_opts.allow_rollup {
+                stream_config.allow_rollup = allow_roll;
+            }
+
+            if let Some(allow_dir) = stream_opts.allow_direct {
+                stream_config.allow_direct = allow_dir;
+            }
 
             jetstream
                 .create_stream(stream_config)

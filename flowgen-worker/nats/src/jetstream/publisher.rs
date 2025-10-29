@@ -363,6 +363,7 @@ mod tests {
                 create_or_update: true,
                 retention: Some(super::super::config::RetentionPolicy::Limits),
                 discard: Some(super::super::config::DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: None,
             batch_size: None,
@@ -440,6 +441,7 @@ mod tests {
                 create_or_update: true,
                 retention: Some(super::super::config::RetentionPolicy::Limits),
                 discard: Some(super::super::config::DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: None,
             batch_size: None,
@@ -478,6 +480,7 @@ mod tests {
                 create_or_update: false,
                 retention: Some(super::super::config::RetentionPolicy::WorkQueue),
                 discard: Some(super::super::config::DiscardPolicy::Old),
+                ..Default::default()
             }),
             durable_name: None,
             batch_size: None,
