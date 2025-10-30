@@ -5,8 +5,8 @@ flow:
     - generate:
         name: "account_run_sample_query"
         label: "account_run_sample_query"
-        interval: 5
-        count: 2
+        interval: 60
+        count:  5
     - salesforce_bulkapi_job_creator:
         name: "account_salesforce_query_job"
         label: "account_salesforce_query_job"
