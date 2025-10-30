@@ -14,12 +14,3 @@ pub mod pubsub {
     /// Salesforce Pub/Sub subscriber implementation for event consumption.
     pub mod subscriber;
 }
-
-pub mod query {
-    /// Configuration structures for Salesforce Bulk API Job creator and retriever.
-    pub mod config;
-    /// Salesforce implementation for creating Bulk API Job.
-    pub mod job_creator;
-    /// Salesforce implementation for retrieving Bulk API Job.
-    pub mod job_retriever;
-}

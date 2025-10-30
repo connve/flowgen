@@ -32,5 +32,3 @@ apache-avro = { workspace = true }
 reqwest = { workspace = true }
 serde_avro_fast = { workspace = true }
 async-trait.workspace = true
-mockito = "1.7.0"
-tempfile = "3.23.0"
