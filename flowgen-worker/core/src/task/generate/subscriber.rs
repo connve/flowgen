@@ -3,7 +3,7 @@
 //! Implements a timer-based event generator that creates events at regular intervals
 //! with optional message content and count limits for testing and simulation workflows.
 
-use crate::event::{generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix};
+use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -152,13 +152,10 @@ impl EventHandler {
                 }
             };
 
-            // Generate event subject.
-            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
-
             // Build and send event.
             let e = EventBuilder::new()
                 .data(EventData::Json(data))
-                .subject(subject.clone())
+                .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()?;

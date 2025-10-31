@@ -1,7 +1,7 @@
 use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
-use flowgen_core::event::{generate_subject, Event, EventBuilder, SenderExt, SubjectSuffix};
+use flowgen_core::event::{Event, EventBuilder, SenderExt};
 use flowgen_core::{client::Client, event::EventData};
 use futures::StreamExt;
 use object_store::GetResultPayload;
@@ -189,10 +189,8 @@ impl EventHandler {
 
         // Send events.
         for event_data in event_data_list {
-            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
-
             let e = EventBuilder::new()
-                .subject(subject)
+                .subject(self.config.name.to_owned())
                 .data(event_data)
                 .task_id(self.task_id)
                 .task_type(self.task_type)

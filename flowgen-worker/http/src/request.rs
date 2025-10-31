@@ -74,12 +74,9 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Expected JSON input but got different event type.
-    #[error("Expected JSON input, got ArrowRecordBatch")]
-    ExpectedJsonGotArrowRecordBatch,
-    /// Expected JSON input but got Avro.
-    #[error("Expected JSON input, got Avro")]
-    ExpectedJsonGotAvro,
+    /// Expected event data but found null.
+    #[error("No event data available on the event")]
+    NoEventData,
 }
 
 /// Event handler for processing HTTP requests.
@@ -106,14 +103,9 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Extract JSON data from event
-        let json_data = match &event.data {
-            EventData::Json(data) => data,
-            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
-            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
-        };
-
-        let config = self.config.render(json_data)?;
+        // Render config with to support templates inside configuration.
+        let event_value = serde_json::value::Value::try_from(&event)?;
+        let config = self.config.render(&event_value)?;
 
         let mut client = match config.method {
             crate::config::Method::GET => self.client.get(config.endpoint),
@@ -137,10 +129,10 @@ impl EventHandler {
         }
 
         if let Some(payload) = &config.payload {
-            let json = if payload.from_event {
-                json_data.clone()
+            let event_data = if payload.from_event {
+                event_value.get("data").ok_or_else(|| Error::NoEventData)?
             } else {
-                match &payload.object {
+                &match &payload.object {
                     Some(obj) => Value::Object(obj.to_owned()),
                     None => match &payload.input {
                         Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
@@ -151,9 +143,9 @@ impl EventHandler {
             };
 
             client = match payload.send_as {
-                crate::config::PayloadSendAs::Json => client.json(&json),
-                crate::config::PayloadSendAs::UrlEncoded => client.form(&json),
-                crate::config::PayloadSendAs::QueryParams => client.query(&json),
+                crate::config::PayloadSendAs::Json => client.json(&event_data),
+                crate::config::PayloadSendAs::UrlEncoded => client.form(&event_data),
+                crate::config::PayloadSendAs::QueryParams => client.query(&event_data),
             };
         }
 
@@ -185,9 +177,7 @@ impl EventHandler {
             .await
             .map_err(|e| Error::Reqwest { source: e })?;
 
-        // Try to parse as JSON, fall back to string if it fails
         let data = serde_json::from_str::<Value>(&resp).unwrap_or_else(|_| json!(resp));
-
         let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
         let e = EventBuilder::new()
             .data(EventData::Json(data))

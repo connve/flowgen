@@ -10,8 +10,6 @@ pub struct Config {
     /// Path to credentials file containing NATS authentication details.
     pub credentials_path: PathBuf,
     /// Subject to publish/subscribe to/from.
-    /// For publisher: supports handlebars templates like "pubsub.{{event.subject}}" which renders with event data.
-    /// For subscriber: the subject pattern to subscribe to.
     pub subject: String,
     /// Optional stream configuration. If provided for publisher, ensures stream exists.
     /// Required for subscriber as the stream name to consume from.

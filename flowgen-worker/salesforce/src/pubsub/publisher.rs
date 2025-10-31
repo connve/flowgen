@@ -49,12 +49,12 @@ pub enum Error {
         #[source]
         source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
-    /// Flowgen core event system error.
-    #[error("Event error: {source}")]
-    Event {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
+    /// Event building error.
+    #[error(transparent)]
+    Event(#[from] flowgen_core::event::Error),
+    /// Configuration template rendering failed.
+    #[error(transparent)]
+    ConfigRender(#[from] flowgen_core::config::Error),
     /// Flowgen core service error.
     #[error("Service error: {source}")]
     Service {
@@ -106,10 +106,9 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        let config = self
-            .config
-            .render(&event.data)
-            .map_err(|e| Error::Render { source: e })?;
+        // Render config with to support templates inside configuration.
+        let event_value = serde_json::value::Value::try_from(&event)?;
+        let config = self.config.render(&event_value)?;
         let mut publish_payload = config.payload;
 
         let now = Utc::now().timestamp_millis();
@@ -158,8 +157,7 @@ impl EventHandler {
             .subject(subject)
             .task_id(self.task_id)
             .task_type(self.task_type)
-            .build()
-            .map_err(|e| Error::Event { source: e })?;
+            .build()?;
 
         self.tx
             .send_with_logging(e)

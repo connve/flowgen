@@ -3,7 +3,7 @@
 //! Processes events containing JSON arrays and emits individual events
 //! for each array element, enabling fan-out processing patterns.
 
-use crate::event::{generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix};
+use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -93,11 +93,9 @@ impl EventHandler {
         };
 
         for element in array {
-            let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
-
             let e = EventBuilder::new()
                 .data(EventData::Json(element))
-                .subject(subject)
+                .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()?;

@@ -2,8 +2,8 @@ use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
 use flowgen_core::buffer::ToWriter;
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt, SubjectSuffix};
-use flowgen_core::{client::Client, event::generate_subject};
+use flowgen_core::client::Client;
+use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
 use object_store::PutPayload;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -157,29 +157,25 @@ impl EventHandler {
             .await
             .map_err(|e| Error::ObjectStore { source: e })?;
 
-        // Create structured result.
         let result = WriteResult {
             status: WriteStatus::Success,
             path: object_path.to_string(),
             e_tag: put_result.e_tag.clone(),
         };
 
-        // Generate event subject using e_tag as identifier, or timestamp if unavailable.
-        // Strip quotes from e_tag if present.
-        let suffix = match &put_result.e_tag {
-            Some(e_tag) => SubjectSuffix::Id(e_tag.trim_matches('"')),
-            None => SubjectSuffix::Timestamp,
-        };
-        let subject = generate_subject(&self.config.name, Some(suffix));
-
         // Build and send event.
         let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
-        let e = EventBuilder::new()
-            .subject(subject)
+        let mut e = EventBuilder::new()
+            .subject(self.config.name.to_owned())
             .data(EventData::Json(data))
             .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()?;
+            .task_type(self.task_type);
+
+        if let Some(e_tag) = put_result.e_tag {
+            e = e.id(e_tag);
+        };
+
+        let e = e.build()?;
 
         self.tx
             .send_with_logging(e)

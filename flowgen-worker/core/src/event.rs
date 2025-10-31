@@ -120,21 +120,19 @@ pub struct Event {
     pub task_type: &'static str,
 }
 
-impl Event {
-    /// Creates a JSON representation of the event for template rendering.
-    ///
-    /// Returns a JSON object with event fields that can be used in Handlebars templates.
-    /// The event data is converted to JSON format regardless of its internal representation.
-    pub fn to_template_data(&self) -> Result<serde_json::Value, Error> {
-        let data_value = serde_json::Value::try_from(&self.data)?;
-
+impl TryFrom<&Event> for Value {
+    type Error = Error;
+    fn try_from(event: &Event) -> Result<Self, Self::Error> {
+        let event_data = serde_json::Value::try_from(&event.data)?;
         Ok(serde_json::json!({
-            "subject": self.subject,
-            "data": data_value,
-            "id": self.id,
-            "timestamp": self.timestamp,
-            "task_id": self.task_id,
-            "task_type": self.task_type,
+            "event": {
+                "subject": event.subject,
+                "data": event_data,
+                "id": event.id,
+                "timestamp": event.timestamp,
+                "task_id": event.task_id,
+                "task_type": event.task_type,
+            }
         }))
     }
 }

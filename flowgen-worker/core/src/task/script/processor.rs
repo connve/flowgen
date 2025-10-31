@@ -3,7 +3,7 @@
 //! Executes Rhai scripts to transform, filter, or manipulate event data.
 //! Scripts can return objects, arrays, or null to control event emission.
 
-use crate::event::{generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix};
+use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
@@ -108,11 +108,9 @@ impl EventHandler {
 
     /// Emits a single event with the given data.
     async fn emit_event(&self, data: Value) -> Result<(), Error> {
-        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
-
         let e = EventBuilder::new()
             .data(EventData::Json(data))
-            .subject(subject)
+            .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
             .build()?;

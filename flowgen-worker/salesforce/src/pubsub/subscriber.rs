@@ -9,6 +9,8 @@ use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
 const DEFAULT_NUM_REQUESTED: i32 = 100;
+const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
+const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -201,15 +203,15 @@ impl EventHandler {
                                 raw_bytes: event.payload[..].to_vec(),
                             };
 
-                            // Normalize topic name.
-                            let topic = topic_name.replace('/', ".").to_lowercase();
+                            // Normalize topic name by removing data/ or event/ prefix and keeping the object name.
+                            let topic = topic_name
+                                .strip_prefix(DEFAULT_TOPIC_PREFIX_DATA)
+                                .or_else(|| topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_EVENT))
+                                .unwrap_or(topic_name)
+                                .to_lowercase();
 
-                            // Generate event subject prefix from topic name.
-                            let subject_prefix = if let Some(stripped) = topic.strip_prefix('.') {
-                                stripped.to_string()
-                            } else {
-                                topic
-                            };
+                            // Use the topic object name as subject prefix.
+                            let subject_prefix = topic;
                             let subject = generate_subject(
                                 &subject_prefix,
                                 Some(SubjectSuffix::Id(&event.id)),
