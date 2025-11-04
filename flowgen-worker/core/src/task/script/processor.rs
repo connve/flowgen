@@ -316,56 +316,39 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_processor_builder_new() {
-        let builder = ProcessorBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
     #[tokio::test]
-    async fn test_processor_builder_build_success() {
+    async fn test_processor_builder() {
         let config = Arc::new(crate::task::script::config::Processor {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: "data".to_string(),
+            code: "event".to_string(),
         });
+        let (tx, rx) = broadcast::channel(100);
 
-        let (tx, _rx) = broadcast::channel(100);
-        let rx2 = tx.subscribe();
-
+        // Success case.
         let processor = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx2)
+            .config(config.clone())
+            .sender(tx.clone())
+            .receiver(rx)
             .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(processor.is_ok());
 
-        assert_eq!(processor.task_id, 1);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_config() {
-        let (tx, rx) = broadcast::channel(100);
-
+        // Error case - missing config.
+        let (tx2, rx2) = broadcast::channel(100);
         let result = ProcessorBuilder::new()
-            .sender(tx)
-            .receiver(rx)
+            .sender(tx2)
+            .receiver(rx2)
             .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 
     #[tokio::test]

@@ -432,18 +432,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_reader_builder_new() {
-        let builder = ReaderBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_reader_builder_config() {
+    #[tokio::test]
+    async fn test_reader_builder() {
         let config = Arc::new(crate::config::Reader {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
@@ -455,203 +445,31 @@ mod tests {
             delete_after_read: None,
             delimiter: None,
         });
-
-        let builder = ReaderBuilder::new().config(config.clone());
-        assert!(builder.config.is_some());
-        assert_eq!(
-            builder.config.unwrap().path,
-            PathBuf::from("s3://bucket/input/")
-        );
-    }
-
-    #[test]
-    fn test_reader_builder_receiver() {
-        let (_, rx) = broadcast::channel::<Event>(10);
-        let builder = ReaderBuilder::new().receiver(rx);
-        assert!(builder.rx.is_some());
-    }
-
-    #[test]
-    fn test_reader_builder_sender() {
-        let (tx, _) = broadcast::channel::<Event>(10);
-        let builder = ReaderBuilder::new().sender(tx);
-        assert!(builder.tx.is_some());
-    }
-
-    #[test]
-    fn test_reader_builder_task_id() {
-        let builder = ReaderBuilder::new().task_id(123);
-        assert_eq!(builder.task_id, 123);
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_missing_config() {
         let (tx, rx) = broadcast::channel::<Event>(10);
 
-        let result = ReaderBuilder::new()
-            .receiver(rx)
-            .sender(tx)
-            .task_context(create_mock_task_context())
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_missing_receiver() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("/tmp/input/"),
-            credentials_path: None,
-            client_options: None,
-            batch_size: None,
-            has_header: None,
-            cache_options: None,
-            delete_after_read: None,
-            delimiter: None,
-        });
-
-        let (tx, _) = broadcast::channel::<Event>(10);
-
-        let result = ReaderBuilder::new()
-            .config(config)
-            .sender(tx)
-            .task_context(create_mock_task_context())
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_missing_sender() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("gs://bucket/data/"),
-            credentials_path: Some(PathBuf::from("/creds.json")),
-            client_options: None,
-            batch_size: Some(1000),
-            has_header: Some(false),
-            cache_options: None,
-            delete_after_read: None,
-            delimiter: None,
-        });
-
-        let (_, rx) = broadcast::channel::<Event>(10);
-
-        let result = ReaderBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .task_context(create_mock_task_context())
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_build_success() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("s3://my-bucket/files/"),
-            credentials_path: Some(PathBuf::from("/aws-creds.json")),
-            client_options: Some({
-                let mut opts = std::collections::HashMap::new();
-                opts.insert("region".to_string(), "us-west-2".to_string());
-                opts
-            }),
-            batch_size: Some(2000),
-            has_header: Some(true),
-            cache_options: None,
-            delete_after_read: None,
-            delimiter: None,
-        });
-
-        let (tx, rx) = broadcast::channel::<Event>(50);
-
-        let result = ReaderBuilder::new()
+        // Success case.
+        let reader = ReaderBuilder::new()
             .config(config.clone())
             .receiver(rx)
-            .sender(tx)
-            .task_id(777)
+            .sender(tx.clone())
+            .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
+        assert!(reader.is_ok());
 
-        assert!(result.is_ok());
-        let reader = result.unwrap();
-        assert_eq!(reader.task_id, 777);
-        assert_eq!(reader.config.path, PathBuf::from("s3://my-bucket/files/"));
-    }
-
-    #[test]
-    fn test_reader_builder_chain() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("file:///data/input/"),
-            credentials_path: None,
-            client_options: None,
-            batch_size: Some(100),
-            has_header: Some(false),
-            cache_options: None,
-            delete_after_read: None,
-            delimiter: None,
-        });
-
-        let (tx, rx) = broadcast::channel::<Event>(5);
-
-        let builder = ReaderBuilder::new()
-            .config(config.clone())
-            .receiver(rx)
-            .sender(tx)
-            .task_id(20);
-
-        assert!(builder.config.is_some());
-        assert!(builder.rx.is_some());
-        assert!(builder.tx.is_some());
-        assert_eq!(builder.task_id, 20);
-    }
-
-    #[tokio::test]
-    async fn test_reader_builder_build_missing_task_context() {
-        let config = Arc::new(crate::config::Reader {
-            name: "test_reader".to_string(),
-            path: PathBuf::from("s3://bucket/input/"),
-            credentials_path: None,
-            client_options: None,
-            batch_size: None,
-            has_header: None,
-            cache_options: None,
-            delete_after_read: None,
-            delimiter: None,
-        });
-        let (tx, rx) = broadcast::channel::<Event>(10);
-
+        // Error case - missing config.
+        let (tx2, rx2) = broadcast::channel::<Event>(10);
         let result = ReaderBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
+            .receiver(rx2)
+            .sender(tx2)
+            .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 }

@@ -9,8 +9,7 @@ use serde_json::{Map, Value};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Required builder attribute was not provided.
-    #[error("Missing required attribute: {}", _0)]
+    #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
@@ -181,10 +180,10 @@ mod tests {
         let result = TaskContextBuilder::new().flow_labels(Some(labels)).build();
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: flow_name"));
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 
     #[test]

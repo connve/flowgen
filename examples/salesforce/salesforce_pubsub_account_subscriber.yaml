@@ -1,11 +1,11 @@
 flow:
+  require_leader_election: true
   name: salesforce_pubsub_account_subscriber
-  # set to true if running in k8s and require only single pod running this flow (leader election)
-  # require_leader_election: true
   tasks:
+
+    # Subscribe to Salesforce PubSub API on a given topic.
     - salesforce_pubsub_subscriber:
         name: start_subscription
-        # update to your credentials path
         credentials_path: /etc/sfdc/credentials.json
         topic:
           name: /data/AccountChangeEvent
@@ -13,12 +13,18 @@ flow:
             enabled: true
             managed_subscription: false
             name: salesforce_pubsub_account_subscriber
+
+    # Publish events to NATS for extra durability.
     - nats_jetstream_publisher:
         name: publish_events
-        # update to your credentials path
         credentials_path: /etc/nats/credentials.json
-        stream: flowgen_events
-        stream_description: Main evenbuts of Flowgen.
-        subjects:
-          - salesforce_pubsub_subscriber.>
+        subject: pubsub.data.{{event.subject}}
+        stream:
+          create_or_update: true
+          name: salesforce
+          description: "Salesforce messaging stream for platform events, query results etc."
+          subjects: ["pubsub.>",]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
 

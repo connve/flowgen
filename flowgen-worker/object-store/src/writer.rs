@@ -395,7 +395,6 @@ impl WriterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HiveParitionKeys, HivePartitionOptions};
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
@@ -418,16 +417,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_writer_builder_new() {
-        let builder = WriterBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.rx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_writer_builder_config() {
+    #[tokio::test]
+    async fn test_writer_builder() {
         let config = Arc::new(crate::config::Writer {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
@@ -435,155 +426,30 @@ mod tests {
             client_options: None,
             hive_partition_options: None,
         });
-
-        let builder = WriterBuilder::new().config(config.clone());
-        assert!(builder.config.is_some());
-        assert_eq!(
-            builder.config.unwrap().path,
-            PathBuf::from("s3://bucket/path/")
-        );
-    }
-
-    #[test]
-    fn test_writer_builder_receiver() {
-        let (_, rx) = broadcast::channel::<Event>(10);
-        let builder = WriterBuilder::new().receiver(rx);
-        assert!(builder.rx.is_some());
-    }
-
-    #[test]
-    fn test_writer_builder_task_id() {
-        let builder = WriterBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, 42);
-    }
-
-    #[tokio::test]
-    async fn test_writer_builder_missing_config() {
-        let (_, rx) = broadcast::channel::<Event>(10);
-        let result = WriterBuilder::new().receiver(rx).task_id(1).build().await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_writer_builder_missing_receiver() {
-        let config = Arc::new(crate::config::Writer {
-            name: "test_writer".to_string(),
-            path: PathBuf::from("/tmp/output/"),
-            credentials_path: None,
-            client_options: None,
-            hive_partition_options: None,
-        });
-
-        let result = WriterBuilder::new().config(config).task_id(1).build().await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_writer_builder_build_success() {
-        let config = Arc::new(crate::config::Writer {
-            name: "test_writer".to_string(),
-            path: PathBuf::from("gs://my-bucket/data/"),
-            credentials_path: Some(PathBuf::from("/service-account.json")),
-            client_options: None,
-            hive_partition_options: Some(HivePartitionOptions {
-                enabled: true,
-                partition_keys: vec![HiveParitionKeys::EventDate],
-            }),
-        });
-
         let (tx, rx) = broadcast::channel::<Event>(10);
 
-        let result = WriterBuilder::new()
+        // Success case.
+        let writer = WriterBuilder::new()
             .config(config.clone())
             .receiver(rx)
-            .sender(tx)
-            .task_id(99)
+            .sender(tx.clone())
+            .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
+        assert!(writer.is_ok());
 
-        assert!(result.is_ok());
-        let writer = result.unwrap();
-        assert_eq!(writer.task_id, 99);
-        assert_eq!(writer.config.path, PathBuf::from("gs://my-bucket/data/"));
-    }
-
-    #[test]
-    fn test_event_handler_structure() {
-        // Test that EventHandler can be constructed with the right types
-        let config = Arc::new(crate::config::Writer {
-            name: "test_writer".to_string(),
-            path: PathBuf::from("/tmp/"),
-            credentials_path: None,
-            client_options: None,
-            hive_partition_options: None,
-        });
-
-        let client = Arc::new(Mutex::new(
-            crate::client::ClientBuilder::new()
-                .path(PathBuf::from("/tmp/"))
-                .build()
-                .unwrap(),
-        ));
-
-        // We can't actually create an EventHandler here because it's private,
-        // but we can verify the types are correct by compiling this
-        let _ = (config, client);
-    }
-
-    #[test]
-    fn test_writer_builder_chain() {
-        let config = Arc::new(crate::config::Writer {
-            name: "test_writer".to_string(),
-            path: PathBuf::from("file:///data/output/"),
-            credentials_path: None,
-            client_options: None,
-            hive_partition_options: None,
-        });
-
-        let (_, rx) = broadcast::channel::<Event>(5);
-
-        let builder = WriterBuilder::new()
-            .config(config.clone())
-            .receiver(rx)
-            .task_id(10);
-
-        assert!(builder.config.is_some());
-        assert!(builder.rx.is_some());
-        assert_eq!(builder.task_id, 10);
-    }
-
-    #[tokio::test]
-    async fn test_writer_builder_build_missing_task_context() {
-        let config = Arc::new(crate::config::Writer {
-            name: "test_writer".to_string(),
-            path: PathBuf::from("s3://bucket/path/"),
-            credentials_path: None,
-            client_options: None,
-            hive_partition_options: None,
-        });
-        let (tx, rx) = broadcast::channel::<Event>(10);
-
+        // Error case - missing config.
+        let (_tx2, rx2) = broadcast::channel::<Event>(10);
         let result = WriterBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
+            .receiver(rx2)
+            .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 }

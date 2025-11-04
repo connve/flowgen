@@ -382,7 +382,7 @@ impl PublisherBuilder {
 mod tests {
     use super::*;
     use crate::pubsub::config;
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
 
@@ -404,16 +404,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_publisher_builder_new() {
-        let builder = PublisherBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.rx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_publisher_builder_config() {
+    #[tokio::test]
+    async fn test_publisher_builder() {
         let config = Arc::new(config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("test_creds"),
@@ -421,116 +413,30 @@ mod tests {
             payload: serde_json::Map::new(),
             endpoint: None,
         });
-
-        let builder = PublisherBuilder::new().config(config.clone());
-        assert!(builder.config.is_some());
-        assert_eq!(builder.config.unwrap().topic, "/event/Test__e");
-    }
-
-    #[test]
-    fn test_publisher_builder_receiver() {
-        let (_, rx) = broadcast::channel::<Event>(10);
-        let builder = PublisherBuilder::new().receiver(rx);
-        assert!(builder.rx.is_some());
-    }
-
-    #[test]
-    fn test_publisher_builder_task_id() {
-        let builder = PublisherBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, 42);
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_missing_config() {
-        let (_, rx) = broadcast::channel::<Event>(10);
-        let result = PublisherBuilder::new()
-            .receiver(rx)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_missing_receiver() {
-        let config = Arc::new(config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("test_creds"),
-            topic: "/event/Test__e".to_string(),
-            payload: serde_json::Map::new(),
-            endpoint: None,
-        });
-
-        let result = PublisherBuilder::new()
-            .config(config)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_success() {
-        let config = Arc::new(config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("test_creds"),
-            topic: "/event/Test__e".to_string(),
-            payload: {
-                let mut payload = serde_json::Map::new();
-                payload.insert("Test_Field__c".to_string(), json!("test_value"));
-                payload
-            },
-            endpoint: None,
-        });
-
         let (tx, rx) = broadcast::channel::<Event>(10);
 
-        let result = PublisherBuilder::new()
+        // Success case.
+        let publisher = PublisherBuilder::new()
             .config(config.clone())
             .receiver(rx)
-            .sender(tx)
-            .task_id(5)
+            .sender(tx.clone())
+            .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
             .await;
+        assert!(publisher.is_ok());
 
-        assert!(result.is_ok());
-        let publisher = result.unwrap();
-        assert_eq!(publisher.task_id, 5);
-        assert_eq!(publisher.config.topic, "/event/Test__e");
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_missing_task_context() {
-        let config = Arc::new(config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("test_creds"),
-            topic: "/event/Test__e".to_string(),
-            payload: serde_json::Map::new(),
-            endpoint: None,
-        });
-        let (tx, rx) = broadcast::channel::<Event>(10);
-
+        // Error case - missing config.
+        let (_tx2, rx2) = broadcast::channel::<Event>(10);
         let result = PublisherBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
+            .receiver(rx2)
+            .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 }

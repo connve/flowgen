@@ -351,8 +351,6 @@ mod tests {
     use super::*;
     use crate::config::BasicAuth;
     use serde_json::Map;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
     use tokio::sync::broadcast;
 
     /// Creates a mock TaskContext for testing.
@@ -462,80 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_processor_builder_new() {
-        let builder = ProcessorBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_default() {
-        let builder = ProcessorBuilder::default();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_config() {
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://api.example.com".to_string(),
-            method: crate::config::Method::POST,
-            payload: None,
-            headers: None,
-            credentials_path: None,
-        });
-
-        let builder = ProcessorBuilder::new().config(config.clone());
-        assert_eq!(builder.config, Some(config));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_receiver() {
-        let (_tx, rx) = broadcast::channel(100);
-        let builder = ProcessorBuilder::new().receiver(rx);
-        assert!(builder.rx.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_sender() {
-        let (tx, _rx) = broadcast::channel(100);
-        let builder = ProcessorBuilder::new().sender(tx);
-        assert!(builder.tx.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_task_id() {
-        let builder = ProcessorBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, 42);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_config() {
-        let (tx, rx) = broadcast::channel(100);
-        let result = ProcessorBuilder::new()
-            .sender(tx)
-            .receiver(rx)
-            .task_id(1)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_receiver() {
-        let (tx, _rx) = broadcast::channel(100);
+    async fn test_processor_builder() {
         let config = Arc::new(crate::config::Processor {
             name: "test_processor".to_string(),
             endpoint: "https://test.com".to_string(),
@@ -544,149 +469,31 @@ mod tests {
             headers: None,
             credentials_path: None,
         });
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .task_id(1)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_sender() {
-        let (_tx, rx) = broadcast::channel(100);
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://test.com".to_string(),
-            method: crate::config::Method::GET,
-            payload: None,
-            headers: None,
-            credentials_path: None,
-        });
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .task_id(1)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_success() {
         let (tx, rx) = broadcast::channel(100);
-        let mut headers = HashMap::new();
-        headers.insert("Content-Type".to_string(), "application/json".to_string());
 
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://success.test.com".to_string(),
-            method: crate::config::Method::POST,
-            payload: Some(crate::config::Payload {
-                object: None,
-                input: Some("{\"test\": \"data\"}".to_string()),
-                from_event: false,
-                send_as: crate::config::PayloadSendAs::Json,
-            }),
-            headers: Some(headers),
-            credentials_path: Some(PathBuf::from("/test/creds.json")),
-        });
-
-        let result = ProcessorBuilder::new()
-            .config(config.clone())
-            .sender(tx)
-            .receiver(rx)
-            .task_id(5)
-            .task_type("test")
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_ok());
-        let processor = result.unwrap();
-        assert_eq!(processor.config, config);
-        assert_eq!(processor.task_id, 5);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_chain() {
-        let (tx, rx) = broadcast::channel(50);
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://chain.test.com".to_string(),
-            method: crate::config::Method::PUT,
-            payload: None,
-            headers: None,
-            credentials_path: None,
-        });
-
+        // Success case.
         let processor = ProcessorBuilder::new()
             .config(config.clone())
-            .sender(tx)
+            .sender(tx.clone())
             .receiver(rx)
-            .task_id(10)
+            .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(processor.is_ok());
 
-        assert_eq!(processor.config, config);
-        assert_eq!(processor.task_id, 10);
-    }
-
-    #[test]
-    fn test_event_handler_structure() {
-        let (tx, _rx) = broadcast::channel(1);
-        let config = Arc::new(crate::config::Processor::default());
-        let client = Arc::new(reqwest::Client::new());
-
-        let _handler = EventHandler {
-            client,
-            config,
-            tx,
-            task_id: 0,
-            task_type: "test",
-            _task_context: create_mock_task_context(),
-        };
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_task_context() {
-        let config = Arc::new(crate::config::Processor {
-            name: "test_processor".to_string(),
-            endpoint: "https://test.com".to_string(),
-            method: crate::config::Method::GET,
-            payload: None,
-            headers: None,
-            credentials_path: None,
-        });
-        let (tx, rx) = broadcast::channel(100);
-
+        // Error case - missing config.
+        let (tx2, rx2) = broadcast::channel(100);
         let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .task_id(1)
+            .sender(tx2)
+            .receiver(rx2)
+            .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 }

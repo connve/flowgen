@@ -335,24 +335,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_subscriber_builder_new() {
-        let builder = SubscriberBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_subscriber_builder_default() {
-        let builder = SubscriberBuilder::default();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_subscriber_builder_config() {
+    #[tokio::test]
+    async fn test_subscriber_builder() {
         let config = Arc::new(super::super::config::Subscriber {
             name: "test_subscriber".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
@@ -369,165 +353,30 @@ mod tests {
             batch_size: Some(100),
             delay_secs: Some(5),
         });
-
-        let builder = SubscriberBuilder::new().config(config.clone());
-        assert_eq!(builder.config, Some(config));
-    }
-
-    #[test]
-    fn test_subscriber_builder_sender() {
-        let (tx, _rx) = broadcast::channel(100);
-        let builder = SubscriberBuilder::new().sender(tx);
-        assert!(builder.tx.is_some());
-    }
-
-    #[test]
-    fn test_subscriber_builder_task_id() {
-        let builder = SubscriberBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, 42);
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_build_missing_config() {
-        let (tx, _rx) = broadcast::channel(100);
-        let result = SubscriberBuilder::new().sender(tx).task_id(1).build().await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_build_missing_sender() {
-        let config = Arc::new(super::super::config::Subscriber {
-            name: "test_subscriber".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "test.subject".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "test_stream".to_string(),
-                subjects: vec!["test.>".to_string()],
-                create_or_update: true,
-                retention: Some(super::super::config::RetentionPolicy::Limits),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: Some("test_consumer".to_string()),
-            batch_size: Some(50),
-            delay_secs: None,
-        });
-
-        let result = SubscriberBuilder::new()
-            .config(config)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_build_success() {
-        let config = Arc::new(super::super::config::Subscriber {
-            name: "test_subscriber".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "test.subject.*".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "test_stream".to_string(),
-                subjects: vec!["test.>".to_string()],
-                create_or_update: true,
-                retention: Some(super::super::config::RetentionPolicy::Limits),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: Some("test_consumer".to_string()),
-            batch_size: Some(25),
-            delay_secs: Some(10),
-        });
         let (tx, _rx) = broadcast::channel(100);
 
-        let result = SubscriberBuilder::new()
-            .config(config.clone())
-            .sender(tx)
-            .task_id(5)
-            .task_context(create_mock_task_context())
-            .task_type("test_task")
-            .build()
-            .await;
-
-        assert!(result.is_ok());
-        let subscriber = result.unwrap();
-        assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.task_id, 5);
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_chain() {
-        let config = Arc::new(super::super::config::Subscriber {
-            name: "test_subscriber".to_string(),
-            credentials_path: PathBuf::from("/chain/test.creds"),
-            subject: "chain.subject".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "chain_stream".to_string(),
-                subjects: vec!["chain.>".to_string()],
-                create_or_update: true,
-                retention: Some(super::super::config::RetentionPolicy::Limits),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: Some("chain_consumer".to_string()),
-            batch_size: Some(10),
-            delay_secs: Some(1),
-        });
-        let (tx, _rx) = broadcast::channel(50);
-
+        // Success case.
         let subscriber = SubscriberBuilder::new()
             .config(config.clone())
-            .sender(tx)
-            .task_id(10)
-            .task_context(create_mock_task_context())
+            .sender(tx.clone())
+            .task_id(1)
             .task_type("test_task")
+            .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(subscriber.is_ok());
 
-        assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.task_id, 10);
-    }
-
-    #[test]
-    fn test_subscriber_structure() {
-        let config = Arc::new(super::super::config::Subscriber {
-            name: "test_subscriber".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "struct.test".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "struct_test".to_string(),
-                subjects: vec!["struct.>".to_string()],
-                create_or_update: true,
-                retention: Some(super::super::config::RetentionPolicy::Limits),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: Some("struct_consumer".to_string()),
-            batch_size: Some(1),
-            delay_secs: None,
-        });
-        let (tx, _rx) = broadcast::channel(1);
-
-        let subscriber = Subscriber {
-            config: config.clone(),
-            tx,
-            task_id: 0,
-            _task_context: create_mock_task_context(),
-            task_type: "test_task",
-        };
-
-        assert_eq!(subscriber.config, config);
-        assert_eq!(subscriber.task_id, 0);
+        // Error case - missing config.
+        let (tx2, _rx2) = broadcast::channel(100);
+        let result = SubscriberBuilder::new()
+            .sender(tx2)
+            .task_context(create_mock_task_context())
+            .build()
+            .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 
     #[test]

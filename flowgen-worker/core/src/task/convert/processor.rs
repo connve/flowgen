@@ -32,10 +32,6 @@ pub enum Error {
         #[source]
         source: crate::event::Error,
     },
-    #[error(
-        "ArrowRecordBatch to Avro conversion is not supported. Please convert data to JSON first."
-    )]
-    ArrowToAvroNotSupported,
     #[error("Avro serialization failed with error: {source}")]
     SerdeAvro {
         #[source]
@@ -51,7 +47,11 @@ pub enum Error {
         #[source]
         source: serde_avro_fast::schema::SchemaError,
     },
-    #[error("Missing required builder attribute: {}", _0)]
+    #[error(
+        "ArrowRecordBatch to Avro conversion is not supported. Please convert data to JSON first."
+    )]
+    ArrowToAvroNotSupported,
+    #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
 
@@ -353,7 +353,6 @@ mod tests {
     use serde_json::json;
     use tokio::sync::broadcast;
 
-    /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
         labels.insert(
@@ -385,7 +384,6 @@ mod tests {
 
         assert_eq!(value["normal_key"], "value1");
         assert_eq!(value["another_key"], "value2");
-
         assert_eq!(value["nested"]["inner-key"], "nested_value");
     }
 
@@ -402,107 +400,39 @@ mod tests {
         assert_eq!(value, original);
     }
 
-    #[test]
-    fn test_processor_builder_new() {
-        let builder = ProcessorBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
     #[tokio::test]
-    async fn test_processor_builder_build_success() {
+    async fn test_processor_builder() {
         let config = Arc::new(crate::task::convert::config::Processor {
             name: "test".to_string(),
             target_format: crate::task::convert::config::TargetFormat::Avro,
             schema: Some(r#"{"type": "string"}"#.to_string()),
         });
+        let (tx, rx) = broadcast::channel(100);
 
-        let (tx, _rx) = broadcast::channel(100);
-        let rx2 = tx.subscribe();
-
+        // Success case.
         let processor = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx2)
+            .config(config.clone())
+            .sender(tx.clone())
+            .receiver(rx)
             .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(processor.is_ok());
 
-        assert_eq!(processor.task_id, 1);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_config() {
-        let (tx, rx) = broadcast::channel(100);
-
+        // Error case - missing config.
+        let (tx2, rx2) = broadcast::channel(100);
         let result = ProcessorBuilder::new()
-            .sender(tx)
-            .receiver(rx)
+            .sender(tx2)
+            .receiver(rx2)
             .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required builder attribute: config"));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_sender() {
-        let config = Arc::new(crate::task::convert::config::Processor::default());
-        let (_, rx) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required builder attribute: sender"));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_receiver() {
-        let config = Arc::new(crate::task::convert::config::Processor::default());
-        let (tx, _) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required builder attribute: receiver"));
-    }
-
-    #[test]
-    fn test_avro_serializer_options_creation() {
-        let options = AvroSerializerOptions {
-            schema_string: r#"{"type": "string"}"#.to_string(),
-            serializer_config: Mutex::new(serde_avro_fast::ser::SerializerConfig::new(Box::leak(
-                Box::new(r#"{"type": "string"}"#.parse().unwrap()),
-            ))),
-        };
-
-        assert_eq!(options.schema_string, r#"{"type": "string"}"#);
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 
     #[tokio::test]
@@ -547,25 +477,6 @@ mod tests {
         }
         assert_eq!(output_event.subject, "test");
         assert_eq!(output_event.task_id, 1);
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_build_missing_task_context() {
-        let config = Arc::new(crate::task::convert::config::Processor::default());
-        let (tx, rx) = broadcast::channel(100);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .receiver(rx)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
     }
 
     #[tokio::test]

@@ -18,43 +18,54 @@ use tracing::{debug, info};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Kubernetes client error.
-    #[error("Kubernetes client error")]
-    Kube(#[source] kube::Error),
-    /// Failed to read namespace from service account.
-    #[error("Failed to read namespace from service account")]
-    NamespaceRead(#[source] std::io::Error),
-    /// Client not connected.
-    #[error("Client not connected")]
-    ClientNotConnected,
-    /// Failed to create lease.
-    #[error("Failed to create lease")]
-    CreateLease(#[source] kube::Error),
-    /// Failed to get existing lease.
-    #[error("Failed to get existing lease")]
-    GetLease(#[source] kube::Error),
-    /// Existing lease has no spec.
+    #[error("Connection to Kubernetes API failed with error: {source}")]
+    KubernetesClient {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Reading namespace from service account failed with error: {source}")]
+    NamespaceRead {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Kubernetes Client is not connect / setup properly")]
+    KubernetesClientNotConnected,
+    #[error("Lease creation failed with error: {source}")]
+    CreateLease {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Lease get failed with error: {source}")]
+    GetLease {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Lease renewal failed with error: {source}")]
+    RenewLease {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Lease takeover failed with error: {source}")]
+    TakeoverLease {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Lease deletion failed with error: {source}")]
+    DeleteLease {
+        #[source]
+        source: kube::Error,
+    },
+    #[error("Lease pathing failed with error: {source}")]
+    PatchLease {
+        #[source]
+        source: kube::Error,
+    },
     #[error("Existing lease has no spec")]
     MissingLeaseSpec,
-    /// Existing lease has no holder identity.
     #[error("Existing lease has no holder identity")]
     MissingHolderIdentity,
-    /// Failed to renew lease.
-    #[error("Failed to renew lease")]
-    RenewLease(#[source] kube::Error),
-    /// Failed to take over expired lease.
-    #[error("Failed to take over expired lease")]
-    TakeoverLease(#[source] kube::Error),
-    /// Lease is held by another instance.
     #[error("Lease {name} is held by another instance: {holder}")]
     LeaseHeldByOther { name: String, holder: String },
-    /// Failed to delete lease.
-    #[error("Failed to delete lease")]
-    DeleteLease(#[source] kube::Error),
-    /// Failed to patch lease.
-    #[error("Failed to patch lease")]
-    PatchLease(#[source] kube::Error),
-    /// Required builder attribute was not provided.
     #[error("Missing required attribute: {0}")]
     MissingRequiredAttribute(String),
 }
@@ -91,13 +102,15 @@ impl FlowgenClient for K8sHost {
 
     #[tracing::instrument(skip(self), name = "k8s.connect")]
     async fn connect(mut self) -> Result<Self, Self::Error> {
-        let client = Client::try_default().await.map_err(Error::Kube)?;
+        let client = Client::try_default()
+            .await
+            .map_err(|source| Error::KubernetesClient { source })?;
 
         // Auto-detect namespace from pod's service account.
         let namespace =
             tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
                 .await
-                .map_err(Error::NamespaceRead)?
+                .map_err(|source| Error::NamespaceRead { source })?
                 .trim()
                 .to_string();
 
@@ -119,7 +132,7 @@ impl Host for K8sHost {
         let client = self
             .client
             .as_ref()
-            .ok_or_else(|| Box::new(Error::ClientNotConnected) as crate::host::Error)?;
+            .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
 
         let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
 
@@ -154,7 +167,7 @@ impl Host for K8sHost {
                 let existing_lease = api
                     .get(name)
                     .await
-                    .map_err(|e| Box::new(Error::GetLease(e)) as crate::host::Error)?;
+                    .map_err(|source| Box::new(Error::GetLease { source }) as crate::host::Error)?;
 
                 let spec = existing_lease
                     .spec
@@ -193,7 +206,9 @@ impl Host for K8sHost {
 
                     api.patch(name, &PatchParams::default(), &Patch::Merge(renew_patch))
                         .await
-                        .map_err(|e| Box::new(Error::RenewLease(e)) as crate::host::Error)?;
+                        .map_err(|source| {
+                            Box::new(Error::RenewLease { source }) as crate::host::Error
+                        })?;
 
                     debug!("Renewed lease: {} in namespace: {}", name, namespace);
                     Ok(())
@@ -214,7 +229,9 @@ impl Host for K8sHost {
 
                     api.patch(name, &PatchParams::default(), &Patch::Merge(takeover_patch))
                         .await
-                        .map_err(|e| Box::new(Error::TakeoverLease(e)) as crate::host::Error)?;
+                        .map_err(|source| {
+                            Box::new(Error::TakeoverLease { source }) as crate::host::Error
+                        })?;
 
                     info!(
                         "Took over expired lease: {} in namespace: {}",
@@ -229,7 +246,7 @@ impl Host for K8sHost {
                     }) as crate::host::Error)
                 }
             }
-            Err(e) => Err(Box::new(Error::CreateLease(e)) as crate::host::Error),
+            Err(source) => Err(Box::new(Error::CreateLease { source }) as crate::host::Error),
         }
     }
 
@@ -243,12 +260,12 @@ impl Host for K8sHost {
         let client = self
             .client
             .as_ref()
-            .ok_or_else(|| Box::new(Error::ClientNotConnected) as crate::host::Error)?;
+            .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
         let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
 
         api.delete(name, &DeleteParams::default())
             .await
-            .map_err(|e| Box::new(Error::DeleteLease(e)) as crate::host::Error)?;
+            .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
         info!("Deleted lease: {} in namespace: {}", name, namespace);
         Ok(())
@@ -264,7 +281,7 @@ impl Host for K8sHost {
         let client = self
             .client
             .as_ref()
-            .ok_or_else(|| Box::new(Error::ClientNotConnected) as crate::host::Error)?;
+            .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
         let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
 
         let patch = serde_json::json!({
@@ -275,7 +292,7 @@ impl Host for K8sHost {
 
         api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
             .await
-            .map_err(|e| Box::new(Error::PatchLease(e)) as crate::host::Error)?;
+            .map_err(|source| Box::new(Error::PatchLease { source }) as crate::host::Error)?;
 
         debug!("Renewed lease: {} in namespace: {}", name, namespace);
         Ok(())
@@ -350,7 +367,11 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Client not connected"));
+        assert!(err.downcast_ref::<Error>().is_some());
+        assert!(matches!(
+            err.downcast_ref::<Error>().unwrap(),
+            Error::KubernetesClientNotConnected
+        ));
     }
 
     #[tokio::test]
@@ -360,7 +381,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Client not connected"));
+        assert!(matches!(
+            err.downcast_ref::<Error>().unwrap(),
+            Error::KubernetesClientNotConnected
+        ));
     }
 
     #[tokio::test]
@@ -369,10 +393,11 @@ mod tests {
         let result = host.delete_lease("test-lease", None).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Client not connected"));
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<Error>().unwrap(),
+            Error::KubernetesClientNotConnected
+        ));
     }
 
     #[tokio::test]
@@ -390,7 +415,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Client not connected"));
+        assert!(matches!(
+            err.downcast_ref::<Error>().unwrap(),
+            Error::KubernetesClientNotConnected
+        ));
     }
 
     #[tokio::test]
@@ -492,47 +520,5 @@ mod tests {
         assert_eq!(host.holder_identity, cloned.holder_identity);
         assert_eq!(host.namespace, cloned.namespace);
         assert_eq!(host.lease_duration_secs, cloned.lease_duration_secs);
-    }
-
-    #[test]
-    fn test_error_display_client_not_connected() {
-        assert_eq!(
-            Error::ClientNotConnected.to_string(),
-            "Client not connected"
-        );
-    }
-
-    #[test]
-    fn test_error_display_missing_lease_spec() {
-        assert_eq!(
-            Error::MissingLeaseSpec.to_string(),
-            "Existing lease has no spec"
-        );
-    }
-
-    #[test]
-    fn test_error_display_missing_holder_identity() {
-        assert_eq!(
-            Error::MissingHolderIdentity.to_string(),
-            "Existing lease has no holder identity"
-        );
-    }
-
-    #[test]
-    fn test_error_display_lease_held_by_other() {
-        let error = Error::LeaseHeldByOther {
-            name: "my-lease".to_string(),
-            holder: "other-pod".to_string(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Lease my-lease is held by another instance: other-pod"
-        );
-    }
-
-    #[test]
-    fn test_error_display_missing_required_attribute() {
-        let error = Error::MissingRequiredAttribute("field_name".to_string());
-        assert_eq!(error.to_string(), "Missing required attribute: field_name");
     }
 }

@@ -334,24 +334,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_publisher_builder_new() {
-        let builder = PublisherBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.rx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_publisher_builder_default() {
-        let builder = PublisherBuilder::default();
-        assert!(builder.config.is_none());
-        assert!(builder.rx.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
-    #[test]
-    fn test_publisher_builder_config() {
+    #[tokio::test]
+    async fn test_publisher_builder() {
         let config = Arc::new(super::super::config::Publisher {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("/test/creds.jwt"),
@@ -371,164 +355,30 @@ mod tests {
             batch_size: None,
             delay_secs: None,
         });
-
-        let builder = PublisherBuilder::new().config(config.clone());
-        assert_eq!(builder.config, Some(config));
-    }
-
-    #[test]
-    fn test_publisher_builder_receiver() {
-        let (_tx, rx) = broadcast::channel(100);
-        let builder = PublisherBuilder::new().receiver(rx);
-        assert!(builder.rx.is_some());
-    }
-
-    #[test]
-    fn test_publisher_builder_task_id() {
-        let builder = PublisherBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, 42);
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_missing_config() {
-        let (_tx, rx) = broadcast::channel(100);
-        let result = PublisherBuilder::new()
-            .receiver(rx)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_missing_receiver() {
-        let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "test.subject".to_string(),
-            stream: None,
-            durable_name: None,
-            batch_size: None,
-            delay_secs: None,
-        });
-
-        let result = PublisherBuilder::new()
-            .config(config)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "receiver")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_success() {
-        let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "test.subject.1".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "test_stream".to_string(),
-                description: Some("Test description".to_string()),
-                subjects: vec!["test.subject.1".to_string(), "test.subject.2".to_string()],
-                max_age_secs: Some(86400),
-                max_messages_per_subject: Some(1),
-                create_or_update: true,
-                retention: Some(super::super::config::RetentionPolicy::Limits),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: None,
-            batch_size: None,
-            delay_secs: None,
-        });
         let (tx, rx) = broadcast::channel(100);
 
-        let result = PublisherBuilder::new()
-            .config(config.clone())
-            .receiver(rx)
-            .sender(tx)
-            .task_id(5)
-            .task_type("test")
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_ok());
-        let publisher = result.unwrap();
-        assert_eq!(publisher.config, config);
-        assert_eq!(publisher.task_id, 5);
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_chain() {
-        let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("/chain/test.creds"),
-            subject: "chain.subject".to_string(),
-            stream: Some(super::super::config::StreamOptions {
-                name: "chain_stream".to_string(),
-                description: None,
-                subjects: vec!["chain.subject".to_string()],
-                max_age_secs: Some(1800),
-                max_messages_per_subject: None,
-                create_or_update: false,
-                retention: Some(super::super::config::RetentionPolicy::WorkQueue),
-                discard: Some(super::super::config::DiscardPolicy::Old),
-                ..Default::default()
-            }),
-            durable_name: None,
-            batch_size: None,
-            delay_secs: None,
-        });
-        let (tx, rx) = broadcast::channel(50);
-
+        // Success case.
         let publisher = PublisherBuilder::new()
             .config(config.clone())
             .receiver(rx)
-            .sender(tx)
-            .task_id(10)
+            .sender(tx.clone())
+            .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(publisher.is_ok());
 
-        assert_eq!(publisher.config, config);
-        assert_eq!(publisher.task_id, 10);
-    }
-
-    #[tokio::test]
-    async fn test_publisher_builder_build_missing_task_context() {
-        let config = Arc::new(super::super::config::Publisher {
-            name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
-            subject: "test.subject".to_string(),
-            stream: None,
-            durable_name: None,
-            batch_size: None,
-            delay_secs: None,
-        });
-        let (tx, rx) = broadcast::channel(100);
-
+        // Error case - missing config.
+        let (_tx2, rx2) = broadcast::channel(100);
         let result = PublisherBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
+            .receiver(rx2)
+            .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 }

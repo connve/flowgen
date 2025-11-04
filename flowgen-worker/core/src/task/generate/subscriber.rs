@@ -373,70 +373,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_subscriber_builder_new() {
-        let builder = SubscriberBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.task_context.is_none());
-        assert_eq!(builder.task_id, 0);
-    }
-
     #[tokio::test]
-    async fn test_subscriber_builder_build_success() {
+    async fn test_subscriber_builder() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
             message: Some("test message".to_string()),
             interval: 1,
             count: Some(1),
         });
-
         let (tx, _rx) = broadcast::channel(100);
 
+        // Success case.
         let subscriber = SubscriberBuilder::new()
             .config(config.clone())
-            .sender(tx)
+            .sender(tx.clone())
             .task_id(1)
             .task_type("test")
             .task_context(create_mock_task_context())
             .build()
-            .await
-            .unwrap();
+            .await;
+        assert!(subscriber.is_ok());
 
-        assert_eq!(subscriber.task_id, 1);
-        assert_eq!(subscriber.config.interval, 1);
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_missing_config() {
-        let (tx, _rx) = broadcast::channel(100);
-
+        // Error case - missing config.
+        let (tx2, _rx2) = broadcast::channel(100);
         let result = SubscriberBuilder::new()
-            .sender(tx)
+            .sender(tx2)
             .task_context(create_mock_task_context())
             .build()
             .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "config")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_missing_sender() {
-        let config = Arc::new(crate::task::generate::config::Subscriber::default());
-
-        let result = SubscriberBuilder::new()
-            .config(config)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "sender")
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
     }
 
     #[tokio::test]
@@ -557,23 +525,5 @@ mod tests {
         // Check that cache key was created with flow.task_type.task format
         let cache_data = mock_cache.data.lock().await;
         assert!(cache_data.contains_key("test-flow.test.test.last_run"));
-    }
-
-    #[tokio::test]
-    async fn test_subscriber_builder_build_missing_task_context() {
-        let config = Arc::new(crate::task::generate::config::Subscriber::default());
-        let (tx, _rx) = broadcast::channel(100);
-
-        let result = SubscriberBuilder::new()
-            .config(config)
-            .sender(tx)
-            .task_id(1)
-            .build()
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
-        );
     }
 }

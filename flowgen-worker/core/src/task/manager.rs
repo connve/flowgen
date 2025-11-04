@@ -11,6 +11,17 @@ const DEFAULT_LEASE_RENEWAL_INTERVAL_SECS: u64 = 10;
 /// Lease acquisition retry interval in seconds.
 const DEFAULT_LEASE_RETRY_INTERVAL_SECS: u64 = 5;
 
+/// Task manager errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("Failed to send event: {0}")]
+    SendError(#[source] mpsc::error::SendError<TaskRegistration>),
+    /// Host coordination error.
+    #[error("Host coordination error")]
+    Host(#[source] crate::host::Error),
+}
+
 /// Spawns a task to continuously renew a Kubernetes lease.
 fn spawn_renewal_task(
     task_id: String,
@@ -31,15 +42,6 @@ fn spawn_renewal_task(
     })
 }
 
-/// Task manager errors.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Failed to send event: {0}")]
-    SendError(#[source] mpsc::error::SendError<TaskRegistration>),
-    /// Host coordination error.
-    #[error("Host coordination error")]
-    Host(#[source] crate::host::Error),
-}
 /// Leader election options for tasks requiring coordination.
 #[derive(Debug, Clone)]
 pub struct LeaderElectionOptions {
