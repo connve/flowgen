@@ -1,0 +1,38 @@
+flow:
+  name: salesforce_pubsub_writer
+  tasks:
+    # Subscribe to NATS stream on a given topic.
+    - nats_jetstream_subscriber:
+        name: "start_subscription"
+        credentials_path: /etc/nats/credentials.json
+        subject: pubsub.>
+        stream:
+          create_or_update: true
+          name: salesforce
+          description: "Salesforce messaging stream for platform events, query results etc."
+          subjects: ["pubsub.>",]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
+        durable_name: salesforce_pubsub_writer
+        batch_size: 100
+
+    # Edit subject to change format and follow path-like convention.
+    - script:
+        name: "strip_subject_prefix"
+        code: |
+          // Strip "pubsub" prefix and use data/event as path prefix
+          let parts = event.subject.split(".");
+          if parts.len() >= 3 && parts[0] == "pubsub" && (parts[1] == "data" || parts[1] == "event") {
+            event.subject = parts[1] + "/" + parts[2];
+          }
+          event
+
+    # Write data into local or remote object store.
+    - object_store_writer:
+        name: "write_events"
+        path: file///salesforce/{{event.subject}}
+        hive_partition_options:
+          enabled: true
+          partition_keys:
+            - "EventDate"
