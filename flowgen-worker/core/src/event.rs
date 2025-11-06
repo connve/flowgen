@@ -13,14 +13,6 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
-/// Subject suffix options for event subjects.
-pub enum SubjectSuffix<'a> {
-    /// Use current timestamp as suffix.
-    Timestamp,
-    /// Use custom ID as suffix.
-    Id(&'a str),
-}
-
 /// Extension trait for broadcast sender with automatic event logging.
 pub trait SenderExt {
     /// Sends an event and automatically logs it.
@@ -35,35 +27,15 @@ impl SenderExt for tokio::sync::broadcast::Sender<Event> {
         &self,
         event: Event,
     ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>> {
-        let subject = event.subject.clone();
-        let result = self.send(event).map_err(Box::new)?;
-        info!("Event processed: {}", subject);
-        Ok(result)
-    }
-}
+        let subject = event.subject.to_owned();
+        let suffix = match &event.id {
+            Some(ref id) => id.to_string(),
+            None => event.timestamp.to_string(),
+        };
 
-/// Generates a structured subject string from a prefix and an optional suffix.
-///
-/// The resulting subject is formatted as:
-/// - With suffix: `<prefix>.<suffix_value>`
-/// - Without suffix: `<prefix>`
-///
-/// # Arguments
-/// * `prefix` - The subject prefix (e.g., task name, topic name, or identifier).
-/// * `suffix` - Optional dynamic suffix for uniqueness (timestamp or custom ID).
-///
-/// # Returns
-/// A formatted subject string with the optional suffix.
-pub fn generate_subject(prefix: &str, suffix: Option<SubjectSuffix>) -> String {
-    match suffix {
-        Some(SubjectSuffix::Timestamp) => {
-            let timestamp = Utc::now().timestamp_micros();
-            format!("{prefix}.{timestamp}")
-        }
-        Some(SubjectSuffix::Id(id)) => {
-            format!("{prefix}.{id}")
-        }
-        None => prefix.to_string(),
+        let result = self.send(event).map_err(Box::new)?;
+        info!("Event processed: {}.{}", subject, suffix);
+        Ok(result)
     }
 }
 
@@ -71,34 +43,28 @@ pub fn generate_subject(prefix: &str, suffix: Option<SubjectSuffix>) -> String {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Input/output operation failed.
-    #[error("IO operation failed: {source}")]
+    #[error("IO operation failed with error: {source}")]
     IO {
         #[source]
         source: std::io::Error,
     },
-    /// Arrow data processing error.
-    #[error("Arrow data processing failed: {source}")]
+    #[error("Arrow data processing failed with error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,
     },
-    /// Avro serialization or deserialization error.
-    #[error("Avro operation failed: {source}")]
+    #[error("Avro operation failed with error: {source}")]
     Avro {
         #[source]
         source: apache_avro::Error,
     },
-    /// JSON serialization or deserialization error.
-    #[error("JSON serialization/deserialization failed: {source}")]
+    #[error("JSON serialization/deserialization failed with error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::error::Error,
     },
-    /// Required builder attribute was not provided.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    /// Attempted conversion between unsupported content types.
     #[error("Content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
 }
@@ -374,31 +340,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
-
-    #[test]
-    fn test_generate_subject_with_id() {
-        let subject = generate_subject("task-name", Some(SubjectSuffix::Id("123")));
-        assert_eq!(subject, "task-name.123");
-    }
-
-    #[test]
-    fn test_generate_subject_no_suffix() {
-        let subject = generate_subject("task-name", None);
-        assert_eq!(subject, "task-name");
-    }
-
-    #[test]
-    fn test_generate_subject_with_timestamp() {
-        let subject = generate_subject("task-name", Some(SubjectSuffix::Timestamp));
-        assert!(subject.starts_with("task-name."));
-        assert!(subject.len() > "task-name.".len());
-    }
-
-    #[test]
-    fn test_generate_subject_with_topic_prefix() {
-        let subject = generate_subject("event.myevent__e", Some(SubjectSuffix::Id("evt123")));
-        assert_eq!(subject, "event.myevent__e.evt123");
-    }
 
     #[test]
     fn test_event_builder_success() {

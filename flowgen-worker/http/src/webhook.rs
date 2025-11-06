@@ -6,9 +6,7 @@
 use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use flowgen_core::event::{
-    generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix,
-};
+use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
@@ -147,14 +145,9 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
-        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
-
         // Validate the authentication and return error if request is not authorized.
         if let Err(auth_error) = self.validate_authentication(&headers) {
-            error!(
-                "Webhook authentication failed for {}: {}",
-                subject, auth_error
-            );
+            error!("Webhook authentication failed for: {}", auth_error);
             return Ok(StatusCode::UNAUTHORIZED);
         }
 
@@ -188,7 +181,7 @@ impl EventHandler {
 
         let e = EventBuilder::new()
             .data(EventData::Json(data))
-            .subject(subject)
+            .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
             .build()

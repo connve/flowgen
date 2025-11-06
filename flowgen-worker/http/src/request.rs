@@ -7,7 +7,7 @@
 use crate::config::Credentials;
 use flowgen_core::{
     config::ConfigExt,
-    event::{generate_subject, Event, EventBuilder, EventData, SenderExt, SubjectSuffix},
+    event::{Event, EventBuilder, EventData, SenderExt},
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
@@ -179,10 +179,10 @@ impl EventHandler {
             .map_err(|source| Error::Reqwest { source })?;
 
         let data = serde_json::from_str::<Value>(&resp).unwrap_or_else(|_| json!(resp));
-        let subject = generate_subject(&self.config.name, Some(SubjectSuffix::Timestamp));
+
         let e = EventBuilder::new()
             .data(EventData::Json(data))
-            .subject(subject.clone())
+            .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
             .build()

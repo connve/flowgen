@@ -2,7 +2,7 @@ use apache_avro::{types::Value as AvroValue, Schema as AvroSchema};
 use chrono::Utc;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{generate_subject, Event, SenderExt, SubjectSuffix};
+use flowgen_core::event::{Event, EventData, SenderExt};
 use salesforce_pubsub_v1::eventbus::v1::{
     ProducerEvent, PublishRequest, SchemaRequest, TopicRequest,
 };
@@ -13,68 +13,54 @@ use tracing::{error, Instrument};
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Pub/Sub context or gRPC communication error.
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
         source: salesforce_core::pubsub::context::Error,
     },
-    /// Client authentication error.
     #[error("Authentication error: {source}")]
     Auth {
         #[source]
         source: salesforce_core::client::Error,
     },
-    /// Flowgen core serialization extension error.
     #[error("Serialization error: {source}")]
     SerdeExt {
         #[source]
         source: flowgen_core::serde::Error,
     },
-    /// Apache Avro error.
-    #[error("Avro operation failed: {source}")]
+    #[error("Avro operation error: {source}")]
     Avro {
         #[source]
         source: apache_avro::Error,
     },
-    /// Template rendering error for dynamic configuration.
     #[error("Render error: {source}")]
     Render {
         #[source]
         source: flowgen_core::config::Error,
     },
-    /// Failed to send event through broadcast channel.
-    #[error("Failed to send event message: {source}")]
+    #[error("Send event message error: {source}")]
     SendMessage {
         #[source]
         source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
-    /// Event building error.
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
-    /// Configuration template rendering failed.
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
-    /// Flowgen core service error.
     #[error("Service error: {source}")]
     Service {
         #[source]
         source: flowgen_core::service::Error,
     },
-    /// Required attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    /// Event data object is empty when content is expected.
     #[error("Empty object")]
     EmptyObject(),
-    /// Failed to parse Avro schema from JSON string.
     #[error("Error parsing Schema JSON string to Schema type")]
     SchemaParse(),
-    /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// JSON serialization error.
-    #[error("JSON serialization failed: {source}")]
+    #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
@@ -89,8 +75,6 @@ pub struct EventHandler {
     pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
     /// Topic name for publishing.
     topic: String,
-    /// Subject prefix for event generation (derived from topic name).
-    subject_prefix: String,
     /// Schema ID for event serialization.
     schema_id: String,
     /// Avro serializer configuration.
@@ -148,13 +132,24 @@ impl EventHandler {
             .map_err(|e| Error::PubSub { source: e })?
             .into_inner();
 
-        let subject = generate_subject(&self.subject_prefix, Some(SubjectSuffix::Id(&resp.rpc_id)));
+        // Generate subject prefix from topic name.
+        let subject = if let Some(stripped) = self
+            .topic
+            .replace('/', ".")
+            .to_lowercase()
+            .strip_prefix('.')
+        {
+            stripped.to_string()
+        } else {
+            self.topic.to_owned()
+        };
 
-        let resp_json = serde_json::to_value(resp).map_err(|e| Error::SerdeJson { source: e })?;
+        let resp_json = serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 
         let e = flowgen_core::event::EventBuilder::new()
-            .data(flowgen_core::event::EventData::Json(resp_json))
+            .data(EventData::Json(resp_json))
             .subject(subject)
+            .id(resp.rpc_id)
             .task_id(self.task_id)
             .task_type(self.task_type)
             .build()?;
@@ -250,21 +245,10 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let schema = AvroSchema::parse_str(&schema_info.schema_json)
             .map_err(|e| Error::Avro { source: e })?;
 
-        // Generate subject prefix from topic name.
-        let topic = topic_info.topic_name.replace('/', ".").to_lowercase();
-        let subject_prefix = if let Some(stripped) = topic.strip_prefix('.') {
-            stripped.to_string()
-        } else {
-            topic
-        };
-
-        let topic_name = self.config.topic.clone();
-
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             pubsub,
-            topic: topic_name,
-            subject_prefix,
+            topic: config.topic.to_owned(),
             schema_id: schema_info.schema_id,
             schema: Arc::new(schema),
             task_id: self.task_id,
