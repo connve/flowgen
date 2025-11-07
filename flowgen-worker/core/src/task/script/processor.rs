@@ -63,72 +63,116 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Prepare data for script execution.
+        // Store the original event for comparison after script execution.
+        let original_event = event.clone();
+
+        // Convert the event to JSON for script execution.
         let value = Value::try_from(&event).map_err(|source| Error::EventConversion { source })?;
         let event_obj = value["event"].to_owned();
+
+        // Execute the script with the event in scope.
         let mut scope = Scope::new();
         scope.push("event", json_to_dynamic(&event_obj)?);
 
-        // Execute script.
         let result: Dynamic = self
             .engine
             .eval_with_scope(&mut scope, &self.config.code)
             .map_err(|e| Error::ScriptExecution { source: e })?;
 
-        // Convert result back to JSON.
+        // Convert the script result back to JSON.
         let result_json = dynamic_to_json(result)?;
 
-        // Handle different result types.
+        // Process the script result based on its type.
         match result_json {
-            Value::Null => {
-                // Don't emit events.
-                Ok(())
-            }
+            Value::Null => Ok(()),
             Value::Array(arr) => {
                 // Emit multiple events, one per array element.
-                for element in arr {
-                    self.emit_event(element, None, None).await?;
+                for value in arr {
+                    let new_event = self.generate_script_event(value, &original_event)?;
+                    self.emit_event(new_event).await?;
                 }
                 Ok(())
             }
-            Value::Object(ref obj) if obj.contains_key("subject") && obj.contains_key("data") => {
-                // Result is an event object with metadata, preserve it.
-                let subject = obj
-                    .get("subject")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_owned());
-                let data = obj.get("data").unwrap_or(&Value::Null).clone();
-                let id = obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_owned());
-                self.emit_event(data, subject, id).await
-            }
             value => {
-                // Emit single event with data only.
-                self.emit_event(value, None, None).await
+                // Emit a single event.
+                let new_event = self.generate_script_event(value, &original_event)?;
+                self.emit_event(new_event).await
             }
         }
     }
 
-    /// Emits a single event with the given data, optional custom subject, and optional ID.
-    async fn emit_event(
-        &self,
-        data: Value,
-        subject: Option<String>,
-        id: Option<String>,
-    ) -> Result<(), Error> {
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(data))
-            .subject(subject.unwrap_or_else(|| self.config.name.to_owned()))
+    /// Generates a new event from the script result by comparing with the original event.
+    ///
+    /// Preserves the original data format (Avro, Arrow, or JSON) when the script has not
+    /// modified the data content. This allows scripts to modify metadata fields like subject
+    /// or id while maintaining efficient binary formats through the pipeline.
+    fn generate_script_event(&self, result: Value, original_event: &Event) -> Result<Event, Error> {
+        // Convert the original event data to JSON for comparison.
+        let original_data_json = Value::try_from(&original_event.data)
+            .map_err(|source| Error::EventConversion { source })?;
+
+        let (subject, data, id) = match result {
+            Value::Object(ref obj) if obj.contains_key("subject") && obj.contains_key("data") => {
+                // Script returned a full event object with metadata.
+                let subject = obj
+                    .get("subject")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| original_event.subject.clone());
+
+                let data_json = obj.get("data").unwrap_or(&Value::Null);
+
+                // Keep the original data format if the content has not changed.
+                let data = if data_json == &original_data_json {
+                    original_event.data.clone()
+                } else {
+                    EventData::Json(data_json.clone())
+                };
+
+                let id = obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                (subject, data, id)
+            }
+            value => {
+                // Script returned only data, use the original subject and id.
+                // Keep the original data format if the content has not changed.
+                let data = if value == original_data_json {
+                    original_event.data.clone()
+                } else {
+                    EventData::Json(value)
+                };
+
+                (
+                    original_event.subject.clone(),
+                    data,
+                    original_event.id.clone(),
+                )
+            }
+        };
+
+        // Build the new event with the processed fields.
+        let mut builder = EventBuilder::new()
+            .data(data)
+            .subject(subject)
             .task_id(self.task_id)
             .task_type(self.task_type);
 
         if let Some(id) = id {
-            e = e.id(id);
+            builder = builder.id(id);
         }
 
-        let e = e.build().map_err(|source| Error::EventBuilder { source })?;
+        builder
+            .build()
+            .map_err(|source| Error::EventBuilder { source })
+    }
 
+    /// Emits a single event to the broadcast channel.
+    async fn emit_event(&self, event: Event) -> Result<(), Error> {
         self.tx
-            .send_with_logging(e)
+            .send_with_logging(event)
             .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
