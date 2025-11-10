@@ -70,8 +70,8 @@ pub enum Error {
     },
     #[error("Either payload json or payload input is required")]
     PayloadConfig,
-    #[error("No event data available on the event")]
-    NoEventData,
+    #[error("Event data was not found on the event payload")]
+    MissingEventData,
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
 }
@@ -131,7 +131,10 @@ impl EventHandler {
 
         if let Some(payload) = &config.payload {
             let event_data = if payload.from_event {
-                event_value.get("data").ok_or_else(|| Error::NoEventData)?
+                event_value
+                    .get("event")
+                    .and_then(|e| e.get("data"))
+                    .ok_or_else(|| Error::MissingEventData)?
             } else {
                 &match &payload.object {
                     Some(obj) => Value::Object(obj.to_owned()),
