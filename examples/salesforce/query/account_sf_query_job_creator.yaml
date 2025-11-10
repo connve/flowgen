@@ -1,0 +1,17 @@
+flow:
+  name: "account_salesforce_query_job_create"
+  require_leader_election: "true"
+  tasks:
+    - generate:
+        name: "account_run_sample_query"
+        interval: 60
+        count:  5
+    - salesforce_bulkapi_job_creator:
+        name: "account_salesforce_query_job"
+        credentials_path: "/etc/sfdc/credentials.json"
+        job_type: "query"
+        operation: "query"
+        query: "SELECT Id, Name, CreatedDate, LastModifiedDate FROM Account WHERE SystemModstamp = LAST_N_DAYS:200"
+        content_type: "CSV"
+        column_delimiter: "COMMA"
+        line_ending: "CRLF"
