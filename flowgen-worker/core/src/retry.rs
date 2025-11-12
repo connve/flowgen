@@ -4,10 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::strategy::ExponentialBackoff;
 
 /// Default maximum retry attempts
-pub const DEFAULT_MAX_ATTEMPTS: usize = 5;
+pub const DEFAULT_MAX_ATTEMPTS: usize = 10;
 
 /// Default initial backoff delay in milliseconds
 pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 1000;
@@ -18,7 +18,7 @@ pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30000;
 /// Retry configuration with exponential backoff and jitter.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts (default: 5)
+    /// Maximum number of retry attempts (default: 10)
     #[serde(default = "default_max_attempts")]
     pub max_attempts: usize,
 
@@ -42,21 +42,20 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    /// Creates a tokio-retry strategy with exponential backoff and jitter.
+    /// Creates a tokio-retry strategy with exponential backoff.
     ///
     /// Backoff sequence with defaults (1s initial, 30s max):
-    /// - Attempt 1: ~1s
-    /// - Attempt 2: ~2s
-    /// - Attempt 3: ~4s
-    /// - Attempt 4: ~8s
-    /// - Attempt 5: ~16s
-    ///
-    /// Jitter adds randomization to prevent thundering herd.
+    /// - Attempt 1: 1s
+    /// - Attempt 2: 2s
+    /// - Attempt 3: 4s
+    /// - Attempt 4: 8s
+    /// - Attempt 5: 16s
+    /// - Attempt 6-10: 30s (capped at max)
     pub fn strategy(&self) -> impl Iterator<Item = Duration> {
-        ExponentialBackoff::from_millis(self.initial_backoff_ms)
+        ExponentialBackoff::from_millis(2)
+            .factor(self.initial_backoff_ms / 2)
             .max_delay(Duration::from_millis(self.max_backoff_ms))
-            .take(self.max_attempts.saturating_sub(1)) // -1 because first attempt is not a retry
-            .map(jitter) // Apply jitter to each delay
+            .take(self.max_attempts.saturating_sub(1))
     }
 
     /// Merge task-level retry config with app-level config.

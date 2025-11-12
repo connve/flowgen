@@ -332,7 +332,13 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     };
 
                     // Run event handler.
-                    event_handler.handle().await
+                    match event_handler.handle().await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            error!("{}", e);
+                            Err(e)
+                        }
+                    }
                 })
                 .await;
 
