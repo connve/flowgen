@@ -85,6 +85,11 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -294,11 +299,28 @@ impl flowgen_core::task::runner::Runner for Reader {
 
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
-        // Initialize runner task.
-        let event_handler = match self.init().await {
+        let retry_config =
+            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!("{}", e);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!("{}", e);
+                error!(
+                    "{}",
+                    Error::RetryExhausted {
+                        source: Box::new(e)
+                    }
+                );
                 return Ok(());
             }
         };
@@ -444,6 +466,7 @@ mod tests {
             cache_options: None,
             delete_after_read: None,
             delimiter: None,
+            retry: None,
         });
         let (tx, rx) = broadcast::channel::<Event>(10);
 

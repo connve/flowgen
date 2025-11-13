@@ -38,6 +38,11 @@ pub enum Error {
     InvalidReturnType(String),
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 /// Handles individual script execution operations.
@@ -232,11 +237,28 @@ impl crate::task::runner::Runner for Processor {
 
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
-        // Initialize runner task.
-        let event_handler = match self.init().await {
+        let retry_config =
+            crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!("{}", e);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!("{}", e);
+                error!(
+                    "{}",
+                    Error::RetryExhausted {
+                        source: Box::new(e)
+                    }
+                );
                 return Ok(());
             }
         };
@@ -366,6 +388,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: "event".to_string(),
+            retry: None,
         });
         let (tx, rx) = broadcast::channel(100);
 
@@ -401,6 +424,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: r#"#{ original: event.data, transformed: true }"#.to_string(),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -445,6 +469,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: r#"if data.age < 18 { null } else { data }"#.to_string(),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -484,6 +509,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: r#"[#{ id: 1 }, #{ id: 2 }, #{ id: 3 }]"#.to_string(),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -535,6 +561,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: "event".to_string(),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);

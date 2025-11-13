@@ -47,6 +47,11 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
 }
 /// Event handler for generating scheduled events.
 pub struct EventHandler {
@@ -213,7 +218,31 @@ impl crate::task::runner::Runner for Subscriber {
 
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
-        let event_handler = self.init().await?;
+        let retry_config =
+            crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
+
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!("{}", e);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        {
+            Ok(handler) => handler,
+            Err(e) => {
+                error!(
+                    "{}",
+                    Error::RetryExhausted {
+                        source: Box::new(e)
+                    }
+                );
+                return Ok(());
+            }
+        };
 
         // Spawn event handler task.
         tokio::spawn(
@@ -380,6 +409,7 @@ mod tests {
             message: Some("test message".to_string()),
             interval: 1,
             count: Some(1),
+            retry: None,
         });
         let (tx, _rx) = broadcast::channel(100);
 
@@ -414,6 +444,7 @@ mod tests {
             message: Some("test message".to_string()),
             interval: 0,
             count: Some(2),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -449,6 +480,7 @@ mod tests {
             message: Some("custom message".to_string()),
             interval: 0,
             count: Some(1),
+            retry: None,
         });
 
         let (tx, mut rx) = broadcast::channel(100);
@@ -486,6 +518,7 @@ mod tests {
             message: None,
             interval: 1,    // Short interval for testing
             count: Some(1), // Only run once
+            retry: None,
         });
 
         let (tx, mut _rx) = broadcast::channel(100);

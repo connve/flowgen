@@ -60,7 +60,7 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Subscriber failed after all retry attempts: {source}")]
+    #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,

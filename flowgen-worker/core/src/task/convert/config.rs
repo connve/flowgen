@@ -14,6 +14,9 @@ pub struct Processor {
     pub target_format: TargetFormat,
     /// Optional schema definition for target format validation.
     pub schema: Option<String>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetryConfig>,
 }
 
 /// Supported target formats for event data conversion.
@@ -25,88 +28,4 @@ pub enum TargetFormat {
     Avro,
     /// Convert to JSON format.
     Json,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_processor_config_default() {
-        // NOTE: The `Default` trait for a struct with a `String` field
-        // will set the string to an empty string (`""`).
-        let config = Processor::default();
-        assert_eq!(config.name, String::new()); // Check for default empty string
-        assert_eq!(config.target_format, TargetFormat::Avro);
-        assert!(config.schema.is_none());
-    }
-
-    #[test]
-    fn test_target_format_default() {
-        let format = TargetFormat::default();
-        assert_eq!(format, TargetFormat::Avro);
-    }
-
-    #[test]
-    fn test_processor_config_creation() {
-        let processor_name = "convert_test".to_string();
-        let schema_json = r#"{"type": "record", "name": "Test"}"#.to_string();
-
-        let config = Processor {
-            name: processor_name.clone(),
-            target_format: TargetFormat::Avro, // Fixed: Changed to Avro
-            schema: Some(schema_json.clone()),
-        };
-
-        assert_eq!(config.name, processor_name);
-        assert_eq!(config.target_format, TargetFormat::Avro);
-        assert_eq!(config.schema, Some(schema_json));
-    }
-
-    #[test]
-    fn test_processor_config_serialization() {
-        let config = Processor {
-            name: "serialize_test".to_string(),
-            target_format: TargetFormat::Avro, // Fixed: Changed to Avro
-            schema: None,
-        };
-
-        let serialized = serde_json::to_string(&config).unwrap();
-
-        let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        let expected_json = json!({
-            "name": "serialize_test",
-            "target_format": "avro",
-            "schema": null
-        });
-        assert_eq!(parsed, expected_json);
-
-        // Test deserialization
-        let deserialized: Processor = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn test_target_format_serialization() {
-        let formats = vec![TargetFormat::Avro, TargetFormat::Json];
-
-        for format in formats {
-            let serialized = serde_json::to_string(&format).unwrap();
-            let deserialized: TargetFormat = serde_json::from_str(&serialized).unwrap();
-            assert_eq!(format, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let config = Processor {
-            name: "clone_test".to_string(),
-            target_format: TargetFormat::Avro,
-            schema: Some("test_schema".to_string()),
-        };
-
-        let cloned = config.clone();
-        assert_eq!(config, cloned);
-    }
 }

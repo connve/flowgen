@@ -35,6 +35,9 @@ pub struct Reader {
     pub cache_options: Option<CacheOptions>,
     /// Delete the file from object store after successfully reading it.
     pub delete_after_read: Option<bool>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
 /// Object Store writer configuration.
@@ -50,6 +53,9 @@ pub struct Writer {
     pub client_options: Option<HashMap<String, String>>,
     /// Hive-style partitioning configuration.
     pub hive_partition_options: Option<HivePartitionOptions>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
 /// Configuration for Hive-style directory partitioning.
@@ -94,6 +100,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: None,
+            retry: None,
         };
 
         assert_eq!(reader.name, "test_reader".to_string());
@@ -119,6 +126,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: None,
+            retry: None,
         };
 
         let json = serde_json::to_string(&reader).unwrap();
@@ -134,6 +142,7 @@ mod tests {
         assert_eq!(writer.credentials_path, None);
         assert_eq!(writer.client_options, None);
         assert_eq!(writer.hive_partition_options, None);
+        assert_eq!(writer.retry, None);
     }
 
     #[test]
@@ -155,6 +164,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/service-account.json")),
             client_options: Some(client_options.clone()),
             hive_partition_options: Some(hive_options.clone()),
+            retry: None,
         };
 
         assert_eq!(writer.name, "test_writer".to_string());
@@ -178,6 +188,7 @@ mod tests {
                 enabled: false,
                 partition_keys: vec![],
             }),
+            retry: None,
         };
 
         let json = serde_json::to_string(&writer).unwrap();
@@ -222,6 +233,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: None,
+            retry: None,
         };
 
         let cloned = reader.clone();
@@ -247,6 +259,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: Some(true),
+            retry: None,
         };
 
         assert_eq!(reader.delete_after_read, Some(true));
@@ -264,6 +277,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: Some(false),
+            retry: None,
         };
 
         assert_eq!(reader.delete_after_read, Some(false));
@@ -281,6 +295,7 @@ mod tests {
             delimiter: None,
             cache_options: None,
             delete_after_read: None,
+            retry: None,
         };
 
         assert_eq!(reader.delete_after_read, None);

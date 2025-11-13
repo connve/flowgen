@@ -29,3 +29,4 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 bincode = { workspace = true }
+tokio-retry = { workspace = true }

@@ -16,7 +16,7 @@ pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 1000;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 30000;
 
 /// Retry configuration with exponential backoff and jitter.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (default: 10)
     #[serde(default = "default_max_attempts")]

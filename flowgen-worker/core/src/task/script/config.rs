@@ -15,6 +15,9 @@ pub struct Processor {
     pub engine: ScriptEngine,
     /// Script source code to execute.
     pub code: String,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetryConfig>,
 }
 
 /// Supported script engine types.
@@ -36,6 +39,7 @@ mod tests {
             name: "test_script".to_string(),
             engine: ScriptEngine::Rhai,
             code: "data + 1".to_string(),
+            retry: None,
         };
 
         assert_eq!(config.name, "test_script");
@@ -49,6 +53,7 @@ mod tests {
         assert_eq!(config.name, "");
         assert_eq!(config.engine, ScriptEngine::Rhai);
         assert_eq!(config.code, "");
+        assert!(config.retry.is_none());
     }
 
     #[test]
@@ -63,6 +68,7 @@ mod tests {
             name: "transform".to_string(),
             engine: ScriptEngine::Rhai,
             code: "data * 2".to_string(),
+            retry: None,
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
@@ -76,6 +82,7 @@ mod tests {
             name: "clone_test".to_string(),
             engine: ScriptEngine::Rhai,
             code: "data".to_string(),
+            retry: None,
         };
 
         let cloned = config.clone();

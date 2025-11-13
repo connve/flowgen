@@ -235,6 +235,9 @@ pub struct Publisher {
     pub payload: Map<String, Value>,
     /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
     pub endpoint: Option<String>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
 /// Configuration structure for Salesforce Pub/Sub durable consumer options.
@@ -380,6 +383,7 @@ mod tests {
             topic: "/event/Order_Status__e".to_string(),
             payload,
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
+            retry: None,
         };
 
         let json = serde_json::to_string(&publisher).unwrap();

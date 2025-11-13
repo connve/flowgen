@@ -16,6 +16,9 @@ pub struct Subscriber {
     pub interval: u64,
     /// Optional maximum number of events to generate before stopping.
     pub count: Option<u64>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetryConfig>,
 }
 
 #[cfg(test)]
@@ -29,6 +32,7 @@ mod tests {
         assert!(config.message.is_none());
         assert_eq!(config.interval, 0);
         assert!(config.count.is_none());
+        assert!(config.retry.is_none());
     }
 
     #[test]
@@ -38,6 +42,7 @@ mod tests {
             message: Some("test message".to_string()),
             interval: 5000,
             count: Some(10),
+            retry: None,
         };
 
         assert_eq!(config.name, "test_task_name".to_string());
@@ -53,6 +58,7 @@ mod tests {
             message: None,
             interval: 1000,
             count: Some(5),
+            retry: None,
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
@@ -68,6 +74,7 @@ mod tests {
             message: Some("clone message".to_string()),
             interval: 2000,
             count: None,
+            retry: None,
         };
 
         let cloned = config.clone();

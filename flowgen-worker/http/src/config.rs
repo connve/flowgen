@@ -23,6 +23,9 @@ pub struct Processor {
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
     pub credentials_path: Option<PathBuf>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
 impl ConfigExt for Processor {}
@@ -104,6 +107,7 @@ mod tests {
         assert_eq!(processor.payload, None);
         assert_eq!(processor.headers, None);
         assert_eq!(processor.credentials_path, None);
+        assert_eq!(processor.retry, None);
     }
 
     #[test]
@@ -130,6 +134,7 @@ mod tests {
             payload: Some(payload),
             headers: Some(headers.clone()),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
+            retry: None,
         };
 
         assert_eq!(processor.name, "test_processor".to_string());
@@ -152,6 +157,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
+            retry: None,
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -168,6 +174,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            retry: None,
         };
 
         let cloned = processor.clone();
@@ -320,6 +327,7 @@ mod tests {
             payload: Some(payload),
             headers: Some(headers),
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
+            retry: None,
         };
 
         let json = serde_json::to_string(&processor).unwrap();

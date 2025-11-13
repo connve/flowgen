@@ -19,6 +19,11 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 /// Handles individual log operations.
@@ -148,10 +153,28 @@ impl crate::task::runner::Runner for Processor {
 
     #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
     async fn run(mut self) -> Result<(), Error> {
-        let event_handler = match self.init().await {
+        let retry_config =
+            crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!("{}", e);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!("{}", e);
+                error!(
+                    "{}",
+                    Error::RetryExhausted {
+                        source: Box::new(e)
+                    }
+                );
                 return Ok(());
             }
         };
@@ -281,6 +304,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            retry: None,
         });
         let (tx, rx) = broadcast::channel(100);
 
@@ -316,6 +340,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            retry: None,
         });
 
         let (tx, _rx) = broadcast::channel(100);
@@ -346,6 +371,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            retry: None,
         });
 
         let (tx, _rx) = broadcast::channel(100);

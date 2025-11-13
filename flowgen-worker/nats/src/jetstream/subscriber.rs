@@ -69,6 +69,13 @@ pub enum Error {
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
+    #[error("Stream ended unexpectedly, connection may have been lost")]
+    StreamEnded,
 }
 
 /// Event handler for processing NATS messages.
@@ -218,20 +225,37 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
-        // Initialize runner task.
-        let event_handler = match self.init().await {
-            Ok(handler) => handler,
-            Err(e) => {
-                error!("{}", e);
-                return Ok(());
-            }
-        };
+        let retry_config =
+            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
 
-        // Spawn event handler task.
         tokio::spawn(
             async move {
-                if let Err(e) = event_handler.handle().await {
-                    error!("{}", e);
+                let result = tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+                    let event_handler = match self.init().await {
+                        Ok(handler) => handler,
+                        Err(e) => {
+                            error!("{}", e);
+                            return Err(e);
+                        }
+                    };
+
+                    match event_handler.handle().await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            error!("{}", e);
+                            Err(e)
+                        }
+                    }
+                })
+                .await;
+
+                if let Err(e) = result {
+                    error!(
+                        "{}",
+                        Error::RetryExhausted {
+                            source: Box::new(e)
+                        }
+                    );
                 }
             }
             .instrument(tracing::Span::current()),
@@ -352,6 +376,7 @@ mod tests {
             durable_name: Some("test_consumer".to_string()),
             batch_size: Some(100),
             delay_secs: Some(5),
+            retry: None,
         });
         let (tx, _rx) = broadcast::channel(100);
 
@@ -430,6 +455,7 @@ mod tests {
             durable_name: Some("test_consumer".to_string()),
             batch_size: Some(50),
             delay_secs: None,
+            retry: None,
         });
         let (tx, _rx) = broadcast::channel(100);
 

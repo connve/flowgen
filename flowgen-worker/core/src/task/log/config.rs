@@ -15,6 +15,9 @@ pub struct Processor {
     /// When false, logs pretty-printed JSON strings for console readability.
     #[serde(default)]
     pub structured: bool,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetryConfig>,
 }
 
 /// Log level options.

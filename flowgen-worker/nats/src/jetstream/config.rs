@@ -20,6 +20,9 @@ pub struct Config {
     pub batch_size: Option<usize>,
     /// Delay in seconds between message batch fetches (subscriber only).
     pub delay_secs: Option<u64>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
 /// Type alias for backward compatibility with publisher code.
@@ -97,6 +100,7 @@ pub enum DiscardPolicy {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::path::PathBuf;
 
@@ -129,6 +133,7 @@ mod tests {
             durable_name: Some("test_consumer".to_string()),
             batch_size: Some(100),
             delay_secs: Some(5),
+            retry: None,
         };
 
         assert_eq!(subscriber.name, "test_subscriber");
@@ -160,6 +165,7 @@ mod tests {
             durable_name: Some("my_durable".to_string()),
             batch_size: Some(50),
             delay_secs: Some(10),
+            retry: None,
         };
 
         let json = serde_json::to_string(&subscriber).unwrap();
@@ -184,6 +190,7 @@ mod tests {
             durable_name: Some("clone_consumer".to_string()),
             batch_size: Some(25),
             delay_secs: None,
+            retry: None,
         };
 
         let cloned = subscriber.clone();
@@ -224,6 +231,7 @@ mod tests {
             durable_name: None,
             batch_size: None,
             delay_secs: None,
+            retry: None,
         };
 
         assert_eq!(publisher.name, "test_publisher");
@@ -260,6 +268,7 @@ mod tests {
             durable_name: None,
             batch_size: None,
             delay_secs: None,
+            retry: None,
         };
 
         let json = serde_json::to_string(&publisher).unwrap();
@@ -286,6 +295,7 @@ mod tests {
             durable_name: None,
             batch_size: None,
             delay_secs: None,
+            retry: None,
         };
 
         let cloned = publisher.clone();
@@ -302,6 +312,7 @@ mod tests {
             durable_name: None,
             batch_size: None,
             delay_secs: None,
+            retry: None,
         };
 
         assert_eq!(publisher.subject, "simple.subject");
@@ -332,6 +343,7 @@ mod tests {
             durable_name: None,
             batch_size: None,
             delay_secs: None,
+            retry: None,
         };
 
         assert!(publisher.stream.is_some());
@@ -358,6 +370,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             batch_size: Some(10),
             delay_secs: Some(1),
+            retry: None,
         };
 
         let sub2 = Subscriber {
@@ -375,6 +388,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             batch_size: Some(10),
             delay_secs: Some(1),
+            retry: None,
         };
 
         assert_eq!(sub1, sub2);
