@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'charts/**'
 
 permissions:
   contents: read
@@ -18,9 +16,12 @@ jobs:
         uses: actions/create-github-app-token@v2
         id: app-token
         with:
-          app-id: ${{ secrets.CI_BOT_CLIENT_ID }}
+          app-id: ${{ vars.CI_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: |
+            flowgen
+            helm
 
       - name: Checkout flowgen repo
         uses: actions/checkout@v4
