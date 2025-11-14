@@ -35,11 +35,12 @@ jobs:
           repository: connve-dev/helm
           token: ${{ steps.app-token.outputs.token }}
           path: helm-repo
+          persist-credentials: true
 
       - name: Configure Git
         run: |
-          git config --global user.name "$GITHUB_ACTOR"
-          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Install Helm
         uses: azure/setup-helm@v4
