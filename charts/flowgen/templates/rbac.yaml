@@ -1,0 +1,26 @@
+{{- $worker := index .Values "flowgen-worker" -}}
+{{- if and $worker.enabled $worker.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flowgen-worker.fullname" . }}-lease-manager
+  labels:
+    {{- include "flowgen-worker.labels" . | nindent 4 }}
+rules:
+{{- toYaml $worker.rbac.rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flowgen-worker.fullname" . }}-lease-manager
+  labels:
+    {{- include "flowgen-worker.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flowgen-worker.fullname" . }}-lease-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flowgen-worker.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

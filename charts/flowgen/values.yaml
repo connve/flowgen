@@ -1,0 +1,113 @@
+################################################################################
+# Global options
+################################################################################
+global:
+  # Global image configuration
+  image:
+    repository: ghcr.io/connve-dev/flowgen
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  # Global image pull secrets (optional)
+  # Example:
+  # imagePullSecrets:
+  #   - name: regcred
+  imagePullSecrets: []
+
+################################################################################
+# Flowgen Worker options
+################################################################################
+flowgen-worker:
+  enabled: true
+
+  nameOverride: ""
+  fullnameOverride: ""
+
+  # Number of replicas (used when autoscaling is disabled)
+  replicaCount: 3
+
+  # Horizontal Pod Autoscaler
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  labels: {}
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+
+  # RBAC configuration
+  rbac:
+    create: true
+    rules:
+      - apiGroups: ["coordination.k8s.io"]
+        resources: ["leases"]
+        verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+  config:
+    configPath: /etc/app/config.yaml
+    rustLog: "info,async_nats=warn"
+
+  volumes:
+    config:
+      enabled: true
+      configMapName: config
+      mountPath: /etc/app
+    flows:
+      enabled: true
+      configMapName: flows
+      mountPath: /etc/app/flows
+    # Secrets - user must configure these as needed
+    # Example:
+    # natsCredentials:
+    #   enabled: true
+    #   secretName: "my-nats-secret"
+    #   mountPath: /etc/nats
+    # sfdcCredentials:
+    #   enabled: true
+    #   secretName: "my-sfdc-secret"
+    #   mountPath: /etc/sfdc
+    # gcpCredentials:
+    #   enabled: true
+    #   secretName: "my-gcp-secret"
+    #   mountPath: /etc/gcp
+
+  resources: {}
+    # limits:
+    #   cpu: 500m
+    #   memory: 512Mi
+    # requests:
+    #   cpu: 250m
+    #   memory: 256Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
