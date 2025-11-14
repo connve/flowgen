@@ -1,0 +1,53 @@
+name: Release Helm Charts
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Sync appVersion with Cargo.toml
+        run: |
+          # Extract version from Cargo.toml
+          APP_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version')
+
+          # Add or update Chart.yaml appVersion (after the version line)
+          if grep -q '^appVersion:' charts/flowgen/Chart.yaml; then
+            sed -i "s/^appVersion: .*/appVersion: \"$APP_VERSION\"/" charts/flowgen/Chart.yaml
+          else
+            sed -i "/^version: /a appVersion: \"$APP_VERSION\"" charts/flowgen/Chart.yaml
+          fi
+
+          echo "Updated Chart.yaml appVersion to $APP_VERSION"
+
+      - name: Run chart-releaser
+        uses: helm/chart-releaser-action@v1.6.0
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        with:
+          charts_dir: charts
+          skip_existing: true

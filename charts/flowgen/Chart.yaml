@@ -1,0 +1,14 @@
+apiVersion: v2
+name: flowgen
+description: A Helm Chart for Flowgen - Data activation with a blast 💥
+type: application
+version: 0.1.0
+keywords:
+  - flowgen
+  - data-activation
+  - workflows
+  - automation
+  - kubernetes
+maintainers:
+  - email: hello@connve.com
+    name: The Flowgen Authors

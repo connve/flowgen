@@ -1,0 +1,110 @@
+{{- $worker := index .Values "flowgen-worker" -}}
+{{- if $worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flowgen-worker.fullname" . }}
+  labels:
+    {{- include "flowgen-worker.labels" . | nindent 4 }}
+  {{- with $worker.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not $worker.autoscaling.enabled }}
+  replicas: {{ $worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "flowgen-worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with $worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "flowgen-worker.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flowgen-worker.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml $worker.podSecurityContext | nindent 8 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        command: ["/bin/flowgen_worker"]
+        securityContext:
+          {{- toYaml $worker.securityContext | nindent 12 }}
+        image: "{{ .Values.global.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+        env:
+        - name: CONFIG_PATH
+          value: {{ $worker.config.configPath }}
+        - name: RUST_LOG
+          value: {{ $worker.config.rustLog | quote }}
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - name: http
+          containerPort: {{ $worker.service.port }}
+          protocol: TCP
+        resources:
+          {{- toYaml $worker.resources | nindent 12 }}
+        volumeMounts:
+        {{- if $worker.volumes.config.enabled }}
+        - name: config
+          mountPath: {{ $worker.volumes.config.mountPath }}
+          readOnly: true
+        {{- end }}
+        {{- if $worker.volumes.flows.enabled }}
+        - name: flows
+          mountPath: {{ $worker.volumes.flows.mountPath }}
+          readOnly: true
+        {{- end }}
+        {{- range $key, $volume := $worker.volumes }}
+        {{- if and (hasKey $volume "enabled") (hasKey $volume "secretName") $volume.enabled $volume.secretName }}
+        - name: {{ $key | kebabcase }}
+          mountPath: {{ $volume.mountPath }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- end }}
+      volumes:
+      {{- if $worker.volumes.config.enabled }}
+      - name: config
+        configMap:
+          name: {{ $worker.volumes.config.configMapName }}
+      {{- end }}
+      {{- if $worker.volumes.flows.enabled }}
+      - name: flows
+        configMap:
+          name: {{ $worker.volumes.flows.configMapName }}
+      {{- end }}
+      {{- range $key, $volume := $worker.volumes }}
+      {{- if and (hasKey $volume "enabled") (hasKey $volume "secretName") $volume.enabled $volume.secretName }}
+      - name: {{ $key | kebabcase }}
+        secret:
+          secretName: {{ $volume.secretName }}
+      {{- end }}
+      {{- end }}
+      {{- with $worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
