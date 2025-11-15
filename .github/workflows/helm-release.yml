@@ -71,7 +71,7 @@ jobs:
       - name: Update Helm repo index
         working-directory: helm-repo
         run: |
-          helm repo index . --url https://connve-labs.github.io/helm
+          helm repo index . --url https://helm.connve.com
 
       - name: Commit and push to helm repo
         working-directory: helm-repo

@@ -15,7 +15,7 @@ Flowgen executes data activation workflows defined in YAML configuration files. 
 Install using Helm:
 
 ```bash
-helm repo add connve https://connve-labs.github.io/helm
+helm repo add connve https://helm.connve.com
 helm repo update
 helm install flowgen connve/flowgen --namespace flowgen --create-namespace
 ```
