@@ -12,44 +12,31 @@ const DEFAULT_URI_PATH: &str = "/services/data/v61.0/jobs/";
 /// Errors for Salesforce bulk job creation operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    /// Failed to send event through broadcast channel.
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
         source: Box<tokio::sync::broadcast::error::SendError<Event>>,
     },
-    /// Required attribute is missing.
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    /// Flowgen core service error.
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
-
-    /// HTTP request failed.
     #[error("HTTP request failed: {source}")]
     Reqwest {
         #[source]
         source: reqwest::Error,
     },
-
-    /// Salesforce authentication or client initialization error.
     #[error(transparent)]
     SalesforceAuth(#[from] salesforce_core::client::Error),
-
-    /// Flowgen core event system error.
     #[error("Event error: {source}")]
     Event {
         #[source]
         source: flowgen_core::event::Error,
     },
-
-    /// Missing or invalid Salesforce access token.
     #[error("missing salesforce access token")]
     NoSalesforceAuthToken(),
-
     #[error("missing salesforce instance URL")]
     NoSalesforceInstanceURL(),
-
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
