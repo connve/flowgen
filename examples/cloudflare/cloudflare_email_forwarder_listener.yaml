@@ -1,0 +1,31 @@
+flow:
+  name: cloudflare_email_forwarder_listener
+  tasks:
+
+    # Receive email forwarder by Cloudflare Worker.
+    - http_webhook:
+        name: receive_requests
+        credentials_path: /etc/cloudflare-emails/credentials.json
+        method: POST
+        endpoint: /cloudflare/emails
+
+    # Return only payload from the event.data.
+    - script:
+        name: return_payload
+        code: |
+          let event = event.data.payload;
+          event
+
+    # Publish event to NATS.
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials_path: /etc/nats/credentials.json
+        subject: email.received
+        stream:
+          create_or_update: true
+          name: cloudflare
+          description: "Cloudflare events stream"
+          subjects: ["email.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
