@@ -1,0 +1,34 @@
+flow:
+  name: cloudflare_email_forwarder_writer
+  tasks:
+
+    # Subscribe to email forwarded events in NATS.
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        subject: email.received
+        stream:
+          create_or_update: true
+          name: cloudflare
+          description: "Cloudflare events stream"
+          subjects: ["email.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
+        durable_name: cloudflare_email_forwarder_writer
+        batch_size: 100
+
+    # Convert event data (JSON) to avro.
+    - convert:
+        name: json_avro_converter
+        target_format: avro
+        schema: '{"type":"record","name":"EmailMessage","fields":[{"name":"subject","type":"string","default":""},{"name":"from","type":"string","default":""},{"name":"to","type":"string","default":""},{"name":"cc","type":["null","string"],"default":null},{"name":"bcc","type":["null","string"],"default":null},{"name":"date","type":"string","default":""},{"name":"message_id","type":"string","default":""},{"name":"headers","type":{"type":"map","values":"string"},"default":{}},{"name":"body","type":{"type":"record","name":"EmailBody","fields":[{"name":"html","type":["null","string"],"default":null},{"name":"text","type":["null","string"],"default":null}]}},{"name":"raw_content","type":"string","default":""}]}'
+
+    # Write data into local or remote object store.
+    - object_store_writer:
+        name: write_events
+        path: file:///cloudflare/emails
+        hive_partition_options:
+          enabled: true
+          partition_keys:
+            - EventDate
