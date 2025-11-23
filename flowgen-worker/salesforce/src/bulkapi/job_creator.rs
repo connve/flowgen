@@ -223,10 +223,21 @@ impl flowgen_core::task::runner::Runner for JobCreator {
                 Ok(event) => {
                     if Some(event.task_id) == event_handler.current_task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
+                        let retry_strategy = retry_config.strategy();
                         tokio::spawn(
                             async move {
-                                if let Err(err) = event_handler.handle().await {
-                                    error!("{}", err);
+                                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                    event_handler.handle().await
+                                })
+                                .await;
+
+                                if let Err(err) = result {
+                                    error!(
+                                        "{}",
+                                        Error::RetryExhausted {
+                                            source: Box::new(err)
+                                        }
+                                    );
                                 }
                             }
                             .instrument(tracing::Span::current()),

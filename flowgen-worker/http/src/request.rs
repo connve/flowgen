@@ -277,10 +277,21 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.rx.recv().await {
                 Ok(event) => {
                     let event_handler = Arc::clone(&event_handler);
+                    let retry_strategy = retry_config.strategy();
                     tokio::spawn(
                         async move {
-                            if let Err(err) = event_handler.handle(event).await {
-                                error!("{}", err);
+                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                event_handler.handle(event.clone()).await
+                            })
+                            .await;
+
+                            if let Err(err) = result {
+                                error!(
+                                    "{}",
+                                    Error::RetryExhausted {
+                                        source: Box::new(err)
+                                    }
+                                );
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -64,7 +64,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Generates events at scheduled intervals.
-    async fn handle(self) -> Result<(), Error> {
+    async fn handle(&self) -> Result<(), Error> {
         let mut counter = 0;
 
         // Get cache from task context if available.
@@ -245,10 +245,21 @@ impl crate::task::runner::Runner for Subscriber {
         };
 
         // Spawn event handler task.
+        let retry_strategy = retry_config.strategy();
         tokio::spawn(
             async move {
-                if let Err(e) = event_handler.handle().await {
-                    error!("{}", e);
+                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                    event_handler.handle().await
+                })
+                .await;
+
+                if let Err(e) = result {
+                    error!(
+                        "{}",
+                        Error::RetryExhausted {
+                            source: Box::new(e)
+                        }
+                    );
                 }
             }
             .instrument(tracing::Span::current()),
