@@ -385,8 +385,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         });
         let (tx, rx) = broadcast::channel(100);

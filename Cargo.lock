@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1164,6 +1164,8 @@ dependencies = [
  "chrono",
  "flowgen_core",
  "futures-util",
+ "humantime",
+ "humantime-serde",
  "oauth2",
  "prost 0.13.5",
  "serde",
@@ -1179,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1200,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1228,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "arrow",
  "config",
@@ -1610,6 +1612,16 @@ name = "humantime"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+
+[[package]]
+name = "humantime-serde"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
+dependencies = [
+ "humantime",
+ "serde",
+]
 
 [[package]]
 name = "hyper"

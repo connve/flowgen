@@ -1,6 +1,6 @@
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -16,10 +16,17 @@ pub struct Config {
     pub stream: Option<StreamOptions>,
     /// Durable consumer name (subscriber only).
     pub durable_name: Option<String>,
-    /// Number of messages to fetch per batch (subscriber only).
-    pub batch_size: Option<usize>,
-    /// Delay in seconds between message batch fetches (subscriber only).
-    pub delay_secs: Option<u64>,
+    /// Maximum number of messages to fetch per batch (subscriber only).
+    pub max_messages: Option<usize>,
+    /// Delay between message batch fetches (subscriber only).
+    /// Accepts duration strings: "100ms", "1s", "5m", etc.
+    #[serde(default, with = "humantime_serde")]
+    pub delay: Option<Duration>,
+    /// Throttle individual message processing (subscriber only).
+    /// Enforces a fixed delay between each message.
+    /// Accepts duration strings: "100ms", "1s", etc.
+    #[serde(default, with = "humantime_serde")]
+    pub throttle: Option<Duration>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -112,8 +119,8 @@ mod tests {
         assert_eq!(config.subject, String::new());
         assert_eq!(config.stream, None);
         assert_eq!(config.durable_name, None);
-        assert_eq!(config.batch_size, None);
-        assert_eq!(config.delay_secs, None);
+        assert_eq!(config.max_messages, None);
+        assert_eq!(config.delay, None);
     }
 
     #[test]
@@ -131,8 +138,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("test_consumer".to_string()),
-            batch_size: Some(100),
-            delay_secs: Some(5),
+            max_messages: Some(100),
+            delay: Some(Duration::from_secs(5)),
+            throttle: None,
             retry: None,
         };
 
@@ -144,8 +152,8 @@ mod tests {
         assert_eq!(subscriber.subject, "test.subject");
         assert!(subscriber.stream.is_some());
         assert_eq!(subscriber.durable_name, Some("test_consumer".to_string()));
-        assert_eq!(subscriber.batch_size, Some(100));
-        assert_eq!(subscriber.delay_secs, Some(5));
+        assert_eq!(subscriber.max_messages, Some(100));
+        assert_eq!(subscriber.delay, Some(Duration::from_secs(5)));
     }
 
     #[test]
@@ -163,8 +171,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("my_durable".to_string()),
-            batch_size: Some(50),
-            delay_secs: Some(10),
+            max_messages: Some(50),
+            delay: Some(Duration::from_secs(10)),
+            throttle: None,
             retry: None,
         };
 
@@ -188,8 +197,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("clone_consumer".to_string()),
-            batch_size: Some(25),
-            delay_secs: None,
+            max_messages: Some(25),
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -205,8 +215,8 @@ mod tests {
         assert_eq!(publisher.subject, String::new());
         assert_eq!(publisher.stream, None);
         assert_eq!(publisher.durable_name, None);
-        assert_eq!(publisher.batch_size, None);
-        assert_eq!(publisher.delay_secs, None);
+        assert_eq!(publisher.max_messages, None);
+        assert_eq!(publisher.delay, None);
     }
 
     #[test]
@@ -229,8 +239,9 @@ mod tests {
             subject: "pub.subject.1".to_string(),
             stream: Some(stream_opts.clone()),
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -266,8 +277,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -293,8 +305,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -310,8 +323,9 @@ mod tests {
             subject: "simple.subject".to_string(),
             stream: None,
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -341,8 +355,9 @@ mod tests {
             subject: "subject.1".to_string(),
             stream: Some(stream_opts),
             durable_name: None,
-            batch_size: None,
-            delay_secs: None,
+            max_messages: None,
+            delay: None,
+            throttle: None,
             retry: None,
         };
 
@@ -368,8 +383,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("consumer1".to_string()),
-            batch_size: Some(10),
-            delay_secs: Some(1),
+            max_messages: Some(10),
+            delay: Some(Duration::from_secs(1)),
+            throttle: None,
             retry: None,
         };
 
@@ -386,8 +402,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("consumer1".to_string()),
-            batch_size: Some(10),
-            delay_secs: Some(1),
+            max_messages: Some(10),
+            delay: Some(Duration::from_secs(1)),
+            throttle: None,
             retry: None,
         };
 

@@ -4,13 +4,11 @@ use flowgen_core::{
     client::Client,
     event::{Event, SenderExt},
 };
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use tokio::pin;
 use tokio::{sync::broadcast::Sender, time};
 use tokio_stream::StreamExt;
 use tracing::{error, Instrument};
-
-/// Default batch size for fetching messages.
-const DEFAULT_BATCH_SIZE: usize = 100;
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -39,6 +37,11 @@ pub enum Error {
     ConsumerStream {
         #[source]
         source: async_nats::jetstream::consumer::StreamError,
+    },
+    #[error("JetStream consumer batch fetch failed with error: {source}")]
+    ConsumerBatch {
+        #[source]
+        source: async_nats::jetstream::consumer::pull::BatchError,
     },
     #[error("JetStream stream management failed with error: {source}")]
     StreamManagement {
@@ -88,31 +91,70 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Processes a single message result.
+    async fn process_message(
+        &self,
+        message_result: Result<
+            async_nats::jetstream::Message,
+            Box<dyn std::error::Error + Send + Sync>,
+        >,
+    ) -> Result<(), Error> {
+        match message_result {
+            Ok(message) => {
+                let e = message
+                    .to_event(self.task_type, self.task_id)
+                    .map_err(|source| Error::MessageConversion { source })?;
+
+                message.ack().await.ok();
+
+                self.tx
+                    .send_with_logging(e)
+                    .map_err(|source| Error::SendMessage { source })?;
+                Ok(())
+            }
+            Err(err) => Err(Error::Other(err)),
+        }
+    }
+
     /// Processes messages from the NATS JetStream consumer.
     async fn handle(self) -> Result<(), Error> {
         loop {
-            if let Some(delay_secs) = self.config.delay_secs {
-                time::sleep(Duration::from_secs(delay_secs)).await
+            // Apply delay between batches if configured
+            if let Some(delay) = self.config.delay {
+                time::sleep(delay).await
             }
 
-            let stream = self
-                .consumer
-                .messages()
-                .await
-                .map_err(|e| Error::ConsumerStream { source: e })?;
-            let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-            let mut batch = stream.take(batch_size);
+            // Fetch messages with / without max_messages setting.
+            let messages = match self.config.max_messages {
+                Some(max_messages) => self
+                    .consumer
+                    .fetch()
+                    .max_messages(max_messages)
+                    .messages()
+                    .await
+                    .map_err(|e| Error::ConsumerBatch { source: e })?,
+                None => self
+                    .consumer
+                    .fetch()
+                    .messages()
+                    .await
+                    .map_err(|e| Error::ConsumerBatch { source: e })?,
+            };
 
-            while let Some(message) = batch.next().await {
-                if let Ok(message) = message {
-                    let e = message
-                        .to_event(self.task_type, self.task_id)
-                        .map_err(|source| Error::MessageConversion { source })?;
-                    message.ack().await.ok();
-
-                    self.tx
-                        .send_with_logging(e)
-                        .map_err(|source| Error::SendMessage { source })?;
+            // Process all fetched messages with optional throttling.
+            match self.config.throttle {
+                Some(throttle_duration) => {
+                    let throttled = messages.throttle(throttle_duration);
+                    pin!(throttled);
+                    while let Some(message_result) = throttled.next().await {
+                        self.process_message(message_result).await?;
+                    }
+                }
+                None => {
+                    let mut messages = messages;
+                    while let Some(message_result) = messages.next().await {
+                        self.process_message(message_result).await?;
+                    }
                 }
             }
         }
@@ -338,7 +380,7 @@ impl SubscriberBuilder {
 mod tests {
     use super::*;
     use serde_json::{Map, Value};
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
     use tokio::sync::broadcast;
 
     /// Creates a mock TaskContext for testing.
@@ -374,8 +416,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("test_consumer".to_string()),
-            batch_size: Some(100),
-            delay_secs: Some(5),
+            max_messages: Some(100),
+            delay: Some(Duration::from_secs(5)),
+            throttle: None,
             retry: None,
         });
         let (tx, _rx) = broadcast::channel(100);
@@ -453,8 +496,9 @@ mod tests {
                 ..Default::default()
             }),
             durable_name: Some("test_consumer".to_string()),
-            batch_size: Some(50),
-            delay_secs: None,
+            max_messages: Some(50),
+            delay: None,
+            throttle: None,
             retry: None,
         });
         let (tx, _rx) = broadcast::channel(100);

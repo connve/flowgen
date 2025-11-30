@@ -37,6 +37,9 @@ flowgen-worker:
   labels: {}
 
   podAnnotations: {}
+    # Example: Enable Stakater Reloader for auto-restart on ConfigMap changes
+    # Requires Stakater Reloader to be installed in the cluster
+    # configmap.reloader.stakater.com/reload: "flows,config"
 
   podSecurityContext:
     runAsNonRoot: true
