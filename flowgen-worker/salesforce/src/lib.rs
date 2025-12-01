@@ -20,4 +20,6 @@ pub mod bulkapi {
     pub mod config;
     /// Salesforce implementation for creating Bulk API Job.
     pub mod job_creator;
+    /// Salesforce implementation for retrieving from Bulk API Job.
+    pub mod job_retriever;
 }

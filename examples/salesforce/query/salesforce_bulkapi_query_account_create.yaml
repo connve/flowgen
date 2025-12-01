@@ -6,7 +6,8 @@ flow:
     # Run this task on specified intervals.
     - generate:
         name: "generate_jobs"
-        interval: 60
+        interval: 10s
+        count: 2
 
     # Create Salesforce BulkAPI query job.
     - salesforce_bulkapi_job_creator:

@@ -33,3 +33,6 @@ reqwest = { workspace = true }
 serde_avro_fast = { workspace = true }
 async-trait.workspace = true
 tokio-retry = { workspace = true }
+tempfile = "3.23.0"
+mockito = "1.7.0"
+tokio-test = "0.4.4"
