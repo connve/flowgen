@@ -242,7 +242,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
                     tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                event_handler.handle(event.clone()).await
+                                match event_handler.handle(event.clone()).await {
+                                    Ok(result) => Ok(result),
+                                    Err(e) => {
+                                        error!("{}", e);
+                                        Err(e)
+                                    }
+                                }
                             })
                             .await;
 

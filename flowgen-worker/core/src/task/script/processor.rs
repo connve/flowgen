@@ -271,7 +271,13 @@ impl crate::task::runner::Runner for Processor {
                     tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                event_handler.handle(event.clone()).await
+                                match event_handler.handle(event.clone()).await {
+                                    Ok(result) => Ok(result),
+                                    Err(e) => {
+                                        error!("{}", e);
+                                        Err(e)
+                                    }
+                                }
                             })
                             .await;
 
