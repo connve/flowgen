@@ -144,6 +144,7 @@ impl App {
 
                     flowgen_nats::cache::CacheBuilder::new()
                         .credentials_path(cache_config.credentials_path.clone())
+                        .url(cache_config.url.clone())
                         .build()
                         .map_err(|e| {
                             warn!("Failed to build cache: {}. Continuing without cache.", e);

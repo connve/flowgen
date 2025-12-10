@@ -190,6 +190,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials_path.clone())
+            .url(self.config.url.clone())
             .build()
             .map_err(|source| Error::Client { source })?
             .connect()
@@ -419,7 +420,7 @@ mod tests {
             max_messages: Some(100),
             delay: Some(Duration::from_secs(5)),
             throttle: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, _rx) = broadcast::channel(100);
 
@@ -499,7 +500,7 @@ mod tests {
             max_messages: Some(50),
             delay: None,
             throttle: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, _rx) = broadcast::channel(100);
 

@@ -2,6 +2,11 @@ use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
+/// Default NATS server URL function for serde.
+fn default_nats_url() -> String {
+    crate::client::DEFAULT_NATS_URL.to_string()
+}
+
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Config {
@@ -9,6 +14,9 @@ pub struct Config {
     pub name: String,
     /// Path to credentials file containing NATS authentication details.
     pub credentials_path: PathBuf,
+    /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
+    #[serde(default = "default_nats_url")]
+    pub url: String,
     /// Subject to publish/subscribe to/from.
     pub subject: String,
     /// Optional stream configuration. If provided for publisher, ensures stream exists.
@@ -140,8 +148,7 @@ mod tests {
             durable_name: Some("test_consumer".to_string()),
             max_messages: Some(100),
             delay: Some(Duration::from_secs(5)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(subscriber.name, "test_subscriber");
@@ -173,8 +180,7 @@ mod tests {
             durable_name: Some("my_durable".to_string()),
             max_messages: Some(50),
             delay: Some(Duration::from_secs(10)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&subscriber).unwrap();
@@ -199,8 +205,7 @@ mod tests {
             durable_name: Some("clone_consumer".to_string()),
             max_messages: Some(25),
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let cloned = subscriber.clone();
@@ -241,8 +246,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(publisher.name, "test_publisher");
@@ -279,8 +283,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&publisher).unwrap();
@@ -307,8 +310,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let cloned = publisher.clone();
@@ -325,8 +327,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(publisher.subject, "simple.subject");
@@ -357,8 +358,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert!(publisher.stream.is_some());
@@ -385,8 +385,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             max_messages: Some(10),
             delay: Some(Duration::from_secs(1)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let sub2 = Subscriber {
@@ -404,8 +403,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             max_messages: Some(10),
             delay: Some(Duration::from_secs(1)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(sub1, sub2);

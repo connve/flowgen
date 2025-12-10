@@ -174,6 +174,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
     async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials_path.clone())
+            .url(self.config.url.clone())
             .build()
             .map_err(|source| Error::ClientAuth { source })?
             .connect()
@@ -388,7 +389,7 @@ mod tests {
             max_messages: None,
             delay: None,
             throttle: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, rx) = broadcast::channel(100);
 
