@@ -2,6 +2,11 @@ use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
+/// Default NATS server URL function for serde.
+fn default_nats_url() -> String {
+    crate::client::DEFAULT_NATS_URL.to_string()
+}
+
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Config {
@@ -9,10 +14,14 @@ pub struct Config {
     pub name: String,
     /// Path to credentials file containing NATS authentication details.
     pub credentials_path: PathBuf,
-    /// Subject to publish/subscribe to/from.
+    /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
+    #[serde(default = "default_nats_url")]
+    pub url: String,
+    /// Subject name for publishing or subscribing to messages.
     pub subject: String,
-    /// Optional stream configuration. If provided for publisher, ensures stream exists.
-    /// Required for subscriber as the stream name to consume from.
+    /// Optional stream configuration.
+    /// For publishers: if provided, ensures the stream exists.
+    /// For subscribers: required to specify the stream to consume from.
     pub stream: Option<StreamOptions>,
     /// Durable consumer name (subscriber only).
     pub durable_name: Option<String>,
@@ -47,7 +56,8 @@ pub struct StreamOptions {
     pub name: String,
     /// Stream description.
     pub description: Option<String>,
-    /// Subject patterns for the stream (can include wildcards). Required for publisher when creating stream.
+    /// Subject patterns for the stream (can include wildcards).
+    /// Required for publishers when creating a stream.
     pub subjects: Vec<String>,
     /// Maximum age of messages in seconds.
     pub max_age_secs: Option<u64>,
@@ -63,21 +73,24 @@ pub struct StreamOptions {
     pub max_consumers: Option<i32>,
     /// Whether to create or update the stream if it doesn't exist or differs.
     pub create_or_update: bool,
-    /// Retention policy for the stream. If None during update, keeps existing value.
+    /// Retention policy for the stream.
+    /// If None during update, keeps the existing value.
     pub retention: Option<RetentionPolicy>,
-    /// Discard policy for when stream limits are reached. If None during update, keeps existing value.
+    /// Discard policy for when stream limits are reached.
+    /// If None during update, keeps the existing value.
     pub discard: Option<DiscardPolicy>,
-    /// Duplicate window in seconds. Prevents duplicate messages within this time window.
+    /// Duplicate window in seconds.
+    /// Prevents duplicate messages within this time window.
     pub duplicate_window_secs: Option<u64>,
-    /// Allow batch publish (allows publishing multiple messages at once).
+    /// Allows publishing multiple messages in a single batch operation.
     pub allow_batch_publish: Option<bool>,
-    /// Allow message delete (allows deleting individual messages).
+    /// Allows direct access to retrieve messages without using the consumer API.
     pub allow_direct: Option<bool>,
-    /// Allow rollup headers (allows messages to be compacted/rolled up).
+    /// Allows rollup headers for message compaction and consolidation.
     pub allow_rollup: Option<bool>,
-    /// Deny delete (disables message deletion).
+    /// Disables the ability to delete individual messages from the stream.
     pub deny_delete: Option<bool>,
-    /// Deny purge (disables stream purge).
+    /// Disables the ability to purge all messages from the stream.
     pub deny_purge: Option<bool>,
 }
 
@@ -140,8 +153,7 @@ mod tests {
             durable_name: Some("test_consumer".to_string()),
             max_messages: Some(100),
             delay: Some(Duration::from_secs(5)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(subscriber.name, "test_subscriber");
@@ -173,8 +185,7 @@ mod tests {
             durable_name: Some("my_durable".to_string()),
             max_messages: Some(50),
             delay: Some(Duration::from_secs(10)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&subscriber).unwrap();
@@ -199,8 +210,7 @@ mod tests {
             durable_name: Some("clone_consumer".to_string()),
             max_messages: Some(25),
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let cloned = subscriber.clone();
@@ -241,8 +251,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(publisher.name, "test_publisher");
@@ -279,8 +288,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&publisher).unwrap();
@@ -307,8 +315,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let cloned = publisher.clone();
@@ -325,8 +332,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(publisher.subject, "simple.subject");
@@ -357,8 +363,7 @@ mod tests {
             durable_name: None,
             max_messages: None,
             delay: None,
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert!(publisher.stream.is_some());
@@ -385,8 +390,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             max_messages: Some(10),
             delay: Some(Duration::from_secs(1)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         let sub2 = Subscriber {
@@ -404,8 +408,7 @@ mod tests {
             durable_name: Some("consumer1".to_string()),
             max_messages: Some(10),
             delay: Some(Duration::from_secs(1)),
-            throttle: None,
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(sub1, sub2);
