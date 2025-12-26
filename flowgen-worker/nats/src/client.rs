@@ -66,9 +66,9 @@ pub struct Client {
 impl flowgen_core::client::Client for Client {
     type Error = Error;
 
-    /// Connect to the NATS Server with provided options.
+    /// Connects to the NATS server with the provided options.
     async fn connect(mut self) -> Result<Self, Error> {
-        // Read and parse credentials file
+        // Read and parse credentials file.
         let credentials: Credentials =
             serde_json::from_str(&fs::read_to_string(&self.credentials_path).map_err(|e| {
                 Error::ReadCredentials {
@@ -78,28 +78,25 @@ impl flowgen_core::client::Client for Client {
             })?)
             .map_err(|e| Error::ParseCredentials { source: e })?;
 
-        // Build connect options based on credential type
+        // Build connect options based on credential type.
         let connect_options = if let Some(nkey_creds) = credentials.nkey {
-            // For NKey auth, we pass the seed to async_nats
-            // The seed is used to sign challenges, and the server validates against the public key
+            // For NKey authentication, the seed (private key) is passed to async_nats.
+            // The seed is used to sign authentication challenges, and the server validates against the public key.
             async_nats::ConnectOptions::with_nkey(nkey_creds.seed)
         } else {
             return Err(Error::NoCredentials);
         };
 
-        // Use provided URL or default
-        let url = self
-            .url
-            .clone()
-            .unwrap_or_else(|| DEFAULT_NATS_URL.to_string());
+        // Use provided URL or fall back to default.
+        let url = self.url.as_deref().unwrap_or(DEFAULT_NATS_URL);
 
-        // Connect to NATS server
+        // Connect to NATS server.
         let nats_client = connect_options
             .connect(url)
             .await
             .map_err(|e| Error::Connect { source: e })?;
 
-        // Initialize JetStream context
+        // Initialize JetStream context.
         let jetstream = async_nats::jetstream::new(nats_client);
 
         self.jetstream = Some(jetstream);
@@ -117,12 +114,12 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
-    /// Creates a new instance of a client builder and allows various configuration of the client.
+    /// Creates a new client builder instance for configuring NATS client options.
     pub fn new() -> Self {
         ClientBuilder::default()
     }
 
-    /// Set the path to the credentials file.
+    /// Sets the path to the credentials file.
     ///
     /// The credentials file should be a JSON file with the following format:
     ///
@@ -139,16 +136,16 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the NATS server URL (e.g., "nats://localhost:4222" or "localhost:4222").
-    ///
-    /// This should be specified in your configuration, not in the credentials file.
+    /// Sets the NATS server URL (e.g., "nats://localhost:4222" or "localhost:4222").
     /// If not set, defaults to "localhost:4222".
     pub fn url(&mut self, url: String) -> &mut ClientBuilder {
         self.url = Some(url);
         self
     }
 
-    /// Generates a new NATS Client or return error if credentials_path is not provided.
+    /// Builds a new NATS client instance.
+    ///
+    /// Returns an error if `credentials_path` is not provided.
     pub fn build(&self) -> Result<Client, Error> {
         Ok(Client {
             credentials_path: self
@@ -319,8 +316,4 @@ mod tests {
         assert_eq!(client.url, url);
         assert!(client.jetstream.is_none());
     }
-
-    // Note: We cannot easily test the connect() method without a real NATS server
-    // and valid credentials file, but the builder pattern and error handling
-    // are thoroughly tested above
 }

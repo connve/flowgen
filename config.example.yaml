@@ -2,17 +2,22 @@
 cache:
   enabled: true
   credentials_path: "path_to_credentials"
+  url: "url_of_cache"
+  db_name: "cache_db_name"
   type: nats
+
 # Points to config directory.
 flows:
-  dir: "path_to_configs_folder"
+  path: "path_to_configs_folder"
 # HTTP server configuration (optional, defaults to port 3000).
+
 http_server:
   enabled: true
   port: 3000
   # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
   routes_prefix: "/api/flowgen/workers"
 # Host coordination configuration (optional).
+
 host:
   enabled: true
   type: k8s
