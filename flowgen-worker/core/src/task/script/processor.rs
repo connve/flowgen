@@ -38,6 +38,12 @@ pub enum Error {
     InvalidReturnType(String),
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Failed to parse RFC 2822 date '{date}': {source}")]
+    ParseDateRFC2822 {
+        date: String,
+        #[source]
+        source: chrono::ParseError,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -221,7 +227,25 @@ impl crate::task::runner::Runner for Processor {
 
     /// Initializes the processor by setting up the Rhai engine.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
-        let engine = Engine::new();
+        let mut engine = Engine::new();
+
+        // Register custom function to parse RFC 2822 dates to Unix timestamp in milliseconds.
+        engine.register_fn(
+            "parse_date_rfc2822_timestamp",
+            |date_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Parse RFC 2822 format like "Mon, 5 Jan 2026 15:03:34 +0100".
+                // Returns Unix timestamp in milliseconds on success, or error on parse failure.
+                chrono::DateTime::parse_from_rfc2822(date_str)
+                    .map(|dt| dt.timestamp_millis())
+                    .map_err(|source| {
+                        let err = Error::ParseDateRFC2822 {
+                            date: date_str.to_string(),
+                            source,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
