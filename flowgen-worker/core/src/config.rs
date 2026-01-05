@@ -34,7 +34,21 @@ fn render_json_value(
         serde_json::Value::String(s) => {
             // Only render if the string contains template syntax
             if s.contains("{{") {
-                *s = handlebars.render_template(s, data)?;
+                let rendered = handlebars.render_template(s, data)?;
+
+                // Try to parse the rendered string as JSON to preserve type information
+                // This allows boolean/number values from templates to be correctly typed.
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&rendered) {
+                    // Only use the parsed value if it's a non-string type (bool, number, etc.)
+                    // For string types, keep as rendered string to avoid double-quoting.
+                    if !matches!(parsed, serde_json::Value::String(_)) {
+                        *value = parsed;
+                        return Ok(());
+                    }
+                }
+
+                // Fallback to string if parsing fails or parsed value is a string.
+                *s = rendered;
             }
         }
         serde_json::Value::Object(map) => {
