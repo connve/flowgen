@@ -38,9 +38,15 @@ pub enum Error {
     InvalidReturnType(String),
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
-    #[error("Failed to parse RFC 2822 date '{date}': {source}")]
-    ParseDateRFC2822 {
-        date: String,
+    #[error("Failed to parse RFC 2822 timestamp '{timestamp}': {source}")]
+    ParseRFC2822Timestamp {
+        timestamp: String,
+        #[source]
+        source: chrono::ParseError,
+    },
+    #[error("Failed to parse RFC 3339 timestamp '{timestamp}': {source}")]
+    ParseRFC3339Timestamp {
+        timestamp: String,
         #[source]
         source: chrono::ParseError,
     },
@@ -229,17 +235,36 @@ impl crate::task::runner::Runner for Processor {
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         let mut engine = Engine::new();
 
-        // Register custom function to parse RFC 2822 dates to Unix timestamp in milliseconds.
+        // Register function to parse RFC 2822 timestamps to Unix milliseconds.
         engine.register_fn(
-            "parse_date_rfc2822_timestamp",
-            |date_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+            "parse_rfc2822_timestamp",
+            |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
                 // Parse RFC 2822 format like "Mon, 5 Jan 2026 15:03:34 +0100".
-                // Returns Unix timestamp in milliseconds on success, or error on parse failure.
-                chrono::DateTime::parse_from_rfc2822(date_str)
+                // Returns Unix timestamp in milliseconds.
+                chrono::DateTime::parse_from_rfc2822(timestamp_str)
                     .map(|dt| dt.timestamp_millis())
                     .map_err(|source| {
-                        let err = Error::ParseDateRFC2822 {
-                            date: date_str.to_string(),
+                        let err = Error::ParseRFC2822Timestamp {
+                            timestamp: timestamp_str.to_string(),
+                            source,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to parse ISO 8601 timestamps to Unix milliseconds.
+        // Uses RFC 3339 format (ISO 8601 profile for internet timestamps).
+        engine.register_fn(
+            "parse_timestamp",
+            |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Parse ISO 8601 timestamp format like "2026-01-07T11:16:13.869Z".
+                // Returns Unix timestamp in milliseconds.
+                chrono::DateTime::parse_from_rfc3339(timestamp_str)
+                    .map(|dt| dt.timestamp_millis())
+                    .map_err(|source| {
+                        let err = Error::ParseRFC3339Timestamp {
+                            timestamp: timestamp_str.to_string(),
                             source,
                         };
                         err.to_string().into()
