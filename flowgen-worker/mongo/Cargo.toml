@@ -1,0 +1,29 @@
+[package]
+name = "flowgen_mongo"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "flowgen_mongo"
+path = "src/lib.rs"
+
+[dependencies]
+flowgen_core = { path = "../core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+arrow = { workspace = true }
+apache-avro = { workspace = true }
+url = { workspace = true }
+object_store = { workspace = true }
+futures = { workspace = true }
+async-trait.workspace = true
+tokio-retry = { workspace = true }
+mongodb = "2.1"

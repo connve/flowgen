@@ -66,6 +66,8 @@ pub enum TaskType {
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
     /// Salesforce Bulk API Job creator task.
     salesforce_bulkapi_job_creator(flowgen_salesforce::bulkapi::config::JobCreator),
+    /// Mongo Reader task.
+    mongo_reader(flowgen_mongo::config::Reader)
 }
 
 impl TaskType {
@@ -86,6 +88,7 @@ impl TaskType {
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
             TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
+            TaskType::mongo_reader(_) => "mongo_reader",
         }
     }
 }
