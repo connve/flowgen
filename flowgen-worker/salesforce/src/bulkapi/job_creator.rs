@@ -6,9 +6,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
 
-/// Salesforce Bulk API endpoint for query jobs (API v61.0).
-const DEFAULT_URI_PATH: &str = "/services/data/v61.0/jobs/";
-
 /// Errors for Salesforce bulk job creation operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -123,9 +120,9 @@ impl EventHandler {
             .ok_or_else(Error::NoSalesforceInstanceURL)?;
 
         // Configure HTTP client with endpoint and auth.
-        let mut client = self
-            .client
-            .post(instance_url + DEFAULT_URI_PATH + self.config.job_type.as_str());
+        let mut client = self.client.post(
+            instance_url + crate::bulkapi::config::DEFAULT_URI_PATH + self.config.job_type.as_str(),
+        );
 
         client = client.bearer_auth(token_result.access_token().secret());
         client = client.json(&payload);
@@ -139,7 +136,7 @@ impl EventHandler {
             .await
             .map_err(|e| Error::Reqwest { source: e })?;
 
-        let data = json!(resp);
+        let data: serde_json::Value = serde_json::from_str(&resp).unwrap_or_else(|_| json!(resp));
 
         // Create and emit response event.
         let e = EventBuilder::new()
@@ -667,12 +664,5 @@ mod tests {
 
         assert_eq!(processor.current_task_id, 5);
         assert_eq!(processor.config.name, "struct_test");
-    }
-
-    #[test]
-    fn test_uri_path_version() {
-        assert!(DEFAULT_URI_PATH.contains("v61.0"));
-        assert!(DEFAULT_URI_PATH.starts_with("/services/data/"));
-        assert!(DEFAULT_URI_PATH.ends_with("/jobs/"));
     }
 }
