@@ -67,7 +67,9 @@ pub enum TaskType {
     /// Salesforce Bulk API Job creator task.
     salesforce_bulkapi_job_creator(flowgen_salesforce::bulkapi::config::JobCreator),
     /// Mongo Reader task.
-    mongo_reader(flowgen_mongo::config::Reader)
+    mongo_reader(flowgen_mongo::config::Reader),
+    /// Mongo Change Stream task.
+    mongo_change_stream(flowgen_mongo::config::Reader)
 }
 
 impl TaskType {
@@ -89,6 +91,7 @@ impl TaskType {
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
             TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
             TaskType::mongo_reader(_) => "mongo_reader",
+            TaskType::mongo_change_stream(_) => "mongo_change_stream",
         }
     }
 }

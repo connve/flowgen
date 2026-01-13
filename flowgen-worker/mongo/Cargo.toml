@@ -27,3 +27,4 @@ futures = { workspace = true }
 async-trait.workspace = true
 tokio-retry = { workspace = true }
 mongodb = "2.1"
+tokio-stream.workspace = true

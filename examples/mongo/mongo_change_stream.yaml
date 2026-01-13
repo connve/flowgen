@@ -1,0 +1,5 @@
+flow:
+  name: "mongo_change_stream_reader"
+  tasks:
+    - "mongo_change_stream":
+        name: "mongo_change_stream"
