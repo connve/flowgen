@@ -1,39 +1,17 @@
-
-
-
-use flowgen_core::event::{Event};
-use std::sync::Arc;
-use tokio::sync::{
-    broadcast::{Receiver, Sender},
-};
-use tracing::{error, Instrument};
-use mongodb::options::ResolverConfig;
-use mongodb::options::ClientOptions;
-use std::env;
-use serde::Deserialize;
-use serde::Serialize;
-use mongodb::{ 
-    Client,
-    Collection,
-    bson::{doc, oid::ObjectId}
-};
-use futures::TryStreamExt;
+use super::message::MongoStreamEventsExt;
+use flowgen_core::event::{Event, SenderExt};
 use futures::StreamExt;
-
-
-
-#[derive(Deserialize,Serialize,Debug)]
-struct User {
-    #[serde(rename = "_id")]
-    pub object_id: ObjectId,
-        pub id: String, 
-    
-    pub name: String,
-    pub email: String,
-    
-    #[serde(rename = "createdTS")]
-    pub created_ts: String,
-}
+use mongodb::bson::Document;
+use mongodb::options::ClientOptions;
+use mongodb::options::ResolverConfig;
+use mongodb::{
+    bson::{doc},
+    Client,
+};
+use std::env;
+use std::sync::Arc;
+use tokio::sync::broadcast::{Receiver, Sender};
+use tracing::{error, Instrument};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -101,44 +79,94 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-     #[error("Mongo Reader failed after all retry attempts: {source}")]
-     MongoReader{
-         #[source]
-         source: mongodb::error::Error,
-     },
+    #[error("Mongo Reader failed after all retry attempts: {source}")]
+    MongoReader {
+        #[source]
+        source: mongodb::error::Error,
+    },
+    #[error("Message conversion failed with error: {source}")]
+    MessageConversion {
+        #[source]
+        source: crate::message::Error,
+    },
+    #[error("Other subscriber error")]
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
-    /// Writer configuration settings.
-    config: Arc<super::config::Reader>,
+    tx: Sender<Event>,
     client: mongodb::Client,
+    task_id: usize,
+    task_type: &'static str,
 }
 
 impl EventHandler {
+    /// Processes a single message result.
+    async fn process_message(
+        &self,
+        message_result: Result<
+            mongodb::change_stream::event::ChangeStreamEvent<Document>,
+            Box<dyn std::error::Error + Send + Sync>,
+        >,
+    ) -> Result<(), Error> {
+        match message_result {
+            Ok(message) => {
+                let e = message
+                    .to_event(self.task_type, self.task_id)
+                    .map_err(|source| Error::MessageConversion { source })?;
+
+                self.tx
+                    .send_with_logging(e)
+                    .map_err(|source| Error::SendMessage { source })?;
+                Ok(())
+            }
+            Err(err) => Err(Error::Other(err)),
+        }
+    }
+
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self) -> Result<(), Error> {
-
-        let users: Collection<User> = self.client.database("rust-example").collection("users");
-      
-        // let mut cursor = users.find(
-        //     doc! { "name": "Sayan 2" },
-        //     None,
-
-        // ).await.unwrap();
-        
-        // while let Some(doc) = cursor.try_next().await.unwrap() {
-        //     println!("{:?}", doc);
-        // }
+        let db = self.client.database("rust-example");
 
         let pipeline = vec![];
-        let mut change_stream = users.watch(pipeline, None).await.map_err(|source| Error::MongoReader { source })?;
+        let mut change_stream = db
+            .watch(pipeline, None)
+            .await
+            .map_err(|source| Error::MongoReader { source })?;
 
-        while let Some(event) = change_stream.next().await.transpose().map_err(|source| Error::MongoReader { source })? {
-            println!("operation performed: {:?}, document: {:?}", event.operation_type, event.full_document);
-            // operation performed: Insert, document: Some(Document({"x": Int32(1)}))
+        while let Some(event) = change_stream.next().await {
+            let result = event.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+
+            match result {
+                Ok(event) => {
+                    println!("Operation Type: {:?}", event.operation_type);
+
+                    // full_document is Option<Document>
+                    if let Some(doc) = &event.full_document {
+                        println!("Full Document: {:?}", doc);
+
+                        // Access specific fields from the document
+                        if let Some(id) = doc.get("_id") {
+                            println!("Document ID: {:?}", id);
+                        }
+
+                        if let Ok(name) = doc.get_str("name") {
+                            println!("Name: {}", name);
+                        }
+                    } else {
+                        println!("No full document available");
+                    }
+
+                    // Now pass to process_message
+                    self.process_message(Ok(event)).await?;
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    self.process_message(Err(e)).await?;
+                }
+            }
         }
-
         Ok(())
     }
 }
@@ -148,8 +176,6 @@ impl EventHandler {
 pub struct Reader {
     /// Reader configuration settings.
     config: Arc<super::config::Reader>,
-    /// Broadcast receiver for incoming events.
-    rx: Receiver<Event>,
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
@@ -165,24 +191,24 @@ impl flowgen_core::task::runner::Runner for Reader {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the reader by establishing object store client connection.
-    ///
-    /// This method performs all setup operations that can fail, including:
-    /// - Building and connecting the object store client with credentials
+    /// Initializes the reader by establishing mongo client connection.
     async fn init(&self) -> Result<EventHandler, Error> {
-
-         // Load the MongoDB connection string from an environment variable:
-        let client_uri = env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
-        // A Client is needed to connect to MongoDB:
-        // An extra line of code to work around a DNS issue on Windows:
+        // Load the MongoDB connection string from an environment variable:
+        let client_uri =
+            env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
+        // A Client is needed to connect to MongoDB
         let options =
-        ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
-            .await.unwrap();
-        let client = Client::with_options(options).map_err(|source| Error::MongoReader { source })?;
-        
+            ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
+                .await
+                .unwrap();
+        let client =
+            Client::with_options(options).map_err(|source| Error::MongoReader { source })?;
+
         let event_handler = EventHandler {
             client,
-            config: Arc::clone(&self.config),
+            tx: self.tx.clone(),
+            task_id: self.task_id,
+            task_type: self.task_type,
         };
 
         Ok(event_handler)
@@ -229,7 +255,7 @@ impl flowgen_core::task::runner::Runner for Reader {
             }
             .instrument(tracing::Span::current()),
         );
-        
+
         Ok(())
     }
 }
@@ -301,9 +327,6 @@ impl ReaderBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
             tx: self
                 .tx
                 .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,

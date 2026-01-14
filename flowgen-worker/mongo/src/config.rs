@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Reader {
     /// The unique name / identifier of the task.
     pub name: String,
-     #[serde(default)]
+    #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
@@ -14,6 +14,6 @@ pub struct Reader {
 pub struct ChangeStream {
     /// The unique name / identifier of the task.
     pub name: String,
-     #[serde(default)]
+    #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }

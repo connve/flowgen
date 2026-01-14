@@ -1,34 +1,27 @@
-
-
-
-use flowgen_core::event::{Event};
-use std::sync::Arc;
-use tokio::sync::{
-    broadcast::{Receiver, Sender},
-};
-use tracing::{error, Instrument};
-use mongodb::options::ResolverConfig;
+use flowgen_core::event::Event;
+use futures::TryStreamExt;
 use mongodb::options::ClientOptions;
-use std::env;
+use mongodb::options::ResolverConfig;
+use mongodb::{
+    bson::{doc, oid::ObjectId},
+    Client, Collection,
+};
 use serde::Deserialize;
 use serde::Serialize;
-use mongodb::{ 
-    Client,
-    Collection,
-    bson::{doc, oid::ObjectId}
-};
-use futures::TryStreamExt;
+use std::env;
+use std::sync::Arc;
+use tokio::sync::broadcast::{Receiver, Sender};
+use tracing::{error, Instrument};
 
-
-#[derive(Deserialize,Serialize,Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct User {
     #[serde(rename = "_id")]
     pub object_id: ObjectId,
-        pub id: String, 
-    
+    pub id: String,
+
     pub name: String,
     pub email: String,
-    
+
     #[serde(rename = "createdTS")]
     pub created_ts: String,
 }
@@ -99,32 +92,25 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-     #[error("Mongo Reader failed after all retry attempts: {source}")]
-     MongoReader{
-         #[source]
-         source: mongodb::error::Error,
-     },
+    #[error("Mongo Reader failed after all retry attempts: {source}")]
+    MongoReader {
+        #[source]
+        source: mongodb::error::Error,
+    },
 }
 
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
-    /// Writer configuration settings.
-    config: Arc<super::config::Reader>,
     client: mongodb::Client,
 }
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-
         let users: Collection<User> = self.client.database("rust-example").collection("users");
-      
-        let mut cursor = users.find(
-            doc! { "name": "Sayan 2" },
-            None,
 
-        ).await.unwrap();
-        
+        let mut cursor = users.find(doc! { "name": "Sayan 2" }, None).await.unwrap();
+
         while let Some(doc) = cursor.try_next().await.unwrap() {
             println!("{:?}", doc);
         }
@@ -160,19 +146,19 @@ impl flowgen_core::task::runner::Runner for Reader {
     /// This method performs all setup operations that can fail, including:
     /// - Building and connecting the object store client with credentials
     async fn init(&self) -> Result<EventHandler, Error> {
-
-         // Load the MongoDB connection string from an environment variable:
-        let client_uri = env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
+        // Load the MongoDB connection string from an environment variable:
+        let client_uri =
+            env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
         // A Client is needed to connect to MongoDB:
         // An extra line of code to work around a DNS issue on Windows:
         let options =
-        ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
-            .await.unwrap();
+            ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
+                .await
+                .unwrap();
         let client = Client::with_options(options).unwrap();
-        
+
         let event_handler = EventHandler {
             client,
-            config: Arc::clone(&self.config),
         };
 
         Ok(event_handler)

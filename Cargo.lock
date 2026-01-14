@@ -1290,7 +1290,9 @@ version = "0.21.0"
 dependencies = [
  "apache-avro",
  "arrow",
+ "async-nats",
  "async-trait",
+ "bincode",
  "bytes",
  "chrono",
  "flowgen_core",

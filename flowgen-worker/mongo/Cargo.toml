@@ -28,3 +28,5 @@ async-trait.workspace = true
 tokio-retry = { workspace = true }
 mongodb = "2.1"
 tokio-stream.workspace = true
+async-nats = { workspace = true }
+bincode.workspace = true
