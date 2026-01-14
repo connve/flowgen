@@ -157,9 +157,7 @@ impl flowgen_core::task::runner::Runner for Reader {
                 .unwrap();
         let client = Client::with_options(options).unwrap();
 
-        let event_handler = EventHandler {
-            client,
-        };
+        let event_handler = EventHandler { client };
 
         Ok(event_handler)
     }

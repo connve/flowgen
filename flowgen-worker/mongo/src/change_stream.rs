@@ -4,10 +4,7 @@ use futures::StreamExt;
 use mongodb::bson::Document;
 use mongodb::options::ClientOptions;
 use mongodb::options::ResolverConfig;
-use mongodb::{
-    bson::{doc},
-    Client,
-};
+use mongodb::{bson::doc, Client};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};

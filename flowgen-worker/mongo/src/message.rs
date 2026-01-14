@@ -1,5 +1,4 @@
-use bincode::deserialize;
-use flowgen_core::event::{AvroData, EventBuilder, EventData};
+use flowgen_core::event::{EventBuilder, EventData};
 use mongodb::bson::{self, Document};
 use mongodb::change_stream::event::ChangeStreamEvent;
 
@@ -28,9 +27,18 @@ pub enum Error {
         #[source]
         source: bincode::Error,
     },
+    /// BSON error
+    #[error("BSON serialization/deserialization failed: {source}")]
+    Bson {
+        #[source]
+        source: bson::ser::Error,
+    },
     /// Expected record batch data is missing or unavailable.
     #[error("Error getting record batch")]
     NoRecordBatch(),
+    /// Missing full document in change stream event
+    #[error("Full document is not available for this operation")]
+    NoFullDocument(),
 }
 
 /// Trait for converting Mongo change stream messages to flowgen events.
@@ -44,12 +52,9 @@ pub trait MongoStreamEventsExt {
     ) -> Result<flowgen_core::event::Event, Self::Error>;
 }
 
-fn to_bytes(doc_opt: &Option<Document>) -> Option<Vec<u8>> {
-    doc_opt.as_ref().and_then(|doc| bson::to_vec(doc).ok())
-}
-
 impl MongoStreamEventsExt for ChangeStreamEvent<Document> {
     type Error = Error;
+
     fn to_event(
         &self,
         task_type: &'static str,
@@ -64,27 +69,33 @@ impl MongoStreamEventsExt for ChangeStreamEvent<Document> {
             event_builder = event_builder.id(id.to_string());
         }
 
-        let event_data = match deserialize::<AvroData>(&to_bytes(&self.full_document).unwrap()) {
-            Ok(data) => EventData::Avro(data),
-            Err(_) => match serde_json::from_slice(&to_bytes(&self.full_document).unwrap()) {
-                Ok(data) => EventData::Json(data),
-                Err(_) => {
-                    let arrow_bytes =
-                        deserialize::<Vec<u8>>(&to_bytes(&self.full_document).unwrap())
-                            .map_err(|e| Error::Bincode { source: e })?;
+        // Get the full document or return error if it doesn't exist
+        let doc = self.full_document.as_ref().ok_or(Error::NoFullDocument())?;
 
-                    let cursor = std::io::Cursor::new(arrow_bytes);
-                    let mut stream_reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)
-                        .map_err(|e| Error::Arrow { source: e })?;
-
-                    let recordbatch = stream_reader
-                        .next()
-                        .ok_or_else(Error::NoRecordBatch)?
-                        .map_err(|e| Error::Arrow { source: e })?;
-
-                    EventData::ArrowRecordBatch(recordbatch)
+        // Try to convert BSON Document to JSON first (most compatible)
+        let event_data = if let Ok(json_value) = bson::to_bson(doc) {
+            // Convert BSON to serde_json::Value
+            match json_value {
+                bson::Bson::Document(d) => {
+                    // Try to convert to JSON
+                    let json_str =
+                        serde_json::to_string(&d).map_err(|e| Error::SerdeJson { source: e })?;
+                    let json_value: serde_json::Value = serde_json::from_str(&json_str)
+                        .map_err(|e| Error::SerdeJson { source: e })?;
+                    EventData::Json(json_value)
                 }
-            },
+                _ => {
+                    // Fallback: serialize the document as JSON
+                    let json_value =
+                        serde_json::to_value(doc).map_err(|e| Error::SerdeJson { source: e })?;
+                    EventData::Json(json_value)
+                }
+            }
+        } else {
+            // If BSON conversion fails, try direct JSON serialization
+            let json_value =
+                serde_json::to_value(doc).map_err(|e| Error::SerdeJson { source: e })?;
+            EventData::Json(json_value)
         };
 
         event_builder.data(event_data).build().map_err(Error::Event)
