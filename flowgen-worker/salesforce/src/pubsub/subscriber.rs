@@ -88,6 +88,21 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
+/// Checks if a gRPC error is due to an invalid/corrupted replay ID.
+fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
+    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+        if let Some(error_code) = status.metadata().get("error-code") {
+            if let Ok(code_str) = error_code.to_str() {
+                return code_str
+                    == "sfdc.platform.eventbus.grpc.subscription.fetch.replayid.validation.failed"
+                    || code_str
+                        == "sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted";
+            }
+        }
+    }
+    false
+}
+
 impl EventHandler {
     /// Runs the topic listener to process events from Salesforce Pub/Sub.
     ///
@@ -159,14 +174,59 @@ impl EventHandler {
         }
 
         // Subscribe to topic stream.
-        let mut stream = self
+        let mut stream = match self
             .pubsub
             .lock()
             .await
-            .subscribe(fetch_request)
+            .subscribe(fetch_request.clone())
             .await
-            .map_err(|e| Error::PubSub { source: e })?
-            .into_inner();
+        {
+            Ok(response) => response.into_inner(),
+            Err(e) => {
+                // If subscribe fails due to invalid replay_id, retry without it.
+                if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
+                    warn!(
+                        "Subscribe failed due to invalid replay_id, retrying without it: {}",
+                        e
+                    );
+
+                    // Clear the invalid replay_id from cache.
+                    if let Some(durable_consumer_opts) = self
+                        .config
+                        .topic
+                        .durable_consumer_options
+                        .as_ref()
+                        .filter(|opts| opts.enabled && !opts.managed_subscription)
+                    {
+                        if let Some(cache) = cache {
+                            if let Err(cache_err) = cache.delete(&durable_consumer_opts.name).await
+                            {
+                                warn!(
+                                    "Failed to clear invalid replay_id from cache: {:?}",
+                                    cache_err
+                                );
+                            }
+                        }
+                    }
+
+                    // Retry subscription without replay_id (start from latest).
+                    let mut fresh_request = fetch_request.clone();
+                    fresh_request.replay_id = vec![];
+                    fresh_request.replay_preset = 0; // Default preset
+
+                    self.pubsub
+                        .lock()
+                        .await
+                        .subscribe(fresh_request)
+                        .await
+                        .map_err(|e| Error::PubSub { source: e })?
+                        .into_inner()
+                } else {
+                    // Not a replay_id error, propagate it.
+                    return Err(Error::PubSub { source: e });
+                }
+            }
+        };
 
         while let Some(event) = stream.next().await {
             match event {

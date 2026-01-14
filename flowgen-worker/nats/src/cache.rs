@@ -22,6 +22,11 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
+    #[error("KV store delete operation failed with error: {source}")]
+    KVDelete {
+        #[source]
+        source: async_nats::jetstream::kv::UpdateError,
+    },
     #[error("KV bucket creation failed with error: {source}")]
     KVBucketCreate {
         #[source]
@@ -134,6 +139,25 @@ impl flowgen_core::cache::Cache for Cache {
             .map_err(|e| Box::new(Error::KVEntry { source: e }) as flowgen_core::cache::Error)?
             .ok_or_else(|| Box::new(Error::EmptyBuffer) as flowgen_core::cache::Error)?;
         Ok(bytes)
+    }
+
+    /// Deletes a key from the NATS KV store.
+    ///
+    /// # Arguments
+    /// * `key` - Key to delete.
+    ///
+    /// # Errors
+    /// If store is uninitialized or NATS `delete` fails.
+    async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
+        store
+            .delete(key)
+            .await
+            .map_err(|e| Box::new(Error::KVDelete { source: e }) as flowgen_core::cache::Error)?;
+        Ok(())
     }
 }
 
