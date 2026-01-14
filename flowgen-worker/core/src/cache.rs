@@ -40,6 +40,15 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Returns
     /// The cached binary data or an error if the key is not found
     async fn get(&self, key: &str) -> Result<bytes::Bytes, Error>;
+
+    /// Deletes a value from the cache by key.
+    ///
+    /// # Arguments
+    /// * `key` - The key to delete
+    ///
+    /// # Returns
+    /// Ok if the key was deleted successfully, or an error if the operation failed
+    async fn delete(&self, key: &str) -> Result<(), Error>;
 }
 
 #[cfg(test)]
@@ -80,6 +89,14 @@ mod tests {
                 Err(Box::new(MockError))
             } else {
                 Ok(self.data.get(key).cloned().unwrap_or_default())
+            }
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), Error> {
+            if self.should_error {
+                Err(Box::new(MockError))
+            } else {
+                Ok(())
             }
         }
     }
