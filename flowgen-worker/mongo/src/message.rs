@@ -2,7 +2,7 @@ use flowgen_core::event::{EventBuilder, EventData};
 use mongodb::bson::{self, Document};
 use mongodb::change_stream::event::ChangeStreamEvent;
 
-/// Errors that can occur during message conversion between flowgen and NATS formats.
+/// Errors that can occur during message conversion between flowgen and Mongo formats.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -72,12 +72,12 @@ impl MongoStreamEventsExt for ChangeStreamEvent<Document> {
         // Get the full document or return error if it doesn't exist
         let doc = self.full_document.as_ref().ok_or(Error::NoFullDocument())?;
 
-        // Try to convert BSON Document to JSON first (most compatible)
+        // Convert BSON Document to JSON 
         let event_data = if let Ok(json_value) = bson::to_bson(doc) {
             // Convert BSON to serde_json::Value
             match json_value {
                 bson::Bson::Document(d) => {
-                    // Try to convert to JSON
+                    // Convert to JSON
                     let json_str =
                         serde_json::to_string(&d).map_err(|e| Error::SerdeJson { source: e })?;
                     let json_value: serde_json::Value = serde_json::from_str(&json_str)
