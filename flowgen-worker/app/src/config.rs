@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+/// Default NATS server URL function for serde.
+fn default_nats_url() -> String {
+    flowgen_nats::client::DEFAULT_NATS_URL.to_string()
+}
+
 /// Default cache database name.
 pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 
@@ -137,6 +142,9 @@ pub struct CacheOptions {
     pub cache_type: CacheType,
     /// Path to cache credentials file.
     pub credentials_path: PathBuf,
+    /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
+    #[serde(default = "default_nats_url")]
+    pub url: String,
     /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
     pub db_name: Option<String>,
 }
@@ -306,6 +314,7 @@ mod tests {
                 enabled: true,
                 cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/test/cache"),
+                url: "localhost:4222".to_string(),
                 db_name: None,
             }),
             flows: FlowOptions {
@@ -349,6 +358,7 @@ mod tests {
                 enabled: false,
                 cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/serialize/cache"),
+                url: "localhost:4222".to_string(),
                 db_name: Some("test_db".to_string()),
             }),
             flows: FlowOptions {
@@ -372,6 +382,7 @@ mod tests {
                 enabled: true,
                 cache_type: CacheType::Nats,
                 credentials_path: PathBuf::from("/clone/cache"),
+                url: "localhost:4222".to_string(),
                 db_name: None,
             }),
             flows: FlowOptions { path: None },
@@ -391,6 +402,7 @@ mod tests {
             enabled: true,
             cache_type: CacheType::Nats,
             credentials_path: PathBuf::from("/test/credentials_path"),
+            url: "localhost:4222".to_string(),
             db_name: None,
         };
 
@@ -407,6 +419,7 @@ mod tests {
             enabled: false,
             cache_type: CacheType::Nats,
             credentials_path: PathBuf::from("/disabled/cache"),
+            url: "localhost:4222".to_string(),
             db_name: Some("custom_db".to_string()),
         };
 
@@ -423,6 +436,7 @@ mod tests {
             enabled: true,
             cache_type: CacheType::Nats,
             credentials_path: PathBuf::from("/serialize/credentials_path"),
+            url: "localhost:4222".to_string(),
             db_name: None,
         };
 

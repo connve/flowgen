@@ -448,6 +448,15 @@ mod tests {
                     .ok_or_else(|| Box::new(MockError) as crate::cache::Error)
             }
         }
+
+        async fn delete(&self, key: &str) -> Result<(), crate::cache::Error> {
+            if self.should_error {
+                Err(Box::new(MockError))
+            } else {
+                self.data.lock().await.remove(key);
+                Ok(())
+            }
+        }
     }
 
     #[tokio::test]

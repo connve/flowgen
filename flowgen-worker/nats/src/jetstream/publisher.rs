@@ -174,6 +174,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
     async fn init(&self) -> Result<EventHandler, Error> {
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.config.credentials_path.clone())
+            .url(self.config.url.clone())
             .build()
             .map_err(|source| Error::ClientAuth { source })?
             .connect()
@@ -241,7 +242,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
                     tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                event_handler.handle(event.clone()).await
+                                match event_handler.handle(event.clone()).await {
+                                    Ok(result) => Ok(result),
+                                    Err(e) => {
+                                        error!("{}", e);
+                                        Err(e)
+                                    }
+                                }
                             })
                             .await;
 
@@ -388,7 +395,7 @@ mod tests {
             max_messages: None,
             delay: None,
             throttle: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, rx) = broadcast::channel(100);
 

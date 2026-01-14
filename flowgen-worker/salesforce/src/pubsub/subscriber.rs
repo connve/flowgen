@@ -67,6 +67,8 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
+    #[error("Failed to clear invalid replay_id from cache: {0}")]
+    ReplayIdCacheClear(String),
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -86,6 +88,21 @@ pub struct EventHandler {
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+}
+
+/// Checks if a gRPC error is due to an invalid/corrupted replay ID.
+fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
+    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+        if let Some(error_code) = status.metadata().get("error-code") {
+            if let Ok(code_str) = error_code.to_str() {
+                return code_str
+                    == "sfdc.platform.eventbus.grpc.subscription.fetch.replayid.validation.failed"
+                    || code_str
+                        == "sfdc.platform.eventbus.grpc.subscription.fetch.replayid.corrupted";
+            }
+        }
+    }
+    false
 }
 
 impl EventHandler {
@@ -159,14 +176,40 @@ impl EventHandler {
         }
 
         // Subscribe to topic stream.
-        let mut stream = self
+        let mut stream = match self
             .pubsub
             .lock()
             .await
-            .subscribe(fetch_request)
+            .subscribe(fetch_request.clone())
             .await
-            .map_err(|e| Error::PubSub { source: e })?
-            .into_inner();
+        {
+            Ok(response) => response.into_inner(),
+            Err(e) => {
+                // If subscribe fails due to invalid replay_id, clear it from cache and let retry handle it.
+                if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
+                    warn!("Invalid replay_id detected, clearing from cache and retrying");
+
+                    // Clear the invalid replay_id from cache so next retry starts fresh.
+                    if let Some(durable_consumer_opts) = self
+                        .config
+                        .topic
+                        .durable_consumer_options
+                        .as_ref()
+                        .filter(|opts| opts.enabled && !opts.managed_subscription)
+                    {
+                        if let Some(cache) = cache {
+                            cache
+                                .delete(&durable_consumer_opts.name)
+                                .await
+                                .map_err(|e| Error::ReplayIdCacheClear(e.to_string()))?;
+                        }
+                    }
+                }
+
+                // Return error to trigger retry with fresh connection.
+                return Err(Error::PubSub { source: e });
+            }
+        };
 
         while let Some(event) = stream.next().await {
             match event {

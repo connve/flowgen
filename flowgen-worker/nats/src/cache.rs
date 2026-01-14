@@ -22,6 +22,11 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
+    #[error("KV store delete operation failed with error: {source}")]
+    KVDelete {
+        #[source]
+        source: async_nats::jetstream::kv::UpdateError,
+    },
     #[error("KV bucket creation failed with error: {source}")]
     KVBucketCreate {
         #[source]
@@ -44,6 +49,8 @@ pub enum Error {
 pub struct Cache {
     /// Path to NATS credentials file.
     credentials_path: PathBuf,
+    /// NATS server URL. Defaults to "localhost:4222".
+    url: String,
     /// NATS JetStream KV store instance; `None` until `init()`.
     store: Option<async_nats::jetstream::kv::Store>,
 }
@@ -62,6 +69,7 @@ impl Cache {
         // Connect to NATS.
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.credentials_path.clone())
+            .url(self.url.clone())
             .build()
             .map_err(|source| Error::ClientAuth { source })?
             .connect()
@@ -132,6 +140,25 @@ impl flowgen_core::cache::Cache for Cache {
             .ok_or_else(|| Box::new(Error::EmptyBuffer) as flowgen_core::cache::Error)?;
         Ok(bytes)
     }
+
+    /// Deletes a key from the NATS KV store.
+    ///
+    /// # Arguments
+    /// * `key` - Key to delete.
+    ///
+    /// # Errors
+    /// If store is uninitialized or NATS `delete` fails.
+    async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
+        store
+            .delete(key)
+            .await
+            .map_err(|e| Box::new(Error::KVDelete { source: e }) as flowgen_core::cache::Error)?;
+        Ok(())
+    }
 }
 
 /// Builder for [`Cache`] instances.
@@ -141,6 +168,8 @@ impl flowgen_core::cache::Cache for Cache {
 pub struct CacheBuilder {
     /// Optional path to NATS credentials.
     credentials_path: Option<PathBuf>,
+    /// NATS server URL. Defaults to DEFAULT_NATS_URL if not set.
+    url: Option<String>,
 }
 
 impl CacheBuilder {
@@ -162,6 +191,15 @@ impl CacheBuilder {
         self
     }
 
+    /// Sets the NATS server URL.
+    ///
+    /// # Arguments
+    /// * `url` - NATS server URL (e.g., "nats://localhost:4222" or "localhost:4222").
+    pub fn url(mut self, url: String) -> Self {
+        self.url = Some(url);
+        self
+    }
+
     /// Builds the [`Cache`].
     ///
     /// Consumes builder. `Cache` is returned unconnected; call `init()` to connect.
@@ -174,7 +212,10 @@ impl CacheBuilder {
             credentials_path: self
                 .credentials_path
                 .ok_or_else(|| Error::MissingRequiredAttribute("credentials_path".to_string()))?,
-            store: None,
+            url: self
+                .url
+                .unwrap_or_else(|| crate::client::DEFAULT_NATS_URL.to_string()),
+            ..Default::default()
         })
     }
 }
@@ -241,7 +282,7 @@ mod tests {
         let path = PathBuf::from("/test/creds.jwt");
         let cache = Cache {
             credentials_path: path.clone(),
-            store: None,
+            ..Default::default()
         };
 
         assert_eq!(cache.credentials_path, path);
