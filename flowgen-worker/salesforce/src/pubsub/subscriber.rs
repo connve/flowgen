@@ -67,6 +67,8 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
+    #[error("Failed to clear invalid replay_id from cache: {0}")]
+    ReplayIdCacheClear(String),
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -183,14 +185,11 @@ impl EventHandler {
         {
             Ok(response) => response.into_inner(),
             Err(e) => {
-                // If subscribe fails due to invalid replay_id, retry without it.
+                // If subscribe fails due to invalid replay_id, clear it from cache and let retry handle it.
                 if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
-                    warn!(
-                        "Subscribe failed due to invalid replay_id, retrying without it: {}",
-                        e
-                    );
+                    warn!("Invalid replay_id detected, clearing from cache and retrying");
 
-                    // Clear the invalid replay_id from cache.
+                    // Clear the invalid replay_id from cache so next retry starts fresh.
                     if let Some(durable_consumer_opts) = self
                         .config
                         .topic
@@ -199,32 +198,16 @@ impl EventHandler {
                         .filter(|opts| opts.enabled && !opts.managed_subscription)
                     {
                         if let Some(cache) = cache {
-                            if let Err(cache_err) = cache.delete(&durable_consumer_opts.name).await
-                            {
-                                warn!(
-                                    "Failed to clear invalid replay_id from cache: {:?}",
-                                    cache_err
-                                );
-                            }
+                            cache
+                                .delete(&durable_consumer_opts.name)
+                                .await
+                                .map_err(|e| Error::ReplayIdCacheClear(e.to_string()))?;
                         }
                     }
-
-                    // Retry subscription without replay_id (start from latest).
-                    let mut fresh_request = fetch_request.clone();
-                    fresh_request.replay_id = vec![];
-                    fresh_request.replay_preset = 0; // Default preset
-
-                    self.pubsub
-                        .lock()
-                        .await
-                        .subscribe(fresh_request)
-                        .await
-                        .map_err(|e| Error::PubSub { source: e })?
-                        .into_inner()
-                } else {
-                    // Not a replay_id error, propagate it.
-                    return Err(Error::PubSub { source: e });
                 }
+
+                // Return error to trigger retry with fresh connection.
+                return Err(Error::PubSub { source: e });
             }
         };
 
