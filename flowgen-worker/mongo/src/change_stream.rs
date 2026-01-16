@@ -42,6 +42,9 @@ pub enum Error {
     },
     #[error("Other subscriber error")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Missing full document in change stream event
+    #[error("Full document is not available for this operation")]
+    NoFullDocument(),
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -57,10 +60,7 @@ impl EventHandler {
     /// Processes a single message result.
     async fn process_message(
         &self,
-        message_result: Result<
-            mongodb::change_stream::event::ChangeStreamEvent<Document>,
-            Box<dyn std::error::Error + Send + Sync>,
-        >,
+        message_result: Result<Document, Box<dyn std::error::Error + Send + Sync>>,
     ) -> Result<(), Error> {
         match message_result {
             Ok(message) => {
@@ -92,8 +92,13 @@ impl EventHandler {
 
             match result {
                 Ok(event) => {
+                    // Get the full document or return error if it doesn't exist.
+                    let doc = event
+                        .full_document
+                        .as_ref()
+                        .ok_or(Error::NoFullDocument())?;
                     // Now pass to process_message
-                    self.process_message(Ok(event)).await?;
+                    self.process_message(Ok(doc.clone())).await?;
                 }
                 Err(e) => {
                     eprintln!("Error: {}", e);
