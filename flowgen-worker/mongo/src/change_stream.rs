@@ -1,4 +1,4 @@
-use super::message::MongoStreamEventsExt;
+use super::message::MongoEventsExt;
 use flowgen_core::event::{Event, SenderExt};
 use futures::StreamExt;
 use mongodb::bson::Document;
@@ -22,52 +22,6 @@ pub enum Error {
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
-    },
-    #[error("IO operation failed with error: {source}")]
-    IO {
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Arrow operation failed with error: {source}")]
-    Arrow {
-        #[source]
-        source: arrow::error::ArrowError,
-    },
-    #[error("Avro operation failed with error: {source}")]
-    Avro {
-        #[source]
-        source: apache_avro::Error,
-    },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
-    SerdeJson {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("Object store operation failed with error: {source}")]
-    ObjectStore {
-        #[source]
-        source: object_store::Error,
-    },
-    #[error("Configuration template rendering failed with error: {source}")]
-    ConfigRender {
-        #[source]
-        source: flowgen_core::config::Error,
-    },
-    #[error("Could not initialize object store context")]
-    NoObjectStoreContext,
-    #[error("Could not retrieve file extension")]
-    NoFileExtension,
-    #[error("Cache error")]
-    Cache,
-    #[error("Host coordination failed with error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
-    #[error("Invalid URL format with error: {source}")]
-    ParseUrl {
-        #[source]
-        source: url::ParseError,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -93,6 +47,7 @@ pub enum Error {
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     tx: Sender<Event>,
+    config: Arc<super::config::ChangeStream>,
     client: mongodb::Client,
     task_id: usize,
     task_type: &'static str,
@@ -124,7 +79,7 @@ impl EventHandler {
 
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self) -> Result<(), Error> {
-        let db = self.client.database("rust-example");
+        let db = self.client.database(&self.config.db_name);
 
         let pipeline = vec![];
         let mut change_stream = db
@@ -137,24 +92,6 @@ impl EventHandler {
 
             match result {
                 Ok(event) => {
-                    println!("Operation Type: {:?}", event.operation_type);
-
-                    // full_document is Option<Document>
-                    if let Some(doc) = &event.full_document {
-                        println!("Full Document: {:?}", doc);
-
-                        // Access specific fields from the document
-                        if let Some(id) = doc.get("_id") {
-                            println!("Document ID: {:?}", id);
-                        }
-
-                        if let Ok(name) = doc.get_str("name") {
-                            println!("Name: {}", name);
-                        }
-                    } else {
-                        println!("No full document available");
-                    }
-
                     // Now pass to process_message
                     self.process_message(Ok(event)).await?;
                 }
@@ -172,7 +109,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct Reader {
     /// Reader configuration settings.
-    config: Arc<super::config::Reader>,
+    config: Arc<super::config::ChangeStream>,
     /// Channel sender for processed events
     tx: Sender<Event>,
     /// Current task identifier for event filtering.
@@ -204,6 +141,7 @@ impl flowgen_core::task::runner::Runner for Reader {
         let event_handler = EventHandler {
             client,
             tx: self.tx.clone(),
+            config: Arc::clone(&self.config),
             task_id: self.task_id,
             task_type: self.task_type,
         };
@@ -261,7 +199,7 @@ impl flowgen_core::task::runner::Runner for Reader {
 #[derive(Default)]
 pub struct ReaderBuilder {
     /// Writer configuration settings.
-    config: Option<Arc<super::config::Reader>>,
+    config: Option<Arc<super::config::ChangeStream>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -282,7 +220,7 @@ impl ReaderBuilder {
     }
 
     /// Sets the writer configuration.
-    pub fn config(mut self, config: Arc<super::config::Reader>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::ChangeStream>) -> Self {
         self.config = Some(config);
         self
     }

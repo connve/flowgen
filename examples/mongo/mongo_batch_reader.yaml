@@ -1,0 +1,28 @@
+flow:
+  name: "mongo_read"
+  tasks:
+    # Run this task on specified intervals.
+    - generate:
+        name: "generate_jobs"
+        interval: 60s
+        count: 1
+
+    # Read documents in batch from mongo collection
+    - mongo_reader:
+        name: "mongo_reader"
+        db_name: "rust-example"
+        collection_name: "users"
+
+    # Publish events to NATS for extra durability.
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials_path: /etc/nats/credentials.json
+        subject: pubsub.data.mongo
+        stream:
+          create_or_update: true
+          name: mongo
+          description: "Mongo CDC events."
+          subjects: ["pubsub.data.mongo",]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old

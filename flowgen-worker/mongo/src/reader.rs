@@ -1,30 +1,14 @@
-use flowgen_core::event::Event;
+use super::message::MongoEventsExt;
+use flowgen_core::event::{Event, SenderExt};
 use futures::TryStreamExt;
+use mongodb::bson::Document;
 use mongodb::options::ClientOptions;
 use mongodb::options::ResolverConfig;
-use mongodb::{
-    bson::{doc, oid::ObjectId},
-    Client, Collection,
-};
-use serde::Deserialize;
-use serde::Serialize;
+use mongodb::{bson::doc, Client, Collection};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
-
-#[derive(Deserialize, Serialize, Debug)]
-struct User {
-    #[serde(rename = "_id")]
-    pub object_id: ObjectId,
-    pub id: String,
-
-    pub name: String,
-    pub email: String,
-
-    #[serde(rename = "createdTS")]
-    pub created_ts: String,
-}
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -39,51 +23,10 @@ pub enum Error {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("IO operation failed with error: {source}")]
-    IO {
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("Arrow operation failed with error: {source}")]
-    Arrow {
-        #[source]
-        source: arrow::error::ArrowError,
-    },
-    #[error("Avro operation failed with error: {source}")]
-    Avro {
-        #[source]
-        source: apache_avro::Error,
-    },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
-    SerdeJson {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("Object store operation failed with error: {source}")]
-    ObjectStore {
-        #[source]
-        source: object_store::Error,
-    },
     #[error("Configuration template rendering failed with error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
-    },
-    #[error("Could not initialize object store context")]
-    NoObjectStoreContext,
-    #[error("Could not retrieve file extension")]
-    NoFileExtension,
-    #[error("Cache error")]
-    Cache,
-    #[error("Host coordination failed with error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
-    #[error("Invalid URL format with error: {source}")]
-    ParseUrl {
-        #[source]
-        source: url::ParseError,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -97,22 +40,56 @@ pub enum Error {
         #[source]
         source: mongodb::error::Error,
     },
+    #[error("Message conversion failed with error: {source}")]
+    MessageConversion {
+        #[source]
+        source: crate::message::Error,
+    },
+    #[error("Other subscriber error")]
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("MongoDB error: {0}")]
+    MongoDB(#[from] mongodb::error::Error),
 }
 
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     client: mongodb::Client,
+    config: Arc<super::config::Reader>,
+    task_id: usize,
+    tx: Sender<Event>,
+    task_type: &'static str,
 }
 
 impl EventHandler {
+    /// Processes a single message result.
+    async fn process_message(
+        &self,
+        message_result: Result<Document, Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Result<(), Error> {
+        match message_result {
+            Ok(message) => {
+                let e = message
+                    .to_event(self.task_type, self.task_id)
+                    .map_err(|source| Error::MessageConversion { source })?;
+
+                self.tx
+                    .send_with_logging(e)
+                    .map_err(|source| Error::SendMessage { source })?;
+                Ok(())
+            }
+            Err(err) => Err(Error::Other(err)),
+        }
+    }
     /// Processes an event and writes it to the configured object store.
-    async fn handle(&self, event: Event) -> Result<(), Error> {
-        let users: Collection<User> = self.client.database("rust-example").collection("users");
-
-        let mut cursor = users.find(doc! { "name": "Sayan 2" }, None).await.unwrap();
-
-        while let Some(doc) = cursor.try_next().await.unwrap() {
+    async fn handle(&self, _event: Event) -> Result<(), Error> {
+        let documents: Collection<Document> = self
+            .client
+            .database(&self.config.db_name)
+            .collection(&self.config.collection_name);
+        let mut cursor = documents.find(doc! { "name": "Sayan 2" }, None).await?;
+        while let Some(doc) = cursor.try_next().await? {
             println!("{:?}", doc);
+            self.process_message(Ok(doc)).await?;
         }
 
         Ok(())
@@ -157,7 +134,13 @@ impl flowgen_core::task::runner::Runner for Reader {
                 .unwrap();
         let client = Client::with_options(options).unwrap();
 
-        let event_handler = EventHandler { client };
+        let event_handler = EventHandler {
+            client,
+            task_id: self.task_id,
+            tx: self.tx.clone(),
+            config: Arc::clone(&self.config),
+            task_type: self.task_type,
+        };
 
         Ok(event_handler)
     }
@@ -190,30 +173,37 @@ impl flowgen_core::task::runner::Runner for Reader {
             }
         };
 
-        // Process incoming events, filtering by task ID.
         loop {
             match self.rx.recv().await {
                 Ok(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                event_handler.handle(event.clone()).await
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
+                    if Some(event.task_id) == event_handler.task_id.checked_sub(1) {
+                        let event_handler = Arc::clone(&event_handler);
+                        let retry_strategy = retry_config.strategy();
+                        tokio::spawn(
+                            async move {
+                                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                    match event_handler.handle(event.clone()).await {
+                                        Ok(result) => Ok(result),
+                                        Err(e) => {
+                                            error!("{}", e);
+                                            Err(e)
+                                        }
                                     }
-                                );
+                                })
+                                .await;
+
+                                if let Err(err) = result {
+                                    error!(
+                                        "{}",
+                                        Error::RetryExhausted {
+                                            source: Box::new(err)
+                                        }
+                                    );
+                                }
                             }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
+                            .instrument(tracing::Span::current()),
+                        );
+                    }
                 }
                 Err(_) => return Ok(()),
             }

@@ -74,7 +74,7 @@ pub enum TaskType {
     /// Mongo Reader task.
     mongo_reader(flowgen_mongo::config::Reader),
     /// Mongo Change Stream task.
-    mongo_change_stream(flowgen_mongo::config::Reader),
+    mongo_change_stream(flowgen_mongo::config::ChangeStream),
 }
 
 impl TaskType {
