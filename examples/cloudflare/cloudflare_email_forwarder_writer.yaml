@@ -6,6 +6,7 @@ flow:
     - nats_jetstream_subscriber:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
         subject: email.received
         stream:
           create_or_update: true
@@ -16,18 +17,19 @@ flow:
           retention: limits
           discard_policy: old
         durable_name: cloudflare_email_forwarder_writer
-        batch_size: 100
+        max_messages: 100
+        delay: 1s
 
     # Convert event data (JSON) to avro.
     - convert:
         name: json_avro_converter
         target_format: avro
-        schema: '{"type":"record","name":"EmailMessage","fields":[{"name":"subject","type":"string","default":""},{"name":"from","type":"string","default":""},{"name":"to","type":"string","default":""},{"name":"cc","type":["null","string"],"default":null},{"name":"bcc","type":["null","string"],"default":null},{"name":"date","type":"string","default":""},{"name":"message_id","type":"string","default":""},{"name":"headers","type":{"type":"map","values":"string"},"default":{}},{"name":"body","type":{"type":"record","name":"EmailBody","fields":[{"name":"html","type":["null","string"],"default":null},{"name":"text","type":["null","string"],"default":null}]}},{"name":"raw_content","type":"string","default":""}]}'
+        schema: '{"type":"record","name":"EmailMessage","fields":[{"name":"subject","type":"string","default":""},{"name":"from","type":{"type":"record","name":"EmailAddress","fields":[{"name":"email","type":"string","default":""},{"name":"name","type":"string","default":""}]}},{"name":"to","type":{"type":"array","items":"EmailAddress"},"default":[]},{"name":"cc","type":["null",{"type":"array","items":"EmailAddress"}],"default":null},{"name":"bcc","type":["null",{"type":"array","items":"EmailAddress"}],"default":null},{"name":"date","type":"string","default":""},{"name":"message_id","type":"string","default":""},{"name":"headers","type":{"type":"map","values":"string"},"default":{}},{"name":"body","type":{"type":"record","name":"EmailBody","fields":[{"name":"text","type":["null","string"],"default":null},{"name":"html","type":["null","string"],"default":null}]}},{"name":"raw_content","type":"string","default":""}]}'
 
     # Write data into local or remote object store.
     - object_store_writer:
         name: write_events
-        path: file:///cloudflare/emails
+        path: file:///cloudflare/email
         hive_partition_options:
           enabled: true
           partition_keys:
