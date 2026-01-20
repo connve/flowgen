@@ -243,9 +243,8 @@ pub struct Publisher {
 /// Replay preset options for Salesforce Pub/Sub subscriptions.
 ///
 /// Determines where to start reading events when no replay ID is available.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[derive(Default)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReplayPreset {
     /// Start from the latest events (default).
     #[default]

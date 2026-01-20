@@ -283,12 +283,12 @@ impl flowgen_core::task::runner::Runner for Processor {
         };
 
         let method_router = match config.method {
-            crate::config::Method::GET => MethodRouter::new().get(handler),
-            crate::config::Method::POST => MethodRouter::new().post(handler),
-            crate::config::Method::PUT => MethodRouter::new().put(handler),
-            crate::config::Method::DELETE => MethodRouter::new().delete(handler),
-            crate::config::Method::PATCH => MethodRouter::new().patch(handler),
-            crate::config::Method::HEAD => MethodRouter::new().head(handler),
+            crate::config::Method::Get => MethodRouter::new().get(handler),
+            crate::config::Method::Post => MethodRouter::new().post(handler),
+            crate::config::Method::Put => MethodRouter::new().put(handler),
+            crate::config::Method::Delete => MethodRouter::new().delete(handler),
+            crate::config::Method::Patch => MethodRouter::new().patch(handler),
+            crate::config::Method::Head => MethodRouter::new().head(handler),
         };
 
         if let Some(http_server) = &self._task_context.http_server {
@@ -436,7 +436,7 @@ mod tests {
         let config = Arc::new(crate::config::Processor {
             name: "test_webhook".to_string(),
             endpoint: "/webhook".to_string(),
-            method: crate::config::Method::POST,
+            method: crate::config::Method::Post,
             payload: None,
             headers: None,
             credentials_path: None,
@@ -498,7 +498,7 @@ mod tests {
         let config = Arc::new(crate::config::Processor {
             name: "test_webhook".to_string(),
             endpoint: "/webhook".to_string(),
-            method: crate::config::Method::POST,
+            method: crate::config::Method::Post,
             payload: None,
             headers: Some(configured_headers),
             credentials_path: None,
@@ -528,7 +528,7 @@ mod tests {
         let config = Arc::new(crate::config::Processor {
             name: "test_webhook".to_string(),
             endpoint: "/webhook".to_string(),
-            method: crate::config::Method::POST,
+            method: crate::config::Method::Post,
             payload: None,
             headers: None,
             credentials_path: None,

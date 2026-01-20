@@ -13,13 +13,13 @@ flow:
     - script:
         name: return_payload
         code: |
-          let event = event.data.payload;
-          event
+          event.data.payload
 
     # Publish event to NATS.
     - nats_jetstream_publisher:
         name: publish_events
         credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
         subject: email.received
         stream:
           create_or_update: true
