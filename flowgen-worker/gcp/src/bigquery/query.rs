@@ -79,6 +79,18 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Failed to parse BigQuery date value: {source}")]
+    DateParse {
+        #[source]
+        source: chrono::ParseError,
+    },
+    #[error("Failed to parse BigQuery time value: {source}")]
+    TimeParse {
+        #[source]
+        source: chrono::ParseError,
+    },
+    #[error("Invalid date/time value")]
+    InvalidDateTime,
 }
 
 /// Event handler for processing individual query events.
@@ -412,7 +424,11 @@ fn field_to_arrow(field: &TableFieldSchema) -> Field {
         TableFieldType::Date => DataType::Date32,
         TableFieldType::Time => DataType::Time64(TimeUnit::Microsecond),
         TableFieldType::Bytes => DataType::Binary,
-        _ => DataType::Utf8, // Fallback for unknown types
+        TableFieldType::Numeric => DataType::Decimal128(38, 9),
+        TableFieldType::Bignumeric => DataType::Decimal256(76, 38),
+        TableFieldType::Datetime => DataType::Utf8,
+        TableFieldType::Json => DataType::Utf8,
+        _ => DataType::Utf8,
     };
 
     let nullable = field.mode != Some(TableFieldMode::Required);
@@ -498,6 +514,102 @@ fn build_column(
             }
             Arc::new(builder.finish()) as ArrayRef
         }
+        TableFieldType::Date => {
+            let mut builder = Date32Builder::new();
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => {
+                        // BigQuery returns dates as "YYYY-MM-DD"
+                        // Date32 is days since Unix epoch (1970-01-01)
+                        match parse_date_to_days(s) {
+                            Ok(days) => builder.append_value(days),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
+        TableFieldType::Time => {
+            let mut builder = Time64MicrosecondBuilder::new();
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => {
+                        // BigQuery returns time as "HH:MM:SS[.ffffff]"
+                        // Time64 is microseconds since midnight
+                        match parse_time_to_micros(s) {
+                            Ok(micros) => builder.append_value(micros),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
+        TableFieldType::Bytes => {
+            let mut builder = BinaryBuilder::new();
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => {
+                        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
+                        {
+                            Ok(bytes) => builder.append_value(&bytes),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
+        TableFieldType::Numeric => {
+            let mut builder = Decimal128Builder::new()
+                .with_precision_and_scale(38, 9)
+                .map_err(|e| Error::Arrow { source: e })?;
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => match parse_decimal_128(s, 9) {
+                        Ok(val) => builder.append_value(val),
+                        Err(_) => builder.append_null(),
+                    },
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
+        TableFieldType::Bignumeric => {
+            let mut builder = Decimal256Builder::new()
+                .with_precision_and_scale(76, 38)
+                .map_err(|e| Error::Arrow { source: e })?;
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => match parse_decimal_256(s, 38) {
+                        Ok(val) => builder.append_value(val),
+                        Err(_) => builder.append_null(),
+                    },
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
+        TableFieldType::Datetime | TableFieldType::Json => {
+            let mut builder = StringBuilder::new();
+            for row in rows {
+                match &row.f[col_idx].v {
+                    Value::Null => builder.append_null(),
+                    Value::String(s) => builder.append_value(s),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }
         _ => {
             // Fallback to string for unknown types
             let mut builder = StringBuilder::new();
@@ -513,12 +625,54 @@ fn build_column(
     })
 }
 
+/// Parse BigQuery NUMERIC string to Decimal128.
+fn parse_decimal_128(decimal_str: &str, scale: i8) -> Result<i128, Box<dyn std::error::Error>> {
+    let value: f64 = decimal_str.parse()?;
+    let multiplier = 10_f64.powi(scale as i32);
+    Ok((value * multiplier).round() as i128)
+}
+
+/// Parse BigQuery BIGNUMERIC string to Decimal256.
+fn parse_decimal_256(
+    decimal_str: &str,
+    scale: i8,
+) -> Result<arrow::datatypes::i256, Box<dyn std::error::Error>> {
+    use arrow::datatypes::i256;
+    let value: f64 = decimal_str.parse()?;
+    let multiplier = 10_f64.powi(scale as i32);
+    let scaled = (value * multiplier).round() as i128;
+    Ok(i256::from_i128(scaled))
+}
+
+/// Parse BigQuery date string (YYYY-MM-DD) to days since Unix epoch.
+fn parse_date_to_days(date_str: &str) -> Result<i32, Error> {
+    use chrono::NaiveDate;
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .map_err(|source| Error::DateParse { source })?;
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).ok_or(Error::InvalidDateTime)?;
+    Ok((date - epoch).num_days() as i32)
+}
+
+/// Parse BigQuery time string (HH:MM:SS[.ffffff]) to microseconds since midnight.
+fn parse_time_to_micros(time_str: &str) -> Result<i64, Error> {
+    use chrono::NaiveTime;
+    let time = NaiveTime::parse_from_str(time_str, "%H:%M:%S%.f")
+        .or_else(|_| NaiveTime::parse_from_str(time_str, "%H:%M:%S"))
+        .map_err(|source| Error::TimeParse { source })?;
+
+    let midnight = NaiveTime::from_hms_opt(0, 0, 0).ok_or(Error::InvalidDateTime)?;
+    let duration = time - midnight;
+    duration.num_microseconds().ok_or(Error::InvalidDateTime)
+}
+
 /// Build a query parameter from name and JSON value.
 fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter, Error> {
+    use super::config::{PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_STRING};
+
     let (parameter_type, parameter_value) = match value {
         JsonValue::String(s) => (
             QueryParameterType {
-                parameter_type: "STRING".to_string(),
+                parameter_type: PARAM_TYPE_STRING.to_string(),
                 ..Default::default()
             },
             QueryParameterValue {
@@ -530,7 +684,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
             if n.is_i64() || n.is_u64() {
                 (
                     QueryParameterType {
-                        parameter_type: "INT64".to_string(),
+                        parameter_type: PARAM_TYPE_INT64.to_string(),
                         ..Default::default()
                     },
                     QueryParameterValue {
@@ -541,7 +695,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
             } else {
                 (
                     QueryParameterType {
-                        parameter_type: "FLOAT64".to_string(),
+                        parameter_type: PARAM_TYPE_FLOAT64.to_string(),
                         ..Default::default()
                     },
                     QueryParameterValue {
@@ -553,7 +707,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
         }
         JsonValue::Bool(b) => (
             QueryParameterType {
-                parameter_type: "BOOL".to_string(),
+                parameter_type: PARAM_TYPE_BOOL.to_string(),
                 ..Default::default()
             },
             QueryParameterValue {
@@ -563,7 +717,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
         ),
         JsonValue::Null => (
             QueryParameterType {
-                parameter_type: "STRING".to_string(),
+                parameter_type: PARAM_TYPE_STRING.to_string(),
                 ..Default::default()
             },
             QueryParameterValue {
@@ -573,7 +727,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
         ),
         _ => (
             QueryParameterType {
-                parameter_type: "STRING".to_string(),
+                parameter_type: PARAM_TYPE_STRING.to_string(),
                 ..Default::default()
             },
             QueryParameterValue {
@@ -590,4 +744,547 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
         parameter_type,
         parameter_value,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::config::{
+        PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_STRING,
+    };
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_date_to_days() {
+        assert_eq!(parse_date_to_days("1970-01-01").unwrap(), 0);
+        assert_eq!(parse_date_to_days("1970-01-02").unwrap(), 1);
+        assert_eq!(parse_date_to_days("2024-01-01").unwrap(), 19723);
+        assert!(parse_date_to_days("invalid").is_err());
+        assert!(parse_date_to_days("2024-13-01").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_to_micros() {
+        assert_eq!(parse_time_to_micros("00:00:00").unwrap(), 0);
+        assert_eq!(parse_time_to_micros("00:00:01").unwrap(), 1_000_000);
+        assert_eq!(parse_time_to_micros("01:00:00").unwrap(), 3_600_000_000);
+        assert_eq!(parse_time_to_micros("23:59:59").unwrap(), 86_399_000_000);
+        assert_eq!(
+            parse_time_to_micros("12:30:45.123456").unwrap(),
+            45_045_123_456
+        );
+        assert!(parse_time_to_micros("invalid").is_err());
+        assert!(parse_time_to_micros("25:00:00").is_err());
+    }
+
+    #[test]
+    fn test_parse_decimal_128() {
+        assert_eq!(parse_decimal_128("123.45", 2).unwrap(), 12345);
+        assert_eq!(parse_decimal_128("0.001", 3).unwrap(), 1);
+        assert_eq!(parse_decimal_128("1000.5", 1).unwrap(), 10005);
+        assert!(parse_decimal_128("invalid", 2).is_err());
+    }
+
+    #[test]
+    fn test_parse_decimal_256() {
+        let result = parse_decimal_256("123.45", 2).unwrap();
+        assert_eq!(result, arrow::datatypes::i256::from_i128(12345));
+        assert!(parse_decimal_256("invalid", 2).is_err());
+    }
+
+    #[test]
+    fn test_build_query_parameter_string() {
+        let param = build_query_parameter("name", &json!("test")).unwrap();
+        assert_eq!(param.name, Some("name".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_STRING);
+        assert_eq!(param.parameter_value.value, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_build_query_parameter_int64() {
+        let param = build_query_parameter("count", &json!(42)).unwrap();
+        assert_eq!(param.name, Some("count".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_INT64);
+        assert_eq!(param.parameter_value.value, Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_build_query_parameter_float64() {
+        let param = build_query_parameter("price", &json!(99.99)).unwrap();
+        assert_eq!(param.name, Some("price".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_FLOAT64);
+        assert_eq!(param.parameter_value.value, Some("99.99".to_string()));
+    }
+
+    #[test]
+    fn test_build_query_parameter_bool() {
+        let param = build_query_parameter("active", &json!(true)).unwrap();
+        assert_eq!(param.name, Some("active".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_BOOL);
+        assert_eq!(param.parameter_value.value, Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_build_query_parameter_null() {
+        let param = build_query_parameter("optional", &json!(null)).unwrap();
+        assert_eq!(param.name, Some("optional".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_STRING);
+        assert_eq!(param.parameter_value.value, None);
+    }
+
+    #[test]
+    fn test_field_to_arrow_string() {
+        use google_cloud_bigquery::http::table::{TableFieldMode, TableFieldType};
+        let field = TableFieldSchema {
+            name: "test".to_string(),
+            data_type: TableFieldType::String,
+            mode: Some(TableFieldMode::Nullable),
+            ..Default::default()
+        };
+        let arrow_field = field_to_arrow(&field);
+        assert_eq!(arrow_field.name(), "test");
+        assert_eq!(arrow_field.data_type(), &DataType::Utf8);
+        assert!(arrow_field.is_nullable());
+    }
+
+    #[test]
+    fn test_field_to_arrow_int64() {
+        use google_cloud_bigquery::http::table::{TableFieldMode, TableFieldType};
+        let field = TableFieldSchema {
+            name: "count".to_string(),
+            data_type: TableFieldType::Int64,
+            mode: Some(TableFieldMode::Required),
+            ..Default::default()
+        };
+        let arrow_field = field_to_arrow(&field);
+        assert_eq!(arrow_field.name(), "count");
+        assert_eq!(arrow_field.data_type(), &DataType::Int64);
+        assert!(!arrow_field.is_nullable());
+    }
+
+    #[test]
+    fn test_field_to_arrow_timestamp() {
+        use google_cloud_bigquery::http::table::{TableFieldMode, TableFieldType};
+        let field = TableFieldSchema {
+            name: "created_at".to_string(),
+            data_type: TableFieldType::Timestamp,
+            mode: Some(TableFieldMode::Nullable),
+            ..Default::default()
+        };
+        let arrow_field = field_to_arrow(&field);
+        assert_eq!(arrow_field.name(), "created_at");
+        assert_eq!(
+            arrow_field.data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert!(arrow_field.is_nullable());
+    }
+
+    #[test]
+    fn test_field_to_arrow_date() {
+        use google_cloud_bigquery::http::table::{TableFieldMode, TableFieldType};
+        let field = TableFieldSchema {
+            name: "birth_date".to_string(),
+            data_type: TableFieldType::Date,
+            mode: Some(TableFieldMode::Nullable),
+            ..Default::default()
+        };
+        let arrow_field = field_to_arrow(&field);
+        assert_eq!(arrow_field.name(), "birth_date");
+        assert_eq!(arrow_field.data_type(), &DataType::Date32);
+        assert!(arrow_field.is_nullable());
+    }
+
+    #[test]
+    fn test_field_to_arrow_numeric() {
+        use google_cloud_bigquery::http::table::{TableFieldMode, TableFieldType};
+        let field = TableFieldSchema {
+            name: "amount".to_string(),
+            data_type: TableFieldType::Numeric,
+            mode: Some(TableFieldMode::Nullable),
+            ..Default::default()
+        };
+        let arrow_field = field_to_arrow(&field);
+        assert_eq!(arrow_field.name(), "amount");
+        assert_eq!(arrow_field.data_type(), &DataType::Decimal128(38, 9));
+        assert!(arrow_field.is_nullable());
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_missing_config() {
+        let result = ProcessorBuilder::new().build().await;
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
+    }
+
+    #[test]
+    fn test_build_column_string() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("test1".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("test2".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "name".to_string(),
+            data_type: TableFieldType::String,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let string_array = result.as_any().downcast_ref::<StringArray>().unwrap();
+
+        assert_eq!(string_array.len(), 3);
+        assert_eq!(string_array.value(0), "test1");
+        assert_eq!(string_array.value(1), "test2");
+        assert!(string_array.is_null(2));
+    }
+
+    #[test]
+    fn test_build_column_int64() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("42".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("100".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("invalid".to_string()),
+                }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "count".to_string(),
+            data_type: TableFieldType::Int64,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let int_array = result.as_any().downcast_ref::<Int64Array>().unwrap();
+
+        assert_eq!(int_array.len(), 4);
+        assert_eq!(int_array.value(0), 42);
+        assert_eq!(int_array.value(1), 100);
+        assert!(int_array.is_null(2));
+        assert!(int_array.is_null(3));
+    }
+
+    #[test]
+    fn test_build_column_float64() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("99.99".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("123.45".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "price".to_string(),
+            data_type: TableFieldType::Float64,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let float_array = result.as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert_eq!(float_array.len(), 3);
+        assert!((float_array.value(0) - 99.99).abs() < f64::EPSILON);
+        assert!((float_array.value(1) - 123.45).abs() < f64::EPSILON);
+        assert!(float_array.is_null(2));
+    }
+
+    #[test]
+    fn test_build_column_bool() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("true".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("false".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "active".to_string(),
+            data_type: TableFieldType::Bool,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let bool_array = result.as_any().downcast_ref::<BooleanArray>().unwrap();
+
+        assert_eq!(bool_array.len(), 3);
+        assert!(bool_array.value(0));
+        assert!(!bool_array.value(1));
+        assert!(bool_array.is_null(2));
+    }
+
+    #[test]
+    fn test_build_column_date() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("2024-01-15".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("1970-01-01".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("invalid".to_string()),
+                }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "date".to_string(),
+            data_type: TableFieldType::Date,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let date_array = result.as_any().downcast_ref::<Date32Array>().unwrap();
+
+        assert_eq!(date_array.len(), 4);
+        assert_eq!(date_array.value(0), 19737);
+        assert_eq!(date_array.value(1), 0);
+        assert!(date_array.is_null(2));
+        assert!(date_array.is_null(3));
+    }
+
+    #[test]
+    fn test_build_column_time() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("12:30:45".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("00:00:00".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "time".to_string(),
+            data_type: TableFieldType::Time,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let time_array = result
+            .as_any()
+            .downcast_ref::<Time64MicrosecondArray>()
+            .unwrap();
+
+        assert_eq!(time_array.len(), 3);
+        assert_eq!(time_array.value(0), 45_045_000_000);
+        assert_eq!(time_array.value(1), 0);
+        assert!(time_array.is_null(2));
+    }
+
+    #[test]
+    fn test_build_column_bytes() {
+        use google_cloud_bigquery::http::table::TableFieldType;
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let rows = vec![
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("aGVsbG8=".to_string()),
+                }],
+            },
+            Tuple {
+                f: vec![Cell { v: Value::Null }],
+            },
+            Tuple {
+                f: vec![Cell {
+                    v: Value::String("invalid base64!".to_string()),
+                }],
+            },
+        ];
+
+        let field = TableFieldSchema {
+            name: "data".to_string(),
+            data_type: TableFieldType::Bytes,
+            ..Default::default()
+        };
+
+        let result = build_column(&rows, 0, &field).unwrap();
+        let binary_array = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+
+        assert_eq!(binary_array.len(), 3);
+        assert_eq!(binary_array.value(0), b"hello");
+        assert!(binary_array.is_null(1));
+        assert!(binary_array.is_null(2));
+    }
+
+    #[test]
+    fn test_response_to_record_batch_empty() {
+        use google_cloud_bigquery::http::job::query::QueryResponse;
+        use google_cloud_bigquery::http::table::{TableFieldType, TableSchema};
+
+        let response = QueryResponse {
+            schema: Some(TableSchema {
+                fields: vec![TableFieldSchema {
+                    name: "test".to_string(),
+                    data_type: TableFieldType::String,
+                    ..Default::default()
+                }],
+            }),
+            rows: None,
+            ..Default::default()
+        };
+
+        let result = response_to_record_batch(response).unwrap();
+        assert_eq!(result.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_response_to_record_batch_with_data() {
+        use google_cloud_bigquery::http::job::query::QueryResponse;
+        use google_cloud_bigquery::http::table::{TableFieldType, TableSchema};
+        use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
+
+        let response = QueryResponse {
+            schema: Some(TableSchema {
+                fields: vec![
+                    TableFieldSchema {
+                        name: "name".to_string(),
+                        data_type: TableFieldType::String,
+                        ..Default::default()
+                    },
+                    TableFieldSchema {
+                        name: "count".to_string(),
+                        data_type: TableFieldType::Int64,
+                        ..Default::default()
+                    },
+                ],
+            }),
+            rows: Some(vec![
+                Tuple {
+                    f: vec![
+                        Cell {
+                            v: Value::String("Alice".to_string()),
+                        },
+                        Cell {
+                            v: Value::String("10".to_string()),
+                        },
+                    ],
+                },
+                Tuple {
+                    f: vec![
+                        Cell {
+                            v: Value::String("Bob".to_string()),
+                        },
+                        Cell {
+                            v: Value::String("20".to_string()),
+                        },
+                    ],
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let result = response_to_record_batch(response).unwrap();
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.num_columns(), 2);
+
+        let name_col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name_col.value(0), "Alice");
+        assert_eq!(name_col.value(1), "Bob");
+
+        let count_col = result
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(count_col.value(0), 10);
+        assert_eq!(count_col.value(1), 20);
+    }
+
+    #[test]
+    fn test_response_to_record_batch_missing_schema() {
+        use google_cloud_bigquery::http::job::query::QueryResponse;
+
+        let response = QueryResponse {
+            schema: None,
+            rows: None,
+            ..Default::default()
+        };
+
+        let result = response_to_record_batch(response);
+        assert!(matches!(result.unwrap_err(), Error::MissingSchema));
+    }
 }

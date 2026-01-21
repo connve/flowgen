@@ -26,6 +26,11 @@ pub const PARAM_TYPE_BYTES: &str = "BYTES";
 pub const PARAM_TYPE_GEOGRAPHY: &str = "GEOGRAPHY";
 pub const PARAM_TYPE_JSON: &str = "JSON";
 
+/// Default timeout for BigQuery queries (5 minutes).
+fn default_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(300))
+}
+
 /// Configuration structure for BigQuery query operations.
 ///
 /// This structure defines all parameters needed to execute queries against BigQuery,
@@ -125,8 +130,8 @@ pub struct Query {
     pub location: Option<String>,
     /// Optional maximum number of rows to return.
     pub max_results: Option<u64>,
-    /// Optional query timeout (e.g., "30s", "5m", "1h").
-    #[serde(default, with = "humantime_serde")]
+    /// Optional query timeout (e.g., "30s", "5m", "1h"). Default: 5 minutes.
+    #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Option<Duration>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
@@ -152,6 +157,18 @@ mod tests {
         assert_eq!(query.max_results, None);
         assert_eq!(query.timeout, None);
         assert_eq!(query.retry, None);
+    }
+
+    #[test]
+    fn test_query_config_deserialization_with_default_timeout() {
+        let json = r#"{
+            "name": "test",
+            "credentials_path": "/test/creds.json",
+            "project_id": "test-project",
+            "query": "SELECT 1"
+        }"#;
+        let query: Query = serde_json::from_str(json).unwrap();
+        assert_eq!(query.timeout, Some(Duration::from_secs(300)));
     }
 
     #[test]

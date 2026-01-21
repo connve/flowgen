@@ -1371,6 +1371,7 @@ dependencies = [
  "arrow-json",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "flowgen_core",
  "gcloud-auth",
  "gcloud-bigquery",

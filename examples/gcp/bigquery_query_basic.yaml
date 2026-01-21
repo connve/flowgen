@@ -15,19 +15,22 @@ flow:
         name: fetch_orders
         credentials_path: /etc/gcp/credentials.json
         project_id: my-project-id
-        query: "SELECT order_id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
+        query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
+        max_results: 10000
+        timeout: "1m"
 
-    # Publish Arrow RecordBatch results directly to NATS (native Arrow support).
-    - nats_jetstream_publisher:
-        name: publish_results
-        credentials_path: /etc/nats/credentials.json
-        url: "localhost:4222"
-        subject: bigquery.orders.fetched
-        stream:
-          create_or_update: true
-          name: bigquery
-          description: "BigQuery query results stream"
-          subjects: ["bigquery.>"]
-          max_age_secs: 86400
-          retention: limits
-          discard_policy: old
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false
+
