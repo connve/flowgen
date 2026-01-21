@@ -73,6 +73,8 @@ pub enum TaskType {
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
     /// Salesforce Bulk API Job creator task.
     salesforce_bulkapi_job_creator(flowgen_salesforce::bulkapi::config::JobCreator),
+    /// GCP BigQuery query task.
+    gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
 }
 
 impl TaskType {
@@ -94,6 +96,7 @@ impl TaskType {
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
             TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
+            TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
         }
     }
 }

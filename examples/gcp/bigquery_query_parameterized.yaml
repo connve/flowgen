@@ -1,0 +1,38 @@
+flow:
+  name: bigquery_query_parameterized
+  require_leader_election: true
+  tasks:
+
+    # Run this task on specified intervals to fetch completed orders.
+    - generate:
+        name: generate_jobs
+        interval: 300s
+
+    # BigQuery query with parameterized SQL for SQL injection protection.
+    # Parameters are type-safe and properly escaped by BigQuery client.
+    # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    - bigquery_query:
+        name: fetch_completed_orders
+        credentials_path: /etc/gcp/credentials.json
+        project_id: my-project-id
+        query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE status = @status AND order_date >= @start_date ORDER BY order_date DESC"
+        parameters:
+          status: "completed"
+          start_date: "2024-01-01"
+        max_results: 10000
+        timeout: "1m"
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false
