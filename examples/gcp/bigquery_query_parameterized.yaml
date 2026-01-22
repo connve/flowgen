@@ -11,7 +11,7 @@ flow:
     # BigQuery query with parameterized SQL for SQL injection protection.
     # Parameters are type-safe and properly escaped by BigQuery client.
     # Results are returned as Arrow RecordBatch for efficient columnar processing.
-    - bigquery_query:
+    - gcp_bigquery_query:
         name: fetch_completed_orders
         credentials_path: /etc/gcp/credentials.json
         project_id: my-project-id
