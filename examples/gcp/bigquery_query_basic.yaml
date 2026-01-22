@@ -11,7 +11,7 @@ flow:
 
     # BigQuery query executes a simple SELECT query.
     # Results are returned as Arrow RecordBatch for efficient columnar processing.
-    - bigquery_query:
+    - gcp_bigquery_query:
         name: fetch_orders
         credentials_path: /etc/gcp/credentials.json
         project_id: my-project-id
