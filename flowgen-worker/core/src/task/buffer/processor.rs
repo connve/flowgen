@@ -4,9 +4,11 @@
 //! and timeout triggers. This enables efficient batch processing for downstream tasks
 //! such as file writes, API calls, or columnar format conversions.
 
+use crate::config::ConfigExt;
 use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -33,6 +35,11 @@ pub enum Error {
     ExpectedJsonGotAvro,
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Failed to render buffer key template: {source}")]
+    Render {
+        #[source]
+        source: crate::config::Error,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -61,6 +68,9 @@ struct FlushData {
     batch_size: usize,
     /// Reason why this buffer was flushed.
     flush_reason: FlushReason,
+    /// Optional key that was used to group these events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffer_key: Option<String>,
 }
 
 /// Buffer processor that accumulates events into batches.
@@ -92,10 +102,16 @@ impl Processor {
     /// # Arguments
     /// * `buffer` - Vector of accumulated events to flush.
     /// * `reason` - The reason this flush was triggered.
+    /// * `buffer_key` - Optional key that was used to group these events.
     ///
     /// # Returns
     /// Result containing () on success or Error on failure.
-    async fn flush_buffer(&self, buffer: Vec<Value>, reason: FlushReason) -> Result<(), Error> {
+    async fn flush_buffer(
+        &self,
+        buffer: Vec<Value>,
+        reason: FlushReason,
+        buffer_key: Option<String>,
+    ) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
         }
@@ -105,6 +121,7 @@ impl Processor {
             batch: buffer,
             batch_size,
             flush_reason: reason,
+            buffer_key,
         };
 
         let flush_result = serde_json::to_value(flush_data).map_err(|e| Error::EventBuilder {
@@ -129,12 +146,26 @@ impl Processor {
     /// Processes the main event loop with buffer accumulation and flush triggers.
     ///
     /// Uses `tokio::select!` to handle three concurrent conditions:
-    /// 1. Receiving new events and accumulating them in the buffer
+    /// 1. Receiving new events and accumulating them in the buffer(s)
     /// 2. Timeout expiration to flush partial batches
     /// 3. Shutdown signal to flush remaining events
+    ///
+    /// When buffer_key is configured, maintains separate buffers per key with independent
+    /// size and timeout tracking. Otherwise uses a single buffer.
     async fn process_events(&mut self) -> Result<(), Error> {
-        let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
         let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
+
+        // If buffer_key is configured, use HashMap for keyed buffers
+        if self.config.buffer_key.is_some() {
+            self.process_events_keyed(timeout_duration).await
+        } else {
+            self.process_events_single(timeout_duration).await
+        }
+    }
+
+    /// Processes events with a single buffer (no keying).
+    async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
+        let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
         let mut last_flush = Instant::now();
 
         loop {
@@ -168,7 +199,7 @@ impl Processor {
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
-                                self.flush_buffer(buffer.clone(), FlushReason::Size).await?;
+                                self.flush_buffer(buffer.clone(), FlushReason::Size, None).await?;
                                 buffer.clear();
                                 last_flush = Instant::now();
                             }
@@ -176,7 +207,7 @@ impl Processor {
                         Err(_) => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown).await?;
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None).await?;
                             }
                             return Ok(());
                         }
@@ -185,9 +216,115 @@ impl Processor {
 
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
-                    self.flush_buffer(buffer.clone(), FlushReason::Timeout).await?;
+                    self.flush_buffer(buffer.clone(), FlushReason::Timeout, None).await?;
                     buffer.clear();
                     last_flush = Instant::now();
+                }
+            }
+        }
+    }
+
+    /// Processes events with keyed buffers (separate buffer per key).
+    async fn process_events_keyed(&mut self, timeout_duration: Duration) -> Result<(), Error> {
+        let mut buffers: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut last_flush_times: HashMap<String, Instant> = HashMap::new();
+
+        loop {
+            // Find the earliest timeout across all active keyed buffers.
+            let min_time_until_flush = buffers
+                .keys()
+                .filter_map(|key| {
+                    last_flush_times
+                        .get(key)
+                        .and_then(|last_flush| timeout_duration.checked_sub(last_flush.elapsed()))
+                })
+                .min()
+                .unwrap_or(timeout_duration);
+
+            tokio::select! {
+                // Receive and buffer incoming events.
+                result = self.rx.recv() => {
+                    match result {
+                        Ok(event) => {
+                            // Filter events by previous task_id.
+                            if Some(event.task_id) != self.task_id.checked_sub(1) {
+                                continue;
+                            }
+
+                            // Extract JSON data from event.
+                            let json_data = match &event.data {
+                                EventData::Json(data) => data.clone(),
+                                EventData::ArrowRecordBatch(_) => {
+                                    return Err(Error::ExpectedJsonGotArrowRecordBatch);
+                                }
+                                EventData::Avro(_) => {
+                                    return Err(Error::ExpectedJsonGotAvro);
+                                }
+                            };
+
+                            // Render the config with event data to get the rendered buffer key.
+                            let event_value = serde_json::value::Value::try_from(&event)
+                                .map_err(|source| Error::EventBuilder { source })?;
+                            let rendered_config = self.config.render(&event_value)
+                                .map_err(|source| Error::Render { source })?;
+
+                            // Extract the rendered key from the config.
+                            let rendered_key = rendered_config.buffer_key
+                                .ok_or_else(|| Error::MissingRequiredAttribute("buffer_key".to_string()))?;
+
+                            // Get or create buffer for this key.
+                            let is_new_buffer = !buffers.contains_key(&rendered_key);
+                            let buffer = buffers.entry(rendered_key.clone()).or_default();
+                            buffer.push(json_data);
+
+                            // Initialize last flush time for new buffers.
+                            if is_new_buffer {
+                                last_flush_times.insert(rendered_key.clone(), Instant::now());
+                            }
+
+                            // Flush if this key's buffer reached size limit.
+                            if buffer.len() >= self.config.size {
+                                if let Some(buffer_to_flush) = buffers.remove(&rendered_key) {
+                                    self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(rendered_key.clone())).await?;
+                                }
+                                last_flush_times.insert(rendered_key, Instant::now());
+                            }
+                        }
+                        Err(_) => {
+                            // Channel closed, flush all remaining buffers and exit.
+                            for (key, buffer) in buffers {
+                                if !buffer.is_empty() {
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key)).await?;
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Timeout trigger to flush buffers that have exceeded timeout.
+                _ = sleep(min_time_until_flush), if !buffers.is_empty() => {
+                    let now = Instant::now();
+                    let mut keys_to_flush = Vec::new();
+
+                    // Find all keys with active buffers whose timeout has been exceeded.
+                    for key in buffers.keys() {
+                        if let Some(last_flush) = last_flush_times.get(key) {
+                            if now.duration_since(*last_flush) >= timeout_duration {
+                                keys_to_flush.push(key.clone());
+                            }
+                        }
+                    }
+
+                    // Flush timed-out buffers.
+                    for key in keys_to_flush {
+                        if let Some(buffer) = buffers.remove(&key) {
+                            if !buffer.is_empty() {
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone())).await?;
+                            }
+                        }
+                        last_flush_times.insert(key, now);
+                    }
                 }
             }
         }
@@ -351,6 +488,7 @@ mod tests {
             name: "test".to_string(),
             size: 100,
             timeout: Some(Duration::from_secs(30)),
+            buffer_key: None,
             retry: None,
         });
         let (tx, rx) = broadcast::channel(100);

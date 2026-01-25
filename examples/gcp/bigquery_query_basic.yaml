@@ -1,0 +1,36 @@
+flow:
+  name: bigquery_query_basic
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # BigQuery query executes a simple SELECT query.
+    # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    - gcp_bigquery_query:
+        name: fetch_orders
+        credentials_path: /etc/gcp/credentials.json
+        project_id: my-project-id
+        query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
+        max_results: 10000
+        timeout: "1m"
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false
+

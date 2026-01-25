@@ -77,6 +77,8 @@ pub enum TaskType {
     mongo_reader(flowgen_mongo::config::Reader),
     /// Mongo Change Stream task.
     mongo_change_stream(flowgen_mongo::config::ChangeStream),
+    /// GCP BigQuery query task.
+    gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
 }
 
 impl TaskType {
@@ -100,6 +102,7 @@ impl TaskType {
             TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
             TaskType::mongo_reader(_) => "mongo_reader",
             TaskType::mongo_change_stream(_) => "mongo_change_stream",
+            TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
         }
     }
 }

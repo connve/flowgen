@@ -79,6 +79,8 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error("HTTP request failed with status {status}: {body}")]
+    HttpError { status: u16, body: String },
 }
 
 /// Event handler for processing HTTP requests.
@@ -178,15 +180,25 @@ impl EventHandler {
             }
         };
 
-        let resp = client
+        let response = client
             .send()
             .await
-            .map_err(|source| Error::Reqwest { source })?
+            .map_err(|source| Error::Reqwest { source })?;
+
+        let status = response.status();
+        let body = response
             .text()
             .await
             .map_err(|source| Error::Reqwest { source })?;
 
-        let data = serde_json::from_str::<Value>(&resp).unwrap_or_else(|_| json!(resp));
+        if status.is_client_error() || status.is_server_error() {
+            return Err(Error::HttpError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
 
         let e = EventBuilder::new()
             .data(EventData::Json(data))
