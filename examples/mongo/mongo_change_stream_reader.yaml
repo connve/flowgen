@@ -4,6 +4,7 @@ flow:
     # Read database changes from mongo.
     - mongo_change_stream:
         name: "mongo_change_stream"
+        credentials_path: "/etc/mongo/credentials.json"
         db_name: "rust-example"
     
     # Publish events to NATS for extra durability.

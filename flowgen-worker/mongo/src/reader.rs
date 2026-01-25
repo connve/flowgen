@@ -1,11 +1,9 @@
 use super::message::MongoEventsExt;
+use crate::client::MongoClientBuilder;
 use flowgen_core::event::{Event, SenderExt};
 use futures::TryStreamExt;
 use mongodb::bson::Document;
-use mongodb::options::ClientOptions;
-use mongodb::options::ResolverConfig;
-use mongodb::{bson::doc, Client, Collection};
-use std::env;
+use mongodb::{bson::doc, Collection};
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
@@ -13,6 +11,11 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Authentication error: {source}")]
+    Auth {
+        #[source]
+        source: crate::client::Error,
+    },
     #[error("Sending event to channel failed with error: {source}")]
     SendMessage {
         #[source]
@@ -82,13 +85,18 @@ impl EventHandler {
     }
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, _event: Event) -> Result<(), Error> {
-        let documents: Collection<Document> = self
+        let document_collection: Collection<Document> = self
             .client
             .database(&self.config.db_name)
             .collection(&self.config.collection_name);
-        let mut cursor = documents.find(doc! { "name": "Sayan 2" }, None).await?;
+
+        let mut doc = Document::new();
+        for (key, value) in &self.config.filter {
+            doc.insert(key, value);
+        }
+
+        let mut cursor = document_collection.find(doc).await?;
         while let Some(doc) = cursor.try_next().await? {
-            println!("{:?}", doc);
             self.process_message(Ok(doc)).await?;
         }
 
@@ -118,21 +126,20 @@ impl flowgen_core::task::runner::Runner for Reader {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the reader by establishing object store client connection.
+    /// Initializes the reader by establishing mongo client connection.
     ///
     /// This method performs all setup operations that can fail, including:
-    /// - Building and connecting the object store client with credentials
+    /// - Building and connecting the mongo client with credentials
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Load the MongoDB connection string from an environment variable:
-        let client_uri =
-            env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
-        // A Client is needed to connect to MongoDB:
-        // An extra line of code to work around a DNS issue on Windows:
-        let options =
-            ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
-                .await
-                .unwrap();
-        let client = Client::with_options(options).unwrap();
+        let client = MongoClientBuilder::new()
+            .credentials_path(self.config.credentials_path.clone())
+            .map_err(|e| Error::Auth { source: e })?
+            .default_host("cluster0.mongodb.net".to_string()) // Optional: set your MongoDB host
+            .build()
+            .map_err(|e| Error::Auth { source: e })?
+            .connect()
+            .await
+            .map_err(|e| Error::Auth { source: e })?;
 
         let event_handler = EventHandler {
             client,

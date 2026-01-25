@@ -1,11 +1,9 @@
 use super::message::MongoEventsExt;
+use crate::client::MongoClientBuilder;
 use flowgen_core::event::{Event, SenderExt};
 use futures::StreamExt;
+use mongodb::bson::doc;
 use mongodb::bson::Document;
-use mongodb::options::ClientOptions;
-use mongodb::options::ResolverConfig;
-use mongodb::{bson::doc, Client};
-use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{error, Instrument};
@@ -13,6 +11,11 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Authentication error: {source}")]
+    Auth {
+        #[source]
+        source: crate::client::Error,
+    },
     #[error("Sending event to channel failed with error: {source}")]
     SendMessage {
         #[source]
@@ -81,9 +84,8 @@ impl EventHandler {
     async fn handle(&self) -> Result<(), Error> {
         let db = self.client.database(&self.config.db_name);
 
-        let pipeline = vec![];
         let mut change_stream = db
-            .watch(pipeline, None)
+            .watch()
             .await
             .map_err(|source| Error::MongoReader { source })?;
 
@@ -132,16 +134,15 @@ impl flowgen_core::task::runner::Runner for Reader {
 
     /// Initializes the reader by establishing mongo client connection.
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Load the MongoDB connection string from an environment variable:
-        let client_uri =
-            env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment variable!");
-        // A Client is needed to connect to MongoDB
-        let options =
-            ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare())
-                .await
-                .unwrap();
-        let client =
-            Client::with_options(options).map_err(|source| Error::MongoReader { source })?;
+        let client = MongoClientBuilder::new()
+            .credentials_path(self.config.credentials_path.clone())
+            .map_err(|e| Error::Auth { source: e })?
+            .default_host("cluster0.mongodb.net".to_string())
+            .build()
+            .map_err(|e| Error::Auth { source: e })?
+            .connect()
+            .await
+            .map_err(|e| Error::Auth { source: e })?;
 
         let event_handler = EventHandler {
             client,

@@ -50,3 +50,5 @@ tokio-retry = { version = "0.3" }
 humantime = { version = "2.1" }
 humantime-serde = { version = "1.1" }
 croner = { version = "3.0.1" }
+mongodb = "=3.5.0"
+bson = "3.1.0"

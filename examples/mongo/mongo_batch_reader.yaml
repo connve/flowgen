@@ -7,11 +7,15 @@ flow:
         interval: 60s
         count: 1
 
-    # Read documents in batch from mongo collection
+    # Read documents in batch from mongo collection with dynamic filter.
     - mongo_reader:
         name: "mongo_reader"
+        credentials_path: "/etc/mongo/credentials.json"
         db_name: "rust-example"
         collection_name: "users"
+        # Filter based on Mongo collection attributes.
+        filter:
+            name: "Sayan 2" 
 
     # Publish events to NATS for extra durability.
     - nats_jetstream_publisher:

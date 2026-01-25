@@ -9,10 +9,14 @@
 //!    to listen for real-time changes.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Mongo batch reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 pub struct Reader {
+    /// Path to credentials file containing Mongo authentication details.
+    pub credentials_path: PathBuf,
     /// The unique name / identifier of the task.
     pub name: String,
     /// The Database Name from Mongo.
@@ -21,11 +25,15 @@ pub struct Reader {
     pub collection_name: String,
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    #[serde(default)]
+    pub filter: HashMap<String, String>,
 }
 
 /// Mongo Change Data Capture reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 pub struct ChangeStream {
+    /// Path to credentials file containing Mongo authentication details.
+    pub credentials_path: PathBuf,
     /// The unique name / identifier of the task.
     pub name: String,
     /// The Database Name from Mongo.
