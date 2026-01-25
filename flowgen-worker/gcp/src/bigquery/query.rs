@@ -12,6 +12,9 @@ use flowgen_core::{
 };
 use gcloud_auth::credentials::CredentialsFile;
 use google_cloud_bigquery::client::{Client, ClientConfig};
+use google_cloud_bigquery::http::job::get_query_results::{
+    GetQueryResultsRequest, GetQueryResultsResponse,
+};
 use google_cloud_bigquery::http::job::query::{QueryRequest, QueryResponse};
 use google_cloud_bigquery::http::table::TableFieldSchema;
 use google_cloud_bigquery::http::tabledata::list::{Tuple, Value};
@@ -116,10 +119,10 @@ impl EventHandler {
             .render(&event_value)
             .map_err(|source| Error::ConfigRender { source })?;
 
-        // Execute query
+        // Execute query.
         let record_batch = execute_query(&self.client, &config).await?;
 
-        // Build result event
+        // Build result event.
         let result_event = EventBuilder::new()
             .data(EventData::ArrowRecordBatch(record_batch))
             .subject(format!("{}.{}", event.subject, config.name))
@@ -345,14 +348,15 @@ async fn execute_query(
     client: &Client,
     config: &super::config::Query,
 ) -> Result<arrow::array::RecordBatch, Error> {
-    // Build query request
+    // Build query request.
     let mut query_request = QueryRequest {
         query: config.query.clone(),
-        use_legacy_sql: false,
+        use_legacy_sql: config.use_legacy_sql,
+        use_query_cache: Some(config.use_query_cache),
         ..Default::default()
     };
 
-    // Add parameters
+    // Add parameters.
     if let Some(ref params) = config.parameters {
         query_request.query_parameters = params
             .iter()
@@ -360,45 +364,145 @@ async fn execute_query(
             .collect::<Result<Vec<_>, _>>()?;
     }
 
-    // Set options
+    // Set options.
     if let Some(timeout) = config.timeout {
         query_request.timeout_ms = Some(timeout.as_millis() as i64);
     }
     if let Some(max) = config.max_results {
         query_request.max_results = Some(max as i64);
     }
+    if let Some(ref location) = config.location {
+        query_request.location = location.clone();
+    }
+    if let Some(create_session) = config.create_session {
+        query_request.create_session = Some(create_session);
+    }
+    if let Some(ref labels) = config.labels {
+        query_request.labels = Some(labels.clone());
+    }
 
-    // Execute query
+    // Execute query.
     let response: QueryResponse = client
         .job()
         .query(&config.project_id, &query_request)
         .await
         .map_err(|source| Error::QueryExecution { source })?;
 
-    // Convert to RecordBatch
-    response_to_record_batch(response)
+    // If query is not complete, poll for results using getQueryResults.
+    let (schema, job_ref, mut all_rows, mut page_token) = if !response.job_complete {
+        let result = poll_query_results(client, &response).await?;
+        (
+            result.schema,
+            result.job_reference,
+            result.rows.unwrap_or_default(),
+            result.page_token,
+        )
+    } else {
+        (
+            response.schema,
+            response.job_reference,
+            response.rows.unwrap_or_default(),
+            response.page_token,
+        )
+    };
+
+    // Fetch all pages if there are more results.
+    while let Some(token) = page_token {
+        let page_response = get_query_results_page(client, &job_ref, &token).await?;
+
+        if let Some(mut rows) = page_response.rows {
+            all_rows.append(&mut rows);
+        }
+
+        page_token = page_response.page_token;
+    }
+
+    // Convert to RecordBatch with schema and all rows.
+    response_to_record_batch(schema, all_rows)
 }
 
-/// Convert QueryResponse to Arrow RecordBatch.
-fn response_to_record_batch(response: QueryResponse) -> Result<arrow::array::RecordBatch, Error> {
-    // Get schema
-    let bq_schema = response.schema.ok_or_else(|| Error::MissingSchema)?;
+/// Poll for query completion using getQueryResults API.
+///
+/// This function polls BigQuery to check if an asynchronous query job has completed.
+/// Each call to getQueryResults has a 10-second server-side timeout, meaning BigQuery
+/// waits up to 10 seconds for the job to complete before returning. If the job is not
+/// complete, we wait 1 second before the next poll attempt.
+///
+/// Polling continues indefinitely until either the job completes or BigQuery returns
+/// an error. Any errors from the BigQuery API will propagate up and be handled by the
+/// retry system at the handler level.
+async fn poll_query_results(
+    client: &Client,
+    initial_response: &QueryResponse,
+) -> Result<GetQueryResultsResponse, Error> {
+    let job_ref = &initial_response.job_reference;
+    let poll_interval = std::time::Duration::from_secs(1);
 
-    // Get rows
-    let rows = response.rows.unwrap_or_default();
+    loop {
+        let request = GetQueryResultsRequest {
+            start_index: 0,
+            page_token: None,
+            max_results: None,
+            timeout_ms: Some(10000), // Server-side timeout: wait up to 10s for job completion.
+            location: job_ref.location.clone(),
+            format_options: None,
+        };
+
+        let result_response = client
+            .job()
+            .get_query_results(&job_ref.project_id, &job_ref.job_id, &request)
+            .await
+            .map_err(|source| Error::QueryExecution { source })?;
+
+        if result_response.job_complete {
+            return Ok(result_response);
+        }
+
+        // Wait before next poll attempt.
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Fetch a single page of query results using pageToken.
+async fn get_query_results_page(
+    client: &Client,
+    job_ref: &google_cloud_bigquery::http::job::JobReference,
+    page_token: &str,
+) -> Result<GetQueryResultsResponse, Error> {
+    let request = GetQueryResultsRequest {
+        start_index: 0,
+        page_token: Some(page_token.to_string()),
+        max_results: None,
+        timeout_ms: None,
+        location: job_ref.location.clone(),
+        format_options: None,
+    };
+
+    client
+        .job()
+        .get_query_results(&job_ref.project_id, &job_ref.job_id, &request)
+        .await
+        .map_err(|source| Error::QueryExecution { source })
+}
+
+/// Convert BigQuery schema and rows to Arrow RecordBatch.
+fn response_to_record_batch(
+    schema: Option<google_cloud_bigquery::http::table::TableSchema>,
+    rows: Vec<Tuple>,
+) -> Result<arrow::array::RecordBatch, Error> {
+    // Get schema.
+    let bq_schema = schema.ok_or_else(|| Error::MissingSchema)?;
+
+    // Convert BigQuery schema to Arrow schema.
+    let arrow_fields: Vec<Field> = bq_schema.fields.iter().map(field_to_arrow).collect();
+    let arrow_schema = Arc::new(Schema::new(arrow_fields));
 
     if rows.is_empty() {
-        // Return empty batch
-        let arrow_schema = Arc::new(Schema::empty());
+        // Return empty batch with correct schema.
         return Ok(arrow::array::RecordBatch::new_empty(arrow_schema));
     }
 
-    // Convert BigQuery schema to Arrow schema
-    let arrow_fields: Vec<Field> = bq_schema.fields.iter().map(field_to_arrow).collect();
-
-    let arrow_schema = Arc::new(Schema::new(arrow_fields));
-
-    // Build columns
+    // Build columns.
     let columns: Vec<ArrayRef> = (0..bq_schema.fields.len())
         .map(|col_idx| {
             let field = &bq_schema.fields[col_idx];
@@ -1188,72 +1292,64 @@ mod tests {
 
     #[test]
     fn test_response_to_record_batch_empty() {
-        use google_cloud_bigquery::http::job::query::QueryResponse;
         use google_cloud_bigquery::http::table::{TableFieldType, TableSchema};
 
-        let response = QueryResponse {
-            schema: Some(TableSchema {
-                fields: vec![TableFieldSchema {
-                    name: "test".to_string(),
-                    data_type: TableFieldType::String,
-                    ..Default::default()
-                }],
-            }),
-            rows: None,
-            ..Default::default()
-        };
+        let schema = Some(TableSchema {
+            fields: vec![TableFieldSchema {
+                name: "test".to_string(),
+                data_type: TableFieldType::String,
+                ..Default::default()
+            }],
+        });
 
-        let result = response_to_record_batch(response).unwrap();
+        let result = response_to_record_batch(schema, vec![]).unwrap();
         assert_eq!(result.num_rows(), 0);
     }
 
     #[test]
     fn test_response_to_record_batch_with_data() {
-        use google_cloud_bigquery::http::job::query::QueryResponse;
         use google_cloud_bigquery::http::table::{TableFieldType, TableSchema};
         use google_cloud_bigquery::http::tabledata::list::{Cell, Tuple, Value};
 
-        let response = QueryResponse {
-            schema: Some(TableSchema {
-                fields: vec![
-                    TableFieldSchema {
-                        name: "name".to_string(),
-                        data_type: TableFieldType::String,
-                        ..Default::default()
+        let schema = Some(TableSchema {
+            fields: vec![
+                TableFieldSchema {
+                    name: "name".to_string(),
+                    data_type: TableFieldType::String,
+                    ..Default::default()
+                },
+                TableFieldSchema {
+                    name: "count".to_string(),
+                    data_type: TableFieldType::Int64,
+                    ..Default::default()
+                },
+            ],
+        });
+
+        let rows = vec![
+            Tuple {
+                f: vec![
+                    Cell {
+                        v: Value::String("Alice".to_string()),
                     },
-                    TableFieldSchema {
-                        name: "count".to_string(),
-                        data_type: TableFieldType::Int64,
-                        ..Default::default()
+                    Cell {
+                        v: Value::String("10".to_string()),
                     },
                 ],
-            }),
-            rows: Some(vec![
-                Tuple {
-                    f: vec![
-                        Cell {
-                            v: Value::String("Alice".to_string()),
-                        },
-                        Cell {
-                            v: Value::String("10".to_string()),
-                        },
-                    ],
-                },
-                Tuple {
-                    f: vec![
-                        Cell {
-                            v: Value::String("Bob".to_string()),
-                        },
-                        Cell {
-                            v: Value::String("20".to_string()),
-                        },
-                    ],
-                },
-            ]),
-            ..Default::default()
-        };
+            },
+            Tuple {
+                f: vec![
+                    Cell {
+                        v: Value::String("Bob".to_string()),
+                    },
+                    Cell {
+                        v: Value::String("20".to_string()),
+                    },
+                ],
+            },
+        ];
 
-        let result = response_to_record_batch(response).unwrap();
+        let result = response_to_record_batch(schema, rows).unwrap();
         assert_eq!(result.num_rows(), 2);
         assert_eq!(result.num_columns(), 2);
 
@@ -1276,15 +1372,7 @@ mod tests {
 
     #[test]
     fn test_response_to_record_batch_missing_schema() {
-        use google_cloud_bigquery::http::job::query::QueryResponse;
-
-        let response = QueryResponse {
-            schema: None,
-            rows: None,
-            ..Default::default()
-        };
-
-        let result = response_to_record_batch(response);
+        let result = response_to_record_batch(None, vec![]);
         assert!(matches!(result.unwrap_err(), Error::MissingSchema));
     }
 }
