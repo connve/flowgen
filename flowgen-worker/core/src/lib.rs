@@ -66,4 +66,11 @@ pub mod task {
         /// Processor implementation for logging.
         pub mod processor;
     }
+    /// Buffer processor for accumulating events into batches.
+    pub mod buffer {
+        /// Configuration for buffer processor.
+        pub mod config;
+        /// Processor implementation for event buffering.
+        pub mod processor;
+    }
 }

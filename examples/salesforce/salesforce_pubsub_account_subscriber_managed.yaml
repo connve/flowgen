@@ -1,11 +1,12 @@
 flow:
   require_leader_election: true
-  name: salesforce_pubsub_account_subscriber
+  name: salesforce_pubsub_account_subscriber_managed
   tasks:
 
     # Subscribe to Salesforce PubSub API on a given topic.
-    # This example uses a non-managed durable subscription.
-    # The subscription replay ID is managed by configured cache.
+    # This example uses a Salesforce-managed durable subscription.
+    # The subscription is automatically managed by Salesforce, however it does
+    # require creation of managed subscription by Tooling API.
     - salesforce_pubsub_subscriber:
         name: start_subscription
         credentials_path: /etc/sfdc/credentials.json
@@ -13,12 +14,8 @@ flow:
           name: /data/AccountChangeEvent
           durable_consumer_options:
             enabled: true
-            managed_subscription: false
-            name: salesforce_pubsub_account_subscriber
-            # replay_preset: EARLIEST
-            # replay_present is set as LATEST by default if no reply_id is provided
-            # or set to CUSTOM if it is provided. It can also be set to EARLIEST if
-            # required to get events from before last known reply_id.
+            managed_subscription: true
+            name: salesforce_pubsub_account_subscriber_managed
 
     # Publish events to NATS for extra durability.
     - nats_jetstream_publisher:
@@ -34,4 +31,3 @@ flow:
           max_age_secs: 86400
           retention: limits
           discard_policy: old
-

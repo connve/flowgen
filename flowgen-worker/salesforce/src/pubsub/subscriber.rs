@@ -69,6 +69,8 @@ pub enum Error {
     StreamEnded,
     #[error("Failed to clear invalid replay_id from cache: {0}")]
     ReplayIdCacheClear(String),
+    #[error("Managed subscription requires durable_consumer_options to be configured")]
+    MissingManagedSubscriptionConfig,
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -106,6 +108,67 @@ fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
 }
 
 impl EventHandler {
+    /// Processes a batch of events from Salesforce Pub/Sub.
+    async fn process_events(
+        &self,
+        events: Vec<salesforce_pubsub_v1::eventbus::v1::ConsumerEvent>,
+        schema_info: &salesforce_pubsub_v1::eventbus::v1::SchemaInfo,
+        topic_name: &str,
+    ) -> Result<(), Error> {
+        let cache = self.task_context.cache.as_ref();
+
+        for ce in events {
+            // Cache replay ID for durable consumer recovery (non-managed only).
+            if let Some(durable_consumer_opts) = self
+                .config
+                .topic
+                .durable_consumer_options
+                .as_ref()
+                .filter(|opts| opts.enabled && !opts.managed_subscription)
+            {
+                if let Some(cache) = cache {
+                    cache
+                        .put(&durable_consumer_opts.name, ce.replay_id.into())
+                        .await
+                        .map_err(|err| {
+                            Error::Cache(format!("Failed to cache replay ID: {err:?}"))
+                        })?;
+                }
+            }
+
+            if let Some(event) = ce.event {
+                // Setup event data payload.
+                let data = AvroData {
+                    schema: schema_info.schema_json.clone(),
+                    raw_bytes: event.payload[..].to_vec(),
+                };
+
+                // Normalize topic name by removing data/ or event/ prefix.
+                let subject = topic_name
+                    .strip_prefix(DEFAULT_TOPIC_PREFIX_DATA)
+                    .or_else(|| topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_EVENT))
+                    .unwrap_or(topic_name)
+                    .to_lowercase();
+
+                // Build and send event.
+                let e = EventBuilder::new()
+                    .data(EventData::Avro(data))
+                    .subject(subject)
+                    .id(event.id)
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|e| Error::Event { source: e })?;
+
+                self.tx
+                    .send_with_logging(e)
+                    .map_err(|source| Error::SendMessage { source })?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Runs the topic listener to process events from Salesforce Pub/Sub.
     ///
     /// Fetches topic and schema info, establishes subscription with optional
@@ -143,39 +206,100 @@ impl EventHandler {
             None => DEFAULT_NUM_REQUESTED,
         };
 
-        // Build fetch request.
+        // Get topic name for later use.
         let topic_name = topic_info.topic_name.as_str();
+
+        // Determine subscription type and create appropriate stream.
+        let use_managed_subscription = self
+            .config
+            .topic
+            .durable_consumer_options
+            .as_ref()
+            .map(|opts| opts.enabled && opts.managed_subscription)
+            .unwrap_or(false);
+
+        if use_managed_subscription {
+            // Use managed subscription.
+            let durable_consumer_opts = self
+                .config
+                .topic
+                .durable_consumer_options
+                .as_ref()
+                .ok_or(Error::MissingManagedSubscriptionConfig)?;
+
+            let managed_request = salesforce_pubsub_v1::eventbus::v1::ManagedFetchRequest {
+                developer_name: durable_consumer_opts.name.clone(),
+                num_requested,
+                ..Default::default()
+            };
+
+            let mut stream = self
+                .pubsub
+                .lock()
+                .await
+                .managed_subscribe(managed_request)
+                .await
+                .map_err(|e| Error::PubSub { source: e })?
+                .into_inner();
+
+            // Process managed subscription events.
+            while let Some(event) = stream.next().await {
+                let events = match event {
+                    Ok(fr) => fr.events,
+                    Err(e) => {
+                        return Err(Error::PubSub {
+                            source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                        });
+                    }
+                };
+
+                self.process_events(events, &schema_info, topic_name)
+                    .await?;
+            }
+
+            return Err(Error::StreamEnded);
+        }
+
+        // Build fetch request with optional replay_id.
         let mut fetch_request = FetchRequest {
             topic_name: topic_name.to_string(),
             num_requested,
             ..Default::default()
         };
 
-        // Set replay ID for durable consumers.
+        // Set replay ID or preset for non-managed durable consumers.
         if let Some(durable_consumer_opts) = self
             .config
             .topic
             .durable_consumer_options
             .as_ref()
-            .filter(|opts| opts.enabled && !opts.managed_subscription)
+            .filter(|opts| opts.enabled)
         {
-            if let Some(cache) = cache {
-                match cache.get(&durable_consumer_opts.name).await {
-                    Ok(reply_id) => {
-                        fetch_request.replay_id = reply_id.into();
-                        fetch_request.replay_preset = 2;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "No cache entry found for key: {:?}",
-                            &durable_consumer_opts.name
-                        );
-                    }
+            // Try to load cached replay_id, or use configured preset.
+            let cached_replay_id = match cache {
+                Some(c) => c.get(&durable_consumer_opts.name).await.ok(),
+                None => None,
+            };
+
+            match cached_replay_id {
+                Some(reply_id) => {
+                    // Found cached replay_id - use it to resume from last processed event.
+                    fetch_request.replay_id = reply_id.into();
+                    fetch_request.replay_preset = 2; // CUSTOM preset when using replay_id.
+                }
+                None => {
+                    // No cached replay_id found - use replay_preset to determine start position.
+                    // LATEST (0) starts from the tip of the stream.
+                    // EARLIEST (1) starts from the earliest retained events in the retention window.
+                    fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
+                    warn!(
+                        "No cache entry found for key: {:?}, starting from {:?}",
+                        &durable_consumer_opts.name, &durable_consumer_opts.replay_preset
+                    );
                 }
             }
         }
 
-        // Subscribe to topic stream.
         let mut stream = match self
             .pubsub
             .lock()
@@ -195,7 +319,7 @@ impl EventHandler {
                         .topic
                         .durable_consumer_options
                         .as_ref()
-                        .filter(|opts| opts.enabled && !opts.managed_subscription)
+                        .filter(|opts| opts.enabled)
                     {
                         if let Some(cache) = cache {
                             cache
@@ -212,63 +336,17 @@ impl EventHandler {
         };
 
         while let Some(event) = stream.next().await {
-            match event {
-                Ok(fr) => {
-                    for ce in fr.events {
-                        // Cache replay ID for durable consumer recovery.
-                        if let Some(durable_consumer_opts) = self
-                            .config
-                            .topic
-                            .durable_consumer_options
-                            .as_ref()
-                            .filter(|opts| opts.enabled && !opts.managed_subscription)
-                        {
-                            if let Some(cache) = cache {
-                                cache
-                                    .put(&durable_consumer_opts.name, ce.replay_id.into())
-                                    .await
-                                    .map_err(|err| {
-                                        Error::Cache(format!("Failed to cache replay ID: {err:?}"))
-                                    })?;
-                            }
-                        }
-
-                        if let Some(event) = ce.event {
-                            // Setup event data payload.
-                            let data = AvroData {
-                                schema: schema_info.schema_json.clone(),
-                                raw_bytes: event.payload[..].to_vec(),
-                            };
-
-                            // Normalize topic name by removing data/ or event/ prefix and keeping the object name.
-                            let subject = topic_name
-                                .strip_prefix(DEFAULT_TOPIC_PREFIX_DATA)
-                                .or_else(|| topic_name.strip_prefix(DEFAULT_TOPIC_PREFIX_EVENT))
-                                .unwrap_or(topic_name)
-                                .to_lowercase();
-
-                            // Build and send event.
-                            let e = EventBuilder::new()
-                                .data(EventData::Avro(data))
-                                .subject(subject)
-                                .id(event.id)
-                                .task_id(self.task_id)
-                                .task_type(self.task_type)
-                                .build()
-                                .map_err(|e| Error::Event { source: e })?;
-
-                            self.tx
-                                .send_with_logging(e)
-                                .map_err(|source| Error::SendMessage { source })?;
-                        }
-                    }
-                }
+            let events = match event {
+                Ok(fr) => fr.events,
                 Err(e) => {
                     return Err(Error::PubSub {
                         source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
                     });
                 }
-            }
+            };
+
+            self.process_events(events, &schema_info, topic_name)
+                .await?;
         }
 
         Err(Error::StreamEnded)

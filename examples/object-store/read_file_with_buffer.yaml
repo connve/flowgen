@@ -1,0 +1,54 @@
+flow:
+  require_leader_election: true
+  name: read_file_with_buffer
+  tasks:
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # Object store reader reads CSV file with 10,000 order records.
+    - object_store_reader:
+        name: read_file
+        path: file:///flowgen/examples/data/orders.csv
+        batch_size: 1000
+        has_header: true
+
+    # Convert transforms CSV data to JSON format.
+    - convert:
+        name: to_json
+        target_format: json
+
+    # Iterate splits the batch into individual row events (fan-out).
+    - iterate:
+        name: split_rows
+
+    # Buffer accumulates individual events into batches of 75 before forwarding downstream.
+    - buffer:
+        name: group_into_batches
+        size: 75
+        timeout: "30s"
+
+    # Script removes buffer metadata and keeps the batch array as a single event.
+    - script:
+        name: unwrap_batch
+        code: |
+          #{
+            "items": event.data.batch
+          }
+
+    # NATS JetStream publisher publishes the unwrapped batch array to the message stream.
+    - nats_jetstream_publisher:
+        name: publish_batches
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        subject: rows.received_batched
+        stream:
+          create_or_update: true
+          name: file
+          description: "All general file drops"
+          subjects: ["rows.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard: old

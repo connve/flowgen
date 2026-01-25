@@ -1,0 +1,40 @@
+flow:
+  require_leader_election: true
+  name: read_file
+  tasks:
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # Object store reader reads CSV file with 10,000 order records.
+    - object_store_reader:
+        name: read_file
+        path: file:///flowgen/examples/data/orders.csv
+        batch_size: 1000
+        has_header: true
+
+    # Convert transforms CSV data to JSON format.
+    - convert:
+        name: to_json
+        target_format: json
+
+    # Iterate splits the batch into individual row events (fan-out).
+    - iterate:
+        name: split_rows
+
+    # NATS JetStream publisher publishes each individual row as a separate message.
+    - nats_jetstream_publisher:
+        name: publish_to_queue
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        subject: rows.received
+        stream:
+          create_or_update: true
+          name: file
+          description: "All general file drops"
+          subjects: ["rows.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard: old

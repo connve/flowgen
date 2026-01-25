@@ -3,7 +3,4 @@
 .cargo/
 .DS_Store
 .git
-/examples/data
-*.csv
-/examples/data/*
 /local

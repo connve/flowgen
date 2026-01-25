@@ -114,12 +114,12 @@ impl EventHandler {
             .map_err(|source| Error::ConfigRender { source })?;
 
         let mut client = match config.method {
-            crate::config::Method::GET => self.client.get(config.endpoint),
-            crate::config::Method::POST => self.client.post(config.endpoint),
-            crate::config::Method::PUT => self.client.put(config.endpoint),
-            crate::config::Method::DELETE => self.client.delete(config.endpoint),
-            crate::config::Method::PATCH => self.client.patch(config.endpoint),
-            crate::config::Method::HEAD => self.client.head(config.endpoint),
+            crate::config::Method::Get => self.client.get(config.endpoint),
+            crate::config::Method::Post => self.client.post(config.endpoint),
+            crate::config::Method::Put => self.client.put(config.endpoint),
+            crate::config::Method::Delete => self.client.delete(config.endpoint),
+            crate::config::Method::Patch => self.client.patch(config.endpoint),
+            crate::config::Method::Head => self.client.head(config.endpoint),
         };
 
         if let Some(headers) = config.headers.to_owned() {
@@ -506,7 +506,7 @@ mod tests {
         let config = Arc::new(crate::config::Processor {
             name: "test_processor".to_string(),
             endpoint: "https://test.com".to_string(),
-            method: crate::config::Method::GET,
+            method: crate::config::Method::Get,
             payload: None,
             headers: None,
             credentials_path: None,

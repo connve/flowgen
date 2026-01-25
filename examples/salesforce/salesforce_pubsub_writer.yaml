@@ -6,6 +6,7 @@ flow:
     - nats_jetstream_subscriber:
         name: "start_subscription"
         credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
         subject: pubsub.>
         stream:
           create_or_update: true
@@ -16,7 +17,8 @@ flow:
           retention: limits
           discard_policy: old
         durable_name: salesforce_pubsub_writer
-        batch_size: 100
+        max_messages: 100
+        delay: 1s
 
     # Edit subject to change format and follow path-like convention.
     - script:

@@ -240,6 +240,33 @@ pub struct Publisher {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
+/// Replay preset options for Salesforce Pub/Sub subscriptions.
+///
+/// Determines where to start reading events when no replay ID is available.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayPreset {
+    /// Start from the latest events (default).
+    #[default]
+    Latest,
+    /// Start from the earliest available events in the retention window.
+    Earliest,
+}
+
+impl ReplayPreset {
+    /// Converts the replay preset to its numeric value for the gRPC API.
+    ///
+    /// # Returns
+    /// * `0` for Latest - Start from the most recent events.
+    /// * `1` for Earliest - Start from the oldest available events in retention window.
+    pub fn to_i32(&self) -> i32 {
+        match self {
+            ReplayPreset::Latest => 0,
+            ReplayPreset::Earliest => 1,
+        }
+    }
+}
+
 /// Configuration structure for Salesforce Pub/Sub durable consumer options.
 ///
 /// Durable consumers provide reliable message processing with replay capabilities,
@@ -251,6 +278,7 @@ pub struct Publisher {
 /// - `enabled`: Whether to enable durable consumer functionality.
 /// - `managed_subscription`: Whether Salesforce should manage the subscription lifecycle.
 /// - `name`: Unique name for this durable consumer subscription.
+/// - `replay_preset`: Where to start reading when no replay ID is cached (Latest or Earliest).
 ///
 /// # Durable Consumer Benefits
 /// - Message replay: Can replay messages from a specific replay ID or timestamp.
@@ -260,7 +288,7 @@ pub struct Publisher {
 ///
 /// # Examples
 ///
-/// Basic durable consumer configuration:
+/// Basic durable consumer configuration (starts from latest):
 /// ```json
 /// {
 ///     "enabled": true,
@@ -269,12 +297,13 @@ pub struct Publisher {
 /// }
 /// ```
 ///
-/// Manual subscription management:
+/// Manual subscription starting from earliest available events:
 /// ```json
 /// {
 ///     "enabled": true,
 ///     "managed_subscription": false,
-///     "name": "CustomEventProcessor_v2"
+///     "name": "CustomEventProcessor_v2",
+///     "replay_preset": "EARLIEST"
 /// }
 /// ```
 ///
@@ -283,7 +312,8 @@ pub struct Publisher {
 /// {
 ///     "enabled": true,
 ///     "managed_subscription": true,
-///     "name": "BulkDataSyncConsumer"
+///     "name": "BulkDataSyncConsumer",
+///     "replay_preset": "LATEST"
 /// }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -294,6 +324,9 @@ pub struct DurableConsumerOptions {
     pub managed_subscription: bool,
     /// Unique name for this durable consumer subscription (must be unique within the org).
     pub name: String,
+    /// Where to start reading events when no replay ID is cached (defaults to Latest).
+    #[serde(default)]
+    pub replay_preset: ReplayPreset,
 }
 
 impl ConfigExt for Publisher {}
@@ -324,6 +357,7 @@ mod tests {
                     enabled: true,
                     managed_subscription: false,
                     name: "TestConsumer".to_string(),
+                    replay_preset: ReplayPreset::Latest,
                 }),
                 num_requested: Some(50),
             },
@@ -352,6 +386,7 @@ mod tests {
                 enabled: true,
                 managed_subscription: true,
                 name: "AccountProcessor".to_string(),
+                replay_preset: ReplayPreset::Latest,
             }),
             num_requested: Some(100),
         };
@@ -405,6 +440,7 @@ mod tests {
             enabled: true,
             managed_subscription: true,
             name: "TestDurableConsumer".to_string(),
+            replay_preset: ReplayPreset::Latest,
         };
 
         assert!(options.enabled);

@@ -51,6 +51,8 @@ pub enum TaskType {
     log(flowgen_core::task::log::config::Processor),
     /// Script execution task.
     script(flowgen_core::task::script::config::Processor),
+    /// Buffer task for accumulating events into batches.
+    buffer(flowgen_core::task::buffer::config::Processor),
     /// Object store reader task.
     object_store_reader(flowgen_object_store::config::Reader),
     /// Object store writer task.
@@ -85,6 +87,7 @@ impl TaskType {
             TaskType::iterate(_) => "iterate",
             TaskType::log(_) => "log",
             TaskType::script(_) => "script",
+            TaskType::buffer(_) => "buffer",
             TaskType::object_store_reader(_) => "object_store_reader",
             TaskType::object_store_writer(_) => "object_store_writer",
             TaskType::generate(_) => "generate",

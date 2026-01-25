@@ -46,6 +46,7 @@ pub struct Payload {
 
 /// Payload encoding format options.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PayloadSendAs {
     /// Send payload as JSON (default).
     #[default]
@@ -58,20 +59,21 @@ pub enum PayloadSendAs {
 
 /// HTTP method types supported by the processor.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Method {
     /// HTTP GET method (default).
     #[default]
-    GET,
+    Get,
     /// HTTP POST method.
-    POST,
+    Post,
     /// HTTP PUT method.
-    PUT,
+    Put,
     /// HTTP DELETE method.
-    DELETE,
+    Delete,
     /// HTTP PATCH method.
-    PATCH,
+    Patch,
     /// HTTP HEAD method.
-    HEAD,
+    Head,
 }
 
 /// Authentication credentials for HTTP requests.
@@ -103,7 +105,7 @@ mod tests {
         let processor = Processor::default();
         assert_eq!(processor.name, String::new());
         assert_eq!(processor.endpoint, String::new());
-        assert_eq!(processor.method, Method::GET);
+        assert_eq!(processor.method, Method::Get);
         assert_eq!(processor.payload, None);
         assert_eq!(processor.headers, None);
         assert_eq!(processor.credentials_path, None);
@@ -130,7 +132,7 @@ mod tests {
         let processor = Processor {
             name: "test_processor".to_string(),
             endpoint: "https://api.example.com/webhook".to_string(),
-            method: Method::POST,
+            method: Method::Post,
             payload: Some(payload),
             headers: Some(headers.clone()),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
@@ -139,7 +141,7 @@ mod tests {
 
         assert_eq!(processor.name, "test_processor".to_string());
         assert_eq!(processor.endpoint, "https://api.example.com/webhook");
-        assert_eq!(processor.method, Method::POST);
+        assert_eq!(processor.method, Method::Post);
         assert!(processor.payload.is_some());
         assert_eq!(processor.headers, Some(headers));
         assert_eq!(
@@ -153,7 +155,7 @@ mod tests {
         let processor = Processor {
             name: "serialize_test".to_string(),
             endpoint: "https://test.api.com".to_string(),
-            method: Method::PUT,
+            method: Method::Put,
             payload: None,
             headers: None,
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
@@ -170,7 +172,7 @@ mod tests {
         let processor = Processor {
             name: "clone_test".to_string(),
             endpoint: "https://clone.test.com".to_string(),
-            method: Method::DELETE,
+            method: Method::Delete,
             payload: None,
             headers: None,
             credentials_path: None,
@@ -254,18 +256,18 @@ mod tests {
 
     #[test]
     fn test_method_default() {
-        assert_eq!(Method::default(), Method::GET);
+        assert_eq!(Method::default(), Method::Get);
     }
 
     #[test]
     fn test_method_variants() {
         let methods = [
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-            Method::HEAD,
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+            Method::Head,
         ];
 
         // Test that all methods are unique
@@ -281,12 +283,12 @@ mod tests {
     #[test]
     fn test_method_serialization() {
         let methods = vec![
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-            Method::HEAD,
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Delete,
+            Method::Patch,
+            Method::Head,
         ];
 
         for method in methods {
@@ -323,7 +325,7 @@ mod tests {
         let processor = Processor {
             name: "complex_test".to_string(),
             endpoint: "https://complex.example.com/api/v1/endpoint".to_string(),
-            method: Method::PATCH,
+            method: Method::Patch,
             payload: Some(payload),
             headers: Some(headers),
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),

@@ -1,0 +1,384 @@
+//! Buffer processor for accumulating events into batches.
+//!
+//! Collects individual events and emits them as batches based on configurable size
+//! and timeout triggers. This enables efficient batch processing for downstream tasks
+//! such as file writes, API calls, or columnar format conversions.
+
+use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::time::{sleep, Instant};
+use tracing::error;
+
+/// Errors that can occur during buffer processing operations.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("Sending event to channel failed with error: {source}")]
+    SendMessage {
+        #[source]
+        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+    },
+    #[error("Processor event builder failed with error: {source}")]
+    EventBuilder {
+        #[source]
+        source: crate::event::Error,
+    },
+    #[error("Expected JSON event data, got ArrowRecordBatch")]
+    ExpectedJsonGotArrowRecordBatch,
+    #[error("Expected JSON event data, got Avro")]
+    ExpectedJsonGotAvro,
+    #[error("Missing required builder attribute: {}", _0)]
+    MissingRequiredAttribute(String),
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
+    },
+}
+
+/// Flush reason for tracking why a buffer was flushed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FlushReason {
+    /// Buffer reached the configured size limit.
+    Size,
+    /// Timeout elapsed since last flush.
+    Timeout,
+    /// Shutdown signal received.
+    Shutdown,
+}
+
+/// Output structure for flushed buffer data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FlushData {
+    /// Array of buffered events.
+    batch: Vec<Value>,
+    /// Number of events in this batch.
+    batch_size: usize,
+    /// Reason why this buffer was flushed.
+    flush_reason: FlushReason,
+}
+
+/// Buffer processor that accumulates events into batches.
+///
+/// Unlike typical processors that handle events individually, this processor maintains
+/// state across events and uses `tokio::select!` to handle multiple triggers:
+/// - Size trigger when buffer reaches configured size
+/// - Timeout trigger to flush partial batches
+/// - Shutdown trigger to flush remaining events on graceful shutdown
+#[derive(Debug)]
+pub struct Processor {
+    /// Buffer processor configuration.
+    config: Arc<super::config::Processor>,
+    /// Channel sender for processed events.
+    tx: Sender<Event>,
+    /// Channel receiver for incoming events.
+    rx: Receiver<Event>,
+    /// Current task identifier for event filtering.
+    task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    _task_context: Arc<crate::task::context::TaskContext>,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
+}
+
+impl Processor {
+    /// Flushes the buffer by emitting a single event containing all buffered events.
+    ///
+    /// # Arguments
+    /// * `buffer` - Vector of accumulated events to flush.
+    /// * `reason` - The reason this flush was triggered.
+    ///
+    /// # Returns
+    /// Result containing () on success or Error on failure.
+    async fn flush_buffer(&self, buffer: Vec<Value>, reason: FlushReason) -> Result<(), Error> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        let batch_size = buffer.len();
+        let flush_data = FlushData {
+            batch: buffer,
+            batch_size,
+            flush_reason: reason,
+        };
+
+        let flush_result = serde_json::to_value(flush_data).map_err(|e| Error::EventBuilder {
+            source: crate::event::Error::SerdeJson { source: e },
+        })?;
+
+        let event = EventBuilder::new()
+            .data(EventData::Json(flush_result))
+            .subject(self.config.name.clone())
+            .task_id(self.task_id)
+            .task_type(self.task_type)
+            .build()
+            .map_err(|source| Error::EventBuilder { source })?;
+
+        self.tx
+            .send_with_logging(event)
+            .map_err(|source| Error::SendMessage { source })?;
+
+        Ok(())
+    }
+
+    /// Processes the main event loop with buffer accumulation and flush triggers.
+    ///
+    /// Uses `tokio::select!` to handle three concurrent conditions:
+    /// 1. Receiving new events and accumulating them in the buffer
+    /// 2. Timeout expiration to flush partial batches
+    /// 3. Shutdown signal to flush remaining events
+    async fn process_events(&mut self) -> Result<(), Error> {
+        let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
+        let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
+        let mut last_flush = Instant::now();
+
+        loop {
+            // Calculate remaining time until next timeout flush.
+            let time_until_flush = timeout_duration
+                .checked_sub(last_flush.elapsed())
+                .unwrap_or(Duration::ZERO);
+
+            tokio::select! {
+                // Receive and buffer incoming events.
+                result = self.rx.recv() => {
+                    match result {
+                        Ok(event) => {
+                            // Filter events by previous task_id.
+                            if Some(event.task_id) != self.task_id.checked_sub(1) {
+                                continue;
+                            }
+
+                            // Extract JSON data from event.
+                            let json_data = match event.data {
+                                EventData::Json(data) => data,
+                                EventData::ArrowRecordBatch(_) => {
+                                    return Err(Error::ExpectedJsonGotArrowRecordBatch);
+                                }
+                                EventData::Avro(_) => {
+                                    return Err(Error::ExpectedJsonGotAvro);
+                                }
+                            };
+
+                            buffer.push(json_data);
+
+                            // Flush if buffer reached size limit.
+                            if buffer.len() >= self.config.size {
+                                self.flush_buffer(buffer.clone(), FlushReason::Size).await?;
+                                buffer.clear();
+                                last_flush = Instant::now();
+                            }
+                        }
+                        Err(_) => {
+                            // Channel closed, flush remaining events and exit.
+                            if !buffer.is_empty() {
+                                self.flush_buffer(buffer, FlushReason::Shutdown).await?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Timeout trigger to flush partial batches.
+                _ = sleep(time_until_flush), if !buffer.is_empty() => {
+                    self.flush_buffer(buffer.clone(), FlushReason::Timeout).await?;
+                    buffer.clear();
+                    last_flush = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::task::runner::Runner for Processor {
+    type Error = Error;
+    type EventHandler = ();
+
+    /// Initializes the buffer processor.
+    ///
+    /// Buffer processor doesn't use a separate EventHandler since it needs to maintain
+    /// state across events, so this returns unit type.
+    async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    async fn run(mut self) -> Result<(), Error> {
+        let retry_config =
+            crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+
+        // Initialize (no-op for buffer processor).
+        match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!("{}", e);
+                    Err(e)
+                }
+            }
+        })
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                error!(
+                    "{}",
+                    Error::RetryExhausted {
+                        source: Box::new(e)
+                    }
+                );
+                return Ok(());
+            }
+        };
+
+        // Run the main event processing loop with buffer accumulation.
+        if let Err(e) = self.process_events().await {
+            error!("{}", e);
+        }
+
+        Ok(())
+    }
+}
+
+/// Builder for constructing Processor instances with validation.
+#[derive(Debug, Default)]
+pub struct ProcessorBuilder {
+    /// Buffer processor configuration (required for build).
+    config: Option<Arc<super::config::Processor>>,
+    /// Event broadcast sender (required for build).
+    tx: Option<Sender<Event>>,
+    /// Event broadcast receiver (required for build).
+    rx: Option<Receiver<Event>>,
+    /// Current task identifier for event filtering.
+    task_id: usize,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Option<Arc<crate::task::context::TaskContext>>,
+    /// Task type for event categorization and logging.
+    task_type: Option<&'static str>,
+}
+
+impl ProcessorBuilder {
+    pub fn new() -> ProcessorBuilder {
+        ProcessorBuilder {
+            ..Default::default()
+        }
+    }
+
+    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
+        self.rx = Some(receiver);
+        self
+    }
+
+    pub fn sender(mut self, sender: Sender<Event>) -> Self {
+        self.tx = Some(sender);
+        self
+    }
+
+    pub fn task_id(mut self, task_id: usize) -> Self {
+        self.task_id = task_id;
+        self
+    }
+
+    pub fn task_context(mut self, task_context: Arc<crate::task::context::TaskContext>) -> Self {
+        self.task_context = Some(task_context);
+        self
+    }
+
+    pub fn task_type(mut self, task_type: &'static str) -> Self {
+        self.task_type = Some(task_type);
+        self
+    }
+
+    pub async fn build(self) -> Result<Processor, Error> {
+        Ok(Processor {
+            config: self
+                .config
+                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+            rx: self
+                .rx
+                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+            tx: self
+                .tx
+                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            task_id: self.task_id,
+            _task_context: self
+                .task_context
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+            task_type: self
+                .task_type
+                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Map;
+    use std::time::Duration;
+    use tokio::sync::broadcast;
+
+    fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Buffer Test".to_string()),
+        );
+        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_success() {
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 100,
+            timeout: Some(Duration::from_secs(30)),
+            retry: None,
+        });
+        let (tx, rx) = broadcast::channel(100);
+
+        let processor = ProcessorBuilder::new()
+            .config(config.clone())
+            .sender(tx.clone())
+            .receiver(rx)
+            .task_id(1)
+            .task_type("test")
+            .task_context(create_mock_task_context())
+            .build()
+            .await;
+        assert!(processor.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_processor_builder_missing_config() {
+        let (tx, rx) = broadcast::channel(100);
+        let result = ProcessorBuilder::new()
+            .sender(tx)
+            .receiver(rx)
+            .task_context(create_mock_task_context())
+            .build()
+            .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingRequiredAttribute(_)
+        ));
+    }
+}
