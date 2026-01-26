@@ -1,6 +1,6 @@
 //! Log processor for outputting event data to application logs.
 
-use crate::event::Event;
+use crate::event::{Event, SenderExt};
 use std::sync::Arc;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn, Instrument};
@@ -121,9 +121,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx.send(event).map_err(|e| Error::SendMessage {
-            source: Box::new(e),
-        })?;
+        self.tx
+            .send_with_logging(event)
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }

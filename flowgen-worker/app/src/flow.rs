@@ -84,9 +84,6 @@ pub enum Error {
     /// Error in Mongo Reader task.
     #[error(transparent)]
     MongoChangeStreamError(#[from] flowgen_mongo::change_stream::Error),
-    /// Error in GCP BigQuery query task.
-    #[error(transparent)]
-    GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
 }
 
 pub struct Flow {
@@ -767,7 +764,6 @@ async fn spawn_tasks(
             }
 
             TaskType::mongo_reader(config) => {
-            TaskType::gcp_bigquery_query(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
                 let tx = tx.clone();
@@ -804,7 +800,6 @@ async fn spawn_tasks(
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_mongo::change_stream::ReaderBuilder::new()
-                        flowgen_gcp::bigquery::query::ProcessorBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)

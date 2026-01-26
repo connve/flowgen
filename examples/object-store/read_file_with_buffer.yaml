@@ -25,12 +25,9 @@ flow:
         name: split_rows
 
     # Buffer accumulates individual events into batches of 75 before forwarding downstream.
-    # The buffer_key parameter is optional and groups events by rendered template value.
-    # Each group maintains independent buffers that flush separately based on size and timeout.
     - buffer:
         name: group_into_batches
         size: 75
-        buffer_key: "{{event.data.payment_type}}"
         timeout: "30s"
 
     # Script removes buffer metadata and keeps the batch array as a single event.
