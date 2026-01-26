@@ -13,7 +13,10 @@ use tokio::{
 };
 use tracing::{debug, error, info, Instrument};
 
-const DEFAULT_EVENT_BUFFER_SIZE: usize = 10000;
+// Event buffer size for broadcast channel. This needs to be large enough to handle
+// bursts from tasks like iterate that fan-out large arrays (e.g., 100k+ rows).
+// Set to 10M (~1.2 GB memory) to provide ample headroom for high-volume processing.
+const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000_000;
 
 /// Errors that can occur during flow execution.
 #[derive(thiserror::Error, Debug)]
@@ -962,10 +965,5 @@ mod tests {
         assert_eq!(flow.config, flow_config);
         assert!(flow.task_manager.is_none());
         assert!(flow.task_context.is_none());
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_EVENT_BUFFER_SIZE, 10_000);
     }
 }

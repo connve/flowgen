@@ -85,7 +85,9 @@ impl EventHandler {
     fn calculate_next_run(&self, now: u64, last_run: Option<u64>) -> Result<u64, Error> {
         match (&self.config.interval, &self.config.cron) {
             // Use interval if it's configured.
-            (Some(interval), _) => Ok(last_run.map(|t| t + interval.as_secs()).unwrap_or(now)),
+            (Some(interval), _) => Ok(last_run
+                .map(|t| t + interval.as_secs())
+                .unwrap_or_else(|| now + interval.as_secs())),
             // Use cron expression if it's configured.
             (None, Some(cron_expr)) => {
                 let cron = Cron::from_str(cron_expr).map_err(|e| Error::InvalidCron {
@@ -128,7 +130,7 @@ impl EventHandler {
         );
 
         loop {
-            // Calcualate now timestamp.
+            // Calculate now timestamp.
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| Error::SystemTime { source: e })?
@@ -144,7 +146,7 @@ impl EventHandler {
                 None => None,
             };
 
-            // Calculate next run time for internval or cron.
+            // Calculate next run time for interval or cron.
             let next_run_time = self.calculate_next_run(now, last_run)?;
 
             // Sleep until it's time to generate the next event.
@@ -153,16 +155,26 @@ impl EventHandler {
                 time::sleep(Duration::from_secs(sleep_duration)).await;
             }
 
+            // Get current time after sleeping (actual execution time).
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| Error::SystemTime { source: e })?
+                .as_secs();
+
+            // Update cache with current execution time before sending the event to ensure
+            // we don't lose track of execution times if the process crashes.
+            if let Some(cache) = cache {
+                if let Err(cache_err) = cache.put(&cache_key, current_time.to_string().into()).await
+                {
+                    // Log warn for cache errors.
+                    warn!("Failed to update cache: {:?}", cache_err);
+                }
+            }
+
             // Determine if there will be a next run
             let next_run_time_val = match self.config.count {
                 Some(count) if count == counter + 1 => None,
-                _ => {
-                    let current_time = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| Error::SystemTime { source: e })?
-                        .as_secs();
-                    Some(self.calculate_next_run(current_time, Some(current_time))?)
-                }
+                _ => Some(self.calculate_next_run(current_time, Some(current_time))?),
             };
 
             // Create system information.
@@ -185,17 +197,6 @@ impl EventHandler {
                     })
                 }
             };
-
-            // Update cache with next_run_time before sending the event.
-            if let Some(cache) = cache {
-                if let Err(cache_err) = cache
-                    .put(&cache_key, next_run_time.to_string().into())
-                    .await
-                {
-                    // Log warn for cache errors.
-                    warn!("Failed to update cache: {:?}", cache_err);
-                }
-            }
 
             // Build and send event.
             let e = EventBuilder::new()
@@ -613,8 +614,8 @@ mod tests {
         // Run subscriber to completion
         let _ = subscriber.run().await;
 
-        // Wait a bit for the spawned task to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for the spawned task to complete (interval is 1s, so wait 1.5s to be safe).
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
         // Check that cache key was created with flow.task_type.task format
         let cache_data = mock_cache.data.lock().await;

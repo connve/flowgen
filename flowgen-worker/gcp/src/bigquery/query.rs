@@ -438,16 +438,16 @@ async fn poll_query_results(
     let job_ref = &initial_response.job_reference;
     let poll_interval = std::time::Duration::from_secs(1);
 
-    loop {
-        let request = GetQueryResultsRequest {
-            start_index: 0,
-            page_token: None,
-            max_results: None,
-            timeout_ms: Some(10000), // Server-side timeout: wait up to 10s for job completion.
-            location: job_ref.location.clone(),
-            format_options: None,
-        };
+    let request = GetQueryResultsRequest {
+        start_index: 0,
+        page_token: None,
+        max_results: None,
+        timeout_ms: Some(10000), // Server-side timeout: wait up to 10s for job completion.
+        location: job_ref.location.clone(),
+        format_options: None,
+    };
 
+    loop {
         let result_response = client
             .job()
             .get_query_results(&job_ref.project_id, &job_ref.job_id, &request)
