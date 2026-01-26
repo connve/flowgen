@@ -70,7 +70,7 @@ struct FlushData {
     flush_reason: FlushReason,
     /// Optional key that was used to group these events.
     #[serde(skip_serializing_if = "Option::is_none")]
-    buffer_key: Option<String>,
+    partition_key: Option<String>,
 }
 
 /// Buffer processor that accumulates events into batches.
@@ -102,7 +102,7 @@ impl Processor {
     /// # Arguments
     /// * `buffer` - Vector of accumulated events to flush.
     /// * `reason` - The reason this flush was triggered.
-    /// * `buffer_key` - Optional key that was used to group these events.
+    /// * `partition_key` - Optional key that was used to group these events.
     ///
     /// # Returns
     /// Result containing () on success or Error on failure.
@@ -110,7 +110,7 @@ impl Processor {
         &self,
         buffer: Vec<Value>,
         reason: FlushReason,
-        buffer_key: Option<String>,
+        partition_key: Option<String>,
     ) -> Result<(), Error> {
         if buffer.is_empty() {
             return Ok(());
@@ -121,7 +121,7 @@ impl Processor {
             batch: buffer,
             batch_size,
             flush_reason: reason,
-            buffer_key,
+            partition_key,
         };
 
         let flush_result = serde_json::to_value(flush_data).map_err(|e| Error::EventBuilder {
@@ -150,13 +150,13 @@ impl Processor {
     /// 2. Timeout expiration to flush partial batches
     /// 3. Shutdown signal to flush remaining events
     ///
-    /// When buffer_key is configured, maintains separate buffers per key with independent
+    /// When partition_key is configured, maintains separate buffers per key with independent
     /// size and timeout tracking. Otherwise uses a single buffer.
     async fn process_events(&mut self) -> Result<(), Error> {
         let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
 
-        // If buffer_key is configured, use HashMap for keyed buffers
-        if self.config.buffer_key.is_some() {
+        // If partition_key is configured, use HashMap for keyed buffers
+        if self.config.partition_key.is_some() {
             self.process_events_keyed(timeout_duration).await
         } else {
             self.process_events_single(timeout_duration).await
@@ -269,8 +269,8 @@ impl Processor {
                                 .map_err(|source| Error::Render { source })?;
 
                             // Extract the rendered key from the config.
-                            let rendered_key = rendered_config.buffer_key
-                                .ok_or_else(|| Error::MissingRequiredAttribute("buffer_key".to_string()))?;
+                            let rendered_key = rendered_config.partition_key
+                                .ok_or_else(|| Error::MissingRequiredAttribute("partition_key".to_string()))?;
 
                             // Get or create buffer for this key.
                             let is_new_buffer = !buffers.contains_key(&rendered_key);
@@ -488,7 +488,7 @@ mod tests {
             name: "test".to_string(),
             size: 100,
             timeout: Some(Duration::from_secs(30)),
-            buffer_key: None,
+            partition_key: None,
             retry: None,
         });
         let (tx, rx) = broadcast::channel(100);

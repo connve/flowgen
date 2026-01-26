@@ -84,6 +84,10 @@ pub struct Event {
     pub task_id: usize,
     /// Task type for categorization and logging.
     pub task_type: &'static str,
+    /// Optional metadata for passing contextual information between tasks.
+    /// Metadata can be set by script tasks and accessed in templates using event.meta syntax.
+    /// Useful for adding context that should travel with the event but is separate from the payload.
+    pub meta: Option<Map<String, Value>>,
 }
 
 impl TryFrom<&Event> for Value {
@@ -98,6 +102,7 @@ impl TryFrom<&Event> for Value {
                 "timestamp": event.timestamp,
                 "task_id": event.task_id,
                 "task_type": event.task_type,
+                "meta": event.meta,
             }
         }))
     }
@@ -181,6 +186,8 @@ pub struct EventBuilder {
     pub task_id: Option<usize>,
     /// Task type for categorization and logging (required for build).
     pub task_type: Option<&'static str>,
+    /// Optional metadata for contextual information.
+    pub meta: Option<Map<String, Value>>,
 }
 
 impl EventBuilder {
@@ -214,6 +221,10 @@ impl EventBuilder {
         self.task_type = Some(task_type);
         self
     }
+    pub fn meta(mut self, meta: Map<String, Value>) -> Self {
+        self.meta = Some(meta);
+        self
+    }
 
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
@@ -233,6 +244,7 @@ impl EventBuilder {
             task_type: self
                 .task_type
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+            meta: self.meta,
         })
     }
 }

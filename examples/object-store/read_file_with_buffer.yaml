@@ -25,20 +25,25 @@ flow:
         name: split_rows
 
     # Buffer accumulates individual events into batches of 75 before forwarding downstream.
-    # The buffer_key parameter is optional and groups events by rendered template value.
-    # Each group maintains independent buffers that flush separately based on size and timeout.
+    # The partition_key parameter is optional and groups events by rendered template value.
+    # Each partition maintains independent buffers that flush separately based on size and timeout.
+    # You can use event.data.* or event.meta.* in the partition_key template.
     - buffer:
         name: group_into_batches
         size: 75
-        buffer_key: "{{event.data.payment_type}}"
+        partition_key: "{{event.data.payment_type}}"
         timeout: "30s"
 
-    # Script removes buffer metadata and keeps the batch array as a single event.
+    # Script unwraps the batch and adds metadata for downstream tasks.
+    # The _meta field is extracted separately and available in templates as event.meta.*.
     - script:
         name: unwrap_batch
         code: |
           #{
-            "items": event.data.batch
+            "data": event.data.batch,
+            "_meta": #{
+              "partition_key": event.data.partition_key
+            }
           }
 
     # NATS JetStream publisher publishes the unwrapped batch array to the message stream.
