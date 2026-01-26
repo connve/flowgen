@@ -105,6 +105,9 @@ impl EventHandler {
             self.tx
                 .send_with_logging(e)
                 .map_err(|source| Error::SendMessage { source })?;
+
+            // Yield to allow downstream tasks to process events and prevent channel overflow.
+            tokio::task::yield_now().await;
         }
 
         Ok(())

@@ -26,9 +26,19 @@ pub const PARAM_TYPE_BYTES: &str = "BYTES";
 pub const PARAM_TYPE_GEOGRAPHY: &str = "GEOGRAPHY";
 pub const PARAM_TYPE_JSON: &str = "JSON";
 
-/// Default timeout for BigQuery queries (5 minutes).
+/// Default timeout for BigQuery queries (10 seconds per BigQuery API defaults).
 fn default_timeout() -> Option<Duration> {
-    Some(Duration::from_secs(300))
+    Some(Duration::from_secs(10))
+}
+
+/// Default value for use_query_cache.
+fn default_use_query_cache() -> bool {
+    true
+}
+
+/// Default value for use_legacy_sql.
+fn default_use_legacy_sql() -> bool {
+    false
 }
 
 /// Configuration structure for BigQuery query operations.
@@ -50,8 +60,13 @@ fn default_timeout() -> Option<Duration> {
 /// - `query`: SQL query to execute (use `@parameter_name` for parameterized queries).
 /// - `parameters`: Optional query parameters for safe SQL injection prevention.
 /// - `location`: Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
-/// - `max_results`: Optional maximum number of rows to return (default: all rows).
-/// - `timeout`: Optional query timeout (e.g., "30s", "5m", "1h").
+/// - `max_results`: Optional maximum number of rows to return per page (default: all rows).
+/// - `timeout`: Optional query timeout (e.g., "30s", "5m", "1h"). Default: 10 seconds.
+/// - `use_query_cache`: Whether to use query cache (default: true).
+/// - `use_legacy_sql`: Whether to use legacy SQL syntax (default: false for Standard SQL).
+/// - `create_session`: Whether to create a new session for this query.
+/// - `labels`: Optional labels for the query job (key-value pairs).
+/// - `default_dataset`: Optional default dataset for unqualified table names.
 ///
 /// # Examples
 ///
@@ -128,11 +143,27 @@ pub struct Query {
     pub parameters: Option<HashMap<String, Value>>,
     /// Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
     pub location: Option<String>,
-    /// Optional maximum number of rows to return.
+    /// Optional maximum number of rows to return per page.
     pub max_results: Option<u64>,
-    /// Optional query timeout (e.g., "30s", "5m", "1h"). Default: 5 minutes.
+    /// Optional query timeout (e.g., "30s", "5m", "1h"). Default: 10 seconds.
     #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Option<Duration>,
+    /// Whether to use query cache. Default: true.
+    #[serde(default = "default_use_query_cache")]
+    pub use_query_cache: bool,
+    /// Whether to use legacy SQL syntax. Default: false (uses Standard SQL).
+    #[serde(default = "default_use_legacy_sql")]
+    pub use_legacy_sql: bool,
+    /// Whether to create a new session for this query.
+    #[serde(default)]
+    pub create_session: Option<bool>,
+    /// Optional labels for the query job (key-value pairs for organization).
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
+    /// Optional default dataset for unqualified table names in the query.
+    /// Format: "project_id.dataset_id" or "dataset_id" (uses query's project_id).
+    #[serde(default)]
+    pub default_dataset: Option<String>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -156,6 +187,11 @@ mod tests {
         assert_eq!(query.location, None);
         assert_eq!(query.max_results, None);
         assert_eq!(query.timeout, None);
+        assert!(!query.use_query_cache);
+        assert!(!query.use_legacy_sql);
+        assert_eq!(query.create_session, None);
+        assert_eq!(query.labels, None);
+        assert_eq!(query.default_dataset, None);
         assert_eq!(query.retry, None);
     }
 
@@ -168,7 +204,9 @@ mod tests {
             "query": "SELECT 1"
         }"#;
         let query: Query = serde_json::from_str(json).unwrap();
-        assert_eq!(query.timeout, Some(Duration::from_secs(300)));
+        assert_eq!(query.timeout, Some(Duration::from_secs(10)));
+        assert!(query.use_query_cache);
+        assert!(!query.use_legacy_sql);
     }
 
     #[test]
@@ -187,7 +225,7 @@ mod tests {
             location: Some("US".to_string()),
             max_results: Some(1000),
             timeout: Some(Duration::from_secs(300)),
-            retry: None,
+            ..Default::default()
         };
 
         assert_eq!(query.name, "test_query");
@@ -205,11 +243,7 @@ mod tests {
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
             query: "SELECT 1".to_string(),
-            parameters: None,
-            location: None,
-            max_results: None,
-            timeout: None,
-            retry: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&query).unwrap();
@@ -233,7 +267,7 @@ mod tests {
             location: Some("EU".to_string()),
             max_results: Some(500),
             timeout: Some(Duration::from_secs(60)),
-            retry: None,
+            ..Default::default()
         };
 
         assert!(query.parameters.is_some());
@@ -250,11 +284,10 @@ mod tests {
             credentials_path: PathBuf::from("/creds.json"),
             project_id: "test-project".to_string(),
             query: "SELECT COUNT(*) FROM dataset.table".to_string(),
-            parameters: None,
             location: Some("us-central1".to_string()),
             max_results: Some(100),
             timeout: Some(Duration::from_secs(30)),
-            retry: None,
+            ..Default::default()
         };
 
         let cloned = query.clone();

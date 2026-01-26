@@ -118,10 +118,12 @@ pub struct AppConfig {
     pub http_server: Option<HttpServerOptions>,
     /// Optional host coordination configuration.
     pub host: Option<HostOptions>,
-    /// Event channel buffer size for all flows (defaults to 10000 if not specified).
-    pub event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Optional event channel buffer size (defaults to 10M if not specified).
+    /// Controls memory allocation for the broadcast channel used for inter-task communication.
+    /// Approximate memory usage: buffer_size * 128 bytes (e.g., 10M = ~1.2 GB).
+    pub event_buffer_size: Option<usize>,
 }
 
 /// Cache type for storage backend.
@@ -322,8 +324,8 @@ mod tests {
             },
             http_server: None,
             host: None,
-            event_buffer_size: None,
             retry: None,
+            event_buffer_size: None,
         };
 
         assert!(app_config.cache.is_some());
@@ -332,6 +334,7 @@ mod tests {
         assert!(app_config.http_server.is_none());
         assert!(app_config.host.is_none());
         assert!(app_config.retry.is_none());
+        assert!(app_config.event_buffer_size.is_none());
     }
 
     #[test]
@@ -343,8 +346,8 @@ mod tests {
             },
             http_server: None,
             host: None,
-            event_buffer_size: None,
             retry: None,
+            event_buffer_size: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -366,8 +369,8 @@ mod tests {
             },
             http_server: None,
             host: None,
-            event_buffer_size: None,
             retry: None,
+            event_buffer_size: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -388,8 +391,8 @@ mod tests {
             flows: FlowOptions { path: None },
             http_server: None,
             host: None,
-            event_buffer_size: None,
             retry: None,
+            event_buffer_size: None,
         };
 
         let cloned = app_config.clone();
@@ -542,8 +545,8 @@ mod tests {
                 routes_prefix: Some("/workers".to_string()),
             }),
             host: None,
-            event_buffer_size: None,
             retry: None,
+            event_buffer_size: None,
         };
 
         assert!(app_config.http_server.is_some());
