@@ -502,6 +502,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {
@@ -559,6 +560,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {
@@ -610,6 +612,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {

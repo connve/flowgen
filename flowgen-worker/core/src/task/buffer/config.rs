@@ -29,13 +29,13 @@ use std::time::Duration;
 ///   timeout: "10s"
 /// ```
 ///
-/// Buffer with keyed grouping:
+/// Buffer with partitioned grouping:
 /// ```yaml
 /// buffer:
 ///   name: "batch_by_program_country"
 ///   size: 75
 ///   timeout: "10s"
-///   buffer_key: "{{event.data.program_id}}.{{event.data.country}}"
+///   partition_key: "{{event.data.program_id}}.{{event.data.country}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
@@ -47,13 +47,11 @@ pub struct Processor {
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Option<Duration>,
-    /// Optional key template for grouping events into separate buffers.
-    /// When specified, events are grouped by the rendered key value and each group
+    /// Optional key template for partitioning events into separate buffers.
+    /// When specified, events are partitioned by the rendered key value and each partition
     /// is buffered and flushed independently based on size and timeout.
-    #[serde(default)]
-    pub buffer_key: Option<String>,
+    pub partition_key: Option<String>,
     /// Optional retry configuration (overrides app-level retry config).
-    #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
 }
 
@@ -74,7 +72,7 @@ mod tests {
             name: "test_buffer".to_string(),
             size: 100,
             timeout: Some(Duration::from_secs(30)),
-            buffer_key: None,
+            partition_key: None,
             retry: None,
         };
 
@@ -94,7 +92,7 @@ mod tests {
             name: "custom_buffer".to_string(),
             size: 75,
             timeout: Some(Duration::from_secs(10)),
-            buffer_key: None,
+            partition_key: None,
             retry: None,
         };
 
@@ -103,17 +101,17 @@ mod tests {
     }
 
     #[test]
-    fn test_processor_with_buffer_key() {
+    fn test_processor_with_partition_key() {
         let processor = Processor {
-            name: "keyed_buffer".to_string(),
+            name: "partitioned_buffer".to_string(),
             size: 75,
             timeout: Some(Duration::from_secs(30)),
-            buffer_key: Some("{{event.data.program_id}}.{{event.data.country}}".to_string()),
+            partition_key: Some("{{event.data.program_id}}.{{event.data.country}}".to_string()),
             retry: None,
         };
 
         assert_eq!(
-            processor.buffer_key,
+            processor.partition_key,
             Some("{{event.data.program_id}}.{{event.data.country}}".to_string())
         );
         assert_eq!(processor.size, 75);

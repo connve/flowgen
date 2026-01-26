@@ -128,33 +128,52 @@ impl EventHandler {
         let original_data_json = Value::try_from(&original_event.data)
             .map_err(|source| Error::EventConversion { source })?;
 
-        let (subject, data, id) = match result {
-            Value::Object(ref obj) if obj.contains_key("subject") && obj.contains_key("data") => {
-                // Script returned a full event object with metadata.
+        let (subject, data, id, meta) = match result {
+            Value::Object(ref obj) => {
+                // Script returned an object, which may contain subject, data, id, or _meta.
                 let subject = obj
                     .get("subject")
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| original_event.subject.clone());
 
-                let data_json = obj.get("data").unwrap_or(&Value::Null);
+                let data_json = obj.get("data").unwrap_or(&result);
 
                 // Keep the original data format if the content has not changed.
                 let data = if data_json == &original_data_json {
                     original_event.data.clone()
-                } else {
+                } else if obj.contains_key("data") {
                     EventData::Json(data_json.clone())
+                } else {
+                    // No explicit data key, treat the whole object as data.
+                    EventData::Json(result.clone())
                 };
 
                 let id = obj
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .map(|s| s.to_string())
+                    .or_else(|| original_event.id.clone());
 
-                (subject, data, id)
+                // Extract _meta if present in script output.
+                // If _meta key exists and is an object, use it.
+                // If _meta is null, clear metadata (set to None).
+                // If _meta is not an object, preserve original metadata.
+                // If _meta key is absent, preserve original metadata.
+                let meta = if obj.contains_key("_meta") {
+                    match obj.get("_meta") {
+                        Some(Value::Object(m)) => Some(m.clone()),
+                        Some(Value::Null) => None,
+                        _ => original_event.meta.clone(), // Invalid type, preserve original.
+                    }
+                } else {
+                    original_event.meta.clone()
+                };
+
+                (subject, data, id, meta)
             }
             value => {
-                // Script returned only data, use the original subject and id.
+                // Script returned a non-object value, treat it as data.
                 // Keep the original data format if the content has not changed.
                 let data = if value == original_data_json {
                     original_event.data.clone()
@@ -166,6 +185,7 @@ impl EventHandler {
                     original_event.subject.clone(),
                     data,
                     original_event.id.clone(),
+                    original_event.meta.clone(),
                 )
             }
         };
@@ -179,6 +199,10 @@ impl EventHandler {
 
         if let Some(id) = id {
             builder = builder.id(id);
+        }
+
+        if let Some(meta) = meta {
+            builder = builder.meta(meta);
         }
 
         builder
@@ -511,6 +535,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         // Drop the original tx so recv can complete
@@ -554,6 +579,7 @@ mod tests {
             data: EventData::Json(json!({"age": 15})),
             subject: "input.subject".to_string(),
             task_type: "test",
+            meta: None,
             task_id: 0,
             id: None,
             timestamp: 123456789,
@@ -596,6 +622,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {
@@ -660,6 +687,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         let result = event_handler.handle(input_event).await;

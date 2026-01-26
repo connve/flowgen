@@ -94,11 +94,18 @@ impl EventHandler {
         };
 
         for element in array {
-            let e = EventBuilder::new()
+            let mut builder = EventBuilder::new()
                 .data(EventData::Json(element))
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
-                .task_type(self.task_type)
+                .task_type(self.task_type);
+
+            // Preserve metadata from the original event.
+            if let Some(meta) = &event.meta {
+                builder = builder.meta(meta.clone());
+            }
+
+            let e = builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
@@ -372,6 +379,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {
@@ -423,6 +431,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         tokio::spawn(async move {
@@ -471,6 +480,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -503,6 +513,7 @@ mod tests {
             id: None,
             timestamp: 123456789,
             task_type: "test",
+            meta: None,
         };
 
         let result = event_handler.handle(input_event).await;
