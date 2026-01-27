@@ -3,7 +3,7 @@ use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Salesforce Bulk API endpoint for query jobs (API v61.0).
@@ -15,7 +15,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Missing required attribute: {}", _0)]
     MissingRequiredAttribute(String),
@@ -152,6 +152,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|e| Error::SendMessage { source: e })?;
         Ok(())
     }
@@ -220,7 +221,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     if Some(event.task_id) == event_handler.current_task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
                         let retry_strategy = retry_config.strategy();
@@ -250,7 +251,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
                         );
                     }
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -343,7 +344,7 @@ mod tests {
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -462,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_channels() {
-        let (tx, rx) = broadcast::channel::<Event>(100);
+        let (tx, rx) = mpsc::channel::<Event>(100);
 
         let builder = JobCreatorBuilder::new().sender(tx.clone()).receiver(rx);
 
@@ -478,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_build_missing_config() {
-        let (tx, rx) = broadcast::channel::<Event>(100);
+        let (tx, rx) = mpsc::channel::<Event>(100);
 
         let builder = JobCreatorBuilder::new().sender(tx).receiver(rx);
 
@@ -495,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_build_missing_receiver() {
-        let (tx, _) = broadcast::channel::<Event>(100);
+        let (tx, _) = mpsc::channel::<Event>(100);
 
         let config = Arc::new(super::super::config::JobCreator {
             name: "test".to_string(),
@@ -527,7 +528,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_build_missing_sender() {
-        let (_, rx) = broadcast::channel::<Event>(100);
+        let (_, rx) = mpsc::channel::<Event>(100);
 
         let config = Arc::new(super::super::config::JobCreator {
             name: "test".to_string(),
@@ -639,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_job_creator_structure() {
-        let (tx, rx) = broadcast::channel::<Event>(100);
+        let (tx, rx) = mpsc::channel::<Event>(100);
 
         let config = Arc::new(super::super::config::JobCreator {
             name: "struct_test".to_string(),

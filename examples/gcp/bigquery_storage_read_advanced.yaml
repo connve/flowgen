@@ -1,0 +1,64 @@
+flow:
+  name: bigquery_storage_read_advanced
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # Advanced BigQuery Storage Read example demonstrating all configuration options.
+    # This example shows time-travel, sampling, field selection, and compression.
+    - gcp_bigquery_storage_read:
+        name: read_historical_snapshot
+        credentials_path: /etc/gcp/credentials.json
+        project_id: my-project-id
+        dataset_id: analytics
+        table_id: transactions
+        # Select specific fields to reduce data transfer
+        selected_fields:
+          - transaction_id
+          - user_id
+          - amount
+          - currency
+          - transaction_date
+        # Server-side row filtering
+        row_restriction: "amount > 100 AND currency = 'USD'"
+        # Read 10% sample for testing/analysis
+        sample_percentage: 10.0
+        # Time-travel: read table as it existed at this timestamp
+        snapshot_time: "2024-01-15T12:00:00Z"
+        # Control parallelism (number of parallel streams)
+        max_stream_count: 8
+        preferred_min_stream_count: 2
+        # Use LZ4 compression for network transfer
+        compression_codec: lz4
+        # Data format (arrow is default and preferred)
+        data_format: arrow
+        # Optional: override retry configuration
+        retry:
+          max_attempts: 5
+          max_delay: "30s"
+
+    # Buffer the record batches to group them
+    - buffer:
+        name: batch_records
+        size: 1000
+        timeout: "30s"
+
+    # Convert Arrow RecordBatch to JSON for downstream processing
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split into individual records
+    - iterate:
+        name: split_rows
+
+    # Log the output
+    - log:
+        name: log
+        level: info
+        structured: false

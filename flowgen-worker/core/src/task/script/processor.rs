@@ -7,17 +7,17 @@ use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during script execution.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Processor event builder failed with error: {source}")]
     EventBuilder {
@@ -214,6 +214,7 @@ impl EventHandler {
     async fn emit_event(&self, event: Event) -> Result<(), Error> {
         self.tx
             .send_with_logging(event)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
@@ -338,7 +339,7 @@ impl crate::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -366,7 +367,7 @@ impl crate::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -452,7 +453,7 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
     use serde_json::{json, Map, Value};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
@@ -480,7 +481,7 @@ mod tests {
             code: "event".to_string(),
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -495,7 +496,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)
@@ -517,7 +518,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -563,7 +564,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         let tx_clone = tx.clone();
 
         let event_handler = EventHandler {
@@ -604,7 +605,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -657,7 +658,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,

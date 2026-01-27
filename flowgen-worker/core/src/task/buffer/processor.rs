@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Instant};
 use tracing::error;
 
@@ -19,10 +19,10 @@ use tracing::error;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Processor event builder failed with error: {source}")]
     EventBuilder {
@@ -117,6 +117,12 @@ impl Processor {
         }
 
         let batch_size = buffer.len();
+        tracing::info!(
+            "Buffer flushing batch: size={}, reason={:?}, partition_key={:?}",
+            batch_size,
+            reason,
+            partition_key
+        );
         let flush_data = FlushData {
             batch: buffer,
             batch_size,
@@ -138,6 +144,7 @@ impl Processor {
 
         self.tx
             .send_with_logging(event)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -178,12 +185,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Ok(event) => {
-                            // Filter events by previous task_id.
-                            if Some(event.task_id) != self.task_id.checked_sub(1) {
-                                continue;
-                            }
-
+                        Some(event) => {
                             // Extract JSON data from event.
                             let json_data = match event.data {
                                 EventData::Json(data) => data,
@@ -196,15 +198,21 @@ impl Processor {
                             };
 
                             buffer.push(json_data);
+                            tracing::info!(
+                                "Buffer accumulated event, current size={}/{}",
+                                buffer.len(),
+                                self.config.size
+                            );
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
+                                tracing::info!("Buffer flushing {} events (size trigger)", buffer.len());
                                 self.flush_buffer(buffer.clone(), FlushReason::Size, None).await?;
                                 buffer.clear();
                                 last_flush = Instant::now();
                             }
                         }
-                        Err(_) => {
+                        None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
                                 self.flush_buffer(buffer, FlushReason::Shutdown, None).await?;
@@ -216,6 +224,7 @@ impl Processor {
 
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
+                    tracing::info!("Buffer flushing {} events (timeout trigger)", buffer.len());
                     self.flush_buffer(buffer.clone(), FlushReason::Timeout, None).await?;
                     buffer.clear();
                     last_flush = Instant::now();
@@ -245,12 +254,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Ok(event) => {
-                            // Filter events by previous task_id.
-                            if Some(event.task_id) != self.task_id.checked_sub(1) {
-                                continue;
-                            }
-
+                        Some(event) => {
                             // Extract JSON data from event.
                             let json_data = match &event.data {
                                 EventData::Json(data) => data.clone(),
@@ -285,12 +289,13 @@ impl Processor {
                             // Flush if this key's buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 if let Some(buffer_to_flush) = buffers.remove(&rendered_key) {
+                                    tracing::info!("Buffer (keyed) flushing {} events for key='{}' (size trigger)", buffer_to_flush.len(), rendered_key);
                                     self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(rendered_key.clone())).await?;
                                 }
                                 last_flush_times.insert(rendered_key, Instant::now());
                             }
                         }
-                        Err(_) => {
+                        None => {
                             // Channel closed, flush all remaining buffers and exit.
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
@@ -463,7 +468,7 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use std::time::Duration;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
@@ -491,7 +496,7 @@ mod tests {
             partition_key: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         let processor = ProcessorBuilder::new()
             .config(config.clone())
@@ -507,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_missing_config() {
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx)
             .receiver(rx)

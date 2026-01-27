@@ -6,17 +6,17 @@
 use crate::event::{Event, EventBuilder, EventData, SenderExt};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during loop processing operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Processor event builder failed with error: {source}")]
     EventBuilder {
@@ -57,10 +57,6 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let json_data = match event.data {
             EventData::Json(data) => data,
             EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
@@ -93,9 +89,9 @@ impl EventHandler {
             },
         };
 
-        for element in array {
+        for element in array.iter() {
             let mut builder = EventBuilder::new()
-                .data(EventData::Json(element))
+                .data(EventData::Json(element.clone()))
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type);
@@ -111,10 +107,8 @@ impl EventHandler {
 
             self.tx
                 .send_with_logging(e)
+                .await
                 .map_err(|source| Error::SendMessage { source })?;
-
-            // Yield to allow downstream tasks to process events and prevent channel overflow.
-            tokio::task::yield_now().await;
         }
 
         Ok(())
@@ -186,7 +180,7 @@ impl crate::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -214,7 +208,7 @@ impl crate::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -300,7 +294,7 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
     use serde_json::{json, Map};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
@@ -326,7 +320,7 @@ mod tests {
             iterate_key: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -341,7 +335,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)
@@ -362,7 +356,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -387,7 +381,7 @@ mod tests {
         });
 
         let mut count = 0;
-        while let Ok(output_event) = rx.recv().await {
+        while let Some(output_event) = rx.recv().await {
             match output_event.data {
                 EventData::Json(value) => {
                     assert!(value.get("id").is_some());
@@ -411,7 +405,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -439,7 +433,7 @@ mod tests {
         });
 
         let mut count = 0;
-        while let Ok(output_event) = rx.recv().await {
+        while let Some(output_event) = rx.recv().await {
             match output_event.data {
                 EventData::Json(value) => {
                     assert!(value.get("name").is_some());
@@ -463,7 +457,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -496,7 +490,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,

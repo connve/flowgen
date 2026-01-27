@@ -4,7 +4,7 @@ use flowgen_core::{
 };
 use salesforce_pubsub_v1::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use std::sync::Arc;
-use tokio::sync::{broadcast::Sender, Mutex};
+use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
@@ -39,7 +39,7 @@ pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Binary encoding/decoding failed with error: {source}")]
     Bincode {
@@ -162,6 +162,7 @@ impl EventHandler {
 
                 self.tx
                     .send_with_logging(e)
+                    .await
                     .map_err(|source| Error::SendMessage { source })?;
             }
         }
@@ -561,7 +562,7 @@ mod tests {
     use crate::pubsub::config;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -594,7 +595,7 @@ mod tests {
             endpoint: None,
             retry: None,
         });
-        let (tx, _) = broadcast::channel::<Event>(10);
+        let (tx, _) = mpsc::channel::<Event>(10);
 
         // Success case.
         let subscriber = SubscriberBuilder::new()
@@ -608,7 +609,7 @@ mod tests {
         assert!(subscriber.is_ok());
 
         // Error case - missing config.
-        let (tx2, _rx2) = broadcast::channel::<Event>(10);
+        let (tx2, _rx2) = mpsc::channel::<Event>(10);
         let result = SubscriberBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())

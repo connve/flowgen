@@ -8,7 +8,7 @@ use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
 use object_store::PutPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{broadcast::Receiver, Mutex};
+use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
 /// Status of an object store write operation.
@@ -35,10 +35,10 @@ pub struct WriteResult {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Writer event builder failed with error: {source}")]
     EventBuilder {
@@ -110,7 +110,7 @@ pub struct EventHandler {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -209,6 +209,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -233,7 +234,7 @@ pub struct Writer {
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -313,7 +314,7 @@ impl flowgen_core::task::runner::Runner for Writer {
         // Process incoming events, filtering by task ID.
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -341,7 +342,7 @@ impl flowgen_core::task::runner::Runner for Writer {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -355,7 +356,7 @@ pub struct WriterBuilder {
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Channel sender for response events.
-    tx: Option<tokio::sync::broadcast::Sender<Event>>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -384,7 +385,7 @@ impl WriterBuilder {
     }
 
     /// Sets the event sender.
-    pub fn sender(mut self, sender: tokio::sync::broadcast::Sender<Event>) -> Self {
+    pub fn sender(mut self, sender: tokio::sync::mpsc::Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
     }
@@ -436,7 +437,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -466,7 +467,7 @@ mod tests {
             hive_partition_options: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
         let writer = WriterBuilder::new()
@@ -481,7 +482,7 @@ mod tests {
         assert!(writer.is_ok());
 
         // Error case - missing config.
-        let (_tx2, rx2) = broadcast::channel::<Event>(10);
+        let (_tx2, rx2) = mpsc::channel::<Event>(10);
         let result = WriterBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())

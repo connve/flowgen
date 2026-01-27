@@ -21,17 +21,17 @@ use google_cloud_bigquery::http::tabledata::list::{Tuple, Value};
 use google_cloud_bigquery::http::types::{QueryParameter, QueryParameterType, QueryParameterValue};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during BigQuery query operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Query event builder failed with error: {source}")]
     EventBuilder {
@@ -133,6 +133,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(result_event)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -224,7 +225,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -252,7 +253,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .in_current_span(),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }

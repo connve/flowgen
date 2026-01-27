@@ -4,7 +4,7 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
 use std::sync::Arc;
 use tokio::sync::{
-    broadcast::{Receiver, Sender},
+    mpsc::{Receiver, Sender},
     Mutex,
 };
 use tracing::{error, Instrument};
@@ -32,10 +32,10 @@ impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Publisher event builder failed with error: {source}")]
     EventBuilder {
@@ -138,6 +138,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -236,7 +237,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -264,7 +265,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -354,7 +355,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -397,7 +398,7 @@ mod tests {
             throttle: None,
             ..Default::default()
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let publisher = PublisherBuilder::new()
@@ -412,7 +413,7 @@ mod tests {
         assert!(publisher.is_ok());
 
         // Error case - missing config.
-        let (_tx2, rx2) = broadcast::channel(100);
+        let (_tx2, rx2) = mpsc::channel(100);
         let result = PublisherBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())

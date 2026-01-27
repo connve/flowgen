@@ -13,29 +13,25 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
-/// Extension trait for broadcast sender with automatic event logging.
+/// Extension trait for MPSC sender with automatic event logging.
+#[async_trait::async_trait]
 pub trait SenderExt {
-    /// Sends an event and automatically logs it.
-    fn send_with_logging(
-        &self,
-        event: Event,
-    ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>>;
+    /// Sends an event and automatically logs it with backpressure support.
+    async fn send_with_logging(&self, event: Event) -> Result<(), Error>;
 }
 
-impl SenderExt for tokio::sync::broadcast::Sender<Event> {
-    fn send_with_logging(
-        &self,
-        event: Event,
-    ) -> Result<usize, Box<tokio::sync::broadcast::error::SendError<Event>>> {
+#[async_trait::async_trait]
+impl SenderExt for tokio::sync::mpsc::Sender<Event> {
+    async fn send_with_logging(&self, event: Event) -> Result<(), Error> {
         let subject = event.subject.to_owned();
         let suffix = match &event.id {
             Some(ref id) => id.to_string(),
             None => event.timestamp.to_string(),
         };
 
-        let result = self.send(event).map_err(Box::new)?;
+        self.send(event).await.map_err(|_| Error::SendMessage)?;
         info!("Event processed: {}.{}", subject, suffix);
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -67,6 +63,8 @@ pub enum Error {
     MissingRequiredAttribute(String),
     #[error("Content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
+    #[error("Sending event to channel failed (receiver dropped)")]
+    SendMessage,
 }
 
 /// Core event structure containing data and metadata for workflow processing.

@@ -9,7 +9,7 @@ use object_store::GetResultPayload;
 use std::io::{BufReader, Cursor};
 use std::sync::Arc;
 use tokio::sync::{
-    broadcast::{Receiver, Sender},
+    mpsc::{Receiver, Sender},
     Mutex,
 };
 use tracing::{error, info, warn, Instrument};
@@ -22,10 +22,10 @@ const DEFAULT_HAS_HEADER: bool = true;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Reader event builder failed with error: {source}")]
     EventBuilder {
@@ -223,6 +223,7 @@ impl EventHandler {
 
             self.tx
                 .send_with_logging(e)
+                .await
                 .map_err(|source| Error::SendMessage { source })?;
         }
 
@@ -328,7 +329,7 @@ impl flowgen_core::task::runner::Runner for Reader {
         // Process incoming events, filtering by task ID.
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -356,7 +357,7 @@ impl flowgen_core::task::runner::Runner for Reader {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -451,7 +452,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -485,7 +486,7 @@ mod tests {
             delimiter: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
         let reader = ReaderBuilder::new()
@@ -500,7 +501,7 @@ mod tests {
         assert!(reader.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel::<Event>(10);
+        let (tx2, rx2) = mpsc::channel::<Event>(10);
         let result = ReaderBuilder::new()
             .receiver(rx2)
             .sender(tx2)

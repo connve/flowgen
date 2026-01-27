@@ -2,7 +2,7 @@
 
 use crate::event::Event;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn, Instrument};
 
 /// Default subject prefix for log events.
@@ -12,10 +12,10 @@ const DEFAULT_MESSAGE_SUBJECT: &str = "log";
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Event builder failed with error: {source}")]
     EventBuilder {
@@ -121,8 +121,8 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx.send(event).map_err(|e| Error::SendMessage {
-            source: Box::new(e),
+        self.tx.send(event).await.map_err(|_| Error::SendMessage {
+            source: crate::event::Error::SendMessage,
         })?;
 
         Ok(())
@@ -194,7 +194,7 @@ impl crate::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -222,7 +222,7 @@ impl crate::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -309,7 +309,7 @@ mod tests {
     use super::*;
     use crate::event::{EventBuilder, EventData};
     use serde_json::{json, Map, Value};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
@@ -336,7 +336,7 @@ mod tests {
             structured: false,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -351,7 +351,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)
@@ -373,7 +373,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
@@ -404,7 +404,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,

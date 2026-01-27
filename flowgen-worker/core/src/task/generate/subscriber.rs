@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::broadcast::Sender, time};
+use tokio::{sync::mpsc::Sender, time};
 use tracing::{error, warn, Instrument};
 
 /// System information included in generated events for time-based filtering.
@@ -31,10 +31,10 @@ pub struct SystemInfo {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Subscriber event builder failed with error: {source}")]
     EventBuilder {
@@ -208,6 +208,7 @@ impl EventHandler {
                 .map_err(|source| Error::EventBuilder { source })?;
             self.tx
                 .send_with_logging(e)
+                .await
                 .map_err(|source| Error::SendMessage { source })?;
 
             counter += 1;
@@ -379,7 +380,8 @@ mod tests {
     use crate::task::runner::Runner;
     use serde_json::{Map, Value};
     use std::collections::HashMap;
-    use tokio::sync::{broadcast, Mutex};
+    use tokio::sync::mpsc;
+    use tokio::sync::Mutex;
 
     /// Mock cache implementation for testing.
     #[derive(Debug)]
@@ -470,7 +472,7 @@ mod tests {
             count: Some(1),
             retry: None,
         });
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         // Success case.
         let subscriber = SubscriberBuilder::new()
@@ -484,7 +486,7 @@ mod tests {
         assert!(subscriber.is_ok());
 
         // Error case - missing config.
-        let (tx2, _rx2) = broadcast::channel(100);
+        let (tx2, _rx2) = mpsc::channel(100);
         let result = SubscriberBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())
@@ -507,7 +509,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let subscriber = Subscriber {
             config,
@@ -544,7 +546,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let subscriber = Subscriber {
             config,
@@ -583,7 +585,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut _rx) = broadcast::channel(100);
+        let (tx, mut _rx) = mpsc::channel(100);
         let mock_cache = Arc::new(MockCache::default());
 
         // Create task context with cache

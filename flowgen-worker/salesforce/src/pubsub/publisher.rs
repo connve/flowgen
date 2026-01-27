@@ -7,7 +7,7 @@ use salesforce_pubsub_v1::eventbus::v1::{
     ProducerEvent, PublishRequest, SchemaRequest, TopicRequest,
 };
 use std::sync::Arc;
-use tokio::sync::{broadcast::Receiver, Mutex};
+use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
@@ -41,7 +41,7 @@ pub enum Error {
     #[error("Send event message error: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
@@ -87,7 +87,7 @@ pub struct EventHandler {
     /// Current task identifier.
     task_id: usize,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -161,6 +161,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -175,7 +176,7 @@ pub struct Publisher {
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: tokio::sync::mpsc::Sender<Event>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -294,7 +295,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     if Some(event.task_id) == event_handler.task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
                         let retry_strategy = retry_config.strategy();
@@ -324,7 +325,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         );
                     }
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -334,7 +335,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
 pub struct PublisherBuilder {
     config: Option<Arc<super::config::Publisher>>,
     rx: Option<Receiver<Event>>,
-    tx: Option<tokio::sync::broadcast::Sender<Event>>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
     task_type: Option<&'static str>,
@@ -357,7 +358,7 @@ impl PublisherBuilder {
         self
     }
 
-    pub fn sender(mut self, sender: tokio::sync::broadcast::Sender<Event>) -> Self {
+    pub fn sender(mut self, sender: tokio::sync::mpsc::Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
     }
@@ -408,7 +409,7 @@ mod tests {
     use crate::pubsub::config;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -438,7 +439,7 @@ mod tests {
             endpoint: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
         let publisher = PublisherBuilder::new()
@@ -453,7 +454,7 @@ mod tests {
         assert!(publisher.is_ok());
 
         // Error case - missing config.
-        let (_tx2, rx2) = broadcast::channel::<Event>(10);
+        let (_tx2, rx2) = mpsc::channel::<Event>(10);
         let result = PublisherBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())

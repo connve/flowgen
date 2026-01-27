@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::{
     fs,
-    sync::broadcast::{Receiver, Sender},
+    sync::mpsc::{Receiver, Sender},
 };
 use tracing::{error, Instrument};
 
@@ -22,10 +22,10 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Request event builder failed with error: {source}")]
     EventBuilder {
@@ -210,6 +210,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
@@ -287,7 +288,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -315,7 +316,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -405,7 +406,7 @@ mod tests {
     use super::*;
     use crate::config::BasicAuth;
     use serde_json::Map;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -524,7 +525,7 @@ mod tests {
             credentials_path: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -539,7 +540,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)

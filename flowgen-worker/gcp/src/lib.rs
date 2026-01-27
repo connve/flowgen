@@ -6,8 +6,10 @@
 
 /// BigQuery functionality for data warehousing and analytics.
 pub mod bigquery {
-    /// Configuration structures for BigQuery query operations.
+    /// Configuration structures for BigQuery operations.
     pub mod config;
     /// BigQuery query processor implementation for executing SQL queries.
     pub mod query;
+    /// BigQuery Storage Read API processor for high-throughput parallel table reads.
+    pub mod storage_read;
 }

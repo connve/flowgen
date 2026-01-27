@@ -10,7 +10,7 @@ use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
-use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc::Sender;
 use tracing::{error, Instrument};
 
 /// JSON key for HTTP headers in webhook events.
@@ -25,7 +25,7 @@ pub enum Error {
     #[error("Sending event to channel failed with error: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Webhook event builder failed with error: {source}")]
     EventBuilder {
@@ -194,6 +194,7 @@ impl EventHandler {
 
         self.tx
             .send_with_logging(e)
+            .await
             .map_err(|source| Error::SendMessage { source })?;
         Ok(StatusCode::OK)
     }
@@ -381,7 +382,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::collections::HashMap;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -442,7 +443,7 @@ mod tests {
             credentials_path: None,
             retry: None,
         });
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -456,7 +457,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, _rx2) = broadcast::channel(100);
+        let (tx2, _rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())
@@ -476,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_event_handler_structure() {
-        let (tx, _rx) = broadcast::channel(1);
+        let (tx, _rx) = mpsc::channel(1);
         let config = Arc::new(crate::config::Processor::default());
 
         let _handler = EventHandler {
@@ -505,7 +506,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let handler = EventHandler {
             config,
@@ -535,7 +536,7 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let handler = EventHandler {
             config,
