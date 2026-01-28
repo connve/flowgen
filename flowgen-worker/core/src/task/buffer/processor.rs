@@ -45,6 +45,13 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error("Buffer flush serialization failed: {source}")]
+    FlushSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Partition key template is configured but rendered to empty value")]
+    MissingPartitionKey,
 }
 
 /// Flush reason for tracking why a buffer was flushed.
@@ -99,49 +106,59 @@ pub struct Processor {
 impl Processor {
     /// Flushes the buffer by emitting a single event containing all buffered events.
     ///
+    /// This function spawns a background task to perform the flush asynchronously,
+    /// allowing the buffer to continue receiving events without blocking.
+    ///
     /// # Arguments
     /// * `buffer` - Vector of accumulated events to flush.
     /// * `reason` - The reason this flush was triggered.
     /// * `partition_key` - Optional key that was used to group these events.
-    ///
-    /// # Returns
-    /// Result containing () on success or Error on failure.
-    async fn flush_buffer(
-        &self,
-        buffer: Vec<Value>,
-        reason: FlushReason,
-        partition_key: Option<String>,
-    ) -> Result<(), Error> {
+    fn flush_buffer(&self, buffer: Vec<Value>, reason: FlushReason, partition_key: Option<String>) {
         if buffer.is_empty() {
-            return Ok(());
+            return;
         }
 
-        let batch_size = buffer.len();
-        let flush_data = FlushData {
-            batch: buffer,
-            batch_size,
-            flush_reason: reason,
-            partition_key,
-        };
+        let tx = self.tx.clone();
+        let config_name = self.config.name.clone();
+        let task_id = self.task_id;
+        let task_type = self.task_type;
 
-        let flush_result = serde_json::to_value(flush_data).map_err(|e| Error::EventBuilder {
-            source: crate::event::Error::SerdeJson { source: e },
-        })?;
+        // Spawn flush as background task to avoid blocking event receives.
+        tokio::spawn(async move {
+            let batch_size = buffer.len();
+            let flush_data = FlushData {
+                batch: buffer,
+                batch_size,
+                flush_reason: reason,
+                partition_key,
+            };
 
-        let event = EventBuilder::new()
-            .data(EventData::Json(flush_result))
-            .subject(self.config.name.clone())
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            let flush_result = match serde_json::to_value(flush_data) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("{}", Error::FlushSerialization { source: e });
+                    return;
+                }
+            };
 
-        event
-            .send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            let event = match EventBuilder::new()
+                .data(EventData::Json(flush_result))
+                .subject(config_name)
+                .task_id(task_id)
+                .task_type(task_type)
+                .build()
+            {
+                Ok(e) => e,
+                Err(source) => {
+                    error!("{}", Error::EventBuilder { source });
+                    return;
+                }
+            };
 
-        Ok(())
+            if let Err(source) = event.send_with_logging(tx.as_ref()).await {
+                error!("{}", Error::SendMessage { source });
+            }
+        });
     }
 
     /// Processes the main event loop with buffer accumulation and flush triggers.
@@ -196,14 +213,14 @@ impl Processor {
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                                self.flush_buffer(flush_buffer, FlushReason::Size, None).await?;
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None);
                                 last_flush = Instant::now();
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None).await?;
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None);
                             }
                             return Ok(());
                         }
@@ -213,7 +230,7 @@ impl Processor {
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None).await?;
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None);
                     last_flush = Instant::now();
                 }
             }
@@ -222,29 +239,40 @@ impl Processor {
 
     /// Processes events with keyed buffers (separate buffer per key).
     async fn process_events_keyed(&mut self, timeout_duration: Duration) -> Result<(), Error> {
-        let mut buffers: HashMap<String, Vec<Value>> = HashMap::new();
-        let mut last_flush_times: HashMap<String, Instant> = HashMap::new();
+        // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
+        let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
+        let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {
             // Find the earliest timeout across all active keyed buffers.
-            let min_time_until_flush = buffers
-                .keys()
-                .filter_map(|key| {
-                    last_flush_times
-                        .get(key)
-                        .and_then(|last_flush| timeout_duration.checked_sub(last_flush.elapsed()))
-                })
-                .min()
-                .unwrap_or(timeout_duration);
+            // Only calculated once per loop iteration, not on every event.
+            let min_time_until_flush = if buffers.is_empty() {
+                timeout_duration
+            } else {
+                last_flush_times
+                    .values()
+                    .filter_map(|last_flush| timeout_duration.checked_sub(last_flush.elapsed()))
+                    .min()
+                    .unwrap_or(Duration::ZERO)
+            };
 
             tokio::select! {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
                         Some(event) => {
-                            // Extract JSON data from event.
-                            let json_data = match &event.data {
-                                EventData::Json(data) => data.clone(),
+                            // Render the config with event data to get the rendered buffer key.
+                            let event_value = serde_json::value::Value::try_from(&event)
+                                .map_err(|source| Error::EventBuilder { source })?;
+                            let rendered_config = self.config.render(&event_value)
+                                .map_err(|source| Error::Render { source })?;
+
+                            // Extract the rendered key from the config.
+                            let rendered_key = rendered_config.partition_key.ok_or(Error::MissingPartitionKey)?;
+
+                            // Extract JSON data from event (after rendering to avoid unnecessary clone).
+                            let json_data = match event.data {
+                                EventData::Json(data) => data,
                                 EventData::ArrowRecordBatch(_) => {
                                     return Err(Error::ExpectedJsonGotArrowRecordBatch);
                                 }
@@ -253,39 +281,36 @@ impl Processor {
                                 }
                             };
 
-                            // Render the config with event data to get the rendered buffer key.
-                            let event_value = serde_json::value::Value::try_from(&event)
-                                .map_err(|source| Error::EventBuilder { source })?;
-                            let rendered_config = self.config.render(&event_value)
-                                .map_err(|source| Error::Render { source })?;
-
-                            // Extract the rendered key from the config.
-                            let rendered_key = rendered_config.partition_key
-                                .ok_or_else(|| Error::MissingRequiredAttribute("partition_key".to_string()))?;
-
-                            // Get or create buffer for this key.
-                            let is_new_buffer = !buffers.contains_key(&rendered_key);
-                            let buffer = buffers.entry(rendered_key.clone()).or_default();
-                            buffer.push(json_data);
-
-                            // Initialize last flush time for new buffers.
-                            if is_new_buffer {
-                                last_flush_times.insert(rendered_key.clone(), Instant::now());
-                            }
-
-                            // Flush if this key's buffer reached size limit.
-                            if buffer.len() >= self.config.size {
-                                if let Some(buffer_to_flush) = buffers.remove(&rendered_key) {
-                                    self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(rendered_key.clone())).await?;
+                            // Get or create buffer for this key with pre-allocated capacity.
+                            use std::collections::hash_map::Entry;
+                            let buffer_size = self.config.size;
+                            match buffers.entry(rendered_key) {
+                                Entry::Vacant(vacant) => {
+                                    let key = vacant.key().clone();
+                                    let mut buffer = Vec::with_capacity(buffer_size);
+                                    buffer.push(json_data);
+                                    vacant.insert(buffer);
+                                    last_flush_times.insert(key, Instant::now());
                                 }
-                                last_flush_times.insert(rendered_key, Instant::now());
+                                Entry::Occupied(mut occupied) => {
+                                    let buffer = occupied.get_mut();
+                                    buffer.push(json_data);
+
+                                    // Flush if this key's buffer reached size limit.
+                                    if buffer.len() >= buffer_size {
+                                        let key = occupied.key().clone();
+                                        let buffer_to_flush = occupied.remove();
+                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()));
+                                        last_flush_times.insert(key, Instant::now());
+                                    }
+                                }
                             }
                         }
                         None => {
                             // Channel closed, flush all remaining buffers and exit.
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key)).await?;
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key));
                                 }
                             }
                             return Ok(());
@@ -299,11 +324,9 @@ impl Processor {
                     let mut keys_to_flush = Vec::new();
 
                     // Find all keys with active buffers whose timeout has been exceeded.
-                    for key in buffers.keys() {
-                        if let Some(last_flush) = last_flush_times.get(key) {
-                            if now.duration_since(*last_flush) >= timeout_duration {
-                                keys_to_flush.push(key.clone());
-                            }
+                    for (key, last_flush) in &last_flush_times {
+                        if now.duration_since(*last_flush) >= timeout_duration && buffers.contains_key(key) {
+                            keys_to_flush.push(key.clone());
                         }
                     }
 
@@ -311,7 +334,7 @@ impl Processor {
                     for key in keys_to_flush {
                         if let Some(buffer) = buffers.remove(&key) {
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone())).await?;
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()));
                             }
                         }
                         last_flush_times.insert(key, now);
