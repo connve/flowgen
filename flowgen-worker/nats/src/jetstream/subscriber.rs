@@ -84,7 +84,7 @@ pub enum Error {
 /// Event handler for processing NATS messages.
 pub struct EventHandler {
     consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     task_id: usize,
     config: Arc<super::config::Subscriber>,
     task_type: &'static str,
@@ -107,10 +107,11 @@ impl EventHandler {
 
                 message.ack().await.ok();
 
-                self.tx
-                    .send_with_logging(e)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
+                if let Some(ref tx) = self.tx {
+                    tx.send_with_logging(e)
+                        .await
+                        .map_err(|source| Error::SendMessage { source })?;
+                }
                 Ok(())
             }
             Err(err) => Err(Error::Other(err)),
@@ -168,7 +169,7 @@ pub struct Subscriber {
     /// Subscriber configuration including stream and consumer settings.
     config: Arc<super::config::Subscriber>,
     /// Sender for forwarding converted events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tagging.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -364,9 +365,7 @@ impl SubscriberBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context

@@ -91,7 +91,7 @@ pub struct EventHandler {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier.
     task_id: usize,
     /// Task type for event categorization and logging.
@@ -208,10 +208,11 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(e)
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(e)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
         Ok(())
     }
 }
@@ -222,7 +223,7 @@ pub struct Processor {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Event receiver channel.
     rx: Receiver<Event>,
     /// Current task identifier.
@@ -387,9 +388,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context

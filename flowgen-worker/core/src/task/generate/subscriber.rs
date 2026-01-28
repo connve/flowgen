@@ -74,7 +74,7 @@ pub enum Error {
 /// Event handler for generating scheduled events.
 pub struct EventHandler {
     config: Arc<crate::task::generate::config::Subscriber>,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Arc<crate::task::context::TaskContext>,
     task_type: &'static str,
@@ -206,10 +206,11 @@ impl EventHandler {
                 .task_type(self.task_type)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
-            self.tx
-                .send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            if let Some(ref tx) = self.tx {
+                tx.send_with_logging(e)
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
+            }
 
             counter += 1;
             match self.config.count {
@@ -226,7 +227,7 @@ pub struct Subscriber {
     /// Configuration settings for event generation.
     config: Arc<crate::task::generate::config::Subscriber>,
     /// Channel sender for broadcasting generated events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -360,9 +361,7 @@ impl SubscriberBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             task_context: self
                 .task_context
@@ -513,7 +512,7 @@ mod tests {
 
         let subscriber = Subscriber {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             task_context: create_mock_task_context(),
@@ -550,7 +549,7 @@ mod tests {
 
         let subscriber = Subscriber {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 0,
             task_type: "test",
             task_context: create_mock_task_context(),
@@ -607,7 +606,7 @@ mod tests {
 
         let subscriber = Subscriber {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             task_context,

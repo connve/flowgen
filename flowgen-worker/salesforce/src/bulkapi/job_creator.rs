@@ -65,7 +65,7 @@ struct QueryJobPayload {
 /// Processor for creating Salesforce bulk API jobs.
 pub struct JobCreator {
     config: Arc<super::config::JobCreator>,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     rx: Receiver<Event>,
     current_task_id: usize,
     task_type: &'static str,
@@ -79,7 +79,7 @@ pub struct EventHandler {
     /// Processor configuration.
     config: Arc<super::config::JobCreator>,
     /// Channel sender for emitting job creation responses.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event correlation.
     current_task_id: usize,
     /// SFDC client
@@ -150,10 +150,11 @@ impl EventHandler {
             .build()
             .map_err(|e| Error::Event { source: e })?;
 
-        self.tx
-            .send_with_logging(e)
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(e)
+                .await
+                .map_err(|e| Error::SendMessage { source: e })?;
+        }
         Ok(())
     }
 }
@@ -323,9 +324,7 @@ impl JobCreatorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             current_task_id: self.current_task_id,
             _task_context: self
                 .task_context
@@ -527,7 +526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_processor_builder_build_missing_sender() {
+    async fn test_processor_builder_build_missing_task_context() {
         let (_, rx) = mpsc::channel::<Event>(100);
 
         let config = Arc::new(super::super::config::JobCreator {
@@ -552,7 +551,7 @@ mod tests {
 
         match result {
             Err(Error::MissingRequiredAttribute(attr)) => {
-                assert_eq!(attr, "sender");
+                assert_eq!(attr, "task_context");
             }
             _ => panic!("Expected MissingRequiredAttribute error"),
         }
@@ -659,7 +658,7 @@ mod tests {
 
         let processor = JobCreator {
             config: Arc::clone(&config),
-            tx: tx.clone(),
+            tx: Some(tx.clone()),
             rx,
             current_task_id: 5,
             task_type: "",

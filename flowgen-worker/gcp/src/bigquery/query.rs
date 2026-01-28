@@ -100,7 +100,7 @@ pub enum Error {
 pub struct EventHandler {
     client: Arc<Client>,
     task_id: usize,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     config: Arc<super::config::Query>,
     task_type: &'static str,
 }
@@ -131,10 +131,11 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(result_event)
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(result_event)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
 
         Ok(())
     }
@@ -148,7 +149,7 @@ pub struct Processor {
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -322,9 +323,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self
                 .task_id
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,

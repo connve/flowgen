@@ -99,7 +99,7 @@ pub struct EventHandler {
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task type for event categorization and logging.
@@ -221,10 +221,11 @@ impl EventHandler {
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
-            self.tx
-                .send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            if let Some(ref tx) = self.tx {
+                tx.send_with_logging(e)
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
+            }
         }
 
         // Delete file from object store if configured.
@@ -249,7 +250,7 @@ pub struct Reader {
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -433,9 +434,7 @@ impl ReaderBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context

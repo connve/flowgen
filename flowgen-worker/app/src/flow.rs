@@ -305,7 +305,10 @@ impl Flow {
                         );
                         break;
                     }
-                    None => return Err(Error::LeadershipChannelClosed),
+                    None => {
+                        info!("Flow {} leadership channel closed, exiting", flow_id);
+                        return Ok(());
+                    }
                 }
             }
 
@@ -330,8 +333,8 @@ impl Flow {
                             }
                         }
                         _ = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
-                            error!("All tasks completed unexpectedly for flow {}", flow_id);
-                            break; // Break inner loop.
+                            debug!("All tasks completed for flow {}", flow_id);
+                            break; // Break inner loop to re-evaluate leadership.
                         }
                     }
                 }
@@ -346,23 +349,25 @@ impl Flow {
     }
 }
 
-/// Spawns all tasks for the flow.
-/// Returns (blocking_tasks, background_tasks) where blocking_tasks complete quickly
-/// and must be awaited before the application is ready (e.g., webhooks registering routes),
-/// while background_tasks run indefinitely.
 /// Creates MPSC channels for linear task chain.
+///
 /// Returns vector of (Sender, Receiver) pairs where index i connects task i to task i+1.
 fn create_task_channels(
     tasks: &[(usize, TaskType)],
     buffer_size: usize,
 ) -> Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)> {
     let task_count = tasks.len();
-    // Create N-1 channels for N tasks (linear chain)
+    // Create N-1 channels for N tasks (linear chain).
     (0..task_count.saturating_sub(1))
         .map(|_| mpsc::channel(buffer_size))
         .collect()
 }
 
+/// Spawns all tasks for the flow with proper channel wiring.
+///
+/// Returns (blocking_tasks, background_tasks) where blocking_tasks complete quickly
+/// and must be awaited before the application is ready (e.g., webhooks registering routes),
+/// while background_tasks run indefinitely.
 async fn spawn_tasks(
     tasks: &[(usize, TaskType)],
     channels: Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)>,
@@ -377,23 +382,23 @@ async fn spawn_tasks(
     let mut blocking_tasks = Vec::new();
     let mut background_tasks = Vec::new();
 
-    // Extract senders and receivers from channels
+    // Extract senders and receivers from channels.
     let senders: Vec<Option<mpsc::Sender<Event>>> =
         channels.iter().map(|(tx, _)| Some(tx.clone())).collect();
     let mut receivers: Vec<Option<mpsc::Receiver<Event>>> =
         channels.into_iter().map(|(_, rx)| Some(rx)).collect();
 
     for (task_idx, (i, task)) in tasks.iter().enumerate() {
-        let i = *i; // Copy the index value so it can be moved into async blocks
+        let i = *i; // Copy the index value so it can be moved into async blocks.
 
-        // Get receiver from previous channel (if not first task)
+        // Get receiver from previous channel (if not first task).
         let rx = if task_idx > 0 {
             receivers.get_mut(task_idx - 1).and_then(|r| r.take())
         } else {
             None
         };
 
-        // Get sender for next channel (if not last task)
+        // Get sender for next channel (if not last task).
         let tx = if task_idx < senders.len() {
             senders.get(task_idx).and_then(|s| s.clone())
         } else {

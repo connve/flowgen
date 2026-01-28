@@ -85,7 +85,7 @@ pub struct EventHandler {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier.
     task_id: usize,
     /// Pre-loaded authentication credentials.
@@ -192,10 +192,11 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(e)
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(e)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
         Ok(StatusCode::OK)
     }
 }
@@ -206,7 +207,7 @@ pub struct Processor {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -363,9 +364,7 @@ impl ProcessorBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -482,7 +481,7 @@ mod tests {
 
         let _handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 0,
             credentials: None,
             task_type: "test",
@@ -510,7 +509,7 @@ mod tests {
 
         let handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             credentials: None,
             task_type: "test",
@@ -540,7 +539,7 @@ mod tests {
 
         let handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             credentials: None,
             task_type: "test",

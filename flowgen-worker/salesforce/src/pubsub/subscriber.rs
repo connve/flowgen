@@ -83,7 +83,7 @@ pub struct EventHandler {
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tracking
     task_id: usize,
     /// Task type for event categorization and logging.
@@ -160,10 +160,11 @@ impl EventHandler {
                     .build()
                     .map_err(|e| Error::Event { source: e })?;
 
-                self.tx
-                    .send_with_logging(e)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
+                if let Some(ref tx) = self.tx {
+                    tx.send_with_logging(e)
+                        .await
+                        .map_err(|source| Error::SendMessage { source })?;
+                }
             }
         }
 
@@ -363,7 +364,7 @@ pub struct Subscriber {
     /// Configuration for topics, credentials, and consumer options
     config: Arc<super::config::Subscriber>,
     /// Event channel sender
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tracking
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -542,9 +543,7 @@ impl SubscriberBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context

@@ -38,7 +38,7 @@ pub struct EventHandler {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Event sender for passing through logged events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task type identifier (unused but kept for consistency).
     _task_type: &'static str,
     /// Task context (unused but kept for consistency).
@@ -112,18 +112,20 @@ impl EventHandler {
             }
         }
 
-        // Pass the event through to the next task with updated task_id
-        let event = crate::event::EventBuilder::new()
-            .data(event.data)
-            .subject(event.subject)
-            .task_id(self.task_id)
-            .task_type(event.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+        // Pass the event through to the next task with updated task_id (if there is a next task)
+        if let Some(ref tx) = self.tx {
+            let event = crate::event::EventBuilder::new()
+                .data(event.data)
+                .subject(event.subject)
+                .task_id(self.task_id)
+                .task_type(event.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx.send(event).await.map_err(|_| Error::SendMessage {
-            source: crate::event::Error::SendMessage,
-        })?;
+            tx.send(event).await.map_err(|_| Error::SendMessage {
+                source: crate::event::Error::SendMessage,
+            })?;
+        }
 
         Ok(())
     }
@@ -135,7 +137,7 @@ pub struct Processor {
     /// Log task configuration.
     config: Arc<super::config::Processor>,
     /// Channel sender for passing through events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events to log.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -233,9 +235,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -290,9 +292,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -378,7 +378,7 @@ mod tests {
         let event_handler = EventHandler {
             config,
             task_id: 1,
-            tx,
+            tx: Some(tx),
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };
@@ -409,7 +409,7 @@ mod tests {
         let event_handler = EventHandler {
             config,
             task_id: 1,
-            tx,
+            tx: Some(tx),
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };

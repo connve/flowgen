@@ -44,8 +44,8 @@ pub enum Error {
 pub struct EventHandler {
     /// Loop processor configuration settings.
     config: Arc<super::config::Processor>,
-    /// Channel sender for processed events.
-    tx: Sender<Event>,
+    /// Channel sender for processed events (optional if this is the last task).
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
     task_id: usize,
     /// Task type for event categorization and logging.
@@ -105,10 +105,11 @@ impl EventHandler {
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
-            self.tx
-                .send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            if let Some(ref tx) = self.tx {
+                tx.send_with_logging(e)
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
+            }
         }
 
         Ok(())
@@ -120,8 +121,8 @@ impl EventHandler {
 pub struct Processor {
     /// Loop processor configuration.
     config: Arc<super::config::Processor>,
-    /// Channel sender for processed events.
-    tx: Sender<Event>,
+    /// Channel sender for processed events (optional if this is the last task).
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -219,9 +220,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Loop processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -276,9 +277,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -360,7 +359,7 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             _task_context: create_mock_task_context(),
@@ -409,7 +408,7 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             _task_context: create_mock_task_context(),
@@ -461,7 +460,7 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             _task_context: create_mock_task_context(),
@@ -494,7 +493,7 @@ mod tests {
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             task_type: "test",
             _task_context: create_mock_task_context(),

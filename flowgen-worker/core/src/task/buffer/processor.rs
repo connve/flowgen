@@ -85,7 +85,7 @@ pub struct Processor {
     /// Buffer processor configuration.
     config: Arc<super::config::Processor>,
     /// Channel sender for processed events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -117,12 +117,6 @@ impl Processor {
         }
 
         let batch_size = buffer.len();
-        tracing::info!(
-            "Buffer flushing batch: size={}, reason={:?}, partition_key={:?}",
-            batch_size,
-            reason,
-            partition_key
-        );
         let flush_data = FlushData {
             batch: buffer,
             batch_size,
@@ -142,10 +136,11 @@ impl Processor {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(event)
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(event)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
 
         Ok(())
     }
@@ -198,15 +193,9 @@ impl Processor {
                             };
 
                             buffer.push(json_data);
-                            tracing::info!(
-                                "Buffer accumulated event, current size={}/{}",
-                                buffer.len(),
-                                self.config.size
-                            );
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
-                                tracing::info!("Buffer flushing {} events (size trigger)", buffer.len());
                                 self.flush_buffer(buffer.clone(), FlushReason::Size, None).await?;
                                 buffer.clear();
                                 last_flush = Instant::now();
@@ -224,7 +213,6 @@ impl Processor {
 
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
-                    tracing::info!("Buffer flushing {} events (timeout trigger)", buffer.len());
                     self.flush_buffer(buffer.clone(), FlushReason::Timeout, None).await?;
                     buffer.clear();
                     last_flush = Instant::now();
@@ -289,7 +277,6 @@ impl Processor {
                             // Flush if this key's buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 if let Some(buffer_to_flush) = buffers.remove(&rendered_key) {
-                                    tracing::info!("Buffer (keyed) flushing {} events for key='{}' (size trigger)", buffer_to_flush.len(), rendered_key);
                                     self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(rendered_key.clone())).await?;
                                 }
                                 last_flush_times.insert(rendered_key, Instant::now());
@@ -392,9 +379,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Buffer processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -449,9 +436,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context

@@ -87,7 +87,7 @@ pub struct EventHandler {
     /// Current task identifier.
     task_id: usize,
     /// Channel sender for response events.
-    tx: tokio::sync::mpsc::Sender<Event>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -159,10 +159,11 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        self.tx
-            .send_with_logging(e)
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+        if let Some(ref tx) = self.tx {
+            tx.send_with_logging(e)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
 
         Ok(())
     }
@@ -176,7 +177,7 @@ pub struct Publisher {
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
     /// Channel sender for response events.
-    tx: tokio::sync::mpsc::Sender<Event>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -389,9 +390,7 @@ impl PublisherBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
