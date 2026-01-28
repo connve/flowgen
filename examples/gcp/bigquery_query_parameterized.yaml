@@ -11,11 +11,22 @@ flow:
     # BigQuery query with parameterized SQL for SQL injection protection.
     # Parameters are type-safe and properly escaped by BigQuery client.
     # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    #
+    # This example demonstrates loading SQL from an external resource file.
+    # The query is loaded from "resources/queries/fetch_completed_orders.sql"
+    # where "resources/" is the base path configured in config.yaml.
+    #
+    # Benefits of external SQL files:
+    # - Keep complex SQL separate from configuration
+    # - Enable SQL syntax highlighting in editors
+    # - Easier to maintain and version control large queries
+    # - Support SQL file reuse across multiple flows
     - gcp_bigquery_query:
         name: fetch_completed_orders
         credentials_path: /etc/gcp/credentials.json
         project_id: my-project-id
-        query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE status = @status AND order_date >= @start_date ORDER BY order_date DESC"
+        query:
+          resource: "queries/fetch_completed_orders.sql"
         parameters:
           status: "completed"
           start_date: "2024-01-01"

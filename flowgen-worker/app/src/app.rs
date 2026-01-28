@@ -209,6 +209,11 @@ impl App {
             None
         };
 
+        // Create resource loader from app config if configured.
+        let resource_loader = app_config.resources.as_ref().map(|resource_options| {
+            flowgen_core::resource::ResourceLoader::new(Some(resource_options.path.clone()))
+        });
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -233,6 +238,10 @@ impl App {
 
             if let Some(buffer_size) = app_config.event_buffer_size {
                 flow_builder = flow_builder.event_buffer_size(buffer_size);
+            }
+
+            if let Some(ref loader) = resource_loader {
+                flow_builder = flow_builder.resource_loader(loader.clone());
             }
 
             match flow_builder.build() {

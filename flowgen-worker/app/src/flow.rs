@@ -98,6 +98,8 @@ pub struct Flow {
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
     retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Optional resource loader for loading external files, passed in from the main application.
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// The shared context for all tasks in this flow. Initialized by `init()`.
@@ -155,7 +157,8 @@ impl Flow {
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(Arc::clone(&task_manager))
             .cache(self.cache.clone())
-            .http_server(self.http_server.clone());
+            .http_server(self.http_server.clone())
+            .resource_loader(self.resource_loader.clone());
 
         if let Some(retry_config) = &self.retry {
             task_context_builder = task_context_builder.retry(retry_config.clone());
@@ -906,6 +909,8 @@ pub struct FlowBuilder {
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration.
     retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Resource loader for loading external files.
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 }
 
 impl FlowBuilder {
@@ -950,6 +955,15 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets the resource loader for loading external files.
+    pub fn resource_loader(
+        mut self,
+        resource_loader: flowgen_core::resource::ResourceLoader,
+    ) -> Self {
+        self.resource_loader = Some(resource_loader);
+        self
+    }
+
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -964,6 +978,7 @@ impl FlowBuilder {
             cache: self.cache,
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
+            resource_loader: self.resource_loader,
             task_manager: None,
             task_context: None,
         })

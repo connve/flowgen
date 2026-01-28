@@ -10,6 +10,11 @@ cache:
 flows:
   path: "path_to_configs_folder"
 
+# Resource loading configuration (optional).
+# Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
+resources:
+  path: "path_to_resources_folder"
+
 # HTTP server configuration (optional, defaults to port 3000).
 http_server:
   enabled: true

@@ -117,6 +117,8 @@ pub struct AppConfig {
     pub cache: Option<CacheOptions>,
     /// Flow discovery options.
     pub flows: FlowOptions,
+    /// Optional resource loading configuration.
+    pub resources: Option<ResourceOptions>,
     /// Optional HTTP server configuration.
     pub http_server: Option<HttpServerOptions>,
     /// Optional host coordination configuration.
@@ -159,6 +161,16 @@ pub struct CacheOptions {
 pub struct FlowOptions {
     /// Path pattern for discovering flow configuration files (glob pattern supported).
     pub path: Option<PathBuf>,
+}
+
+/// Resource loading configuration.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
+pub struct ResourceOptions {
+    /// Base path for loading external resource files (SQL, JSON, HTML, etc.).
+    /// Resource keys are resolved relative to this path.
+    /// Example: with path="local/resources/", key="queries/orders.sql" resolves to "local/resources/queries/orders.sql".
+    #[serde(default)]
+    pub path: PathBuf,
 }
 
 /// HTTP server configuration options.
@@ -329,6 +341,7 @@ mod tests {
             host: None,
             retry: None,
             event_buffer_size: None,
+            resources: None,
         };
 
         assert!(app_config.cache.is_some());
@@ -338,6 +351,7 @@ mod tests {
         assert!(app_config.host.is_none());
         assert!(app_config.retry.is_none());
         assert!(app_config.event_buffer_size.is_none());
+        assert!(app_config.resources.is_none());
     }
 
     #[test]
@@ -351,6 +365,7 @@ mod tests {
             host: None,
             retry: None,
             event_buffer_size: None,
+            resources: None,
         };
 
         assert!(app_config.cache.is_none());
@@ -374,6 +389,7 @@ mod tests {
             host: None,
             retry: None,
             event_buffer_size: None,
+            resources: None,
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -396,6 +412,7 @@ mod tests {
             host: None,
             retry: None,
             event_buffer_size: None,
+            resources: None,
         };
 
         let cloned = app_config.clone();
@@ -550,6 +567,7 @@ mod tests {
             host: None,
             retry: None,
             event_buffer_size: None,
+            resources: None,
         };
 
         assert!(app_config.http_server.is_some());
