@@ -67,7 +67,7 @@ pub enum Error {
     #[error("Lease {name} is held by another instance: {holder}")]
     LeaseHeldByOther { name: String, holder: String },
     #[error("Missing required attribute: {0}")]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
 }
 
 /// Default lease duration in seconds.
@@ -341,7 +341,7 @@ impl K8sHostBuilder {
             lease_duration_secs: self.lease_duration_secs,
             holder_identity: self
                 .holder_identity
-                .ok_or_else(|| Error::MissingRequiredAttribute("holder_identity".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("holder_identity".to_string()))?,
         })
     }
 }
@@ -477,13 +477,10 @@ mod tests {
     fn test_builder_missing_holder_identity() {
         let result = K8sHostBuilder::new().build();
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::MissingRequiredAttribute(attr) => {
-                assert_eq!(attr, "holder_identity");
-            }
-            _ => panic!("Expected MissingRequiredAttribute error"),
-        }
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute(attr)) if attr == "holder_identity"
+        ));
     }
 
     #[test]

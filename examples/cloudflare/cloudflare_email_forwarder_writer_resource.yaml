@@ -1,0 +1,37 @@
+flow:
+  name: cloudflare_email_forwarder_writer_resource
+  tasks:
+
+    # Subscribe to email forwarded events in NATS.
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        subject: email.received
+        stream:
+          create_or_update: true
+          name: cloudflare
+          description: "Cloudflare events stream"
+          subjects: ["email.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
+        durable_name: cloudflare_email_forwarder_writer
+        max_messages: 100
+        delay: 1s
+
+    # Convert event data (JSON) to avro using external schema file.
+    - convert:
+        name: json_avro_converter
+        target_format: avro
+        schema:
+          resource: "schemas/email_message.avsc"
+
+    # Write data into local or remote object store.
+    - object_store_writer:
+        name: write_events
+        path: file:///cloudflare/email
+        hive_partition_options:
+          enabled: true
+          partition_keys:
+            - EventDate

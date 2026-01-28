@@ -1,0 +1,10 @@
+SELECT
+  Id,
+  Name,
+  Type,
+  Industry,
+  CreatedDate,
+  LastModifiedDate
+FROM Account
+WHERE SystemModstamp = LAST_N_DAYS:200
+ORDER BY LastModifiedDate DESC

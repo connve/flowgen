@@ -51,12 +51,19 @@ pub enum Error {
         "ArrowRecordBatch to Avro conversion is not supported. Please convert data to JSON first."
     )]
     ArrowToAvroNotSupported,
-    #[error("Missing required attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    #[error("Missing required builder attribute: {}", _0)]
+    MissingBuilderAttribute(String),
+    #[error("Schema is required for Avro target format")]
+    MissingAvroSchema,
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,
+    },
+    #[error("Failed to load resource: {source}")]
+    ResourceLoad {
+        #[source]
+        source: crate::resource::Error,
     },
 }
 
@@ -191,7 +198,7 @@ pub struct Processor {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<crate::task::context::TaskContext>,
+    task_context: Arc<crate::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -208,12 +215,25 @@ impl crate::task::runner::Runner for Processor {
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
         let serializer = match self.config.target_format {
             crate::task::convert::config::TargetFormat::Avro => {
-                let schema_string = self
-                    .config
-                    .as_ref()
-                    .schema
-                    .clone()
-                    .ok_or_else(|| Error::MissingRequiredAttribute("schema".to_string()))?;
+                // Resolve schema from inline or resource source.
+                let schema_string = match &self.config.schema {
+                    Some(crate::resource::Source::Inline(schema)) => schema.clone(),
+                    Some(crate::resource::Source::Resource(key)) => {
+                        let loader =
+                            self.task_context.resource_loader.as_ref().ok_or_else(|| {
+                                Error::ResourceLoad {
+                                    source: crate::resource::Error::ResourcePathNotConfigured,
+                                }
+                            })?;
+                        loader
+                            .load(key)
+                            .await
+                            .map_err(|source| Error::ResourceLoad { source })?
+                    }
+                    None => {
+                        return Err(Error::MissingAvroSchema);
+                    }
+                };
 
                 let schema: serde_avro_fast::Schema = schema_string
                     .parse()
@@ -240,7 +260,7 @@ impl crate::task::runner::Runner for Processor {
             task_id: self.task_id,
             serializer,
             task_type: self.task_type,
-            _task_context: Arc::clone(&self._task_context),
+            _task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)
@@ -249,7 +269,7 @@ impl crate::task::runner::Runner for Processor {
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
-            crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+            crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
             match self.init().await {
@@ -368,18 +388,18 @@ impl ProcessorBuilder {
         Ok(Processor {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             rx: self
                 .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
             task_id: self.task_id,
-            _task_context: self
+            task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -442,7 +462,9 @@ mod tests {
         let config = Arc::new(crate::task::convert::config::Processor {
             name: "test".to_string(),
             target_format: crate::task::convert::config::TargetFormat::Avro,
-            schema: Some(r#"{"type": "string"}"#.to_string()),
+            schema: Some(crate::resource::Source::Inline(
+                r#"{"type": "string"}"#.to_string(),
+            )),
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -469,7 +491,7 @@ mod tests {
             .await;
         assert!(matches!(
             result.unwrap_err(),
-            Error::MissingRequiredAttribute(_)
+            Error::MissingBuilderAttribute(_)
         ));
     }
 

@@ -39,7 +39,7 @@ pub enum Error {
     #[error("Missing required value JetStream Context")]
     MissingJetStreamContext,
     #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
 }
 
 /// NATS JetStream Key-Value (KV) store cache.
@@ -206,12 +206,12 @@ impl CacheBuilder {
     ///
     /// # Returns
     /// * `Ok(Cache)` on success.
-    /// * `Err(Error::MissingRequiredAttribute)` if `credentials_path` is missing.
+    /// * `Err(Error::MissingBuilderAttribute)` if `credentials_path` is missing.
     pub fn build(self) -> Result<Cache, Error> {
         Ok(Cache {
             credentials_path: self
                 .credentials_path
-                .ok_or_else(|| Error::MissingRequiredAttribute("credentials_path".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("credentials_path".to_string()))?,
             url: self
                 .url
                 .unwrap_or_else(|| crate::client::DEFAULT_NATS_URL.to_string()),
@@ -243,7 +243,7 @@ mod tests {
         let result = CacheBuilder::new().build();
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path")
+            matches!(result.unwrap_err(), Error::MissingBuilderAttribute(attr) if attr == "credentials_path")
         );
     }
 

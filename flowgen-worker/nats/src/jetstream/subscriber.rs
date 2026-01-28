@@ -68,10 +68,12 @@ pub enum Error {
     },
     #[error("Missing stream configuration")]
     MissingStreamConfig,
+    #[error("Durable name is required for JetStream consumers")]
+    MissingDurableName,
     #[error("Other subscriber error")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -220,7 +222,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .config
                 .durable_name
                 .as_ref()
-                .ok_or_else(|| Error::MissingRequiredAttribute("durable_name".to_string()))?;
+                .ok_or_else(|| Error::MissingDurableName)?;
 
             let consumer_config = jetstream::consumer::pull::Config {
                 durable_name: Some(durable_name.clone()),
@@ -362,15 +364,15 @@ impl SubscriberBuilder {
         Ok(Subscriber {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -442,14 +444,14 @@ mod tests {
             .await;
         assert!(matches!(
             result.unwrap_err(),
-            Error::MissingRequiredAttribute(_)
+            Error::MissingBuilderAttribute(_)
         ));
     }
 
     #[test]
     fn test_error_variants_added_for_consumer_management() {
         // Test that new error variants for consumer operations exist
-        let consumer_err = Error::MissingRequiredAttribute("test".to_string());
+        let consumer_err = Error::MissingBuilderAttribute("test".to_string());
         assert!(consumer_err
             .to_string()
             .contains("Missing required builder attribute"));
@@ -511,7 +513,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "task_context")
+            matches!(result.unwrap_err(), Error::MissingBuilderAttribute(attr) if attr == "task_context")
         );
     }
 }

@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 #[non_exhaustive]
 pub enum Error {
     #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
 }
 
 /// Flow identification and metadata.
@@ -155,18 +155,18 @@ impl TaskContextBuilder {
     /// Builds the TaskContext instance.
     ///
     /// # Errors
-    /// Returns `Error::MissingRequiredAttribute` if required fields are not set.
+    /// Returns `Error::MissingBuilderAttribute` if required fields are not set.
     pub fn build(self) -> Result<TaskContext, Error> {
         Ok(TaskContext {
             flow: FlowOptions {
                 name: self
                     .flow_name
-                    .ok_or_else(|| Error::MissingRequiredAttribute("flow_name".to_string()))?,
+                    .ok_or_else(|| Error::MissingBuilderAttribute("flow_name".to_string()))?,
                 labels: self.flow_labels,
             },
             task_manager: self
                 .task_manager
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_manager".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_manager".to_string()))?,
             cache: self.cache,
             http_server: self.http_server,
             resource_loader: self.resource_loader,
@@ -215,7 +215,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            Error::MissingRequiredAttribute(_)
+            Error::MissingBuilderAttribute(_)
         ));
     }
 

@@ -13,7 +13,8 @@ pub struct Processor {
     /// Target format for event data conversion.
     pub target_format: TargetFormat,
     /// Optional schema definition for target format validation.
-    pub schema: Option<String>,
+    /// Can be specified as inline schema or loaded from external resource file.
+    pub schema: Option<crate::resource::Source>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
