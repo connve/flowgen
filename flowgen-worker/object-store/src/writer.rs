@@ -4,11 +4,12 @@ use chrono::{DateTime, Datelike, Utc};
 use flowgen_core::buffer::ToWriter;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use futures_util::future;
 use object_store::PutPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{broadcast::Receiver, Mutex};
+use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
 /// Status of an object store write operation.
@@ -35,10 +36,10 @@ pub struct WriteResult {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Writer event builder failed with error: {source}")]
     EventBuilder {
@@ -110,7 +111,7 @@ pub struct EventHandler {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -207,8 +208,8 @@ impl EventHandler {
 
         let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(e)
+        e.send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -233,7 +234,7 @@ pub struct Writer {
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for response events.
-    tx: tokio::sync::broadcast::Sender<Event>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -311,12 +312,14 @@ impl flowgen_core::task::runner::Runner for Writer {
         };
 
         // Process incoming events, filtering by task ID.
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -340,8 +343,13 @@ impl flowgen_core::task::runner::Runner for Writer {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                Err(_) => return Ok(()),
+                None => {
+                    // Channel closed, wait for all spawned handlers to complete.
+                    future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }
@@ -355,7 +363,7 @@ pub struct WriterBuilder {
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Channel sender for response events.
-    tx: Option<tokio::sync::broadcast::Sender<Event>>,
+    tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -384,7 +392,7 @@ impl WriterBuilder {
     }
 
     /// Sets the event sender.
-    pub fn sender(mut self, sender: tokio::sync::broadcast::Sender<Event>) -> Self {
+    pub fn sender(mut self, sender: tokio::sync::mpsc::Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
     }
@@ -417,9 +425,7 @@ impl WriterBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -436,7 +442,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -466,7 +472,7 @@ mod tests {
             hive_partition_options: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel::<Event>(10);
+        let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
         let writer = WriterBuilder::new()
@@ -481,7 +487,7 @@ mod tests {
         assert!(writer.is_ok());
 
         // Error case - missing config.
-        let (_tx2, rx2) = broadcast::channel::<Event>(10);
+        let (_tx2, rx2) = mpsc::channel::<Event>(10);
         let result = WriterBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())

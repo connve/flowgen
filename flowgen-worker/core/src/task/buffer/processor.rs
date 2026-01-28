@@ -5,13 +5,13 @@
 //! such as file writes, API calls, or columnar format conversions.
 
 use crate::config::ConfigExt;
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Instant};
 use tracing::error;
 
@@ -19,10 +19,10 @@ use tracing::error;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Processor event builder failed with error: {source}")]
     EventBuilder {
@@ -85,7 +85,7 @@ pub struct Processor {
     /// Buffer processor configuration.
     config: Arc<super::config::Processor>,
     /// Channel sender for processed events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -136,8 +136,9 @@ impl Processor {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(event)
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -178,12 +179,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Ok(event) => {
-                            // Filter events by previous task_id.
-                            if Some(event.task_id) != self.task_id.checked_sub(1) {
-                                continue;
-                            }
-
+                        Some(event) => {
                             // Extract JSON data from event.
                             let json_data = match event.data {
                                 EventData::Json(data) => data,
@@ -199,12 +195,12 @@ impl Processor {
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
-                                self.flush_buffer(buffer.clone(), FlushReason::Size, None).await?;
-                                buffer.clear();
+                                let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None).await?;
                                 last_flush = Instant::now();
                             }
                         }
-                        Err(_) => {
+                        None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
                                 self.flush_buffer(buffer, FlushReason::Shutdown, None).await?;
@@ -216,8 +212,8 @@ impl Processor {
 
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
-                    self.flush_buffer(buffer.clone(), FlushReason::Timeout, None).await?;
-                    buffer.clear();
+                    let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None).await?;
                     last_flush = Instant::now();
                 }
             }
@@ -245,12 +241,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Ok(event) => {
-                            // Filter events by previous task_id.
-                            if Some(event.task_id) != self.task_id.checked_sub(1) {
-                                continue;
-                            }
-
+                        Some(event) => {
                             // Extract JSON data from event.
                             let json_data = match &event.data {
                                 EventData::Json(data) => data.clone(),
@@ -290,7 +281,7 @@ impl Processor {
                                 last_flush_times.insert(rendered_key, Instant::now());
                             }
                         }
-                        Err(_) => {
+                        None => {
                             // Channel closed, flush all remaining buffers and exit.
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
@@ -387,9 +378,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Buffer processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -444,9 +435,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -463,7 +452,7 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use std::time::Duration;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
@@ -491,7 +480,7 @@ mod tests {
             partition_key: None,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         let processor = ProcessorBuilder::new()
             .config(config.clone())
@@ -507,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_missing_config() {
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx)
             .receiver(rx)

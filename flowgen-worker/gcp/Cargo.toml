@@ -16,6 +16,7 @@ google-cloud-bigquery = { workspace = true }
 google-cloud-gax = { workspace = true }
 gcloud-auth = { workspace = true }
 gcloud-gax = { workspace = true }
+gcloud-googleapis = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -28,3 +29,4 @@ base64 = { workspace = true }
 arrow = { workspace = true }
 arrow-json = { workspace = true }
 chrono = { workspace = true }
+prost-types = { workspace = true }

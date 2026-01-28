@@ -3,21 +3,21 @@
 //! Executes Rhai scripts to transform, filter, or manipulate event data.
 //! Scripts can return objects, arrays, or null to control event emission.
 
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during script execution.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Processor event builder failed with error: {source}")]
     EventBuilder {
@@ -62,7 +62,7 @@ pub struct EventHandler {
     /// Processor configuration settings.
     config: Arc<super::config::Processor>,
     /// Channel sender for processed events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
     task_id: usize,
     /// Rhai script engine instance.
@@ -212,8 +212,9 @@ impl EventHandler {
 
     /// Emits a single event to the broadcast channel.
     async fn emit_event(&self, event: Event) -> Result<(), Error> {
-        self.tx
-            .send_with_logging(event)
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
@@ -239,7 +240,7 @@ pub struct Processor {
     /// Script task configuration.
     config: Arc<super::config::Processor>,
     /// Channel sender for transformed events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events to transform.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -338,7 +339,7 @@ impl crate::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -366,7 +367,7 @@ impl crate::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -377,9 +378,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -434,9 +435,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -452,7 +451,7 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
     use serde_json::{json, Map, Value};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
@@ -480,7 +479,7 @@ mod tests {
             code: "event".to_string(),
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -495,7 +494,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)
@@ -517,11 +516,11 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
-            tx: tx.clone(),
+            tx: Some(tx.clone()),
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
@@ -563,12 +562,12 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         let tx_clone = tx.clone();
 
         let event_handler = EventHandler {
             config,
-            tx: tx_clone,
+            tx: Some(tx_clone),
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
@@ -604,11 +603,11 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
@@ -657,11 +656,11 @@ mod tests {
             retry: None,
         });
 
-        let (tx, mut rx) = broadcast::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",

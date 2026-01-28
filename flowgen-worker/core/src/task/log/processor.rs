@@ -2,20 +2,17 @@
 
 use crate::event::Event;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn, Instrument};
-
-/// Default subject prefix for log events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "log";
 
 /// Errors that can occur during log processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: crate::event::Error,
     },
     #[error("Event builder failed with error: {source}")]
     EventBuilder {
@@ -38,7 +35,7 @@ pub struct EventHandler {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Event sender for passing through logged events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task type identifier (unused but kept for consistency).
     _task_type: &'static str,
     /// Task context (unused but kept for consistency).
@@ -112,7 +109,7 @@ impl EventHandler {
             }
         }
 
-        // Pass the event through to the next task with updated task_id
+        // Pass the event through to the next task with updated task_id (if there is a next task)
         let event = crate::event::EventBuilder::new()
             .data(event.data)
             .subject(event.subject)
@@ -121,9 +118,11 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx.send(event).map_err(|e| Error::SendMessage {
-            source: Box::new(e),
-        })?;
+        if let Some(ref tx) = self.tx {
+            tx.send(event).await.map_err(|_| Error::SendMessage {
+                source: crate::event::Error::SendMessage,
+            })?;
+        }
 
         Ok(())
     }
@@ -135,7 +134,7 @@ pub struct Processor {
     /// Log task configuration.
     config: Arc<super::config::Processor>,
     /// Channel sender for passing through events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Channel receiver for incoming events to log.
     rx: Receiver<Event>,
     /// Current task identifier for event filtering.
@@ -164,7 +163,7 @@ impl crate::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
@@ -194,7 +193,7 @@ impl crate::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -222,7 +221,7 @@ impl crate::task::runner::Runner for Processor {
                         .instrument(tracing::Span::current()),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -233,9 +232,9 @@ impl crate::task::runner::Runner for Processor {
 pub struct ProcessorBuilder {
     /// Processor configuration (required for build).
     config: Option<Arc<super::config::Processor>>,
-    /// Event broadcast sender (required for build).
+    /// Event sender for passing events to next task (optional if this is the last task).
     tx: Option<Sender<Event>>,
-    /// Event broadcast receiver (required for build).
+    /// Event receiver for incoming events (required for build).
     rx: Option<Receiver<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
@@ -290,9 +289,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -309,7 +306,7 @@ mod tests {
     use super::*;
     use crate::event::{EventBuilder, EventData};
     use serde_json::{json, Map, Value};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();
@@ -336,7 +333,7 @@ mod tests {
             structured: false,
             retry: None,
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -351,7 +348,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, rx2) = broadcast::channel(100);
+        let (tx2, rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .receiver(rx2)
@@ -373,12 +370,12 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
             task_id: 1,
-            tx,
+            tx: Some(tx),
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };
@@ -404,12 +401,12 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
             config,
             task_id: 1,
-            tx,
+            tx: Some(tx),
             _task_type: "test",
             _task_context: create_mock_task_context(),
         };

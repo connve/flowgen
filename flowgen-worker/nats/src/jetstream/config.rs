@@ -36,6 +36,11 @@ pub struct Config {
     /// Accepts duration strings: "100ms", "1s", etc.
     #[serde(default, with = "humantime_serde")]
     pub throttle: Option<Duration>,
+    /// Timeout for receiving publish acknowledgments (publisher only).
+    /// If not specified, uses the async-nats default timeout.
+    /// Accepts duration strings: "5s", "30s", "1m", etc.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<Duration>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,

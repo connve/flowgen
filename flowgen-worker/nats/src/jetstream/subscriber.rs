@@ -2,21 +2,21 @@ use super::message::NatsMessageExt;
 use async_nats::jetstream::{self};
 use flowgen_core::{
     client::Client,
-    event::{Event, SenderExt},
+    event::{Event, EventExt},
 };
 use std::sync::Arc;
 use tokio::pin;
-use tokio::{sync::broadcast::Sender, time};
+use tokio::{sync::mpsc::Sender, time};
 use tokio_stream::StreamExt;
 use tracing::{error, Instrument};
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("NATS client failed with error: {source}")]
     Client {
@@ -84,7 +84,7 @@ pub enum Error {
 /// Event handler for processing NATS messages.
 pub struct EventHandler {
     consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     task_id: usize,
     config: Arc<super::config::Subscriber>,
     task_type: &'static str,
@@ -107,8 +107,8 @@ impl EventHandler {
 
                 message.ack().await.ok();
 
-                self.tx
-                    .send_with_logging(e)
+                e.send_with_logging(self.tx.as_ref())
+                    .await
                     .map_err(|source| Error::SendMessage { source })?;
                 Ok(())
             }
@@ -167,7 +167,7 @@ pub struct Subscriber {
     /// Subscriber configuration including stream and consumer settings.
     config: Arc<super::config::Subscriber>,
     /// Sender for forwarding converted events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier for event tagging.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -363,9 +363,7 @@ impl SubscriberBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -382,7 +380,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::{path::PathBuf, time::Duration};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -422,7 +420,7 @@ mod tests {
             throttle: None,
             ..Default::default()
         });
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         // Success case.
         let subscriber = SubscriberBuilder::new()
@@ -436,7 +434,7 @@ mod tests {
         assert!(subscriber.is_ok());
 
         // Error case - missing config.
-        let (tx2, _rx2) = broadcast::channel(100);
+        let (tx2, _rx2) = mpsc::channel(100);
         let result = SubscriberBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())
@@ -502,7 +500,7 @@ mod tests {
             throttle: None,
             ..Default::default()
         });
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let result = SubscriberBuilder::new()
             .config(config)

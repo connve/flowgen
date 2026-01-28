@@ -1,0 +1,49 @@
+flow:
+  name: bigquery_storage_read_basic
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # BigQuery Storage Read reads the entire table using parallel streams.
+    # This is more efficient than query API for reading large tables.
+    # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    - gcp_bigquery_storage_read:
+        name: read_orders_table
+        credentials_path: /etc/gcp/credentials.json
+        project_id: my-project-id
+        dataset_id: analytics
+        table_id: orders
+        # Optional: limit to specific columns for efficiency
+        selected_fields:
+          - id
+          - customer_id
+          - amount
+          - order_date
+        # Optional: filter rows server-side
+        row_restriction: "order_date >= '2024-01-01'"
+        # Optional: read a sample of the data (10%)
+        # sample_percentage: 10.0
+        # Optional: time-travel to a snapshot
+        # snapshot_time: "2024-01-15T12:00:00Z"
+        # Optional: control parallelism
+        max_stream_count: 4
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false

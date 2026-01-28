@@ -8,7 +8,7 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use flowgen_core::{
     config::ConfigExt,
-    event::{Event, EventBuilder, EventData, SenderExt},
+    event::{Event, EventBuilder, EventData, EventExt},
 };
 use gcloud_auth::credentials::CredentialsFile;
 use google_cloud_bigquery::client::{Client, ClientConfig};
@@ -21,17 +21,17 @@ use google_cloud_bigquery::http::tabledata::list::{Tuple, Value};
 use google_cloud_bigquery::http::types::{QueryParameter, QueryParameterType, QueryParameterValue};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
 /// Errors that can occur during BigQuery query operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Query event builder failed with error: {source}")]
     EventBuilder {
@@ -100,7 +100,7 @@ pub enum Error {
 pub struct EventHandler {
     client: Arc<Client>,
     task_id: usize,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     config: Arc<super::config::Query>,
     task_type: &'static str,
 }
@@ -131,8 +131,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(result_event)
+        result_event
+            .send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -147,7 +148,7 @@ pub struct Processor {
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -224,7 +225,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
@@ -252,7 +253,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .in_current_span(),
                     );
                 }
-                Err(_) => return Ok(()),
+                None => return Ok(()),
             }
         }
     }
@@ -321,9 +322,7 @@ impl ProcessorBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self
                 .task_id
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,

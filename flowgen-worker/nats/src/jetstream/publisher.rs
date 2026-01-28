@@ -1,10 +1,11 @@
 use super::message::FlowgenMessageExt;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use futures_util::future;
 use std::sync::Arc;
 use tokio::sync::{
-    broadcast::{Receiver, Sender},
+    mpsc::{Receiver, Sender},
     Mutex,
 };
 use tracing::{error, Instrument};
@@ -32,10 +33,10 @@ impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Sending event to channel failed: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Publisher event builder failed with error: {source}")]
     EventBuilder {
@@ -83,6 +84,8 @@ pub enum Error {
     MissingClient,
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Publish acknowledgment timed out after {:?}", _0)]
+    PublishAckTimeout(std::time::Duration),
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -93,7 +96,7 @@ pub enum Error {
 pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
     task_id: usize,
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     config: Arc<super::config::Publisher>,
     task_type: &'static str,
 }
@@ -124,7 +127,15 @@ impl EventHandler {
             .await
             .map_err(|e| Error::Publish { source: e })?;
 
-        let ack = ack_future.await.map_err(|e| Error::Publish { source: e })?;
+        // Apply timeout if configured, otherwise use default async-nats timeout.
+        let ack = if let Some(timeout) = config.ack_timeout {
+            match tokio::time::timeout(timeout, ack_future).await {
+                Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
+                Err(_) => return Err(Error::PublishAckTimeout(timeout)),
+            }
+        } else {
+            ack_future.await.map_err(|e| Error::Publish { source: e })?
+        };
         let ack: PublishAck = ack.into();
         let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
@@ -136,8 +147,8 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(e)
+        e.send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
@@ -152,7 +163,7 @@ pub struct Publisher {
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
     /// Channel sender for response events.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -234,12 +245,14 @@ impl flowgen_core::task::runner::Runner for Publisher {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
-                Ok(event) => {
+                Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -263,8 +276,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                Err(_) => return Ok(()),
+                None => {
+                    // Channel closed, wait for all spawned handlers to complete.
+                    future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }
@@ -335,9 +353,7 @@ impl PublisherBuilder {
             rx: self
                 .rx
                 .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -354,7 +370,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -397,7 +413,7 @@ mod tests {
             throttle: None,
             ..Default::default()
         });
-        let (tx, rx) = broadcast::channel(100);
+        let (tx, rx) = mpsc::channel(100);
 
         // Success case.
         let publisher = PublisherBuilder::new()
@@ -412,7 +428,7 @@ mod tests {
         assert!(publisher.is_ok());
 
         // Error case - missing config.
-        let (_tx2, rx2) = broadcast::channel(100);
+        let (_tx2, rx2) = mpsc::channel(100);
         let result = PublisherBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())

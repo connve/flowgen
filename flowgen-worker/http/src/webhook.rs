@@ -6,11 +6,11 @@
 use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
-use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc::Sender;
 use tracing::{error, Instrument};
 
 /// JSON key for HTTP headers in webhook events.
@@ -25,7 +25,7 @@ pub enum Error {
     #[error("Sending event to channel failed with error: {source}")]
     SendMessage {
         #[source]
-        source: Box<tokio::sync::broadcast::error::SendError<Event>>,
+        source: flowgen_core::event::Error,
     },
     #[error("Webhook event builder failed with error: {source}")]
     EventBuilder {
@@ -85,7 +85,7 @@ pub struct EventHandler {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier.
     task_id: usize,
     /// Pre-loaded authentication credentials.
@@ -192,8 +192,8 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        self.tx
-            .send_with_logging(e)
+        e.send_with_logging(self.tx.as_ref())
+            .await
             .map_err(|source| Error::SendMessage { source })?;
         Ok(StatusCode::OK)
     }
@@ -205,7 +205,7 @@ pub struct Processor {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
     /// Event sender channel.
-    tx: Sender<Event>,
+    tx: Option<Sender<Event>>,
     /// Task identifier.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
@@ -362,9 +362,7 @@ impl ProcessorBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
-            tx: self
-                .tx
-                .ok_or_else(|| Error::MissingRequiredAttribute("sender".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
@@ -381,7 +379,7 @@ mod tests {
     use super::*;
     use serde_json::{Map, Value};
     use std::collections::HashMap;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
@@ -442,7 +440,7 @@ mod tests {
             credentials_path: None,
             retry: None,
         });
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         // Success case.
         let processor = ProcessorBuilder::new()
@@ -456,7 +454,7 @@ mod tests {
         assert!(processor.is_ok());
 
         // Error case - missing config.
-        let (tx2, _rx2) = broadcast::channel(100);
+        let (tx2, _rx2) = mpsc::channel(100);
         let result = ProcessorBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())
@@ -476,12 +474,12 @@ mod tests {
 
     #[test]
     fn test_event_handler_structure() {
-        let (tx, _rx) = broadcast::channel(1);
+        let (tx, _rx) = mpsc::channel(1);
         let config = Arc::new(crate::config::Processor::default());
 
         let _handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 0,
             credentials: None,
             task_type: "test",
@@ -505,11 +503,11 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             credentials: None,
             task_type: "test",
@@ -535,11 +533,11 @@ mod tests {
             retry: None,
         });
 
-        let (tx, _rx) = broadcast::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
 
         let handler = EventHandler {
             config,
-            tx,
+            tx: Some(tx),
             task_id: 1,
             credentials: None,
             task_type: "test",
