@@ -33,6 +33,8 @@ pub struct TaskContext {
     pub cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
     /// Optional shared HTTP server for webhook tasks.
     pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
+    /// Optional resource loader for loading external assets (SQL files, templates, etc.).
+    pub resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<crate::retry::RetryConfig>,
 }
@@ -47,6 +49,7 @@ impl std::fmt::Debug for TaskContext {
                 "http_server",
                 &self.http_server.as_ref().map(|_| "<HttpServer>"),
             )
+            .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
             .finish()
     }
@@ -65,6 +68,8 @@ pub struct TaskContextBuilder {
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
     /// Optional shared HTTP server for webhook tasks.
     http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
+    /// Resource loader for loading external assets.
+    resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration.
     retry: Option<crate::retry::RetryConfig>,
 }
@@ -126,6 +131,18 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the resource loader for loading external assets.
+    ///
+    /// # Arguments
+    /// * `resource_loader` - Optional resource loader instance
+    pub fn resource_loader(
+        mut self,
+        resource_loader: Option<crate::resource::ResourceLoader>,
+    ) -> Self {
+        self.resource_loader = resource_loader;
+        self
+    }
+
     /// Sets the app-level retry configuration.
     ///
     /// # Arguments
@@ -152,6 +169,7 @@ impl TaskContextBuilder {
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_manager".to_string()))?,
             cache: self.cache,
             http_server: self.http_server,
+            resource_loader: self.resource_loader,
             retry: self.retry,
         })
     }

@@ -57,7 +57,7 @@ fn default_use_legacy_sql() -> bool {
 /// - `name`: Unique name / identifier of the task.
 /// - `credentials_path`: Path to GCP service account credentials JSON file.
 /// - `project_id`: GCP project ID where BigQuery resources are located.
-/// - `query`: SQL query to execute (use `@parameter_name` for parameterized queries).
+/// - `query`: SQL query source (inline string or resource file reference).
 /// - `parameters`: Optional query parameters for safe SQL injection prevention.
 /// - `location`: Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
 /// - `max_results`: Optional maximum number of rows to return per page (default: all rows).
@@ -70,16 +70,24 @@ fn default_use_legacy_sql() -> bool {
 ///
 /// # Examples
 ///
-/// Basic query without parameters:
-/// ```json
-/// {
-///     "bigquery_query": {
-///         "name": "fetch_recent_orders",
-///         "credentials_path": "/etc/gcp/credentials.json",
-///         "project_id": "my-project-id",
-///         "query": "SELECT order_id, customer_id, amount FROM `project.dataset.orders` WHERE order_date >= '2024-01-01' LIMIT 100"
-///     }
-/// }
+/// Basic query with inline SQL:
+/// ```yaml
+/// bigquery_query:
+///   name: fetch_recent_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   query:
+///     inline: "SELECT order_id, customer_id, amount FROM `project.dataset.orders` WHERE order_date >= '2024-01-01' LIMIT 100"
+/// ```
+///
+/// Query using external resource file:
+/// ```yaml
+/// bigquery_query:
+///   name: fetch_recent_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   query:
+///     resource: "queries/get_recent_orders.sql"
 /// ```
 ///
 /// Parameterized query for SQL injection protection:
@@ -127,7 +135,7 @@ fn default_use_legacy_sql() -> bool {
 ///     }
 /// }
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Query {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -135,8 +143,8 @@ pub struct Query {
     pub credentials_path: PathBuf,
     /// GCP project ID where BigQuery resources are located.
     pub project_id: String,
-    /// SQL query to execute (use @parameter_name for parameterized queries).
-    pub query: String,
+    /// SQL query source (inline or resource).
+    pub query: flowgen_core::resource::Source,
     /// Optional query parameters for SQL injection protection.
     /// Keys are parameter names (without @ prefix), values are parameter values.
     #[serde(default)]
@@ -171,42 +179,78 @@ pub struct Query {
 
 impl ConfigExt for Query {}
 
+impl Query {
+    /// Resolves the query string from inline or resource source.
+    ///
+    /// # Arguments
+    /// * `resource_loader` - ResourceLoader instance for loading external files.
+    ///
+    /// # Returns
+    /// The resolved SQL query string.
+    pub async fn resolve_query(
+        &self,
+        resource_loader: &flowgen_core::resource::ResourceLoader,
+    ) -> Result<String, ResolveError> {
+        match &self.query {
+            flowgen_core::resource::Source::Inline(sql) => Ok(sql.clone()),
+            flowgen_core::resource::Source::Resource(key) => resource_loader
+                .load(key)
+                .await
+                .map_err(|source| ResolveError::Resource { source }),
+        }
+    }
+}
+
+/// Errors that can occur when resolving query configuration.
+#[derive(thiserror::Error, Debug)]
+pub enum ResolveError {
+    #[error("Failed to load resource: {source}")]
+    Resource {
+        #[source]
+        source: flowgen_core::resource::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
-    fn test_query_config_default() {
-        let query = Query::default();
-        assert_eq!(query.name, String::new());
-        assert_eq!(query.credentials_path, PathBuf::new());
-        assert_eq!(query.project_id, String::new());
-        assert_eq!(query.query, String::new());
-        assert_eq!(query.parameters, None);
-        assert_eq!(query.location, None);
-        assert_eq!(query.max_results, None);
-        assert_eq!(query.timeout, None);
-        assert!(!query.use_query_cache);
-        assert!(!query.use_legacy_sql);
-        assert_eq!(query.create_session, None);
-        assert_eq!(query.labels, None);
-        assert_eq!(query.default_dataset, None);
-        assert_eq!(query.retry, None);
-    }
-
-    #[test]
-    fn test_query_config_deserialization_with_default_timeout() {
+    fn test_query_config_deserialization_with_inline_query() {
         let json = r#"{
             "name": "test",
             "credentials_path": "/test/creds.json",
             "project_id": "test-project",
-            "query": "SELECT 1"
+            "query": {
+                "inline": "SELECT 1"
+            }
         }"#;
         let query: Query = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            query.query,
+            flowgen_core::resource::Source::Inline("SELECT 1".to_string())
+        );
         assert_eq!(query.timeout, Some(Duration::from_secs(10)));
         assert!(query.use_query_cache);
         assert!(!query.use_legacy_sql);
+    }
+
+    #[test]
+    fn test_query_config_deserialization_with_resource_query() {
+        let json = r#"{
+            "name": "test",
+            "credentials_path": "/test/creds.json",
+            "project_id": "test-project",
+            "query": {
+                "resource": "queries/get_data.sql"
+            }
+        }"#;
+        let query: Query = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            query.query,
+            flowgen_core::resource::Source::Resource("queries/get_data.sql".to_string())
+        );
     }
 
     #[test]
@@ -219,13 +263,20 @@ mod tests {
             name: "test_query".to_string(),
             credentials_path: PathBuf::from("/etc/gcp/credentials.json"),
             project_id: "my-project-id".to_string(),
-            query: "SELECT * FROM `dataset.table` WHERE status = @status AND date >= @start_date"
-                .to_string(),
+            query: flowgen_core::resource::Source::Inline(
+                "SELECT * FROM `dataset.table` WHERE status = @status AND date >= @start_date"
+                    .to_string(),
+            ),
             parameters: Some(parameters.clone()),
             location: Some("US".to_string()),
             max_results: Some(1000),
             timeout: Some(Duration::from_secs(300)),
-            ..Default::default()
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
         };
 
         assert_eq!(query.name, "test_query");
@@ -242,8 +293,17 @@ mod tests {
             name: "serialize_test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
-            query: "SELECT 1".to_string(),
-            ..Default::default()
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
         };
 
         let json = serde_json::to_string(&query).unwrap();
@@ -262,12 +322,17 @@ mod tests {
             name: "parameterized_query".to_string(),
             credentials_path: PathBuf::from("/etc/gcp/creds.json"),
             project_id: "analytics-prod".to_string(),
-            query: "SELECT * FROM orders WHERE customer_id = @customer_id AND amount >= @min_amount AND active = @active".to_string(),
+            query: flowgen_core::resource::Source::Inline("SELECT * FROM orders WHERE customer_id = @customer_id AND amount >= @min_amount AND active = @active".to_string()),
             parameters: Some(parameters),
             location: Some("EU".to_string()),
             max_results: Some(500),
             timeout: Some(Duration::from_secs(60)),
-            ..Default::default()
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
         };
 
         assert!(query.parameters.is_some());
@@ -283,11 +348,19 @@ mod tests {
             name: "clone_test".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             project_id: "test-project".to_string(),
-            query: "SELECT COUNT(*) FROM dataset.table".to_string(),
+            query: flowgen_core::resource::Source::Inline(
+                "SELECT COUNT(*) FROM dataset.table".to_string(),
+            ),
             location: Some("us-central1".to_string()),
             max_results: Some(100),
             timeout: Some(Duration::from_secs(30)),
-            ..Default::default()
+            parameters: None,
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
         };
 
         let cloned = query.clone();

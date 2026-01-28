@@ -94,6 +94,11 @@ pub enum Error {
     },
     #[error("Invalid date/time value")]
     InvalidDateTime,
+    #[error("Failed to load resource: {source}")]
+    ResourceLoad {
+        #[source]
+        source: flowgen_core::resource::Error,
+    },
 }
 
 /// Event handler for processing individual query events.
@@ -103,6 +108,7 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     config: Arc<super::config::Query>,
     task_type: &'static str,
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 }
 
 impl EventHandler {
@@ -120,7 +126,8 @@ impl EventHandler {
             .map_err(|source| Error::ConfigRender { source })?;
 
         // Execute query.
-        let record_batch = execute_query(&self.client, &config).await?;
+        let record_batch =
+            execute_query(&self.client, &config, self.resource_loader.as_ref()).await?;
 
         // Build result event.
         let result_event = EventBuilder::new()
@@ -152,7 +159,7 @@ pub struct Processor {
     /// Current task identifier for event filtering.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -190,6 +197,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             config: Arc::clone(&self.config),
             task_type: self.task_type,
+            resource_loader: self.task_context.resource_loader.clone(),
         };
 
         Ok(event_handler)
@@ -198,7 +206,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
             match self.init().await {
@@ -326,7 +334,7 @@ impl ProcessorBuilder {
             task_id: self
                 .task_id
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,
-            _task_context: self
+            task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
             task_type: self
@@ -346,10 +354,25 @@ impl Default for ProcessorBuilder {
 async fn execute_query(
     client: &Client,
     config: &super::config::Query,
+    resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
 ) -> Result<arrow::array::RecordBatch, Error> {
+    // Resolve query from inline or resource source.
+    let query_string = match &config.query {
+        flowgen_core::resource::Source::Inline(sql) => sql.clone(),
+        flowgen_core::resource::Source::Resource(key) => {
+            let loader = resource_loader.ok_or_else(|| Error::ResourceLoad {
+                source: flowgen_core::resource::Error::ResourcePathNotConfigured,
+            })?;
+            loader
+                .load(key)
+                .await
+                .map_err(|source| Error::ResourceLoad { source })?
+        }
+    };
+
     // Build query request.
     let mut query_request = QueryRequest {
-        query: config.query.clone(),
+        query: query_string,
         use_legacy_sql: config.use_legacy_sql,
         use_query_cache: Some(config.use_query_cache),
         ..Default::default()
