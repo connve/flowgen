@@ -17,7 +17,7 @@ pub enum Error {
     #[error("No path provided")]
     EmptyPath,
     #[error("Missing required builder attribute: {0}")]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
 }
 
 /// Object store context containing the store instance and base path.
@@ -111,7 +111,7 @@ impl ClientBuilder {
         Ok(Client {
             path: self
                 .path
-                .ok_or_else(|| Error::MissingRequiredAttribute("path".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("path".to_string()))?,
             credentials_path: self.credentials_path,
             options: self.options,
             context: None,
@@ -164,7 +164,7 @@ mod tests {
         let result = ClientBuilder::new().build();
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "path")
+            matches!(result.unwrap_err(), Error::MissingBuilderAttribute(attr) if attr == "path")
         );
     }
 

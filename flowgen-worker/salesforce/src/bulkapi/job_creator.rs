@@ -17,8 +17,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Missing required attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    #[error("Missing required builder attribute: {}", _0)]
+    MissingBuilderAttribute(String),
     #[error(transparent)]
     Service(#[from] flowgen_core::service::Error),
     #[error("HTTP request failed: {source}")]
@@ -44,6 +44,11 @@ pub enum Error {
     },
     #[error("Operation not implemented")]
     NotImplemented(),
+    #[error("Failed to load resource: {source}")]
+    ResourceLoad {
+        #[source]
+        source: flowgen_core::resource::Error,
+    },
 }
 
 /// Request payload for Salesforce bulk query job creation.
@@ -69,7 +74,7 @@ pub struct JobCreator {
     rx: Receiver<Event>,
     current_task_id: usize,
     task_type: &'static str,
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 /// Event handler for processing individual job creation requests.
@@ -82,10 +87,12 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     /// Task identifier for event correlation.
     current_task_id: usize,
-    /// SFDC client
+    /// Salesforce client for authentication and API access.
     sfdc_client: salesforce_core::client::Client,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// Optional resource loader for loading external query files.
+    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
 }
 
 impl EventHandler {
@@ -98,13 +105,33 @@ impl EventHandler {
             .clone()
             .ok_or_else(Error::NoSalesforceAuthToken)?;
 
+        // Resolve query from inline or resource source.
+        let query_string = match &self.config.query {
+            Some(flowgen_core::resource::Source::Inline(soql)) => Some(soql.clone()),
+            Some(flowgen_core::resource::Source::Resource(key)) => {
+                let loader = self
+                    .resource_loader
+                    .as_ref()
+                    .ok_or_else(|| Error::ResourceLoad {
+                        source: flowgen_core::resource::Error::ResourcePathNotConfigured,
+                    })?;
+                Some(
+                    loader
+                        .load(key)
+                        .await
+                        .map_err(|source| Error::ResourceLoad { source })?,
+                )
+            }
+            None => None,
+        };
+
         // Build API payload based on operation type.
         let payload = match self.config.operation {
             super::config::Operation::Query | super::config::Operation::QueryAll => {
                 // Query operations require SOQL query and output format specs.
                 QueryJobPayload {
                     operation: self.config.operation.clone(),
-                    query: self.config.query.clone(),
+                    query: query_string,
                     content_type: self.config.content_type.clone(),
                     column_delimiter: self.config.column_delimiter.clone(),
                     line_ending: self.config.line_ending.clone(),
@@ -186,6 +213,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
             client,
             sfdc_client,
             task_type: self.task_type,
+            resource_loader: self.task_context.resource_loader.clone(),
         };
         Ok(event_handler)
     }
@@ -193,7 +221,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
     /// Main execution loop: listen for events, filter by task ID, spawn handlers.
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         // Initialize runner task.
         let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
@@ -300,6 +328,7 @@ impl JobCreatorBuilder {
         self
     }
 
+    /// Sets the task type identifier for event categorization.
     pub fn task_type(mut self, task_type: &'static str) -> Self {
         self.task_type = Some(task_type);
         self
@@ -319,18 +348,18 @@ impl JobCreatorBuilder {
         Ok(JobCreator {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             rx: self
                 .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
             current_task_id: self.current_task_id,
-            _task_context: self
+            task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -412,8 +441,11 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = Error::MissingRequiredAttribute("config".to_string());
-        assert_eq!(err.to_string(), "Missing required attribute: config");
+        let err = Error::MissingBuilderAttribute("config".to_string());
+        assert_eq!(
+            err.to_string(),
+            "Missing required builder attribute: config"
+        );
 
         let err = Error::NoSalesforceAuthToken();
         assert_eq!(err.to_string(), "No salesforce access token provided");
@@ -424,9 +456,9 @@ mod tests {
 
     #[test]
     fn test_error_debug() {
-        let err = Error::MissingRequiredAttribute("test".to_string());
+        let err = Error::MissingBuilderAttribute("test".to_string());
         let debug_str = format!("{err:?}");
-        assert!(debug_str.contains("MissingRequiredAttribute"));
+        assert!(debug_str.contains("MissingBuilderAttribute"));
     }
 
     #[tokio::test]
@@ -443,7 +475,9 @@ mod tests {
         let config = Arc::new(super::super::config::JobCreator {
             name: "test_job".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Account".to_string(),
+            )),
             object: None,
             operation: super::super::config::Operation::Query,
             job_type: super::super::config::JobType::Query,
@@ -485,10 +519,10 @@ mod tests {
         assert!(result.is_err());
 
         match result {
-            Err(Error::MissingRequiredAttribute(attr)) => {
+            Err(Error::MissingBuilderAttribute(attr)) => {
                 assert_eq!(attr, "config");
             }
-            _ => panic!("Expected MissingRequiredAttribute error"),
+            _ => panic!("Expected MissingBuilderAttribute error"),
         }
     }
 
@@ -499,7 +533,9 @@ mod tests {
         let config = Arc::new(super::super::config::JobCreator {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Account".to_string(),
+            )),
             job_type: super::super::config::JobType::Query,
             object: None,
             operation: super::super::config::Operation::Query,
@@ -517,10 +553,10 @@ mod tests {
         assert!(result.is_err());
 
         match result {
-            Err(Error::MissingRequiredAttribute(attr)) => {
+            Err(Error::MissingBuilderAttribute(attr)) => {
                 assert_eq!(attr, "receiver");
             }
-            _ => panic!("Expected MissingRequiredAttribute error"),
+            _ => panic!("Expected MissingBuilderAttribute error"),
         }
     }
 
@@ -531,7 +567,9 @@ mod tests {
         let config = Arc::new(super::super::config::JobCreator {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Account".to_string(),
+            )),
             job_type: super::super::config::JobType::Query,
             object: None,
             operation: super::super::config::Operation::Query,
@@ -549,10 +587,10 @@ mod tests {
         assert!(result.is_err());
 
         match result {
-            Err(Error::MissingRequiredAttribute(attr)) => {
+            Err(Error::MissingBuilderAttribute(attr)) => {
                 assert_eq!(attr, "task_context");
             }
-            _ => panic!("Expected MissingRequiredAttribute error"),
+            _ => panic!("Expected MissingBuilderAttribute error"),
         }
     }
 
@@ -595,11 +633,11 @@ mod tests {
 
     #[test]
     fn test_error_from_conversions() {
-        let service_err = Error::MissingRequiredAttribute("test".to_string());
+        let service_err = Error::MissingBuilderAttribute("test".to_string());
         let _: Error = service_err;
 
         fn _test_conversions() {
-            let _: Error = Error::MissingRequiredAttribute("x".to_string());
+            let _: Error = Error::MissingBuilderAttribute("x".to_string());
         }
     }
 
@@ -643,7 +681,9 @@ mod tests {
         let config = Arc::new(super::super::config::JobCreator {
             name: "struct_test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Account".to_string(),
+            )),
             job_type: super::super::config::JobType::Query,
             object: None,
             operation: super::super::config::Operation::Query,
@@ -661,7 +701,7 @@ mod tests {
             rx,
             current_task_id: 5,
             task_type: "",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         assert_eq!(processor.current_task_id, 5);

@@ -32,7 +32,7 @@ pub enum Error {
     #[error("Expected JSON event data, got Avro")]
     ExpectedJsonGotAvro,
     #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -271,18 +271,18 @@ impl ProcessorBuilder {
         Ok(Processor {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             rx: self
                 .rx
-                .ok_or_else(|| Error::MissingRequiredAttribute("receiver".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
             task_id: self.task_id,
             _task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_context".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
         })
     }
 }
@@ -341,7 +341,7 @@ mod tests {
             .await;
         assert!(matches!(
             result.unwrap_err(),
-            Error::MissingRequiredAttribute(_)
+            Error::MissingBuilderAttribute(_)
         ));
     }
 

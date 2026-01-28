@@ -71,8 +71,8 @@ pub enum Error {
         #[source]
         source: serde_json::error::Error,
     },
-    #[error("Missing required attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    #[error("Missing required builder attribute: {}", _0)]
+    MissingBuilderAttribute(String),
     #[error("Content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
     #[error("Sending event to channel failed (receiver dropped)")]
@@ -240,20 +240,20 @@ impl EventBuilder {
         Ok(Event {
             data: self
                 .data
-                .ok_or_else(|| Error::MissingRequiredAttribute("data".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("data".to_string()))?,
             subject: self
                 .subject
-                .ok_or_else(|| Error::MissingRequiredAttribute("subject".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("subject".to_string()))?,
             id: self.id,
             timestamp: self
                 .timestamp
-                .ok_or_else(|| Error::MissingRequiredAttribute("timestamp".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("timestamp".to_string()))?,
             task_id: self
                 .task_id
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_id".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingRequiredAttribute("task_type".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
         })
     }
@@ -391,11 +391,10 @@ mod tests {
             .subject("test.subject".to_string())
             .build();
 
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: data"));
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute(attr)) if attr == "data"
+        ));
     }
 
     #[test]
@@ -404,11 +403,10 @@ mod tests {
             .data(EventData::Json(json!({"test": "value"})))
             .build();
 
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing required attribute: subject"));
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute(attr)) if attr == "subject"
+        ));
     }
 
     #[test]

@@ -47,7 +47,7 @@ pub enum Error {
     #[error("No authentication credentials provided")]
     NoCredentials,
     #[error("Missing required builder attribute: {}", _0)]
-    MissingRequiredAttribute(String),
+    MissingBuilderAttribute(String),
 }
 
 /// NATS client with optional JetStream context for reliable messaging.
@@ -151,7 +151,7 @@ impl ClientBuilder {
             credentials_path: self
                 .credentials_path
                 .clone()
-                .ok_or_else(|| Error::MissingRequiredAttribute("credentials_path".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("credentials_path".to_string()))?,
             url: self.url.clone(),
             jetstream: None,
         })
@@ -192,7 +192,7 @@ mod tests {
         let result = builder.build();
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::MissingRequiredAttribute(attr) if attr == "credentials_path")
+            matches!(result.unwrap_err(), Error::MissingBuilderAttribute(attr) if attr == "credentials_path")
         );
     }
 

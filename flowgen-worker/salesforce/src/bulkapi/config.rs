@@ -8,9 +8,9 @@ use std::path::PathBuf;
 ///         "credentials_path": "/path/to/salesforce_test_creds.json",
 ///         "operation": "query",
 ///         "job": "Select Id from Account",
-///         "content_type": "CSV",
-///         "column_delimiter": "COMMA",
-///         "line_ending": "CRLF"
+///         "content_type": "csv",
+///         "column_delimiter": "comma",
+///         "line_ending": "crlf"
 ///     }
 ///  }
 /// ```
@@ -22,9 +22,9 @@ use std::path::PathBuf;
 ///         "credentials_path": "/path/to/salesforce_test_creds.json",
 ///         "operation": "queryAll",
 ///         "job": "Select Id from Account",
-///         "content_type": "CSV",
-///         "column_delimiter": "COMMA",
-///         "line_ending": "CRLF"
+///         "content_type": "csv",
+///         "column_delimiter": "comma",
+///         "line_ending": "crlf"
 ///     }
 ///  }
 /// ```
@@ -47,7 +47,8 @@ pub struct JobCreator {
     /// Salesforce Job Type like query, ingest.
     pub job_type: JobType,
     /// SOQL query for query/queryAll operations.
-    pub query: Option<String>,
+    /// Can be specified as inline SOQL or loaded from external resource file.
+    pub query: Option<flowgen_core::resource::Source>,
     /// Salesforce object API name (e.g., "Account", "Contact").
     pub object: Option<String>,
     /// Type of bulk operation to perform.
@@ -210,7 +211,9 @@ mod tests {
         let creator = JobCreator {
             name: "query_job".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
-            query: Some("SELECT Id, Name FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id, Name FROM Account".to_string(),
+            )),
             job_type: JobType::Query,
             object: None,
             operation: Operation::Query,
@@ -456,7 +459,9 @@ mod tests {
         let creator = JobCreator {
             name: "full_job".to_string(),
             credentials_path: PathBuf::from("/path/to/creds.json"),
-            query: Some("SELECT Id FROM Account".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Account".to_string(),
+            )),
             job_type: JobType::Query,
             object: None,
             operation: Operation::Query,
@@ -479,7 +484,9 @@ mod tests {
         let creator1 = JobCreator {
             name: "clone_test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
-            query: Some("SELECT Id FROM Contact".to_string()),
+            query: Some(flowgen_core::resource::Source::Inline(
+                "SELECT Id FROM Contact".to_string(),
+            )),
             job_type: JobType::Query,
             object: None,
             operation: Operation::QueryAll,

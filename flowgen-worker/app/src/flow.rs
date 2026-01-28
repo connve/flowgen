@@ -68,9 +68,18 @@ pub enum Error {
     /// Error in cache operations.
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),
-    /// Missing required configuration attribute.
-    #[error("Missing required attribute: {0}")]
-    MissingRequiredAttribute(String),
+    /// Missing required builder attribute.
+    #[error("Missing required builder attribute: {0}")]
+    MissingBuilderAttribute(String),
+    /// Task context not initialized (init must be called first).
+    #[error("Task context not initialized: init() must be called first")]
+    TaskContextNotInitialized,
+    /// Task manager not initialized (init must be called first).
+    #[error("Task manager not initialized: init() must be called first")]
+    TaskManagerNotInitialized,
+    /// Failed to register flow for leader election.
+    #[error("Failed to register flow for leader election: {0}")]
+    LeaderElectionRegistrationFailed(String),
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
     LeadershipChannelClosed,
@@ -167,7 +176,7 @@ impl Flow {
         let task_context = Arc::new(
             task_context_builder
                 .build()
-                .map_err(|e| Error::MissingRequiredAttribute(e.to_string()))?,
+                .map_err(|e| Error::MissingBuilderAttribute(e.to_string()))?,
         );
 
         self.task_manager = Some(task_manager);
@@ -186,9 +195,10 @@ impl Flow {
             return Ok(Vec::new());
         }
 
-        let task_context = self.task_context.as_ref().ok_or_else(|| {
-            Error::MissingRequiredAttribute("task_context: init() must be called first".to_string())
-        })?;
+        let task_context = self
+            .task_context
+            .as_ref()
+            .ok_or_else(|| Error::TaskContextNotInitialized)?;
 
         let webhook_task_configs: Vec<(usize, TaskType)> = self
             .config
@@ -238,12 +248,12 @@ impl Flow {
     /// The main internal run loop for the flow.
     async fn run_background_tasks(self) -> Result<(), Error> {
         let is_leader_elected = self.is_leader_elected();
-        let task_manager = self.task_manager.ok_or_else(|| {
-            Error::MissingRequiredAttribute("task_manager: init() must be called first".to_string())
-        })?;
-        let task_context = self.task_context.ok_or_else(|| {
-            Error::MissingRequiredAttribute("task_context: init() must be called first".to_string())
-        })?;
+        let task_manager = self
+            .task_manager
+            .ok_or_else(|| Error::TaskManagerNotInitialized)?;
+        let task_context = self
+            .task_context
+            .ok_or_else(|| Error::TaskContextNotInitialized)?;
         let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
 
         // Determine which tasks to run in the main phase.
@@ -283,11 +293,7 @@ impl Flow {
         let mut leadership_rx = task_manager
             .register(flow_id.clone(), leader_election_options)
             .await
-            .map_err(|e| {
-                Error::MissingRequiredAttribute(format!(
-                    "Failed to register flow for leader election: {e}"
-                ))
-            })?;
+            .map_err(|e| Error::LeaderElectionRegistrationFailed(e.to_string()))?;
 
         // Main lifecycle loop.
         loop {
@@ -967,12 +973,12 @@ impl FlowBuilder {
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
-    /// Returns `Error::MissingRequiredAttribute` if required fields are not set.
+    /// Returns `Error::MissingBuilderAttribute` if required fields are not set.
     pub fn build(self) -> Result<Flow, Error> {
         Ok(Flow {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingRequiredAttribute("config".to_string()))?,
+                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
             host: self.host,
             cache: self.cache,
@@ -1031,11 +1037,10 @@ mod tests {
 
         let result = FlowBuilder::new().http_server(server).build();
 
-        assert!(result.is_err());
-        match result {
-            Err(Error::MissingRequiredAttribute(attr)) => assert_eq!(attr, "config"),
-            _ => panic!("Expected MissingRequiredAttribute error"),
-        }
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute(attr)) if attr == "config"
+        ));
     }
 
     #[test]
