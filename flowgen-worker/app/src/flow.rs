@@ -320,7 +320,7 @@ impl Flow {
             // 3. Monitor tasks.
             if is_leader_elected {
                 // For leader-elected flows, monitor leadership and abort tasks if leadership is lost.
-                loop {
+                let all_completed = loop {
                     tokio::select! {
                         biased;
                         Some(status) = leadership_rx.recv() => {
@@ -329,18 +329,37 @@ impl Flow {
                                 for task in &background_tasks {
                                     task.abort();
                                 }
-                                break; // Break inner loop to re-evaluate leadership.
+                                break false; // Lost leadership, may need to re-acquire.
                             }
                         }
-                        _ = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
-                            debug!("All tasks completed for flow {}", flow_id);
-                            break; // Break inner loop to re-evaluate leadership.
+                        results = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
+                            // Check if any tasks failed.
+                            for (idx, result) in results.iter().enumerate() {
+                                if let Err(e) = result {
+                                    error!("Task {} failed: {}", idx, e);
+                                }
+                            }
+                            info!("All tasks completed for flow {}", flow_id);
+                            break true; // All tasks completed successfully.
                         }
                     }
+                };
+
+                if all_completed {
+                    // All tasks finished, exit main loop.
+                    break;
                 }
+                // Otherwise, lost leadership - loop back to re-acquire.
             } else {
                 // For non-leader-elected flows, just wait for all tasks to complete.
-                futures::future::join_all(background_tasks).await;
+                let results = futures::future::join_all(background_tasks).await;
+
+                // Check if any tasks failed.
+                for (idx, result) in results.iter().enumerate() {
+                    if let Err(e) = result {
+                        error!("Task {} failed: {}", idx, e);
+                    }
+                }
                 info!("All tasks completed for flow {}", flow_id);
                 break; // Exit main loop as the work is done.
             }
@@ -761,7 +780,7 @@ async fn spawn_tasks(
                 let config = Arc::new(config.to_owned());
                 let task_context = Arc::clone(task_context);
                 let task_type = task.as_str();
-                let span = tracing::Span::current().clone();
+                let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         let mut builder = flowgen_object_store::reader::ReaderBuilder::new()

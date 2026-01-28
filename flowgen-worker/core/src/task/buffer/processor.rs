@@ -5,7 +5,7 @@
 //! such as file writes, API calls, or columnar format conversions.
 
 use crate::config::ConfigExt;
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -136,11 +136,10 @@ impl Processor {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(event)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }
@@ -196,8 +195,8 @@ impl Processor {
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
-                                self.flush_buffer(buffer.clone(), FlushReason::Size, None).await?;
-                                buffer.clear();
+                                let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None).await?;
                                 last_flush = Instant::now();
                             }
                         }
@@ -213,8 +212,8 @@ impl Processor {
 
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
-                    self.flush_buffer(buffer.clone(), FlushReason::Timeout, None).await?;
-                    buffer.clear();
+                    let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None).await?;
                     last_flush = Instant::now();
                 }
             }

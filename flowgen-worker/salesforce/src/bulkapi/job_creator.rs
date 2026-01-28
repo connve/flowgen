@@ -1,4 +1,4 @@
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -150,11 +150,10 @@ impl EventHandler {
             .build()
             .map_err(|e| Error::Event { source: e })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|e| Error::SendMessage { source: e })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|e| Error::SendMessage { source: e })?;
+
         Ok(())
     }
 }

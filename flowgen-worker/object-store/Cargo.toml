@@ -24,5 +24,6 @@ apache-avro = { workspace = true }
 url = { workspace = true }
 object_store = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 async-trait.workspace = true
 tokio-retry = { workspace = true }

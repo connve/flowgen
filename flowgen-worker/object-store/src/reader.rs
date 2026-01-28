@@ -2,7 +2,7 @@ use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventExt};
 use flowgen_core::{client::Client, event::EventData};
 use futures::StreamExt;
 use object_store::GetResultPayload;
@@ -221,11 +221,9 @@ impl EventHandler {
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
-            if let Some(ref tx) = self.tx {
-                tx.send_with_logging(e)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
         }
 
         // Delete file from object store if configured.

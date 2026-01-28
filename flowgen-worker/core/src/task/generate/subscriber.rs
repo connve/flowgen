@@ -3,7 +3,7 @@
 //! Implements a timer-based event generator that creates events at regular intervals
 //! with optional message content and count limits for testing and simulation workflows.
 
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use chrono::DateTime;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
@@ -206,11 +206,9 @@ impl EventHandler {
                 .task_type(self.task_type)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
-            if let Some(ref tx) = self.tx {
-                tx.send_with_logging(e)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
 
             counter += 1;
             match self.config.count {

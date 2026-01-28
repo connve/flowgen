@@ -4,7 +4,8 @@ use chrono::{DateTime, Datelike, Utc};
 use flowgen_core::buffer::ToWriter;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use futures_util::future;
 use object_store::PutPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -207,11 +208,9 @@ impl EventHandler {
 
         let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }
@@ -313,12 +312,14 @@ impl flowgen_core::task::runner::Runner for Writer {
         };
 
         // Process incoming events, filtering by task ID.
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -342,8 +343,13 @@ impl flowgen_core::task::runner::Runner for Writer {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    // Channel closed, wait for all spawned handlers to complete.
+                    future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

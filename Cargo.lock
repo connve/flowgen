@@ -1262,6 +1262,7 @@ dependencies = [
  "chrono",
  "flowgen_core",
  "futures",
+ "futures-util",
  "object_store",
  "serde",
  "serde_json",

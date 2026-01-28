@@ -1,6 +1,6 @@
 use flowgen_core::{
     client::Client,
-    event::{AvroData, Event, EventBuilder, EventData, SenderExt},
+    event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
 use salesforce_pubsub_v1::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
 use std::sync::Arc;
@@ -160,11 +160,9 @@ impl EventHandler {
                     .build()
                     .map_err(|e| Error::Event { source: e })?;
 
-                if let Some(ref tx) = self.tx {
-                    tx.send_with_logging(e)
-                        .await
-                        .map_err(|source| Error::SendMessage { source })?;
-                }
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
             }
         }
 

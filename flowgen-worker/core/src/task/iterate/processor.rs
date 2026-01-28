@@ -3,7 +3,7 @@
 //! Processes events containing JSON arrays and emits individual events
 //! for each array element, enabling fan-out processing patterns.
 
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -105,11 +105,9 @@ impl EventHandler {
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
-            if let Some(ref tx) = self.tx {
-                tx.send_with_logging(e)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-            }
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
         }
 
         Ok(())

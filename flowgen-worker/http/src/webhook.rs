@@ -6,7 +6,7 @@
 use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
@@ -192,11 +192,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
         Ok(StatusCode::OK)
     }
 }

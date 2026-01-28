@@ -3,7 +3,7 @@
 //! Processes events from the pipeline and converts their data between different formats
 //! such as JSON to Avro with schema validation and key normalization.
 
-use crate::event::{AvroData, Event, EventBuilder, EventData, SenderExt};
+use crate::event::{AvroData, Event, EventBuilder, EventData, EventExt};
 use serde_avro_fast::ser;
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -172,11 +172,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
 }

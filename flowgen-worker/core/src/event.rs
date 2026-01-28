@@ -13,23 +13,35 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
-/// Extension trait for MPSC sender with automatic event logging.
+/// Extension trait for event processing with logging.
 #[async_trait::async_trait]
-pub trait SenderExt {
-    /// Sends an event and automatically logs it with backpressure support.
-    async fn send_with_logging(&self, event: Event) -> Result<(), Error>;
+pub trait EventExt {
+    /// Logs event processing and optionally sends to the next task.
+    ///
+    /// This method always logs the event, then sends it to the next task if a sender is provided.
+    /// Use this in task handlers to ensure visibility of event processing throughout the pipeline.
+    async fn send_with_logging(
+        self,
+        tx: Option<&tokio::sync::mpsc::Sender<Event>>,
+    ) -> Result<(), Error>;
 }
 
 #[async_trait::async_trait]
-impl SenderExt for tokio::sync::mpsc::Sender<Event> {
-    async fn send_with_logging(&self, event: Event) -> Result<(), Error> {
-        let subject = event.subject.to_owned();
-        let suffix = match &event.id {
+impl EventExt for Event {
+    async fn send_with_logging(
+        self,
+        tx: Option<&tokio::sync::mpsc::Sender<Event>>,
+    ) -> Result<(), Error> {
+        let suffix = match &self.id {
             Some(ref id) => id.to_string(),
-            None => event.timestamp.to_string(),
+            None => self.timestamp.to_string(),
         };
+        let subject = self.subject.clone();
 
-        self.send(event).await.map_err(|_| Error::SendMessage)?;
+        if let Some(tx) = tx {
+            tx.send(self).await.map_err(|_| Error::SendMessage)?;
+        }
+
         info!("Event processed: {}.{}", subject, suffix);
         Ok(())
     }

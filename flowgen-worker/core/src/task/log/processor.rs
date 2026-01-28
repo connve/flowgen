@@ -5,9 +5,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, trace, warn, Instrument};
 
-/// Default subject prefix for log events.
-const DEFAULT_MESSAGE_SUBJECT: &str = "log";
-
 /// Errors that can occur during log processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -113,15 +110,15 @@ impl EventHandler {
         }
 
         // Pass the event through to the next task with updated task_id (if there is a next task)
-        if let Some(ref tx) = self.tx {
-            let event = crate::event::EventBuilder::new()
-                .data(event.data)
-                .subject(event.subject)
-                .task_id(self.task_id)
-                .task_type(event.task_type)
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
+        let event = crate::event::EventBuilder::new()
+            .data(event.data)
+            .subject(event.subject)
+            .task_id(self.task_id)
+            .task_type(event.task_type)
+            .build()
+            .map_err(|source| Error::EventBuilder { source })?;
 
+        if let Some(ref tx) = self.tx {
             tx.send(event).await.map_err(|_| Error::SendMessage {
                 source: crate::event::Error::SendMessage,
             })?;
@@ -166,7 +163,7 @@ impl crate::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = DEFAULT_MESSAGE_SUBJECT, fields(task = %self.config.name, task_id = self.task_id))]
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

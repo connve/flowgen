@@ -1,7 +1,8 @@
 use super::message::FlowgenMessageExt;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, SenderExt};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use futures_util::future;
 use std::sync::Arc;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
@@ -83,6 +84,8 @@ pub enum Error {
     MissingClient,
     #[error("Missing required builder attribute: {}", _0)]
     MissingRequiredAttribute(String),
+    #[error("Publish acknowledgment timed out after {:?}", _0)]
+    PublishAckTimeout(std::time::Duration),
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -124,7 +127,15 @@ impl EventHandler {
             .await
             .map_err(|e| Error::Publish { source: e })?;
 
-        let ack = ack_future.await.map_err(|e| Error::Publish { source: e })?;
+        // Apply timeout if configured, otherwise use default async-nats timeout.
+        let ack = if let Some(timeout) = config.ack_timeout {
+            match tokio::time::timeout(timeout, ack_future).await {
+                Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
+                Err(_) => return Err(Error::PublishAckTimeout(timeout)),
+            }
+        } else {
+            ack_future.await.map_err(|e| Error::Publish { source: e })?
+        };
         let ack: PublishAck = ack.into();
         let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
@@ -136,11 +147,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }
@@ -236,12 +245,14 @@ impl flowgen_core::task::runner::Runner for Publisher {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -265,8 +276,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    // Channel closed, wait for all spawned handlers to complete.
+                    future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

@@ -8,7 +8,7 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use flowgen_core::{
     config::ConfigExt,
-    event::{Event, EventBuilder, EventData, SenderExt},
+    event::{Event, EventBuilder, EventData, EventExt},
 };
 use gcloud_auth::credentials::CredentialsFile;
 use google_cloud_bigquery::client::{Client, ClientConfig};
@@ -131,11 +131,10 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(result_event)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        result_event
+            .send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }

@@ -2,7 +2,8 @@ use apache_avro::{types::Value as AvroValue, Schema as AvroSchema};
 use chrono::Utc;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventData, SenderExt};
+use flowgen_core::event::{Event, EventData, EventExt};
+use futures_util::future;
 use salesforce_pubsub_v1::eventbus::v1::{
     ProducerEvent, PublishRequest, SchemaRequest, TopicRequest,
 };
@@ -159,11 +160,9 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(e)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
 
         Ok(())
     }
@@ -294,13 +293,15 @@ impl flowgen_core::task::runner::Runner for Publisher {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     if Some(event.task_id) == event_handler.task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
                         let retry_strategy = retry_config.strategy();
-                        tokio::spawn(
+                        let handle = tokio::spawn(
                             async move {
                                 let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                     match event_handler.handle(event.clone()).await {
@@ -324,9 +325,14 @@ impl flowgen_core::task::runner::Runner for Publisher {
                             }
                             .instrument(tracing::Span::current()),
                         );
+                        handlers.push(handle);
                     }
                 }
-                None => return Ok(()),
+                None => {
+                    // Channel closed, wait for all spawned handlers to complete.
+                    future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

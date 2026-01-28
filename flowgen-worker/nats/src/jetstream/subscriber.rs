@@ -2,7 +2,7 @@ use super::message::NatsMessageExt;
 use async_nats::jetstream::{self};
 use flowgen_core::{
     client::Client,
-    event::{Event, SenderExt},
+    event::{Event, EventExt},
 };
 use std::sync::Arc;
 use tokio::pin;
@@ -107,11 +107,9 @@ impl EventHandler {
 
                 message.ack().await.ok();
 
-                if let Some(ref tx) = self.tx {
-                    tx.send_with_logging(e)
-                        .await
-                        .map_err(|source| Error::SendMessage { source })?;
-                }
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
                 Ok(())
             }
             Err(err) => Err(Error::Other(err)),

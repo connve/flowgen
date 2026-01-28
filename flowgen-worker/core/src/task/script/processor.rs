@@ -3,7 +3,7 @@
 //! Executes Rhai scripts to transform, filter, or manipulate event data.
 //! Scripts can return objects, arrays, or null to control event emission.
 
-use crate::event::{Event, EventBuilder, EventData, SenderExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
@@ -212,11 +212,10 @@ impl EventHandler {
 
     /// Emits a single event to the broadcast channel.
     async fn emit_event(&self, event: Event) -> Result<(), Error> {
-        if let Some(ref tx) = self.tx {
-            tx.send_with_logging(event)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })?;
         Ok(())
     }
 }
