@@ -1,0 +1,58 @@
+flow:
+  name: bigquery_batch_upsert_basic
+  require_leader_election: true
+  tasks:
+
+    # Subscribe from NATS JetStream to receive batch data.
+    # Rate limiting with max_messages=1 and delay ensures we respect BigQuery DML limits.
+    # Processing one batch at a time prevents concurrent MERGE operations on the same table.
+    - nats_jetstream_subscriber:
+        name: consume_batch
+        # Path to NATS credentials file
+        credentials_path: /etc/nats/credentials.json
+        # NATS server URL
+        url: "localhost:4222"
+        # Subject to subscribe to
+        subject: bigquery.upsert.orders
+        # Stream configuration
+        stream:
+          create_or_update: true
+          name: bigquery_upsert
+          description: "BigQuery upsert batches with rate limiting"
+          subjects: ["bigquery.upsert.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard: old
+        # Durable consumer name for resumable processing
+        durable_name: bigquery_upsert_consumer
+        # Process only 1 batch at a time to avoid concurrent MERGE operations
+        max_messages: 1
+        # Wait 1 second between batches (adjust based on your rate limit needs)
+        delay: "1s"
+
+    # Convert Arrow RecordBatch to JSON array.
+    # The Arrow format is efficient for transport, JSON is needed for BigQuery parameters.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # BigQuery MERGE query to upsert entire batch in a single operation.
+    # MERGE with UNNEST processes all rows in one query, avoiding per-row DML rate limits.
+    - gcp_bigquery_query:
+        name: upsert_batch
+        # Path to GCP service account JSON credentials
+        credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where the BigQuery table is located
+        project_id: my-project-id
+        # SQL query loaded from external file
+        query:
+          resource: "gcp/queries/upsert_orders_batch.sql"
+        # Pass the entire JSON array as a single parameter.
+        # BigQuery receives this as native JSON type (not string).
+        # The template {{event.data}} directly accesses the JSON array without string conversion.
+        parameters:
+          batch: "{{event.data}}"
+        # Query timeout (adjust based on batch size)
+        timeout: "30s"
+        # Disable query cache for DML operations
+        use_query_cache: true

@@ -1,0 +1,95 @@
+flow:
+  name: bigquery_batch_upsert_advanced
+  require_leader_election: true
+  tasks:
+
+    # Subscribe from NATS JetStream to receive batch data.
+    # Rate limiting with max_messages=1 and delay ensures we respect BigQuery DML limits.
+    # Processing one batch at a time prevents concurrent MERGE operations on the same table.
+    - nats_jetstream_subscriber:
+        name: consume_batch
+        # Path to NATS credentials file
+        credentials_path: /etc/nats/credentials.json
+        # NATS server URL
+        url: "localhost:4222"
+        # Subject to subscribe to
+        subject: bigquery.upsert.orders
+        # Stream configuration
+        stream:
+          create_or_update: true
+          name: bigquery_upsert
+          description: "BigQuery upsert batches with rate limiting"
+          subjects: ["bigquery.upsert.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard: old
+        # Durable consumer name for resumable processing
+        durable_name: bigquery_upsert_consumer
+        # Process only 1 batch at a time to avoid concurrent MERGE operations
+        max_messages: 1
+        # Wait 1 second between batches (adjust based on your rate limit needs)
+        delay: "1s"
+
+    # Convert Arrow RecordBatch to JSON array.
+    # The Arrow format is efficient for transport, JSON is needed for BigQuery parameters.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Optional: Use Rhai script to transform or prepare data before upsert.
+    # This example wraps the batch in an object with additional metadata.
+    - script:
+        name: prepare_batch_param
+        code: |
+          #{
+            batch: event.data,
+            timestamp: timestamp_now()
+          }
+
+    # BigQuery MERGE query to upsert entire batch in a single operation.
+    # MERGE with UNNEST processes all rows in one query, avoiding per-row DML rate limits.
+    # This is much more efficient than individual INSERT/UPDATE statements.
+    #
+    # Cross-Project Configuration:
+    # - project_id: Where the BigQuery table is located (data project)
+    # - job_project_id: Where the query job runs and is billed (billing project)
+    #
+    # This separation allows you to:
+    # - Query tables in multiple projects from a single billing project
+    # - Centralize BigQuery job billing and monitoring
+    # - Share datasets across projects without duplicating data
+    - gcp_bigquery_query:
+        name: upsert_batch
+        # Path to GCP service account JSON credentials
+        credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where the BigQuery table is located (data project)
+        project_id: my-data-project-id
+        # GCP project ID where the query job runs and is billed (billing project)
+        # If not specified, defaults to project_id
+        job_project_id: my-billing-project-id
+        # SQL query loaded from external file
+        query:
+          resource: "gcp/queries/upsert_orders_batch.sql"
+        # Pass the entire JSON array as a single parameter.
+        # BigQuery receives this as native JSON type (not string).
+        # The template {{event.data.batch}} directly accesses the JSON array without string conversion.
+        # Path notation (event.data.batch) works with nested data from the script task.
+        parameters:
+          batch: "{{event.data.batch}}"
+        # Optional: Maximum number of rows to return (0 for DML operations)
+        max_results: 0
+        # Query timeout (adjust based on batch size)
+        timeout: "30s"
+        # Disable query cache for DML operations
+        use_query_cache: false
+        # Optional: BigQuery location/region for the query job
+        # Must match the table's dataset location
+        # Common values: "US", "EU", "us-central1", "europe-west1"
+        location: "US"
+
+    # Optional: Log the results for monitoring and debugging.
+    # For MERGE operations, this logs the number of rows inserted/updated.
+    - log:
+        name: log_result
+        level: info
+        structured: true
