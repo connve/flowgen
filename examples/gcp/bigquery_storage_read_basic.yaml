@@ -16,7 +16,7 @@ flow:
         name: read_orders_table
         # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
-        # GCP project ID where BigQuery resources are located
+        # GCP project ID where the table is located
         project_id: my-project-id
         # BigQuery dataset ID
         dataset_id: analytics
