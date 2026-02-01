@@ -24,6 +24,38 @@ pub enum Error {
     },
 }
 
+/// Extract a simple path from a template string like "{{event.data}}" or "{{event.data.batch}}".
+/// Returns None if the template is complex (contains helpers, multiple expressions, etc.).
+fn extract_simple_path(template: &str) -> Option<String> {
+    let trimmed = template.trim();
+    // Check if it's a simple {{path}} template
+    if trimmed.starts_with("{{") && trimmed.ends_with("}}") && trimmed.matches("{{").count() == 1 {
+        let inner = &trimmed[2..trimmed.len() - 2].trim();
+        // Make sure it doesn't contain any helper syntax or complex expressions
+        if !inner.contains(' ') && !inner.contains('(') && !inner.contains(')') {
+            return Some(inner.to_string());
+        }
+    }
+    None
+}
+
+/// Get a value from a JSON object by path like "event.data" or "event.data.batch".
+fn get_value_by_path<'a>(data: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = data;
+
+    for part in parts {
+        match current {
+            serde_json::Value::Object(map) => {
+                current = map.get(part)?;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(current)
+}
+
 /// Recursively renders all string values in a JSON value tree that contain Handlebars templates.
 fn render_json_value(
     value: &mut serde_json::Value,
@@ -34,6 +66,15 @@ fn render_json_value(
         serde_json::Value::String(s) => {
             // Only render if the string contains template syntax
             if s.contains("{{") {
+                // Check if this is a template that references a path in the data
+                // If so, try to directly access and use that value instead of rendering as string.
+                if let Some(path) = extract_simple_path(s) {
+                    if let Some(direct_value) = get_value_by_path(data, &path) {
+                        *value = direct_value.clone();
+                        return Ok(());
+                    }
+                }
+
                 let rendered = handlebars.render_template(s, data)?;
 
                 // Try to parse the rendered string as JSON to preserve type information

@@ -793,7 +793,9 @@ fn parse_time_to_micros(time_str: &str) -> Result<i64, Error> {
 
 /// Build a query parameter from name and JSON value.
 fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter, Error> {
-    use super::config::{PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_STRING};
+    use super::config::{
+        PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_JSON, PARAM_TYPE_STRING,
+    };
 
     let (parameter_type, parameter_value) = match value {
         JsonValue::String(s) => (
@@ -851,9 +853,10 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
                 ..Default::default()
             },
         ),
-        _ => (
+        // Arrays and Objects are passed as JSON type to avoid PARSE_JSON() in SQL
+        JsonValue::Array(_) | JsonValue::Object(_) => (
             QueryParameterType {
-                parameter_type: PARAM_TYPE_STRING.to_string(),
+                parameter_type: PARAM_TYPE_JSON.to_string(),
                 ..Default::default()
             },
             QueryParameterValue {
@@ -956,6 +959,27 @@ mod tests {
         assert_eq!(param.name, Some("optional".to_string()));
         assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_STRING);
         assert_eq!(param.parameter_value.value, None);
+    }
+
+    #[test]
+    fn test_build_query_parameter_array() {
+        use super::super::config::PARAM_TYPE_JSON;
+        let param = build_query_parameter("items", &json!([1, 2, 3])).unwrap();
+        assert_eq!(param.name, Some("items".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_JSON);
+        assert_eq!(param.parameter_value.value, Some("[1,2,3]".to_string()));
+    }
+
+    #[test]
+    fn test_build_query_parameter_object() {
+        use super::super::config::PARAM_TYPE_JSON;
+        let param = build_query_parameter("data", &json!({"key": "value"})).unwrap();
+        assert_eq!(param.name, Some("data".to_string()));
+        assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_JSON);
+        assert_eq!(
+            param.parameter_value.value,
+            Some("{\"key\":\"value\"}".to_string())
+        );
     }
 
     #[test]
