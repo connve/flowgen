@@ -530,6 +530,7 @@ mod tests {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
             ..Default::default()
@@ -548,6 +549,7 @@ mod tests {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
             ..Default::default()
@@ -571,6 +573,7 @@ mod tests {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
             ..Default::default()
@@ -595,6 +598,7 @@ mod tests {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
             ..Default::default()
@@ -620,6 +624,7 @@ mod tests {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
             ..Default::default()

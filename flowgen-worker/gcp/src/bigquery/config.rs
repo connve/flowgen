@@ -56,7 +56,8 @@ fn default_use_legacy_sql() -> bool {
 /// # Fields
 /// - `name`: Unique name / identifier of the task.
 /// - `credentials_path`: Path to GCP service account credentials JSON file.
-/// - `project_id`: GCP project ID where BigQuery resources are located.
+/// - `project_id`: GCP project ID where BigQuery resources are located (data project).
+/// - `job_project_id`: Optional GCP project ID for running the query job (billing project). If not specified, uses `project_id`.
 /// - `query`: SQL query source (inline string or resource file reference).
 /// - `parameters`: Optional query parameters for safe SQL injection prevention.
 /// - `location`: Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
@@ -135,14 +136,29 @@ fn default_use_legacy_sql() -> bool {
 ///     }
 /// }
 /// ```
+///
+/// Cross-project query (data in one project, billing in another):
+/// ```yaml
+/// gcp_bigquery_query:
+///   name: cross_project_query
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: data-project-id
+///   job_project_id: billing-project-id
+///   query:
+///     inline: "SELECT * FROM `data-project-id.dataset.table` LIMIT 100"
+/// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Query {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to GCP service account credentials JSON file.
     pub credentials_path: PathBuf,
-    /// GCP project ID where BigQuery resources are located.
+    /// GCP project ID where BigQuery resources are located (data project).
     pub project_id: String,
+    /// Optional GCP project ID for running the query job (billing project).
+    /// If not specified, uses `project_id`.
+    #[serde(default)]
+    pub job_project_id: Option<String>,
     /// SQL query source (inline or resource).
     pub query: flowgen_core::resource::Source,
     /// Optional query parameters for SQL injection protection.
@@ -198,6 +214,12 @@ impl Query {
                 .await
                 .map_err(|source| ResolveError::Resource { source }),
         }
+    }
+
+    /// Returns the project ID to use for running the query job.
+    /// Uses `job_project_id` if specified, otherwise falls back to `project_id`.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
     }
 }
 
@@ -263,6 +285,7 @@ mod tests {
             name: "test_query".to_string(),
             credentials_path: PathBuf::from("/etc/gcp/credentials.json"),
             project_id: "my-project-id".to_string(),
+            job_project_id: None,
             query: flowgen_core::resource::Source::Inline(
                 "SELECT * FROM `dataset.table` WHERE status = @status AND date >= @start_date"
                     .to_string(),
@@ -293,6 +316,7 @@ mod tests {
             name: "serialize_test".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
             parameters: None,
             location: None,
@@ -322,6 +346,7 @@ mod tests {
             name: "parameterized_query".to_string(),
             credentials_path: PathBuf::from("/etc/gcp/creds.json"),
             project_id: "analytics-prod".to_string(),
+            job_project_id: None,
             query: flowgen_core::resource::Source::Inline("SELECT * FROM orders WHERE customer_id = @customer_id AND amount >= @min_amount AND active = @active".to_string()),
             parameters: Some(parameters),
             location: Some("EU".to_string()),
@@ -348,6 +373,7 @@ mod tests {
             name: "clone_test".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             project_id: "test-project".to_string(),
+            job_project_id: None,
             query: flowgen_core::resource::Source::Inline(
                 "SELECT COUNT(*) FROM dataset.table".to_string(),
             ),
@@ -365,6 +391,82 @@ mod tests {
 
         let cloned = query.clone();
         assert_eq!(query, cloned);
+    }
+
+    #[test]
+    fn test_get_job_project_id_with_override() {
+        let query = Query {
+            name: "cross_project_query".to_string(),
+            credentials_path: PathBuf::from("/creds.json"),
+            project_id: "data-project".to_string(),
+            job_project_id: Some("billing-project".to_string()),
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
+        };
+
+        assert_eq!(query.get_job_project_id(), "billing-project");
+    }
+
+    #[test]
+    fn test_get_job_project_id_default() {
+        let query = Query {
+            name: "single_project_query".to_string(),
+            credentials_path: PathBuf::from("/creds.json"),
+            project_id: "my-project".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            retry: None,
+        };
+
+        assert_eq!(query.get_job_project_id(), "my-project");
+    }
+
+    #[test]
+    fn test_storage_read_get_job_project_id_with_override() {
+        let storage_read = StorageRead {
+            name: "cross_project_read".to_string(),
+            credentials_path: PathBuf::from("/creds.json"),
+            project_id: "data-project".to_string(),
+            job_project_id: Some("billing-project".to_string()),
+            dataset_id: "warehouse".to_string(),
+            table_id: "large_table".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(storage_read.get_job_project_id(), "billing-project");
+    }
+
+    #[test]
+    fn test_storage_read_get_job_project_id_default() {
+        let storage_read = StorageRead {
+            name: "single_project_read".to_string(),
+            credentials_path: PathBuf::from("/creds.json"),
+            project_id: "my-project".to_string(),
+            job_project_id: None,
+            dataset_id: "analytics".to_string(),
+            table_id: "events".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(storage_read.get_job_project_id(), "my-project");
     }
 }
 
@@ -408,7 +510,8 @@ pub enum CompressionCodec {
 /// # Fields
 /// - `name`: Unique name / identifier of the task.
 /// - `credentials_path`: Path to GCP service account credentials JSON file.
-/// - `project_id`: GCP project ID where BigQuery resources are located.
+/// - `project_id`: GCP project ID where BigQuery resources are located (data project).
+/// - `job_project_id`: Optional GCP project ID for creating the read session (billing project). If not specified, uses `project_id`.
 /// - `dataset_id`: BigQuery dataset ID containing the table.
 /// - `table_id`: BigQuery table ID to read from.
 /// - `selected_fields`: Optional list of column names to read (reads all if not specified).
@@ -471,14 +574,29 @@ pub enum CompressionCodec {
 ///   snapshot_time: "2024-01-15T00:00:00Z"
 ///   sample_percentage: 10.0
 /// ```
+///
+/// Cross-project read (data in one project, billing in another):
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: cross_project_read
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: data-project-id
+///   job_project_id: billing-project-id
+///   dataset_id: warehouse
+///   table_id: large_table
+/// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StorageRead {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to GCP service account credentials JSON file.
     pub credentials_path: PathBuf,
-    /// GCP project ID where BigQuery resources are located.
+    /// GCP project ID where BigQuery resources are located (data project).
     pub project_id: String,
+    /// Optional GCP project ID for creating the read session (billing project).
+    /// If not specified, uses `project_id`.
+    #[serde(default)]
+    pub job_project_id: Option<String>,
     /// BigQuery dataset ID containing the table.
     pub dataset_id: String,
     /// BigQuery table ID to read from.
@@ -518,3 +636,11 @@ pub struct StorageRead {
 }
 
 impl ConfigExt for StorageRead {}
+
+impl StorageRead {
+    /// Returns the project ID to use for creating the read session.
+    /// Uses `job_project_id` if specified, otherwise falls back to `project_id`.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
+    }
+}

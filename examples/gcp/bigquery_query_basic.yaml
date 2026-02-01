@@ -11,17 +11,18 @@ flow:
 
     # BigQuery query executes a simple SELECT query.
     # Results are returned as Arrow RecordBatch for efficient columnar processing.
-    #
-    # Query can be specified in two ways:
-    # 1. Inline - SQL embedded directly in YAML (shown here)
-    # 2. Resource - SQL loaded from external file (see bigquery_query_parameterized.yaml)
     - gcp_bigquery_query:
         name: fetch_orders
+        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where BigQuery resources are located
         project_id: my-project-id
+        # SQL query (inline or resource file)
         query:
           inline: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
+        # Optional: Maximum number of rows to return
         max_results: 10000
+        # Optional: Query execution timeout (e.g., "30s", "5m", "1h")
         timeout: "1m"
 
     # Convert Arrow RecordBatch to JSON format for downstream processing.
@@ -38,4 +39,3 @@ flow:
         name: log
         level: info
         structured: false
-

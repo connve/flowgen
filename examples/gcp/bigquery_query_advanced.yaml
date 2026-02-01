@@ -1,0 +1,71 @@
+flow:
+  name: bigquery_query_advanced
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 5 minutes.
+    - generate:
+        name: trigger
+        interval: 300s
+
+    # Advanced BigQuery query demonstrating enterprise features:
+    # - Cross-project billing (data in one project, billing in another)
+    # - Regional data processing (EU location)
+    # - Query labels for cost tracking and monitoring
+    # - Default dataset for simplified table references
+    # - Legacy SQL support
+    # - Query cache control
+    - gcp_bigquery_query:
+        name: cross_project_analytics
+        # Path to GCP service account JSON credentials
+        credentials_path: /etc/gcp/credentials.json
+        # Project where the data/tables are located
+        project_id: data-warehouse-project
+        # Optional: Project for running the query job (billing project)
+        # Common in enterprises where data and billing are separated
+        job_project_id: billing-project
+        # SQL query with parameterized values
+        query:
+          inline: "SELECT customer_id, SUM(amount) as total FROM `data-warehouse-project.analytics.orders` WHERE region = @region AND order_date >= @start_date GROUP BY customer_id"
+        # Query parameters for SQL injection protection
+        parameters:
+          region: "EU"
+          start_date: "2024-01-01"
+        # Optional: BigQuery location for data processing (e.g., "US", "EU", "us-central1")
+        # Should match the location of your dataset
+        location: "EU"
+        # Optional: Maximum number of rows to return
+        max_results: 50000
+        # Optional: Query execution timeout (e.g., "30s", "5m", "1h")
+        timeout: "5m"
+        # Optional: Use query cache for faster repeated queries (default: true)
+        use_query_cache: true
+        # Optional: Use Legacy SQL instead of Standard SQL (default: false)
+        use_legacy_sql: false
+        # Optional: Create a session for query execution (default: false)
+        create_session: false
+        # Optional: Labels for cost tracking and resource organization
+        labels:
+          team: "analytics"
+          environment: "production"
+          cost_center: "engineering"
+        # Optional: Default dataset for unqualified table references
+        # Allows using "orders" instead of "`project.dataset.orders`"
+        default_dataset:
+          project_id: "data-warehouse-project"
+          dataset_id: "analytics"
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false
