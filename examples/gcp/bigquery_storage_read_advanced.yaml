@@ -10,7 +10,7 @@ flow:
         count: 1
 
     # Advanced BigQuery Storage Read demonstrating enterprise features:
-    # - Cross-project billing (requires forked gcloud-bigquery library)
+    # - Cross-project billing (data in one project, billing in another)
     # - Time-travel queries (read historical data snapshots)
     # - Data sampling for testing and analysis
     # - Compression for reduced network transfer
@@ -22,7 +22,7 @@ flow:
         # Project where the data/tables are located
         project_id: data-warehouse-project
         # Optional: Project for creating the read session (billing project)
-        # Note: Requires forked gcloud-bigquery library with parent project support
+        # Common in enterprises where data and billing are separated
         job_project_id: billing-project
         # BigQuery dataset ID
         dataset_id: analytics

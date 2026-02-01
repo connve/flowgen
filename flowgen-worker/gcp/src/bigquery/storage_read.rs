@@ -419,6 +419,11 @@ async fn read_table(
         option = option.with_max_stream_count(max_streams);
     }
 
+    // Set job project for cross-project billing support.
+    // If job_project_id is specified, use it for billing.
+    // Otherwise, defaults to the data project_id.
+    option = option.with_job_project_id(config.get_job_project_id().to_string());
+
     // Fetch table schema to get field names and their order.
     // The Storage Read API returns columns in schema order (or selected_fields order if specified).
     let table_info = client
