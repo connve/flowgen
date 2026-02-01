@@ -406,7 +406,7 @@ async fn execute_query(
     // Execute query.
     let response: QueryResponse = client
         .job()
-        .query(&config.project_id, &query_request)
+        .query(config.get_job_project_id(), &query_request)
         .await
         .map_err(|source| Error::QueryExecution { source })?;
 

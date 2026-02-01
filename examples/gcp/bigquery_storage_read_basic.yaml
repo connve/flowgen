@@ -9,28 +9,28 @@ flow:
         interval: 10s
         count: 1
 
-    # BigQuery Storage Read reads the entire table using parallel streams.
-    # This is more efficient than query API for reading large tables.
+    # BigQuery Storage Read API for high-throughput parallel table reads.
+    # More efficient than Query API for reading large tables (millions+ rows).
     # Results are returned as Arrow RecordBatch for efficient columnar processing.
     - gcp_bigquery_storage_read:
         name: read_orders_table
+        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where BigQuery resources are located
         project_id: my-project-id
+        # BigQuery dataset ID
         dataset_id: analytics
+        # BigQuery table ID
         table_id: orders
-        # Optional: limit to specific columns for efficiency
+        # Optional: Select specific columns (improves performance and reduces data transfer)
         selected_fields:
           - id
           - customer_id
           - amount
           - order_date
-        # Optional: filter rows server-side
+        # Optional: Server-side row filtering (SQL WHERE clause without "WHERE" keyword)
         row_restriction: "order_date >= '2024-01-01'"
-        # Optional: read a sample of the data (10%)
-        # sample_percentage: 10.0
-        # Optional: time-travel to a snapshot
-        # snapshot_time: "2024-01-15T12:00:00Z"
-        # Optional: control parallelism
+        # Optional: Maximum number of parallel read streams (higher = faster for large tables)
         max_stream_count: 4
 
     # Convert Arrow RecordBatch to JSON format for downstream processing.

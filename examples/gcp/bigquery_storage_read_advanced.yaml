@@ -9,35 +9,47 @@ flow:
         interval: 10s
         count: 1
 
-    # Advanced BigQuery Storage Read example demonstrating all configuration options.
-    # This example shows time-travel, sampling, field selection, and compression.
+    # Advanced BigQuery Storage Read demonstrating enterprise features:
+    # - Cross-project billing (requires forked gcloud-bigquery library)
+    # - Time-travel queries (read historical data snapshots)
+    # - Data sampling for testing and analysis
+    # - Compression for reduced network transfer
+    # - Custom retry configuration
     - gcp_bigquery_storage_read:
         name: read_historical_snapshot
+        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
-        project_id: my-project-id
+        # Project where the data/tables are located
+        project_id: data-warehouse-project
+        # Optional: Project for creating the read session (billing project)
+        # Note: Requires forked gcloud-bigquery library with parent project support
+        job_project_id: billing-project
+        # BigQuery dataset ID
         dataset_id: analytics
+        # BigQuery table ID
         table_id: transactions
-        # Select specific fields to reduce data transfer
+        # Optional: Select specific columns (reduces data transfer and improves performance)
         selected_fields:
           - transaction_id
           - user_id
           - amount
           - currency
           - transaction_date
-        # Server-side row filtering
+        # Optional: Server-side row filtering (SQL WHERE clause without "WHERE" keyword)
         row_restriction: "amount > 100 AND currency = 'USD'"
-        # Read 10% sample for testing/analysis
+        # Optional: Random sampling percentage (0.0 to 100.0) for testing/analysis
         sample_percentage: 10.0
-        # Time-travel: read table as it existed at this timestamp
+        # Optional: Time-travel to read table as it existed at a specific timestamp (RFC3339 format)
         snapshot_time: "2024-01-15T12:00:00Z"
-        # Control parallelism (number of parallel streams)
+        # Optional: Maximum number of parallel read streams (higher = faster for large tables)
         max_stream_count: 8
+        # Optional: Preferred minimum number of streams (optimization hint)
         preferred_min_stream_count: 2
-        # Use LZ4 compression for network transfer
+        # Optional: Compression codec for network transfer ("unspecified" or "lz4")
         compression_codec: lz4
-        # Data format (arrow is default and preferred)
+        # Optional: Data format ("arrow" is default and preferred for columnar processing)
         data_format: arrow
-        # Optional: override retry configuration
+        # Optional: Custom retry configuration (overrides app-level retry config)
         retry:
           max_attempts: 5
           max_delay: "30s"
