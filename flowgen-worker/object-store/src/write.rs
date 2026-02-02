@@ -105,7 +105,7 @@ pub enum Error {
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     /// Writer configuration settings.
-    config: Arc<super::config::Writer>,
+    config: Arc<super::config::WriteProcessor>,
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
     /// Current task identifier for event filtering.
@@ -226,11 +226,11 @@ impl EventHandler {
     }
 }
 
-/// Object store writer that processes events from a broadcast receiver.
+/// Object store write processor that processes events from a broadcast receiver.
 #[derive(Debug)]
-pub struct Writer {
-    /// Writer configuration settings.
-    config: Arc<super::config::Writer>,
+pub struct WriteProcessor {
+    /// Write configuration settings.
+    config: Arc<super::config::WriteProcessor>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for response events.
@@ -244,7 +244,7 @@ pub struct Writer {
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Writer {
+impl flowgen_core::task::runner::Runner for WriteProcessor {
     type Error = Error;
     type EventHandler = EventHandler;
 
@@ -355,11 +355,11 @@ impl flowgen_core::task::runner::Runner for Writer {
     }
 }
 
-/// Builder pattern for constructing Writer instances.
+/// Builder pattern for constructing WriteProcessor instances.
 #[derive(Default)]
-pub struct WriterBuilder {
-    /// Writer configuration settings.
-    config: Option<Arc<super::config::Writer>>,
+pub struct WriteProcessorBuilder {
+    /// Write configuration settings.
+    config: Option<Arc<super::config::WriteProcessor>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Channel sender for response events.
@@ -372,15 +372,15 @@ pub struct WriterBuilder {
     task_type: Option<&'static str>,
 }
 
-impl WriterBuilder {
-    pub fn new() -> WriterBuilder {
-        WriterBuilder {
+impl WriteProcessorBuilder {
+    pub fn new() -> WriteProcessorBuilder {
+        WriteProcessorBuilder {
             ..Default::default()
         }
     }
 
     /// Sets the writer configuration.
-    pub fn config(mut self, config: Arc<super::config::Writer>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::WriteProcessor>) -> Self {
         self.config = Some(config);
         self
     }
@@ -416,9 +416,9 @@ impl WriterBuilder {
         self
     }
 
-    /// Builds the Writer instance, validating required fields.
-    pub async fn build(self) -> Result<Writer, Error> {
-        Ok(Writer {
+    /// Builds the WriteProcessor instance, validating required fields.
+    pub async fn build(self) -> Result<WriteProcessor, Error> {
+        Ok(WriteProcessor {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_writer_builder() {
-        let config = Arc::new(crate::config::Writer {
+        let config = Arc::new(crate::config::WriteProcessor {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://bucket/path/"),
             credentials_path: None,
@@ -475,7 +475,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
-        let writer = WriterBuilder::new()
+        let writer = WriteProcessorBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx.clone())
@@ -488,7 +488,7 @@ mod tests {
 
         // Error case - missing config.
         let (_tx2, rx2) = mpsc::channel::<Event>(10);
-        let result = WriterBuilder::new()
+        let result: Result<WriteProcessor, Error> = WriteProcessorBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())
             .build()

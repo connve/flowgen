@@ -14,9 +14,9 @@ pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 /// File extension for JSON format files.
 pub const DEFAULT_JSON_EXTENSION: &str = "json";
 
-/// Object Store reader configuration.
+/// Object Store read processor configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
-pub struct Reader {
+pub struct ReadProcessor {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to the object store or file location.
@@ -40,9 +40,9 @@ pub struct Reader {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
-/// Object Store writer configuration.
+/// Object Store write processor configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
-pub struct Writer {
+pub struct WriteProcessor {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to the object store or output location.
@@ -76,8 +76,8 @@ pub enum HiveParitionKeys {
 }
 
 /// Implement default ConfigExt traits.
-impl ConfigExt for Reader {}
-impl ConfigExt for Writer {}
+impl ConfigExt for ReadProcessor {}
+impl ConfigExt for WriteProcessor {}
 
 #[cfg(test)]
 mod tests {
@@ -90,7 +90,7 @@ mod tests {
         let mut client_options = HashMap::new();
         client_options.insert("region".to_string(), "us-west-2".to_string());
 
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://my-bucket/data/"),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_reader_config_serialization() {
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("gs://my-bucket/files/"),
             credentials_path: Some(PathBuf::from("/creds.json")),
@@ -130,13 +130,13 @@ mod tests {
         };
 
         let json = serde_json::to_string(&reader).unwrap();
-        let deserialized: Reader = serde_json::from_str(&json).unwrap();
+        let deserialized: ReadProcessor = serde_json::from_str(&json).unwrap();
         assert_eq!(reader, deserialized);
     }
 
     #[test]
     fn test_writer_config_default() {
-        let writer = Writer::default();
+        let writer = WriteProcessor::default();
         assert_eq!(writer.name, String::new());
         assert_eq!(writer.path, PathBuf::new());
         assert_eq!(writer.credentials_path, None);
@@ -158,7 +158,7 @@ mod tests {
             partition_keys: vec![HiveParitionKeys::EventDate],
         };
 
-        let writer = Writer {
+        let writer = WriteProcessor {
             name: "test_writer".to_string(),
             path: PathBuf::from("s3://output-bucket/results/"),
             credentials_path: Some(PathBuf::from("/service-account.json")),
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_writer_config_serialization() {
-        let writer = Writer {
+        let writer = WriteProcessor {
             name: "test_writer".to_string(),
             path: PathBuf::from("/local/path/output/"),
             credentials_path: None,
@@ -192,7 +192,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&writer).unwrap();
-        let deserialized: Writer = serde_json::from_str(&json).unwrap();
+        let deserialized: WriteProcessor = serde_json::from_str(&json).unwrap();
         assert_eq!(writer, deserialized);
     }
 
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_config_clone() {
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("file:///tmp/data"),
             credentials_path: None,
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_reader_delete_after_read_enabled() {
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
             credentials_path: None,
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_reader_delete_after_read_disabled() {
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
             credentials_path: None,
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_reader_delete_after_read_default() {
-        let reader = Reader {
+        let reader = ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/file.csv"),
             credentials_path: None,

@@ -56,12 +56,12 @@ pub enum Error {
     /// Error in NATS JetStream subscriber task.
     #[error(transparent)]
     NatsJetStreamSubscriber(#[from] flowgen_nats::jetstream::subscriber::Error),
-    /// Error in object store reader task.
+    /// Error in object store read task.
     #[error(transparent)]
-    ObjectStoreReader(#[from] flowgen_object_store::reader::Error),
-    /// Error in object store writer task.
+    ObjectStoreRead(#[from] flowgen_object_store::read::Error),
+    /// Error in object store write task.
     #[error(transparent)]
-    ObjectStoreWriter(#[from] flowgen_object_store::writer::Error),
+    ObjectStoreWrite(#[from] flowgen_object_store::write::Error),
     /// Error in generate subscriber task.
     #[error(transparent)]
     GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
@@ -83,9 +83,12 @@ pub enum Error {
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
     LeadershipChannelClosed,
-    /// Error in Salesforce Bulk API Job Creator task.
+    /// Error in Salesforce Bulk API job create task.
     #[error(transparent)]
-    SalesforceBulkApiError(#[from] flowgen_salesforce::bulkapi::job_creator::Error),
+    SalesforceBulkApiJobCreate(#[from] flowgen_salesforce::bulkapi::job_create::Error),
+    /// Error in Salesforce Bulk API job retrieve task.
+    #[error(transparent)]
+    SalesforceBulkApiJobRetrieve(#[from] flowgen_salesforce::bulkapi::job_retrieve::Error),
     /// Error in GCP BigQuery query task.
     #[error(transparent)]
     GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
@@ -757,7 +760,7 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            TaskType::salesforce_bulkapi_job_creator(config) => {
+            TaskType::salesforce_bulkapi_job_create(config) => {
                 let config = Arc::new(config.to_owned());
                 let task_context = Arc::clone(task_context);
                 let span = tracing::Span::current();
@@ -765,7 +768,7 @@ async fn spawn_tasks(
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         let mut builder =
-                            flowgen_salesforce::bulkapi::job_creator::JobCreatorBuilder::new()
+                            flowgen_salesforce::bulkapi::job_create::JobCreateBuilder::new()
                                 .config(config)
                                 .current_task_id(i)
                                 .task_type(task_type)
@@ -785,14 +788,42 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            TaskType::object_store_reader(config) => {
+            TaskType::salesforce_bulkapi_job_retrieve(config) => {
+                let config = Arc::new(config.to_owned());
+                let task_context = Arc::clone(task_context);
+                let span = tracing::Span::current();
+                let task_type = task.as_str();
+                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
+                    async move {
+                        let mut builder =
+                            flowgen_salesforce::bulkapi::job_retrieve::JobRetrieveBuilder::new()
+                                .config(config)
+                                .current_task_id(i)
+                                .task_type(task_type)
+                                .task_context(task_context);
+
+                        if let Some(rx) = rx {
+                            builder = builder.receiver(rx);
+                        }
+                        if let Some(tx) = tx {
+                            builder = builder.sender(tx);
+                        }
+
+                        builder.build().await?.run().await?;
+                        Ok(())
+                    }
+                    .instrument(span),
+                );
+                background_tasks.push(task);
+            }
+            TaskType::object_store_read(config) => {
                 let config = Arc::new(config.to_owned());
                 let task_context = Arc::clone(task_context);
                 let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        let mut builder = flowgen_object_store::reader::ReaderBuilder::new()
+                        let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
                             .config(config)
                             .task_id(i)
                             .task_type(task_type)
@@ -812,14 +843,14 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-            TaskType::object_store_writer(config) => {
+            TaskType::object_store_write(config) => {
                 let config = Arc::new(config.to_owned());
                 let task_context = Arc::clone(task_context);
                 let task_type = task.as_str();
                 let span = tracing::Span::current();
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
-                        let mut builder = flowgen_object_store::writer::WriterBuilder::new()
+                        let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
                             .config(config)
                             .task_id(i)
                             .task_type(task_type)

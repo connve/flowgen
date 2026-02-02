@@ -1,0 +1,49 @@
+flow:
+  name: salesforce_bulkapi_query_incremental
+  require_leader_election: true
+  tasks:
+
+    # Run every minute to fetch new or modified records.
+    # The generate task tracks last_run_time in cache and provides it in system_info.
+    - generate:
+        name: trigger
+        cron: "* * * * *"  # Every minute
+
+    # Convert last_run_time to ISO 8601 format for Salesforce SOQL.
+    # On first run, defaults to 1 day lookback.
+    - script:
+        name: prepare_query_time
+        code: |
+          let timestamp = if event.data.system_info.last_run_time == () {
+            timestamp_now() - 86400
+          } else {
+            event.data.system_info.last_run_time
+          };
+          #{ last_run_unix: timestamp, last_run_iso: timestamp_to_iso(timestamp) }
+
+    # Create query job with time-based filter using LastModifiedDate.
+    # Using >= operator ensures we capture records modified at the exact boundary timestamp.
+    # This may result in duplicate records but ensures no data loss.
+    - salesforce_bulkapi_job_create:
+        name: query_modified_accounts
+        credentials_path: /etc/sfdc/credentials.json
+        job_type: query
+        operation: query
+        query:
+          inline: "SELECT Id, Name, Industry, AnnualRevenue, CreatedDate, LastModifiedDate FROM Account WHERE LastModifiedDate >= {{event.data.last_run_iso}}"
+        content_type: csv
+        column_delimiter: comma
+        line_ending: lf
+
+    # Log job creation with timestamp context for monitoring.
+    # Use this to verify incremental queries are working correctly.
+    - log:
+        name: log_job_creation
+        level: info
+        structured: true
+
+    # NOTE: Job results are automatically retrieved via the companion flow 'salesforce_bulkapi_job_listener'.
+    # That flow subscribes to /event/BulkApi2JobEvent and processes results when available.
+    # This event-driven approach eliminates polling delays and enables real-time processing.
+    #
+    # See: examples/salesforce/salesforce_bulkapi_job_listener.yaml

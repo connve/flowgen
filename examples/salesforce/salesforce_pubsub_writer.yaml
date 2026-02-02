@@ -32,7 +32,7 @@ flow:
           event
 
     # Write data into local or remote object store.
-    - object_store_writer:
+    - object_store_write:
         name: "write_events"
         path: file:///salesforce/{{event.subject}}
         hive_partition_options:

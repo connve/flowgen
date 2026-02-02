@@ -1,16 +1,14 @@
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
-/// Salesforce Bulk API endpoint for query jobs (API v61.0).
-const DEFAULT_URI_PATH: &str = "/services/data/v61.0/jobs/";
-
 /// Errors for Salesforce bulk job creation operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Failed to send event message: {source}")]
     SendMessage {
@@ -28,11 +26,10 @@ pub enum Error {
     },
     #[error(transparent)]
     SalesforceAuth(#[from] salesforce_core::client::Error),
-    #[error("Event error: {source}")]
-    Event {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
+    #[error(transparent)]
+    EventError(#[from] flowgen_core::event::Error),
+    #[error(transparent)]
+    ConfigRender(#[from] flowgen_core::config::Error),
     #[error("No salesforce access token provided")]
     NoSalesforceAuthToken(),
     #[error("No salesforce instance URL provided")]
@@ -59,17 +56,62 @@ struct QueryJobPayload {
     operation: super::config::Operation,
     /// SOQL query string.
     query: Option<String>,
-    /// Output file format.
+    /// Output file format (serialized as uppercase for API).
+    #[serde(serialize_with = "serialize_content_type")]
     content_type: Option<super::config::ContentType>,
-    /// CSV column delimiter.
+    /// CSV column delimiter (serialized as uppercase for API).
+    #[serde(serialize_with = "serialize_column_delimiter")]
     column_delimiter: Option<super::config::ColumnDelimiter>,
-    /// Line ending style.
+    /// Line ending style (serialized as uppercase for API).
+    #[serde(serialize_with = "serialize_line_ending")]
     line_ending: Option<super::config::LineEnding>,
 }
 
+/// Custom serializer for ContentType - converts to uppercase API format.
+fn serialize_content_type<S>(
+    content_type: &Option<super::config::ContentType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match content_type {
+        Some(ct) => serializer.serialize_str(ct.as_api_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Custom serializer for ColumnDelimiter - converts to uppercase API format.
+fn serialize_column_delimiter<S>(
+    column_delimiter: &Option<super::config::ColumnDelimiter>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match column_delimiter {
+        Some(cd) => serializer.serialize_str(cd.as_api_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Custom serializer for LineEnding - converts to uppercase API format.
+fn serialize_line_ending<S>(
+    line_ending: &Option<super::config::LineEnding>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match line_ending {
+        Some(le) => serializer.serialize_str(le.as_api_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// Processor for creating Salesforce bulk API jobs.
-pub struct JobCreator {
-    config: Arc<super::config::JobCreator>,
+pub struct JobCreate {
+    config: Arc<super::config::JobCreate>,
     tx: Option<Sender<Event>>,
     rx: Receiver<Event>,
     current_task_id: usize,
@@ -82,7 +124,7 @@ pub struct EventHandler {
     /// HTTP client for Salesforce API requests.
     client: Arc<reqwest::Client>,
     /// Processor configuration.
-    config: Arc<super::config::JobCreator>,
+    config: Arc<super::config::JobCreate>,
     /// Channel sender for emitting job creation responses.
     tx: Option<Sender<Event>>,
     /// Task identifier for event correlation.
@@ -97,7 +139,11 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes a job creation request: authenticate, build payload, create job, emit response.
-    async fn handle(&self) -> Result<(), Error> {
+    async fn handle(&self, event: Event) -> Result<(), Error> {
+        // Render config to support templates in configuration fields.
+        let event_value = serde_json::value::Value::try_from(&event)?;
+        let config = self.config.render(&event_value)?;
+
         // Extract access token from authentication result.
         let token_result = self
             .sfdc_client
@@ -106,7 +152,7 @@ impl EventHandler {
             .ok_or_else(Error::NoSalesforceAuthToken)?;
 
         // Resolve query from inline or resource source.
-        let query_string = match &self.config.query {
+        let query_string = match &config.query {
             Some(flowgen_core::resource::Source::Inline(soql)) => Some(soql.clone()),
             Some(flowgen_core::resource::Source::Resource(key)) => {
                 let loader = self
@@ -126,15 +172,16 @@ impl EventHandler {
         };
 
         // Build API payload based on operation type.
-        let payload = match self.config.operation {
+        // Note: Custom serializers convert lowercase config values to uppercase API values.
+        let payload = match config.operation {
             super::config::Operation::Query | super::config::Operation::QueryAll => {
                 // Query operations require SOQL query and output format specs.
                 QueryJobPayload {
-                    operation: self.config.operation.clone(),
+                    operation: config.operation.clone(),
                     query: query_string,
-                    content_type: self.config.content_type.clone(),
-                    column_delimiter: self.config.column_delimiter.clone(),
-                    line_ending: self.config.line_ending.clone(),
+                    content_type: config.content_type.clone(),
+                    column_delimiter: config.column_delimiter.clone(),
+                    line_ending: config.line_ending.clone(),
                 }
             }
             _ => {
@@ -152,7 +199,7 @@ impl EventHandler {
         // Configure HTTP client with endpoint and auth.
         let mut client = self
             .client
-            .post(instance_url + DEFAULT_URI_PATH + self.config.job_type.as_str());
+            .post(instance_url + super::config::DEFAULT_URI_PATH + config.job_type.as_str());
 
         client = client.bearer_auth(token_result.access_token().secret());
         client = client.json(&payload);
@@ -162,20 +209,19 @@ impl EventHandler {
             .send()
             .await
             .map_err(|e| Error::Reqwest { source: e })?
-            .text()
+            .json::<serde_json::Value>()
             .await
             .map_err(|e| Error::Reqwest { source: e })?;
 
-        let data = json!(resp);
+        let data = resp;
 
         // Create and emit response event.
         let e = EventBuilder::new()
             .data(EventData::Json(data))
-            .subject(self.config.name.to_owned())
+            .subject(config.name.to_owned())
             .task_id(self.current_task_id)
             .task_type(self.task_type)
-            .build()
-            .map_err(|e| Error::Event { source: e })?;
+            .build()?;
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -186,7 +232,7 @@ impl EventHandler {
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for JobCreator {
+impl flowgen_core::task::runner::Runner for JobCreate {
     type Error = Error;
     type EventHandler = EventHandler;
 
@@ -219,6 +265,7 @@ impl flowgen_core::task::runner::Runner for JobCreator {
     }
 
     /// Main execution loop: listen for events, filter by task ID, spawn handlers.
+    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.current_task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
@@ -253,10 +300,11 @@ impl flowgen_core::task::runner::Runner for JobCreator {
                     if Some(event.task_id) == event_handler.current_task_id.checked_sub(1) {
                         let event_handler = Arc::clone(&event_handler);
                         let retry_strategy = retry_config.strategy();
+                        let event_clone = event.clone();
                         tokio::spawn(
                             async move {
                                 let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                    match event_handler.handle().await {
+                                    match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!("{}", e);
@@ -285,10 +333,10 @@ impl flowgen_core::task::runner::Runner for JobCreator {
     }
 }
 
-/// Builder for constructing JobCreator instances.
+/// Builder for constructing JobCreate instances.
 #[derive(Default)]
-pub struct JobCreatorBuilder {
-    config: Option<Arc<super::config::JobCreator>>,
+pub struct JobCreateBuilder {
+    config: Option<Arc<super::config::JobCreate>>,
     tx: Option<Sender<Event>>,
     rx: Option<Receiver<Event>>,
     current_task_id: usize,
@@ -296,16 +344,16 @@ pub struct JobCreatorBuilder {
     task_type: Option<&'static str>,
 }
 
-impl JobCreatorBuilder {
-    /// Creates a new JobCreatorBuilder with defaults.
-    pub fn new() -> JobCreatorBuilder {
-        JobCreatorBuilder {
+impl JobCreateBuilder {
+    /// Creates a new JobCreateBuilder with defaults.
+    pub fn new() -> JobCreateBuilder {
+        JobCreateBuilder {
             ..Default::default()
         }
     }
 
     /// Sets the job configuration.
-    pub fn config(mut self, config: Arc<super::config::JobCreator>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::JobCreate>) -> Self {
         self.config = Some(config);
         self
     }
@@ -343,9 +391,9 @@ impl JobCreatorBuilder {
         self
     }
 
-    /// Builds JobCreator after validating required fields.
-    pub async fn build(self) -> Result<JobCreator, Error> {
-        Ok(JobCreator {
+    /// Builds JobCreate after validating required fields.
+    pub async fn build(self) -> Result<JobCreate, Error> {
+        Ok(JobCreate {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
@@ -414,9 +462,9 @@ mod tests {
         let json_str = r#"{
             "operation": "query",
             "query": "SELECT Id FROM Account",
-            "contentType": "CSV",
-            "columnDelimiter": "COMMA",
-            "lineEnding": "LF"
+            "contentType": "csv",
+            "columnDelimiter": "comma",
+            "lineEnding": "lf"
         }"#;
 
         let payload: QueryJobPayload = serde_json::from_str(json_str).unwrap();
@@ -463,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_new() {
-        let builder = JobCreatorBuilder::new();
+        let builder = JobCreateBuilder::new();
         assert!(builder.config.is_none());
         assert!(builder.tx.is_none());
         assert!(builder.rx.is_none());
@@ -472,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_config() {
-        let config = Arc::new(super::super::config::JobCreator {
+        let config = Arc::new(super::super::config::JobCreate {
             name: "test_job".to_string(),
             credentials_path: PathBuf::from("/test/creds.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -489,7 +537,7 @@ mod tests {
             retry: None,
         });
 
-        let builder = JobCreatorBuilder::new().config(Arc::clone(&config));
+        let builder = JobCreateBuilder::new().config(Arc::clone(&config));
         assert!(builder.config.is_some());
     }
 
@@ -497,7 +545,7 @@ mod tests {
     async fn test_processor_builder_channels() {
         let (tx, rx) = mpsc::channel::<Event>(100);
 
-        let builder = JobCreatorBuilder::new().sender(tx.clone()).receiver(rx);
+        let builder = JobCreateBuilder::new().sender(tx.clone()).receiver(rx);
 
         assert!(builder.tx.is_some());
         assert!(builder.rx.is_some());
@@ -505,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_processor_builder_current_task_id() {
-        let builder = JobCreatorBuilder::new().current_task_id(5);
+        let builder = JobCreateBuilder::new().current_task_id(5);
         assert_eq!(builder.current_task_id, 5);
     }
 
@@ -513,7 +561,7 @@ mod tests {
     async fn test_processor_builder_build_missing_config() {
         let (tx, rx) = mpsc::channel::<Event>(100);
 
-        let builder = JobCreatorBuilder::new().sender(tx).receiver(rx);
+        let builder = JobCreateBuilder::new().sender(tx).receiver(rx);
 
         let result = builder.build().await;
         assert!(result.is_err());
@@ -530,7 +578,7 @@ mod tests {
     async fn test_processor_builder_build_missing_receiver() {
         let (tx, _) = mpsc::channel::<Event>(100);
 
-        let config = Arc::new(super::super::config::JobCreator {
+        let config = Arc::new(super::super::config::JobCreate {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -547,7 +595,7 @@ mod tests {
             retry: None,
         });
 
-        let builder = JobCreatorBuilder::new().config(config).sender(tx);
+        let builder = JobCreateBuilder::new().config(config).sender(tx);
 
         let result = builder.build().await;
         assert!(result.is_err());
@@ -564,7 +612,7 @@ mod tests {
     async fn test_processor_builder_build_missing_task_context() {
         let (_, rx) = mpsc::channel::<Event>(100);
 
-        let config = Arc::new(super::super::config::JobCreator {
+        let config = Arc::new(super::super::config::JobCreate {
             name: "test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -581,7 +629,7 @@ mod tests {
             retry: None,
         });
 
-        let builder = JobCreatorBuilder::new().config(config).receiver(rx);
+        let builder = JobCreateBuilder::new().config(config).receiver(rx);
 
         let result = builder.build().await;
         assert!(result.is_err());
@@ -643,8 +691,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_default_trait() {
-        let builder1 = JobCreatorBuilder::new();
-        let builder2 = JobCreatorBuilder::default();
+        let builder1 = JobCreateBuilder::new();
+        let builder2 = JobCreateBuilder::default();
 
         assert_eq!(builder1.current_task_id, builder2.current_task_id);
     }
@@ -678,7 +726,7 @@ mod tests {
     async fn test_job_creator_structure() {
         let (tx, rx) = mpsc::channel::<Event>(100);
 
-        let config = Arc::new(super::super::config::JobCreator {
+        let config = Arc::new(super::super::config::JobCreate {
             name: "struct_test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -695,7 +743,7 @@ mod tests {
             retry: None,
         });
 
-        let processor = JobCreator {
+        let processor = JobCreate {
             config: Arc::clone(&config),
             tx: Some(tx.clone()),
             rx,
@@ -710,8 +758,8 @@ mod tests {
 
     #[test]
     fn test_uri_path_version() {
-        assert!(DEFAULT_URI_PATH.contains("v61.0"));
-        assert!(DEFAULT_URI_PATH.starts_with("/services/data/"));
-        assert!(DEFAULT_URI_PATH.ends_with("/jobs/"));
+        assert!(super::super::config::DEFAULT_URI_PATH.contains("v65.0"));
+        assert!(super::super::config::DEFAULT_URI_PATH.starts_with("/services/data/"));
+        assert!(super::super::config::DEFAULT_URI_PATH.ends_with("/jobs/"));
     }
 }

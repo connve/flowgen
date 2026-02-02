@@ -1,5 +1,19 @@
+use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Salesforce Bulk API endpoint base path (API v65.0).
+pub const DEFAULT_URI_PATH: &str = "/services/data/v65.0/jobs/";
+
+/// Default batch size for CSV parsing (10,000 rows per RecordBatch).
+const fn default_batch_size() -> usize {
+    10000
+}
+
+/// Default header setting for CSV parsing (true = first row is header).
+const fn default_has_header() -> bool {
+    true
+}
 
 /// Processor for creating salesforce account query job.
 /// ```json
@@ -29,17 +43,51 @@ use std::path::PathBuf;
 ///  }
 /// ```
 /// Configuration for retrieving existing Salesforce bulk jobs.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct JobRetriever {
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct JobRetrieve {
+    /// Unique task identifier.
+    pub name: String,
     /// Path to Salesforce authentication credentials.
     pub credentials_path: PathBuf,
     /// Salesforce Job Type like query, ingest.
+    #[serde(default)]
     pub job_type: JobType,
+    /// Template for extracting job ID from event data.
+    /// Example: "{{event.data.JobIdentifier}}" or "{{event.data.id}}"
+    /// This is required to dynamically extract the job ID from incoming events.
+    pub job_id: String,
+    /// Number of rows per Arrow RecordBatch when parsing CSV results.
+    /// Default: 10000
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Whether CSV results include header row.
+    /// Default: true
+    #[serde(default = "default_has_header")]
+    pub has_header: bool,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
+
+impl Default for JobRetrieve {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            credentials_path: PathBuf::new(),
+            job_type: JobType::default(),
+            job_id: String::new(),
+            batch_size: default_batch_size(),
+            has_header: default_has_header(),
+            retry: None,
+        }
+    }
+}
+
+impl ConfigExt for JobRetrieve {}
 
 /// Configuration for creating new Salesforce bulk jobs.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct JobCreator {
+pub struct JobCreate {
     /// Unique task identifier.
     pub name: String,
     /// Path to Salesforce authentication credentials.
@@ -67,6 +115,8 @@ pub struct JobCreator {
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
+
+impl ConfigExt for JobCreate {}
 
 /// Salesforce Bulk API Job types.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -120,26 +170,49 @@ pub enum Operation {
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub enum ContentType {
     #[default]
-    #[serde(rename = "CSV")]
+    #[serde(rename = "csv")]
     Csv,
+}
+
+impl ContentType {
+    /// Returns the Salesforce API representation (uppercase).
+    pub fn as_api_str(&self) -> &str {
+        match self {
+            ContentType::Csv => "CSV",
+        }
+    }
 }
 
 /// CSV column delimiters.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub enum ColumnDelimiter {
     #[default]
-    #[serde(rename = "COMMA")]
+    #[serde(rename = "comma")]
     Comma,
-    #[serde(rename = "TAB")]
+    #[serde(rename = "tab")]
     Tab,
-    #[serde(rename = "SEMICOLON")]
+    #[serde(rename = "semicolon")]
     Semicolon,
-    #[serde(rename = "PIPE")]
+    #[serde(rename = "pipe")]
     Pipe,
-    #[serde(rename = "CARET")]
+    #[serde(rename = "caret")]
     Caret,
-    #[serde(rename = "BACKQUOTE")]
+    #[serde(rename = "backquote")]
     Backquote,
+}
+
+impl ColumnDelimiter {
+    /// Returns the Salesforce API representation (uppercase).
+    pub fn as_api_str(&self) -> &str {
+        match self {
+            ColumnDelimiter::Comma => "COMMA",
+            ColumnDelimiter::Tab => "TAB",
+            ColumnDelimiter::Semicolon => "SEMICOLON",
+            ColumnDelimiter::Pipe => "PIPE",
+            ColumnDelimiter::Caret => "CARET",
+            ColumnDelimiter::Backquote => "BACKQUOTE",
+        }
+    }
 }
 
 /// Line ending styles for cross-platform compatibility.
@@ -147,11 +220,21 @@ pub enum ColumnDelimiter {
 pub enum LineEnding {
     /// Unix/Linux style (\n).
     #[default]
-    #[serde(rename = "LF")]
+    #[serde(rename = "lf")]
     Lf,
     /// Windows style (\r\n).
-    #[serde(rename = "CRLF")]
+    #[serde(rename = "crlf")]
     Crlf,
+}
+
+impl LineEnding {
+    /// Returns the Salesforce API representation (uppercase).
+    pub fn as_api_str(&self) -> &str {
+        match self {
+            LineEnding::Lf => "LF",
+            LineEnding::Crlf => "CRLF",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -162,16 +245,24 @@ mod tests {
 
     #[test]
     fn test_job_retriever_default() {
-        let retriever = JobRetriever::default();
+        let retriever = JobRetrieve::default();
+        assert_eq!(retriever.name, "");
         assert_eq!(retriever.credentials_path, PathBuf::new());
+        assert_eq!(retriever.retry, None);
     }
 
     #[test]
     fn test_job_retriever_creation() {
-        let retriever = JobRetriever {
+        let retriever = JobRetrieve {
+            name: "test_retriever".to_string(),
             credentials_path: PathBuf::from("/path/to/creds.json"),
             job_type: JobType::Query,
+            job_id: "test_job_id_123".to_string(),
+            batch_size: 10000,
+            has_header: true,
+            retry: None,
         };
+        assert_eq!(retriever.name, "test_retriever");
         assert_eq!(
             retriever.credentials_path,
             PathBuf::from("/path/to/creds.json")
@@ -180,20 +271,25 @@ mod tests {
 
     #[test]
     fn test_job_retriever_serialization() {
-        let retriever = JobRetriever {
+        let retriever = JobRetrieve {
+            name: "serialization_test".to_string(),
             credentials_path: PathBuf::from("/test/path.json"),
             job_type: JobType::Query,
+            job_id: "ser_job_456".to_string(),
+            batch_size: 10000,
+            has_header: true,
+            retry: None,
         };
 
         let json = serde_json::to_string(&retriever).unwrap();
-        let deserialized: JobRetriever = serde_json::from_str(&json).unwrap();
+        let deserialized: JobRetrieve = serde_json::from_str(&json).unwrap();
 
         assert_eq!(retriever, deserialized);
     }
 
     #[test]
     fn test_job_creator_default() {
-        let creator = JobCreator::default();
+        let creator = JobCreate::default();
         assert_eq!(creator.name, "");
         assert_eq!(creator.credentials_path, PathBuf::new());
         assert_eq!(creator.query, None);
@@ -208,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_job_creator_query_operation() {
-        let creator = JobCreator {
+        let creator = JobCreate {
             name: "query_job".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -232,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_job_creator_insert_operation() {
-        let creator = JobCreator {
+        let creator = JobCreate {
             name: "insert_job".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             query: None,
@@ -254,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_job_creator_upsert_operation() {
-        let creator = JobCreator {
+        let creator = JobCreate {
             name: "upsert_job".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             query: None,
@@ -354,13 +450,13 @@ mod tests {
 
     #[test]
     fn test_content_type_serialization() {
-        assert_eq!(serde_json::to_string(&ContentType::Csv).unwrap(), "\"CSV\"");
+        assert_eq!(serde_json::to_string(&ContentType::Csv).unwrap(), "\"csv\"");
     }
 
     #[test]
     fn test_content_type_deserialization() {
         assert_eq!(
-            serde_json::from_str::<ContentType>("\"CSV\"").unwrap(),
+            serde_json::from_str::<ContentType>("\"csv\"").unwrap(),
             ContentType::Csv
         );
     }
@@ -375,54 +471,54 @@ mod tests {
     fn test_column_delimiter_serialization() {
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Comma).unwrap(),
-            "\"COMMA\""
+            "\"comma\""
         );
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Tab).unwrap(),
-            "\"TAB\""
+            "\"tab\""
         );
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Semicolon).unwrap(),
-            "\"SEMICOLON\""
+            "\"semicolon\""
         );
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Pipe).unwrap(),
-            "\"PIPE\""
+            "\"pipe\""
         );
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Caret).unwrap(),
-            "\"CARET\""
+            "\"caret\""
         );
         assert_eq!(
             serde_json::to_string(&ColumnDelimiter::Backquote).unwrap(),
-            "\"BACKQUOTE\""
+            "\"backquote\""
         );
     }
 
     #[test]
     fn test_column_delimiter_deserialization() {
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"COMMA\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"comma\"").unwrap(),
             ColumnDelimiter::Comma
         );
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"TAB\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"tab\"").unwrap(),
             ColumnDelimiter::Tab
         );
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"SEMICOLON\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"semicolon\"").unwrap(),
             ColumnDelimiter::Semicolon
         );
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"PIPE\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"pipe\"").unwrap(),
             ColumnDelimiter::Pipe
         );
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"CARET\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"caret\"").unwrap(),
             ColumnDelimiter::Caret
         );
         assert_eq!(
-            serde_json::from_str::<ColumnDelimiter>("\"BACKQUOTE\"").unwrap(),
+            serde_json::from_str::<ColumnDelimiter>("\"backquote\"").unwrap(),
             ColumnDelimiter::Backquote
         );
     }
@@ -435,28 +531,28 @@ mod tests {
 
     #[test]
     fn test_line_ending_serialization() {
-        assert_eq!(serde_json::to_string(&LineEnding::Lf).unwrap(), "\"LF\"");
+        assert_eq!(serde_json::to_string(&LineEnding::Lf).unwrap(), "\"lf\"");
         assert_eq!(
             serde_json::to_string(&LineEnding::Crlf).unwrap(),
-            "\"CRLF\""
+            "\"crlf\""
         );
     }
 
     #[test]
     fn test_line_ending_deserialization() {
         assert_eq!(
-            serde_json::from_str::<LineEnding>("\"LF\"").unwrap(),
+            serde_json::from_str::<LineEnding>("\"lf\"").unwrap(),
             LineEnding::Lf
         );
         assert_eq!(
-            serde_json::from_str::<LineEnding>("\"CRLF\"").unwrap(),
+            serde_json::from_str::<LineEnding>("\"crlf\"").unwrap(),
             LineEnding::Crlf
         );
     }
 
     #[test]
     fn test_job_creator_full_serialization() {
-        let creator = JobCreator {
+        let creator = JobCreate {
             name: "full_job".to_string(),
             credentials_path: PathBuf::from("/path/to/creds.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -474,14 +570,14 @@ mod tests {
         };
 
         let json = serde_json::to_string(&creator).unwrap();
-        let deserialized: JobCreator = serde_json::from_str(&json).unwrap();
+        let deserialized: JobCreate = serde_json::from_str(&json).unwrap();
 
         assert_eq!(creator, deserialized);
     }
 
     #[test]
     fn test_job_creator_clone() {
-        let creator1 = JobCreator {
+        let creator1 = JobCreate {
             name: "clone_test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
             query: Some(flowgen_core::resource::Source::Inline(
@@ -504,9 +600,14 @@ mod tests {
 
     #[test]
     fn test_job_retriever_clone() {
-        let retriever1 = JobRetriever {
+        let retriever1 = JobRetrieve {
+            name: "clone_test".to_string(),
             credentials_path: PathBuf::from("/test.json"),
             job_type: JobType::Query,
+            job_id: "{{event.data.id}}".to_string(),
+            batch_size: 10000,
+            has_header: true,
+            retry: None,
         };
 
         let retriever2 = retriever1.clone();
@@ -523,7 +624,7 @@ mod tests {
             "object": "Account"
         }"#;
 
-        let creator: JobCreator = serde_json::from_str(json).unwrap();
+        let creator: JobCreate = serde_json::from_str(json).unwrap();
         assert_eq!(creator.name, "minimal_job");
         assert_eq!(creator.operation, Operation::Insert);
         assert_eq!(creator.object, Some("Account".to_string()));
@@ -532,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_job_creator_with_assignment_rule() {
-        let creator = JobCreator {
+        let creator = JobCreate {
             name: "case_job".to_string(),
             credentials_path: PathBuf::from("/creds.json"),
             query: None,
@@ -579,12 +680,12 @@ mod tests {
 
     #[test]
     fn test_debug_implementations() {
-        let creator = JobCreator::default();
+        let creator = JobCreate::default();
         let debug_str = format!("{creator:?}");
-        assert!(debug_str.contains("JobCreator"));
+        assert!(debug_str.contains("JobCreate"));
 
-        let retriever = JobRetriever::default();
+        let retriever = JobRetrieve::default();
         let debug_str = format!("{retriever:?}");
-        assert!(debug_str.contains("JobRetriever"));
+        assert!(debug_str.contains("JobRetrieve"));
     }
 }

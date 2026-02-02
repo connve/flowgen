@@ -1,0 +1,72 @@
+flow:
+  name: salesforce_bulkapi_job_listener
+  require_leader_election: true
+  tasks:
+
+    # Subscribe to Salesforce Bulk API job status events.
+    # Salesforce publishes events to /event/BulkApi2JobEvent when jobs complete.
+    # This eliminates the need for polling and enables real-time job result processing.
+    - salesforce_pubsub_subscriber:
+        name: listen_job_events
+        credentials_path: /etc/sfdc/credentials.json
+        topic:
+          name: /event/BulkApi2JobEvent
+          durable_consumer_options:
+            enabled: true
+            managed_subscription: false
+            name: salesforce_bulkapi_job_listener
+
+    # Filter for RESULT events which indicate job results are available.
+    # BulkApi2JobEvent Type field indicates the event category:
+    # - "RESULT" means job has results ready to download
+    # - "JOB_STATE" is just a state change notification
+    # The script extracts relevant fields into a structured format for downstream tasks.
+    - script:
+        name: filter_available_results
+        code: |
+          if event.data.Type == "RESULT" {
+            #{
+              id: event.data.JobIdentifier,
+              result_type: event.data.ResultType,
+              result_url: event.data.ResultUrl,
+              state: event.data.JobState,
+              event_type: event.data.Type
+            }
+          } else {
+            ()
+          }
+
+    # Log the filtered event to verify the structure.
+    # Only RESULT events will reach this point due to the filter above.
+    - log:
+        name: log_filtered_event
+        level: info
+        structured: true
+
+    # Download CSV results (partial or final) and parse to Arrow RecordBatch.
+    # Supports streaming: retrieves partial results during job execution, then final results on completion.
+    # This eliminates polling and enables real-time data processing.
+    # The job_id is dynamically extracted from the filtered event using template syntax.
+    - salesforce_bulkapi_job_retrieve:
+        name: get_job_details
+        credentials_path: /etc/sfdc/credentials.json
+        job_type: query
+        # Template syntax extracts job_id from the event data structure
+        # Event data format: {"id": "job_id", "result_type": "...", ...}
+        job_id: "{{event.data.id}}"
+
+    # Publish Arrow RecordBatch to NATS for downstream processing.
+    # The Arrow format is efficient for columnar data operations and analytics.
+    - nats_jetstream_publisher:
+        name: publish_to_nats
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        subject: salesforce.accounts.jobs
+        stream:
+          create_or_update: true
+          name: salesforce_accounts
+          description: "Salesforce account query job results"
+          subjects: ["salesforce.accounts.>"]
+          max_age_secs: 86400
+          retention: limits
+          discard: old

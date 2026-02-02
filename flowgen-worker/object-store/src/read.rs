@@ -95,7 +95,7 @@ pub enum Error {
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     /// Writer configuration settings.
-    config: Arc<super::config::Reader>,
+    config: Arc<super::config::ReadProcessor>,
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events
@@ -240,11 +240,11 @@ impl EventHandler {
     }
 }
 
-/// Object store reader that processes events from a broadcast receiver.
+/// Object store read processor that processes events from a broadcast receiver.
 #[derive(Debug)]
-pub struct Reader {
-    /// Reader configuration settings.
-    config: Arc<super::config::Reader>,
+pub struct ReadProcessor {
+    /// Read configuration settings.
+    config: Arc<super::config::ReadProcessor>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
@@ -258,7 +258,7 @@ pub struct Reader {
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Reader {
+impl flowgen_core::task::runner::Runner for ReadProcessor {
     type Error = Error;
     type EventHandler = EventHandler;
 
@@ -362,11 +362,11 @@ impl flowgen_core::task::runner::Runner for Reader {
     }
 }
 
-/// Builder pattern for constructing Writer instances.
+/// Builder pattern for constructing ReadProcessor instances.
 #[derive(Default)]
-pub struct ReaderBuilder {
-    /// Writer configuration settings.
-    config: Option<Arc<super::config::Reader>>,
+pub struct ReadProcessorBuilder {
+    /// Read configuration settings.
+    config: Option<Arc<super::config::ReadProcessor>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -379,15 +379,15 @@ pub struct ReaderBuilder {
     task_type: Option<&'static str>,
 }
 
-impl ReaderBuilder {
-    pub fn new() -> ReaderBuilder {
-        ReaderBuilder {
+impl ReadProcessorBuilder {
+    pub fn new() -> ReadProcessorBuilder {
+        ReadProcessorBuilder {
             ..Default::default()
         }
     }
 
     /// Sets the writer configuration.
-    pub fn config(mut self, config: Arc<super::config::Reader>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::ReadProcessor>) -> Self {
         self.config = Some(config);
         self
     }
@@ -423,9 +423,9 @@ impl ReaderBuilder {
         self
     }
 
-    /// Builds the Writer instance, validating required fields.
-    pub async fn build(self) -> Result<Reader, Error> {
-        Ok(Reader {
+    /// Builds the ReadProcessor instance, validating required fields.
+    pub async fn build(self) -> Result<ReadProcessor, Error> {
+        Ok(ReadProcessor {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
@@ -471,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_builder() {
-        let config = Arc::new(crate::config::Reader {
+        let config = Arc::new(crate::config::ReadProcessor {
             name: "test_reader".to_string(),
             path: PathBuf::from("s3://bucket/input/"),
             credentials_path: None,
@@ -486,7 +486,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>(10);
 
         // Success case.
-        let reader = ReaderBuilder::new()
+        let reader = ReadProcessorBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx.clone())
@@ -499,7 +499,7 @@ mod tests {
 
         // Error case - missing config.
         let (tx2, rx2) = mpsc::channel::<Event>(10);
-        let result = ReaderBuilder::new()
+        let result = ReadProcessorBuilder::new()
             .receiver(rx2)
             .sender(tx2)
             .task_context(create_mock_task_context())
