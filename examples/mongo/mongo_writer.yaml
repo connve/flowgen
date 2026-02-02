@@ -1,0 +1,27 @@
+flow:
+  name: "mongo_writer"
+  tasks:
+
+    # Subscribe to NATS stream on a given topic.
+    - nats_jetstream_subscriber:
+        name: "start_subscription"
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        subject: data.mongo
+        stream:
+          create_or_update: true
+          name: mongo
+          description: "Mongo events from reader"
+          subjects: ["data.mongo",]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
+        durable_name: mongo_writer
+        max_messages: 100
+        delay: 1s
+
+    - mongo_writer:
+        name: "mongo_reader"
+        credentials_path: "/etc/mongo/credentials.json"
+        db_name: "rust-example"
+        collection_name: "results"

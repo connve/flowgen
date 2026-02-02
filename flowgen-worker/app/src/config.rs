@@ -77,6 +77,8 @@ pub enum TaskType {
     mongo_reader(flowgen_mongo::config::Reader),
     /// Mongo Change Stream task.
     mongo_change_stream(flowgen_mongo::config::ChangeStream),
+    /// Mongo Reader task.
+    mongo_writer(flowgen_mongo::config::Writer),
 }
 
 impl TaskType {
@@ -100,6 +102,7 @@ impl TaskType {
             TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
             TaskType::mongo_reader(_) => "mongo_reader",
             TaskType::mongo_change_stream(_) => "mongo_change_stream",
+            TaskType::mongo_writer(_) => "mongo_writer",
         }
     }
 }

@@ -76,14 +76,15 @@ pub enum Error {
     /// Error in Salesforce Bulk API Job Creator task.
     #[error(transparent)]
     SalesforceBulkApiError(#[from] flowgen_salesforce::bulkapi::job_creator::Error),
-
     /// Error in Mongo Reader task.
     #[error(transparent)]
     MongoReaderError(#[from] flowgen_mongo::reader::Error),
-
     /// Error in Mongo Reader task.
     #[error(transparent)]
     MongoChangeStreamError(#[from] flowgen_mongo::change_stream::Error),
+    /// Error in Mongo Writer task.
+    #[error(transparent)]
+    MongoWriterError(#[from] flowgen_mongo::writer::Error),
 }
 
 pub struct Flow {
@@ -789,7 +790,6 @@ async fn spawn_tasks(
                 );
                 background_tasks.push(task);
             }
-
             TaskType::mongo_change_stream(config) => {
                 let config = Arc::new(config.to_owned());
                 let rx = tx.subscribe();
@@ -800,6 +800,33 @@ async fn spawn_tasks(
                 let task: JoinHandle<Result<(), Error>> = tokio::spawn(
                     async move {
                         flowgen_mongo::change_stream::ReaderBuilder::new()
+                            .config(config)
+                            .receiver(rx)
+                            .sender(tx)
+                            .task_id(i)
+                            .task_type(task_type)
+                            .task_context(task_context)
+                            .build()
+                            .await?
+                            .run()
+                            .await?;
+                        Ok(())
+                    }
+                    .instrument(span),
+                );
+                background_tasks.push(task);
+            }
+
+            TaskType::mongo_writer(config) => {
+                let config = Arc::new(config.to_owned());
+                let rx = tx.subscribe();
+                let tx = tx.clone();
+                let task_context = Arc::clone(task_context);
+                let task_type = task.as_str();
+                let span = tracing::Span::current();
+                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
+                    async move {
+                        flowgen_mongo::writer::WriterBuilder::new()
                             .config(config)
                             .receiver(rx)
                             .sender(tx)

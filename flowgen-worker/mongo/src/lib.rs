@@ -13,3 +13,5 @@ pub mod config;
 pub mod message;
 /// Configuration for Mongo batch reader.
 pub mod reader;
+/// Configuration for Mongo writer.
+pub mod writer;

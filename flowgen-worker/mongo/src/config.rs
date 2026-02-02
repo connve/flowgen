@@ -41,3 +41,18 @@ pub struct ChangeStream {
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
+
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Writer {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to credentials file containing Salesforce authentication details.
+    pub credentials_path: PathBuf,
+    /// The Database Name from Mongo.
+    pub db_name: String,
+    /// The Collection Name from Mongo.
+    pub collection_name: String,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
