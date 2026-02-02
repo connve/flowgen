@@ -107,6 +107,16 @@ fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
     false
 }
 
+/// Checks if a gRPC error is due to invalid authentication.
+fn is_auth_error(error: &salesforce_core::pubsub::context::Error) -> bool {
+    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+        let message = status.message();
+        return message.contains("does not have valid authentication credentials")
+            || message.contains("authentication exception occurred");
+    }
+    false
+}
+
 impl EventHandler {
     /// Processes a batch of events from Salesforce Pub/Sub.
     async fn process_events(
@@ -309,8 +319,35 @@ impl EventHandler {
         {
             Ok(response) => response.into_inner(),
             Err(e) => {
-                // If subscribe fails due to invalid replay_id, clear it from cache and let retry handle it.
-                if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
+                // If subscribe fails due to auth error, reconnect and retry once.
+                if is_auth_error(&e) {
+                    warn!("Authentication error detected, reconnecting and retrying");
+
+                    // Reconnect to get fresh OAuth token.
+                    {
+                        let mut pubsub = self.pubsub.lock().await;
+                        pubsub
+                            .reconnect()
+                            .await
+                            .map_err(|e| Error::PubSub { source: e })?;
+                    }
+
+                    // Retry subscribe with new credentials.
+                    match self
+                        .pubsub
+                        .lock()
+                        .await
+                        .subscribe(fetch_request.clone())
+                        .await
+                    {
+                        Ok(response) => response.into_inner(),
+                        Err(e) => {
+                            // If it still fails, return error to trigger full retry.
+                            return Err(Error::PubSub { source: e });
+                        }
+                    }
+                } else if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
+                    // If subscribe fails due to invalid replay_id, clear it from cache and let retry handle it.
                     warn!("Invalid replay_id detected, clearing from cache and retrying");
 
                     // Clear the invalid replay_id from cache so next retry starts fresh.
@@ -328,10 +365,13 @@ impl EventHandler {
                                 .map_err(|e| Error::ReplayIdCacheClear(e.to_string()))?;
                         }
                     }
-                }
 
-                // Return error to trigger retry with fresh connection.
-                return Err(Error::PubSub { source: e });
+                    // Return error to trigger retry with fresh connection.
+                    return Err(Error::PubSub { source: e });
+                } else {
+                    // Return error to trigger retry with fresh connection.
+                    return Err(Error::PubSub { source: e });
+                }
             }
         };
 

@@ -11,6 +11,16 @@ use std::sync::Arc;
 use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
+/// Checks if a gRPC error is due to invalid authentication.
+fn is_auth_error(error: &salesforce_core::pubsub::context::Error) -> bool {
+    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+        let message = status.message();
+        return message.contains("does not have valid authentication credentials")
+            || message.contains("authentication exception occurred");
+    }
+    false
+}
+
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -308,6 +318,24 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!("{}", e);
+                                            // If this is an auth error, reconnect before retrying.
+                                            if let Error::PubSub { ref source } = e {
+                                                if is_auth_error(source) {
+                                                    let mut pubsub =
+                                                        event_handler.pubsub.lock().await;
+                                                    if let Err(reconnect_err) =
+                                                        pubsub.reconnect().await
+                                                    {
+                                                        error!(
+                                                            "Failed to reconnect: {}",
+                                                            reconnect_err
+                                                        );
+                                                        return Err(Error::PubSub {
+                                                            source: reconnect_err,
+                                                        });
+                                                    }
+                                                }
+                                            }
                                             Err(e)
                                         }
                                     }
