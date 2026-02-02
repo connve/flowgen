@@ -362,7 +362,12 @@ mod tests {
         assert!(app_config.worker.as_ref().unwrap().http_server.is_none());
         assert!(app_config.worker.as_ref().unwrap().host.is_none());
         assert!(app_config.worker.as_ref().unwrap().retry.is_none());
-        assert!(app_config.worker.as_ref().unwrap().event_buffer_size.is_none());
+        assert!(app_config
+            .worker
+            .as_ref()
+            .unwrap()
+            .event_buffer_size
+            .is_none());
         assert!(app_config.resources.is_none());
     }
 
@@ -591,7 +596,13 @@ mod tests {
         };
 
         assert!(app_config.worker.as_ref().unwrap().http_server.is_some());
-        let http_server = app_config.worker.as_ref().unwrap().http_server.as_ref().unwrap();
+        let http_server = app_config
+            .worker
+            .as_ref()
+            .unwrap()
+            .http_server
+            .as_ref()
+            .unwrap();
         assert!(http_server.enabled);
         assert_eq!(http_server.port, Some(8080));
         assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));
