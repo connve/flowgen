@@ -1,6 +1,5 @@
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use oauth2::TokenResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -34,6 +33,10 @@ pub enum Error {
     NoSalesforceAuthToken(),
     #[error("No salesforce instance URL provided")]
     NoSalesforceInstanceURL(),
+    #[error("Salesforce API returned {count} error(s): {details}", count = .errors.len(), details = format_salesforce_errors(.errors))]
+    SalesforceApi {
+        errors: Vec<SalesforceErrorResponse>,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -46,6 +49,23 @@ pub enum Error {
         #[source]
         source: flowgen_core::resource::Error,
     },
+}
+
+/// Salesforce API error response structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SalesforceErrorResponse {
+    pub error_code: String,
+    pub message: String,
+}
+
+/// Formats Salesforce errors for display in error messages.
+fn format_salesforce_errors(errors: &[SalesforceErrorResponse]) -> String {
+    errors
+        .iter()
+        .map(|e| format!("[{}] {}", e.error_code, e.message))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Request payload for Salesforce bulk query job creation.
@@ -129,8 +149,8 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     /// Task identifier for event correlation.
     current_task_id: usize,
-    /// Salesforce client for authentication and API access.
-    sfdc_client: salesforce_core::client::Client,
+    /// Salesforce client for authentication and API access (wrapped in Mutex for token refresh).
+    sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Optional resource loader for loading external query files.
@@ -144,12 +164,38 @@ impl EventHandler {
         let event_value = serde_json::value::Value::try_from(&event)?;
         let config = self.config.render(&event_value)?;
 
-        // Extract access token from authentication result.
-        let token_result = self
-            .sfdc_client
-            .token_result
+        // Try request, and if it fails with INVALID_SESSION_ID, force token refresh and retry once.
+        match self.handle_request(&event, &config).await {
+            Err(Error::SalesforceApi { ref errors })
+                if errors.iter().any(|e| e.error_code == "INVALID_SESSION_ID") =>
+            {
+                // Token is invalid - force refresh by calling access_token() which auto-refreshes.
+                {
+                    let sfdc_client = self.sfdc_client.lock().await;
+                    (*sfdc_client).access_token().await?;
+                }
+
+                // Retry the request with refreshed token.
+                self.handle_request(&event, &config).await
+            }
+            result => result,
+        }
+    }
+
+    /// Internal method to handle the actual API request.
+    async fn handle_request(
+        &self,
+        _event: &Event,
+        config: &super::config::JobCreate,
+    ) -> Result<(), Error> {
+        // Lock the Salesforce client to get token and instance URL.
+        let sfdc_client = self.sfdc_client.lock().await;
+        let access_token = sfdc_client.access_token().await?;
+        let instance_url = sfdc_client
+            .instance_url
             .clone()
-            .ok_or_else(Error::NoSalesforceAuthToken)?;
+            .ok_or_else(Error::NoSalesforceInstanceURL)?;
+        drop(sfdc_client);
 
         // Resolve query from inline or resource source.
         let query_string = match &config.query {
@@ -190,18 +236,12 @@ impl EventHandler {
             }
         };
 
-        let instance_url = self
-            .sfdc_client
-            .instance_url
-            .clone()
-            .ok_or_else(Error::NoSalesforceInstanceURL)?;
-
         // Configure HTTP client with endpoint and auth.
         let mut client = self
             .client
             .post(instance_url + super::config::DEFAULT_URI_PATH + config.job_type.as_str());
 
-        client = client.bearer_auth(token_result.access_token().secret());
+        client = client.bearer_auth(access_token);
         client = client.json(&payload);
 
         // Execute API request and retrieve response.
@@ -213,11 +253,28 @@ impl EventHandler {
             .await
             .map_err(|e| Error::Reqwest { source: e })?;
 
-        let data = resp;
+        // Check if response is an error array (Salesforce returns errors as array).
+        if let Some(errors_array) = resp.as_array() {
+            if !errors_array.is_empty() {
+                // Try to deserialize all errors from the array.
+                let mut errors = Vec::new();
+                for error_value in errors_array {
+                    if let Ok(error_response) =
+                        serde_json::from_value::<SalesforceErrorResponse>(error_value.clone())
+                    {
+                        errors.push(error_response);
+                    }
+                }
 
-        // Create and emit response event.
+                if !errors.is_empty() {
+                    return Err(Error::SalesforceApi { errors });
+                }
+            }
+        }
+
+        // Response is valid data - create and emit event.
         let e = EventBuilder::new()
-            .data(EventData::Json(data))
+            .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .task_id(self.current_task_id)
             .task_type(self.task_type)
@@ -257,7 +314,7 @@ impl flowgen_core::task::runner::Runner for JobCreate {
             current_task_id: self.current_task_id,
             tx: self.tx.clone(),
             client,
-            sfdc_client,
+            sfdc_client: Arc::new(tokio::sync::Mutex::new(sfdc_client)),
             task_type: self.task_type,
             resource_loader: self.task_context.resource_loader.clone(),
         };
