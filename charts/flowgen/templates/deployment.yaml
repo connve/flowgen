@@ -67,7 +67,7 @@ spec:
           readOnly: true
         {{- end }}
         {{- range $key, $volume := $worker.volumes }}
-        {{- if and (hasKey $volume "enabled") (hasKey $volume "secretName") $volume.enabled $volume.secretName }}
+        {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
         - name: {{ $key | kebabcase }}
           mountPath: {{ $volume.mountPath }}
           {{- if hasKey $volume "readOnly" }}
@@ -89,10 +89,15 @@ spec:
           name: {{ $worker.volumes.flows.configMapName }}
       {{- end }}
       {{- range $key, $volume := $worker.volumes }}
-      {{- if and (hasKey $volume "enabled") (hasKey $volume "secretName") $volume.enabled $volume.secretName }}
+      {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
       - name: {{ $key | kebabcase }}
+        {{- if $volume.secretName }}
         secret:
           secretName: {{ $volume.secretName }}
+        {{- else if $volume.configMapName }}
+        configMap:
+          name: {{ $volume.configMapName }}
+        {{- end }}
       {{- end }}
       {{- end }}
       {{- with $worker.nodeSelector }}
