@@ -56,16 +56,6 @@ spec:
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:
-        {{- if $worker.volumes.config.enabled }}
-        - name: config
-          mountPath: {{ $worker.volumes.config.mountPath }}
-          readOnly: true
-        {{- end }}
-        {{- if $worker.volumes.flows.enabled }}
-        - name: flows
-          mountPath: {{ $worker.volumes.flows.mountPath }}
-          readOnly: true
-        {{- end }}
         {{- range $key, $volume := $worker.volumes }}
         {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
         - name: {{ $key | kebabcase }}
@@ -78,16 +68,6 @@ spec:
         {{- end }}
         {{- end }}
       volumes:
-      {{- if $worker.volumes.config.enabled }}
-      - name: config
-        configMap:
-          name: {{ $worker.volumes.config.configMapName }}
-      {{- end }}
-      {{- if $worker.volumes.flows.enabled }}
-      - name: flows
-        configMap:
-          name: {{ $worker.volumes.flows.configMapName }}
-      {{- end }}
       {{- range $key, $volume := $worker.volumes }}
       {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
       - name: {{ $key | kebabcase }}
