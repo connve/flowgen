@@ -122,7 +122,7 @@ impl App {
 
         // Create shared HTTP Server if enabled.
         let http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>> =
-            match &app_config.http_server {
+            match app_config.worker.as_ref().and_then(|w| w.http_server.as_ref()) {
                 Some(http_config) if http_config.enabled => {
                     let mut http_server_builder = flowgen_http::server::HttpServerBuilder::new();
                     if let Some(ref prefix) = http_config.routes_prefix {
@@ -175,7 +175,7 @@ impl App {
             };
 
         // Create host client if configured.
-        let host_client = if let Some(host) = &app_config.host {
+        let host_client = if let Some(host) = app_config.worker.as_ref().and_then(|w| w.host.as_ref()) {
             if host.enabled {
                 match &host.host_type {
                     crate::config::HostType::K8s => {
@@ -232,11 +232,11 @@ impl App {
                 flow_builder = flow_builder.http_server(server);
             }
 
-            if let Some(retry_config) = &app_config.retry {
+            if let Some(retry_config) = app_config.worker.as_ref().and_then(|w| w.retry.as_ref()) {
                 flow_builder = flow_builder.retry(retry_config.clone());
             }
 
-            if let Some(buffer_size) = app_config.event_buffer_size {
+            if let Some(buffer_size) = app_config.worker.as_ref().and_then(|w| w.event_buffer_size) {
                 flow_builder = flow_builder.event_buffer_size(buffer_size);
             }
 
@@ -262,8 +262,9 @@ impl App {
 
         // Run HTTP handlers and wait for them to register (only if HTTP server is enabled).
         if app_config
-            .http_server
+            .worker
             .as_ref()
+            .and_then(|w| w.http_server.as_ref())
             .is_some_and(|http| http.enabled)
         {
             let mut http_handler_tasks = Vec::new();
@@ -293,7 +294,7 @@ impl App {
         // Start the main HTTP server.
         let mut background_handles = Vec::new();
         if let Some(http_server) = http_server {
-            let configured_port = app_config.http_server.as_ref().and_then(|http| http.port);
+            let configured_port = app_config.worker.as_ref().and_then(|w| w.http_server.as_ref()).and_then(|http| http.port);
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
                 async move {

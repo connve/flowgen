@@ -8,8 +8,8 @@ flow:
         interval: 10s
         count: 1
 
-    # Object store reader reads CSV file with 10,000 order records.
-    - object_store_reader:
+    # Object store read reads CSV file with 10,000 order records.
+    - object_store_read:
         name: read_file
         path: file:///flowgen/examples/data/orders.csv
         batch_size: 1000

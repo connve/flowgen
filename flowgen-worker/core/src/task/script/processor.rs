@@ -36,6 +36,11 @@ pub enum Error {
     },
     #[error("Script returned invalid type: {0}")]
     InvalidReturnType(String),
+    #[error("Failed to serialize event to JSON: {source}")]
+    JsonSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
     #[error("Failed to parse RFC 2822 timestamp '{timestamp}': {source}")]
@@ -50,6 +55,10 @@ pub enum Error {
         #[source]
         source: chrono::ParseError,
     },
+    #[error("Invalid Unix timestamp '{timestamp}': timestamp out of valid range")]
+    InvalidUnixTimestamp { timestamp: i64 },
+    #[error("Timestamp must be an integer, got type: {type_name}")]
+    TimestampTypeError { type_name: String },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -83,13 +92,23 @@ impl EventHandler {
         // Store the original event for comparison after script execution.
         let original_event = event.clone();
 
-        // Convert the event to JSON for script execution.
+        // Convert the event to JSON string and parse with Rhai's native JSON parser.
+        // This avoids serde_json internal representation leaking into Rhai.
         let value = Value::try_from(&event).map_err(|source| Error::EventConversion { source })?;
         let event_obj = value["event"].to_owned();
+        let event_json = serde_json::to_string(&event_obj)
+            .map_err(|source| Error::JsonSerialization { source })?;
 
-        // Execute the script with the event in scope.
+        // Parse JSON using Rhai's engine to get native Rhai types.
+        let event_dynamic: Dynamic = self
+            .engine
+            .parse_json(event_json, true)
+            .map_err(|e| Error::ScriptExecution { source: e })?
+            .into();
+
+        // Execute the script with the parsed event in scope.
         let mut scope = Scope::new();
-        scope.push("event", json_to_dynamic(&event_obj)?);
+        scope.push("event", event_dynamic);
 
         let result: Dynamic = self
             .engine
@@ -220,13 +239,6 @@ impl EventHandler {
     }
 }
 
-/// Converts serde_json::Value to rhai::Dynamic.
-fn json_to_dynamic(value: &Value) -> Result<Dynamic, Error> {
-    let dynamic =
-        rhai::serde::to_dynamic(value).map_err(|e| Error::InvalidReturnType(e.to_string()))?;
-    Ok(dynamic)
-}
-
 /// Converts rhai::Dynamic to serde_json::Value.
 fn dynamic_to_json(dynamic: Dynamic) -> Result<Value, Error> {
     let value =
@@ -296,6 +308,52 @@ impl crate::task::runner::Runner for Processor {
                     })
             },
         );
+
+        // Register function to convert Unix timestamp to ISO 8601 format.
+        engine.register_fn(
+            "timestamp_to_iso",
+            |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+                // Convert Unix timestamp in seconds to ISO 8601 format.
+                // Returns ISO 8601 string like "2026-02-02T12:00:00Z".
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register overload for Dynamic type from Rhai maps.
+        engine.register_fn(
+            "timestamp_to_iso",
+            |timestamp_dynamic: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
+                // Handle Dynamic type from Rhai - try to cast to i64.
+                let timestamp_secs: i64 = timestamp_dynamic.as_int().map_err(|_| {
+                    let err = Error::TimestampTypeError {
+                        type_name: timestamp_dynamic.type_name().to_string(),
+                    };
+                    err.to_string()
+                })?;
+
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to get current Unix timestamp.
+        engine.register_fn("timestamp_now", || -> i64 {
+            // Returns current Unix timestamp in seconds.
+            chrono::Utc::now().timestamp()
+        });
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),

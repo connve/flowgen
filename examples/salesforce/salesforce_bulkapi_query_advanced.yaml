@@ -1,0 +1,46 @@
+flow:
+  name: salesforce_bulkapi_query_advanced
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 5 minutes.
+    - generate:
+        name: trigger
+        interval: 300s
+
+    # Advanced Salesforce Bulk API query demonstrating:
+    # - External SOQL query from resource file
+    # - queryAll operation (includes deleted/archived records)
+    # - Custom CSV formatting options
+    # - Job creation with full metadata response
+    - salesforce_bulkapi_job_create:
+        name: query_all_contacts
+        # Path to Salesforce OAuth credentials file
+        credentials_path: /etc/sfdc/credentials.json
+        # Job type: query for data extraction, ingest for data loading
+        job_type: query
+        # Operation: queryAll includes deleted and archived records
+        operation: queryAll
+        # SOQL query loaded from external resource file
+        # Resources are loaded from the configured resources directory
+        query:
+          resource: "salesforce/fetch_contacts.soql"
+        # Output file format (currently only csv supported)
+        content_type: csv
+        # Use pipe delimiter for easier Excel import
+        column_delimiter: pipe
+        # Windows-style line endings for compatibility
+        line_ending: crlf
+
+    # Output job metadata to console for monitoring.
+    # Response includes job ID, state, and other metadata needed for job retrieve.
+    - log:
+        name: log_job_info
+        level: info
+        structured: true
+
+    # NOTE: Job results are automatically retrieved via the companion flow 'salesforce_bulkapi_job_listener'.
+    # That flow subscribes to /event/BulkApi2JobEvent and processes results when available.
+    # This event-driven approach eliminates polling delays and enables real-time processing.
+    #
+    # See: examples/salesforce/salesforce_bulkapi_job_listener.yaml

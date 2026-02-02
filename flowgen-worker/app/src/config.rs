@@ -53,10 +53,10 @@ pub enum TaskType {
     script(flowgen_core::task::script::config::Processor),
     /// Buffer task for accumulating events into batches.
     buffer(flowgen_core::task::buffer::config::Processor),
-    /// Object store reader task.
-    object_store_reader(flowgen_object_store::config::Reader),
-    /// Object store writer task.
-    object_store_writer(flowgen_object_store::config::Writer),
+    /// Object store read task.
+    object_store_read(flowgen_object_store::config::ReadProcessor),
+    /// Object store write task.
+    object_store_write(flowgen_object_store::config::WriteProcessor),
     /// Data generation task.
     generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
@@ -71,8 +71,10 @@ pub enum TaskType {
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     /// Salesforce Pub/Sub publisher task.
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
-    /// Salesforce Bulk API Job creator task.
-    salesforce_bulkapi_job_creator(flowgen_salesforce::bulkapi::config::JobCreator),
+    /// Salesforce Bulk API job create task.
+    salesforce_bulkapi_job_create(flowgen_salesforce::bulkapi::config::JobCreate),
+    /// Salesforce Bulk API job retrieve task.
+    salesforce_bulkapi_job_retrieve(flowgen_salesforce::bulkapi::config::JobRetrieve),
     /// GCP BigQuery query task.
     gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
     /// GCP BigQuery Storage Read API task.
@@ -88,8 +90,8 @@ impl TaskType {
             TaskType::log(_) => "log",
             TaskType::script(_) => "script",
             TaskType::buffer(_) => "buffer",
-            TaskType::object_store_reader(_) => "object_store_reader",
-            TaskType::object_store_writer(_) => "object_store_writer",
+            TaskType::object_store_read(_) => "object_store_read",
+            TaskType::object_store_write(_) => "object_store_write",
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
             TaskType::http_webhook(_) => "http_webhook",
@@ -97,7 +99,8 @@ impl TaskType {
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
-            TaskType::salesforce_bulkapi_job_creator(_) => "salesforce_bulkapi_job_creator",
+            TaskType::salesforce_bulkapi_job_create(_) => "salesforce_bulkapi_job_create",
+            TaskType::salesforce_bulkapi_job_retrieve(_) => "salesforce_bulkapi_job_retrieve",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
         }
@@ -113,13 +116,20 @@ impl std::fmt::Display for TaskType {
 /// Main application configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
-    /// Optional cache configuration.
+    /// Optional cache configuration (shared across components).
     pub cache: Option<CacheOptions>,
-    /// Flow discovery options.
+    /// Flow discovery options (shared across components).
     pub flows: FlowOptions,
-    /// Optional resource loading configuration.
+    /// Optional resource loading configuration (shared across components).
     pub resources: Option<ResourceOptions>,
-    /// Optional HTTP server configuration.
+    /// Optional worker component configuration.
+    pub worker: Option<WorkerConfig>,
+}
+
+/// Worker component configuration.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct WorkerConfig {
+    /// Optional HTTP server configuration for webhooks, health checks, and metrics.
     pub http_server: Option<HttpServerOptions>,
     /// Optional host coordination configuration.
     pub host: Option<HostOptions>,
@@ -337,20 +347,22 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/test/flows/*")),
             },
-            http_server: None,
-            host: None,
-            retry: None,
-            event_buffer_size: None,
             resources: None,
+            worker: Some(WorkerConfig {
+                http_server: None,
+                host: None,
+                retry: None,
+                event_buffer_size: None,
+            }),
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.path.is_some());
-        assert!(app_config.http_server.is_none());
-        assert!(app_config.host.is_none());
-        assert!(app_config.retry.is_none());
-        assert!(app_config.event_buffer_size.is_none());
+        assert!(app_config.worker.as_ref().unwrap().http_server.is_none());
+        assert!(app_config.worker.as_ref().unwrap().host.is_none());
+        assert!(app_config.worker.as_ref().unwrap().retry.is_none());
+        assert!(app_config.worker.as_ref().unwrap().event_buffer_size.is_none());
         assert!(app_config.resources.is_none());
     }
 
@@ -361,11 +373,13 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/flows/*")),
             },
-            http_server: None,
-            host: None,
-            retry: None,
-            event_buffer_size: None,
             resources: None,
+            worker: Some(WorkerConfig {
+                http_server: None,
+                host: None,
+                retry: None,
+                event_buffer_size: None,
+            }),
         };
 
         assert!(app_config.cache.is_none());
@@ -385,11 +399,13 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/serialize/flows/*")),
             },
-            http_server: None,
-            host: None,
-            retry: None,
-            event_buffer_size: None,
             resources: None,
+            worker: Some(WorkerConfig {
+                http_server: None,
+                host: None,
+                retry: None,
+                event_buffer_size: None,
+            }),
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -408,11 +424,13 @@ mod tests {
                 db_name: None,
             }),
             flows: FlowOptions { path: None },
-            http_server: None,
-            host: None,
-            retry: None,
-            event_buffer_size: None,
             resources: None,
+            worker: Some(WorkerConfig {
+                http_server: None,
+                host: None,
+                retry: None,
+                event_buffer_size: None,
+            }),
         };
 
         let cloned = app_config.clone();
@@ -559,19 +577,21 @@ mod tests {
         let app_config = AppConfig {
             cache: None,
             flows: FlowOptions { path: None },
-            http_server: Some(HttpServerOptions {
-                enabled: true,
-                port: Some(8080),
-                routes_prefix: Some("/workers".to_string()),
-            }),
-            host: None,
-            retry: None,
-            event_buffer_size: None,
             resources: None,
+            worker: Some(WorkerConfig {
+                http_server: Some(HttpServerOptions {
+                    enabled: true,
+                    port: Some(8080),
+                    routes_prefix: Some("/workers".to_string()),
+                }),
+                host: None,
+                retry: None,
+                event_buffer_size: None,
+            }),
         };
 
-        assert!(app_config.http_server.is_some());
-        let http_server = app_config.http_server.as_ref().unwrap();
+        assert!(app_config.worker.as_ref().unwrap().http_server.is_some());
+        let http_server = app_config.worker.as_ref().unwrap().http_server.as_ref().unwrap();
         assert!(http_server.enabled);
         assert_eq!(http_server.port, Some(8080));
         assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));

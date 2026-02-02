@@ -1,4 +1,6 @@
-# Determines if cache service should be used.
+# Shared configuration across components.
+
+# Cache service configuration (optional, shared across worker and server).
 cache:
   enabled: true
   credentials_path: "path_to_credentials"
@@ -6,30 +8,32 @@ cache:
   db_name: "cache_db_name"
   type: nats
 
-# Points to config directory.
+# Flow discovery configuration (shared across worker and server).
 flows:
   path: "path_to_configs_folder"
 
-# Resource loading configuration (optional).
+# Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
 resources:
   path: "path_to_resources_folder"
 
-# HTTP server configuration (optional, defaults to port 3000).
-http_server:
-  enabled: true
-  port: 3000
-  # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
-  routes_prefix: "/api/flowgen/workers"
+# Worker component configuration.
+worker:
+  # HTTP server for webhooks, health checks, and metrics (optional, defaults to port 3000).
+  http_server:
+    enabled: true
+    port: 3000
+    # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
+    routes_prefix: "/api/flowgen/workers"
 
-# Host coordination configuration (optional).
-host:
-  enabled: true
-  type: k8s
+  # Host coordination configuration (optional).
+  host:
+    enabled: true
+    type: k8s
 
-# Event channel buffer size (optional, defaults to 10M).
-# Controls memory allocation for broadcast channel between tasks.
-# Memory usage: ~buffer_size * 128 bytes (e.g., 10M = ~1.2 GB, 50M = ~6 GB).
-# Adjust based on available memory and workload volume.
-# event_buffer_size: 10000000
+  # Event channel buffer size (optional, defaults to 10M).
+  # Controls memory allocation for broadcast channel between tasks.
+  # Memory usage: ~buffer_size * 128 bytes (e.g., 10M = ~1.2 GB, 50M = ~6 GB).
+  # Adjust based on available memory and workload volume.
+  # event_buffer_size: 10000000
 

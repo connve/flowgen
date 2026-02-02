@@ -1,0 +1,19 @@
+-- Fetch Contact records with related Account information
+-- This query demonstrates SOQL relationships and filtering
+-- Optimized for Bulk API with selective fields to minimize data transfer
+SELECT
+    Id,
+    FirstName,
+    LastName,
+    Email,
+    Phone,
+    Account.Id,
+    Account.Name,
+    Account.Industry,
+    CreatedDate,
+    LastModifiedDate
+FROM Contact
+WHERE
+    CreatedDate = LAST_N_DAYS:90
+    AND Email != NULL
+ORDER BY CreatedDate DESC

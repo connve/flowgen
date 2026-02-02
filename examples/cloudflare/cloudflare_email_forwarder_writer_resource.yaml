@@ -28,7 +28,7 @@ flow:
           resource: "schemas/email_message.avsc"
 
     # Write data into local or remote object store.
-    - object_store_writer:
+    - object_store_write:
         name: write_events
         path: file:///cloudflare/email
         hive_partition_options:

@@ -16,8 +16,10 @@ pub mod pubsub {
 }
 
 pub mod bulkapi {
-    /// Configuration structures for Salesforce Bulk API Job creator and retriever.
+    /// Configuration structures for Salesforce Bulk API operations.
     pub mod config;
-    /// Salesforce implementation for creating Bulk API Job.
-    pub mod job_creator;
+    /// Salesforce Bulk API job creation.
+    pub mod job_create;
+    /// Salesforce Bulk API job retrieval.
+    pub mod job_retrieve;
 }
