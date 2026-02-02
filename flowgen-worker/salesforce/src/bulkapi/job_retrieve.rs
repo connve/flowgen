@@ -35,10 +35,8 @@ pub enum Error {
     NoSalesforceAuthToken(),
     #[error("No salesforce instance URL provided")]
     NoSalesforceInstanceURL(),
-    #[error("Salesforce API returned {count} error(s): {details}", count = .errors.len(), details = format_salesforce_errors(.errors))]
-    SalesforceApi {
-        errors: Vec<SalesforceErrorResponse>,
-    },
+    #[error("Salesforce API error: [{error_code}] {message}")]
+    SalesforceApi { error_code: String, message: String },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -54,15 +52,6 @@ pub enum Error {
 pub struct SalesforceErrorResponse {
     pub error_code: String,
     pub message: String,
-}
-
-/// Formats Salesforce errors for display in error messages.
-fn format_salesforce_errors(errors: &[SalesforceErrorResponse]) -> String {
-    errors
-        .iter()
-        .map(|e| format!("[{}] {}", e.error_code, e.message))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Processor for retrieving Salesforce bulk API job status and results.
@@ -97,31 +86,6 @@ impl EventHandler {
         // Render config to support templates in job_id field.
         let event_value = serde_json::value::Value::try_from(&event)?;
         let config = self.config.render(&event_value)?;
-
-        // Try request, and if it fails with INVALID_SESSION_ID, force token refresh and retry once.
-        match self.handle_request(&event, &config).await {
-            Err(Error::SalesforceApi { ref errors })
-                if errors.iter().any(|e| e.error_code == "INVALID_SESSION_ID") =>
-            {
-                // Token is invalid - force refresh by calling access_token() which auto-refreshes.
-                {
-                    let sfdc_client = self.sfdc_client.lock().await;
-                    (*sfdc_client).access_token().await?;
-                }
-
-                // Retry the request with refreshed token.
-                self.handle_request(&event, &config).await
-            }
-            result => result,
-        }
-    }
-
-    /// Internal method to handle the actual API request.
-    async fn handle_request(
-        &self,
-        _event: &Event,
-        config: &super::config::JobRetrieve,
-    ) -> Result<(), Error> {
         // Lock the Salesforce client to get token and instance URL.
         let sfdc_client = self.sfdc_client.lock().await;
         let access_token = sfdc_client.access_token().await?;
@@ -163,21 +127,14 @@ impl EventHandler {
             if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&csv_data) {
                 // Check if it's an error array.
                 if let Some(errors_array) = json_value.as_array() {
-                    if !errors_array.is_empty() {
-                        // Try to deserialize all errors from the array.
-                        let mut errors = Vec::new();
-                        for error_value in errors_array {
-                            if let Ok(error_response) =
-                                serde_json::from_value::<SalesforceErrorResponse>(
-                                    error_value.clone(),
-                                )
-                            {
-                                errors.push(error_response);
-                            }
-                        }
-
-                        if !errors.is_empty() {
-                            return Err(Error::SalesforceApi { errors });
+                    if let Some(first_error) = errors_array.first() {
+                        if let Ok(error_response) =
+                            serde_json::from_value::<SalesforceErrorResponse>(first_error.clone())
+                        {
+                            return Err(Error::SalesforceApi {
+                                error_code: error_response.error_code,
+                                message: error_response.message,
+                            });
                         }
                     }
                 }
@@ -297,6 +254,24 @@ impl flowgen_core::task::runner::Runner for JobRetrieve {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!("{}", e);
+                                            // If this is an INVALID_SESSION_ID error, reconnect before retrying.
+                                            if let Error::SalesforceApi { ref error_code, .. } = e {
+                                                if error_code == "INVALID_SESSION_ID" {
+                                                    let mut sfdc_client =
+                                                        event_handler.sfdc_client.lock().await;
+                                                    if let Err(reconnect_err) =
+                                                        (*sfdc_client).reconnect().await
+                                                    {
+                                                        error!(
+                                                            "Failed to reconnect: {}",
+                                                            reconnect_err
+                                                        );
+                                                        return Err(Error::SalesforceAuth(
+                                                            reconnect_err,
+                                                        ));
+                                                    }
+                                                }
+                                            }
                                             Err(e)
                                         }
                                     }

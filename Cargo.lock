@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1208,7 +1208,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "arrow",
  "config",
@@ -3623,8 +3623,8 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
 name = "salesforce_core"
-version = "0.2.0"
-source = "git+https://github.com/connve-labs/salesforce-rs#87e065561778c2f04aca6c6a1eaaab2cbc555f9f"
+version = "0.3.0"
+source = "git+https://github.com/connve/salesforce-rs#a3d9e550c1cde4812892392c975dbdaef4ff51c9"
 dependencies = [
  "oauth2",
  "reqwest",
@@ -3641,8 +3641,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_pubsub_v1"
-version = "0.2.0"
-source = "git+https://github.com/connve-labs/salesforce-rs#87e065561778c2f04aca6c6a1eaaab2cbc555f9f"
+version = "0.3.0"
+source = "git+https://github.com/connve/salesforce-rs#a3d9e550c1cde4812892392c975dbdaef4ff51c9"
 dependencies = [
  "bytes",
  "futures-util",
