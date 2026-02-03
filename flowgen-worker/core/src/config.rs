@@ -107,6 +107,27 @@ fn render_json_value(
     Ok(())
 }
 
+/// Renders a string template with provided data context.
+///
+/// # Arguments
+/// * `template` - The template string containing Handlebars syntax
+/// * `data` - Template variables for substitution
+///
+/// # Returns
+/// The rendered string with all template variables resolved
+pub fn render_template<T>(template: &str, data: &T) -> Result<String, Error>
+where
+    T: Serialize,
+{
+    let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+    let mut handlebars = Handlebars::new();
+    // Disable HTML escaping since we're rendering data, not HTML
+    handlebars.register_escape_fn(handlebars::no_escape);
+    handlebars
+        .render_template(template, &data_value)
+        .map_err(|e| Error::Render { source: e })
+}
+
 /// Extension trait for configuration types that support template rendering.
 ///
 /// Enables configuration structures to render themselves as Handlebars templates
@@ -225,5 +246,32 @@ mod tests {
 
         assert_eq!(rendered.name, "Jane");
         assert_eq!(rendered.url, "https://api.example.com/123");
+    }
+
+    #[test]
+    fn test_render_template_simple() {
+        let template = "Hello {{name}}!";
+        let data = json!({"name": "World"});
+        let rendered = render_template(template, &data).unwrap();
+        assert_eq!(rendered, "Hello World!");
+    }
+
+    #[test]
+    fn test_render_template_soql() {
+        let template = "SELECT Id, Name FROM Account WHERE LastModifiedDate > {{date}}";
+        let data = json!({"date": "2024-01-01T00:00:00Z"});
+        let rendered = render_template(template, &data).unwrap();
+        assert_eq!(
+            rendered,
+            "SELECT Id, Name FROM Account WHERE LastModifiedDate > 2024-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn test_render_template_nested() {
+        let template = "{{event.data.field}}";
+        let data = json!({"event": {"data": {"field": "value"}}});
+        let rendered = render_template(template, &data).unwrap();
+        assert_eq!(rendered, "value");
     }
 }

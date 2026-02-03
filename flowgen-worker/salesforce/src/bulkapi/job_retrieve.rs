@@ -254,22 +254,29 @@ impl flowgen_core::task::runner::Runner for JobRetrieve {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!("{}", e);
-                                            // If this is an INVALID_SESSION_ID error, reconnect before retrying.
-                                            if let Error::SalesforceApi { ref error_code, .. } = e {
-                                                if error_code == "INVALID_SESSION_ID" {
-                                                    let mut sfdc_client =
-                                                        event_handler.sfdc_client.lock().await;
-                                                    if let Err(reconnect_err) =
-                                                        (*sfdc_client).reconnect().await
-                                                    {
-                                                        error!(
-                                                            "Failed to reconnect: {}",
-                                                            reconnect_err
-                                                        );
-                                                        return Err(Error::SalesforceAuth(
-                                                            reconnect_err,
-                                                        ));
-                                                    }
+                                            // Check if reconnect is needed (auth errors or session invalidation).
+                                            let needs_reconnect = match &e {
+                                                Error::SalesforceApi { error_code, .. } => error_code == "INVALID_SESSION_ID",
+                                                Error::SalesforceAuth(auth_err) => {
+                                                    // Reconnect on token refresh failures (NoRefreshToken).
+                                                    matches!(auth_err, salesforce_core::client::Error::NoRefreshToken)
+                                                }
+                                                _ => false,
+                                            };
+
+                                            if needs_reconnect {
+                                                let mut sfdc_client =
+                                                    event_handler.sfdc_client.lock().await;
+                                                if let Err(reconnect_err) =
+                                                    (*sfdc_client).reconnect().await
+                                                {
+                                                    error!(
+                                                        "Failed to reconnect: {}",
+                                                        reconnect_err
+                                                    );
+                                                    return Err(Error::SalesforceAuth(
+                                                        reconnect_err,
+                                                    ));
                                                 }
                                             }
                                             Err(e)

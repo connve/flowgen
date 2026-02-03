@@ -319,10 +319,8 @@ impl EventHandler {
         {
             Ok(response) => response.into_inner(),
             Err(e) => {
-                // If subscribe fails due to auth error, reconnect and retry once.
+                // Check if reconnect is needed (gRPC auth errors).
                 if is_auth_error(&e) {
-                    warn!("Authentication error detected, reconnecting and retrying");
-
                     // Reconnect to get fresh OAuth token.
                     {
                         let mut pubsub = self.pubsub.lock().await;
