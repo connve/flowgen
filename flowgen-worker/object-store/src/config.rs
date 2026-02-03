@@ -13,6 +13,8 @@ pub const DEFAULT_AVRO_EXTENSION: &str = "avro";
 pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 /// File extension for JSON format files.
 pub const DEFAULT_JSON_EXTENSION: &str = "json";
+/// File extension for Parquet format files.
+pub const DEFAULT_PARQUET_EXTENSION: &str = "parquet";
 
 /// Object Store read processor configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
@@ -40,6 +42,23 @@ pub struct ReadProcessor {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
+/// Output format for writing data to object storage.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteFormat {
+    /// Automatically determine format based on event data type.
+    #[default]
+    Auto,
+    /// Apache Parquet columnar format (efficient for Arrow data).
+    Parquet,
+    /// CSV text format.
+    Csv,
+    /// Apache Avro binary format.
+    Avro,
+    /// Newline-delimited JSON.
+    Json,
+}
+
 /// Object Store write processor configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 pub struct WriteProcessor {
@@ -51,6 +70,9 @@ pub struct WriteProcessor {
     pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
+    /// Output format for the data. Defaults to Auto (inferred from event data type).
+    #[serde(default)]
+    pub format: WriteFormat,
     /// Hive-style partitioning configuration.
     pub hive_partition_options: Option<HivePartitionOptions>,
     /// Optional retry configuration (overrides app-level retry config).
@@ -163,6 +185,7 @@ mod tests {
             path: PathBuf::from("s3://output-bucket/results/"),
             credentials_path: Some(PathBuf::from("/service-account.json")),
             client_options: Some(client_options.clone()),
+            format: WriteFormat::Auto,
             hive_partition_options: Some(hive_options.clone()),
             retry: None,
         };
@@ -184,6 +207,7 @@ mod tests {
             path: PathBuf::from("/local/path/output/"),
             credentials_path: None,
             client_options: None,
+            format: WriteFormat::Parquet,
             hive_partition_options: Some(HivePartitionOptions {
                 enabled: false,
                 partition_keys: vec![],

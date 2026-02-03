@@ -20,6 +20,11 @@ pub enum ContentType {
     },
     /// Apache Avro content format.
     Avro,
+    /// Apache Parquet columnar format with batch size configuration.
+    Parquet {
+        /// Number of records to process in each batch.
+        batch_size: usize,
+    },
 }
 
 /// Trait for converting readers to EventData based on content type.

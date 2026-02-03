@@ -1,14 +1,40 @@
 //! Flow execution and task orchestration.
 //!
-//! Manages the execution of individual flows by creating and orchestrating
-//! tasks from different processor types. Handles task lifecycle, error
-//! propagation, and resource sharing between tasks.
+//! This module manages the lifecycle of flows, including task registry creation,
+//! channel wiring, leader election, and event propagation through task chains.
+//!
+//! ## Architecture
+//!
+//! The core pattern uses a `TaskRegistry` that builds a linear chain of tasks
+//! connected by MPSC channels:
+//!
+//! ```text
+//! [Task 0] --channel[0]--> [Task 1] --channel[1]--> [Task 2]
+//! ```
+//!
+//! For N tasks, we create N-1 channels. Each task receives:
+//! - `input_rx`: Receiver from previous channel (None for first task)
+//! - `output_tx`: Sender to next channel (None for last task)
+//!
+//! ## Channel Ownership
+//!
+//! All tasks are spawned together using the SAME `TaskRegistry` to ensure
+//! channels are properly connected. This is critical for webhook flows where
+//! blocking tasks (webhooks) must send events to background tasks:
+//!
+//! 1. `run_http_handlers()` spawns ALL tasks (webhooks and background)
+//! 2. Returns only blocking handles to wait for webhook registration
+//! 3. Background tasks are already running with connected channels
+//! 4. `run_background_tasks()` monitors the pre-spawned tasks
+//!
+//! This prevents channel mismatch bugs where webhooks send to one channel
+//! while background tasks receive from a different channel.
 
 use crate::config::{FlowConfig, TaskType};
 use flowgen_core::{event::Event, task::runner::Runner};
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
-use tracing::{debug, error, info, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 // Event buffer size for MPSC channels. This needs to be large enough to handle
 // bursts from tasks like iterate that fan-out large arrays (e.g., 100k+ rows).
@@ -95,6 +121,133 @@ pub enum Error {
     /// Error in GCP BigQuery Storage Read task.
     #[error(transparent)]
     GcpBigQueryStorageRead(#[from] flowgen_gcp::bigquery::storage_read::Error),
+    /// Failed to store background task handles for later monitoring.
+    #[error("Failed to store background task handles")]
+    BackgroundHandlesStoreFailed,
+    /// Failed to retrieve background task handles for monitoring.
+    #[error("Failed to retrieve background task handles")]
+    BackgroundHandlesRetrieveFailed,
+}
+
+/// Descriptor for a task with its channel endpoints.
+#[derive(Debug)]
+struct TaskDescriptor {
+    /// Unique task identifier (from original task array index).
+    id: usize,
+    /// Task configuration and type.
+    task_type: TaskType,
+    /// Input channel receiver (None for source tasks).
+    input_rx: Option<mpsc::Receiver<Event>>,
+    /// Output channel sender (None for sink tasks).
+    output_tx: Option<mpsc::Sender<Event>>,
+    /// Whether this is a blocking setup task (e.g., webhook registration).
+    is_blocking: bool,
+}
+
+/// Central registry for managing all tasks in a flow.
+#[derive(Debug)]
+struct TaskRegistry {
+    /// All tasks in execution order.
+    tasks: Vec<TaskDescriptor>,
+}
+
+/// Type alias for a task join handle.
+type TaskHandle = JoinHandle<Result<(), Error>>;
+
+/// Handle collections separated by task type.
+pub struct TaskHandles {
+    /// Handles for blocking setup tasks (e.g., webhook route registration).
+    pub blocking_handles: Vec<TaskHandle>,
+    /// Handles for long-running background tasks.
+    pub background_handles: Vec<TaskHandle>,
+}
+
+impl TaskRegistry {
+    /// Creates a new builder for constructing a task registry.
+    fn builder(flow_config: Arc<FlowConfig>, buffer_size: usize) -> TaskRegistryBuilder {
+        TaskRegistryBuilder {
+            flow_config,
+            buffer_size,
+        }
+    }
+
+    /// Separates tasks into blocking (setup) and background tasks.
+    fn partition(self) -> (Vec<TaskDescriptor>, Vec<TaskDescriptor>) {
+        let mut blocking = Vec::new();
+        let mut background = Vec::new();
+
+        for task in self.tasks {
+            if task.is_blocking {
+                blocking.push(task);
+            } else {
+                background.push(task);
+            }
+        }
+
+        (blocking, background)
+    }
+}
+
+/// Builder for constructing a task registry with proper channel wiring.
+#[derive(Debug)]
+struct TaskRegistryBuilder {
+    flow_config: Arc<FlowConfig>,
+    buffer_size: usize,
+}
+
+impl TaskRegistryBuilder {
+    /// Builds a complete task registry with all channels properly wired.
+    fn build(self) -> Result<TaskRegistry, Error> {
+        let tasks_config = &self.flow_config.flow.tasks;
+        let task_count = tasks_config.len();
+
+        if task_count == 0 {
+            return Ok(TaskRegistry { tasks: Vec::new() });
+        }
+
+        // Create channels for the linear task chain.
+        // For N tasks, we need N-1 channels connecting them.
+        let mut channels: Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)> = (0..task_count
+            .saturating_sub(1))
+            .map(|_| mpsc::channel(self.buffer_size))
+            .collect();
+
+        let mut task_descriptors = Vec::with_capacity(task_count);
+
+        for (idx, task_type) in tasks_config.iter().enumerate() {
+            // Determine blocking status (only webhooks are blocking).
+            let is_blocking = matches!(task_type, TaskType::http_webhook(_));
+
+            // Wire input: task receives from the previous channel (if not the first task).
+            let input_rx = if idx > 0 {
+                channels.get_mut(idx - 1).map(|(_, rx)| {
+                    // Take ownership of the receiver by replacing it with a dummy channel.
+                    std::mem::replace(rx, mpsc::channel(1).1)
+                })
+            } else {
+                None
+            };
+
+            // Wire output: task sends to the next channel (if not the last task).
+            let output_tx = if idx < task_count - 1 {
+                channels.get(idx).map(|(tx, _)| tx.clone())
+            } else {
+                None
+            };
+
+            task_descriptors.push(TaskDescriptor {
+                id: idx,
+                task_type: task_type.clone(),
+                input_rx,
+                output_tx,
+                is_blocking,
+            });
+        }
+
+        Ok(TaskRegistry {
+            tasks: task_descriptors,
+        })
+    }
 }
 
 pub struct Flow {
@@ -116,6 +269,8 @@ pub struct Flow {
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// The shared context for all tasks in this flow. Initialized by `init()`.
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
+    /// Background task handles spawned by run_http_handlers for run_background_tasks to monitor.
+    background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
 }
 
 impl Flow {
@@ -188,6 +343,72 @@ impl Flow {
         Ok(())
     }
 
+    /// Spawns all tasks and returns handles separated by type.
+    ///
+    /// This method spawns ALL tasks together (both blocking and background) using a
+    /// single `TaskRegistry`. This ensures all tasks use the SAME channels for event
+    /// propagation, which is critical for webhook flows.
+    ///
+    /// ## Why All Tasks Are Spawned Together
+    ///
+    /// For webhook flows, the webhook (blocking) task must send events to background
+    /// tasks through a shared channel. If we spawn them separately with different
+    /// registries, they get different channels and events are lost.
+    ///
+    /// ## Example Flow
+    ///
+    /// ```text
+    /// TaskRegistry creates:
+    ///   channel[0]: webhook -> script
+    ///   channel[1]: script -> nats
+    ///
+    /// Spawns:
+    ///   webhook (blocking, registers route, keeps running)
+    ///   script (background, processes events)
+    ///   nats (background, publishes to NATS)
+    ///
+    /// Returns:
+    ///   blocking_handles: [webhook_handle]
+    ///   background_handles: [script_handle, nats_handle]
+    /// ```
+    ///
+    /// The caller should await `blocking_handles` before starting the HTTP server,
+    /// but `background_handles` are already running and connected.
+    #[tracing::instrument(skip(self), name = "flow.spawn_all_tasks", fields(flow = %self.config.flow.name))]
+    pub async fn spawn_all_tasks(&self) -> Result<TaskHandles, Error> {
+        let task_context = self
+            .task_context
+            .as_ref()
+            .ok_or_else(|| Error::TaskContextNotInitialized)?
+            .clone();
+
+        // Build task registry with all tasks properly wired.
+        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
+        let registry = TaskRegistry::builder(self.config.clone(), buffer_size).build()?;
+
+        // Separate blocking (setup) tasks from background tasks.
+        let (blocking_tasks, background_tasks) = registry.partition();
+
+        // Spawn all blocking tasks (webhooks).
+        let mut blocking_handles = Vec::new();
+        for task_desc in blocking_tasks {
+            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            blocking_handles.push(handle);
+        }
+
+        // Spawn all background tasks.
+        let mut background_handles = Vec::new();
+        for task_desc in background_tasks {
+            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            background_handles.push(handle);
+        }
+
+        Ok(TaskHandles {
+            blocking_handles,
+            background_handles,
+        })
+    }
+
     /// Spawns initial setup tasks that must complete before the HTTP server starts.
     ///
     /// This is specifically for registering webhooks for non-leader-elected flows.
@@ -198,37 +419,17 @@ impl Flow {
             return Ok(Vec::new());
         }
 
-        let task_context = self
-            .task_context
-            .as_ref()
-            .ok_or_else(|| Error::TaskContextNotInitialized)?;
+        // Spawn all tasks and return only the blocking handles.
+        let handles = self.spawn_all_tasks().await?;
 
-        let webhook_task_configs: Vec<(usize, TaskType)> = self
-            .config
-            .flow
-            .tasks
-            .iter()
-            .enumerate()
-            .filter(|(_, task)| matches!(task, TaskType::http_webhook(_)))
-            .map(|(i, task)| (i, task.clone()))
-            .collect();
+        // Store background handles for run_background_tasks to monitor.
+        let mut lock = self
+            .background_handles
+            .lock()
+            .map_err(|_| Error::BackgroundHandlesStoreFailed)?;
+        *lock = Some(handles.background_handles);
 
-        if webhook_task_configs.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Create MPSC channels for webhook tasks
-        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
-        let channels = create_task_channels(&webhook_task_configs, buffer_size);
-
-        // Spawn the webhook registration tasks.
-        let (setup_handles, background_handles) =
-            spawn_tasks(&webhook_task_configs, channels, task_context).await?;
-
-        // The `spawn_tasks` for webhooks should not produce background tasks.
-        assert!(background_handles.is_empty());
-
-        Ok(setup_handles)
+        Ok(handles.blocking_handles)
     }
 
     /// Starts the main, long-running execution of the flow.
@@ -253,38 +454,9 @@ impl Flow {
         let is_leader_elected = self.is_leader_elected();
         let task_manager = self
             .task_manager
-            .ok_or_else(|| Error::TaskManagerNotInitialized)?;
-        let task_context = self
-            .task_context
-            .ok_or_else(|| Error::TaskContextNotInitialized)?;
-        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
-
-        // Determine which tasks to run in the main phase.
-        // Setup-only tasks (i.e., non-elected webhooks) are excluded from this phase.
-        let main_tasks_configs: Vec<(usize, TaskType)> = if !is_leader_elected {
-            self.config
-                .flow
-                .tasks
-                .iter()
-                .enumerate()
-                .filter(|(_, task)| !matches!(task, TaskType::http_webhook(_)))
-                .map(|(i, task)| (i, task.clone()))
-                .collect()
-        } else {
-            self.config
-                .flow
-                .tasks
-                .iter()
-                .enumerate()
-                .map(|(i, task)| (i, task.clone()))
-                .collect()
-        };
-
-        if main_tasks_configs.is_empty() {
-            info!("Flow {} has no main tasks to run.", self.config.flow.name);
-            return Ok(());
-        }
-
+            .as_ref()
+            .ok_or_else(|| Error::TaskManagerNotInitialized)?
+            .clone();
         let flow_id = self.config.flow.name.clone();
 
         let leader_election_options = if is_leader_elected {
@@ -324,10 +496,30 @@ impl Flow {
                 }
             }
 
-            // 2. Spawn main tasks.
-            let channels = create_task_channels(&main_tasks_configs, buffer_size);
-            let (_, mut background_tasks) =
-                spawn_tasks(&main_tasks_configs, channels, &task_context).await?;
+            // 2. Get or spawn tasks.
+            let mut background_tasks = if !is_leader_elected {
+                // For non-leader-elected flows, retrieve the already-spawned background tasks.
+                let mut lock = self
+                    .background_handles
+                    .lock()
+                    .map_err(|_| Error::BackgroundHandlesRetrieveFailed)?;
+
+                lock.take()
+                    .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?
+            } else {
+                // For leader-elected flows, spawn all tasks fresh.
+                let handles = self.spawn_all_tasks().await?;
+                handles
+                    .blocking_handles
+                    .into_iter()
+                    .chain(handles.background_handles)
+                    .collect()
+            };
+
+            if background_tasks.is_empty() {
+                info!("Flow {} has no tasks to monitor.", flow_id);
+                return Ok(());
+            }
 
             // 3. Monitor tasks.
             if is_leader_elected {
@@ -361,7 +553,8 @@ impl Flow {
                     // All tasks finished, exit main loop.
                     break;
                 }
-                // Otherwise, lost leadership - loop back to re-acquire.
+                // Otherwise, lost leadership - clear aborted tasks and loop back to re-acquire.
+                background_tasks.clear();
             } else {
                 // For non-leader-elected flows, just wait for all tasks to complete.
                 let results = futures::future::join_all(background_tasks).await;
@@ -380,555 +573,398 @@ impl Flow {
     }
 }
 
-/// Creates MPSC channels for linear task chain.
+/// Spawns a single task based on its descriptor with proper channel wiring.
 ///
-/// Returns vector of (Sender, Receiver) pairs where index i connects task i to task i+1.
-fn create_task_channels(
-    tasks: &[(usize, TaskType)],
-    buffer_size: usize,
-) -> Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)> {
-    let task_count = tasks.len();
-    // Create N-1 channels for N tasks (linear chain).
-    (0..task_count.saturating_sub(1))
-        .map(|_| mpsc::channel(buffer_size))
-        .collect()
-}
+/// Returns a JoinHandle for the spawned task.
+async fn spawn_task(
+    task_desc: TaskDescriptor,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
+) -> Result<JoinHandle<Result<(), Error>>, Error> {
+    let task_id = task_desc.id;
+    let rx = task_desc.input_rx;
+    let tx = task_desc.output_tx;
+    let task_type_str = task_desc.task_type.as_str();
+    let span = tracing::Span::current();
 
-/// Spawns all tasks for the flow with proper channel wiring.
-///
-/// Returns (blocking_tasks, background_tasks) where blocking_tasks complete quickly
-/// and must be awaited before the application is ready (e.g., webhooks registering routes),
-/// while background_tasks run indefinitely.
-async fn spawn_tasks(
-    tasks: &[(usize, TaskType)],
-    channels: Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)>,
-    task_context: &Arc<flowgen_core::task::context::TaskContext>,
-) -> Result<
-    (
-        Vec<JoinHandle<Result<(), Error>>>,
-        Vec<JoinHandle<Result<(), Error>>>,
-    ),
-    Error,
-> {
-    let mut blocking_tasks = Vec::new();
-    let mut background_tasks = Vec::new();
-
-    // Extract senders and receivers from channels.
-    let senders: Vec<Option<mpsc::Sender<Event>>> =
-        channels.iter().map(|(tx, _)| Some(tx.clone())).collect();
-    let mut receivers: Vec<Option<mpsc::Receiver<Event>>> =
-        channels.into_iter().map(|(_, rx)| Some(rx)).collect();
-
-    for (task_idx, (i, task)) in tasks.iter().enumerate() {
-        let i = *i; // Copy the index value so it can be moved into async blocks.
-
-        // Get receiver from previous channel (if not first task).
-        let rx = if task_idx > 0 {
-            receivers.get_mut(task_idx - 1).and_then(|r| r.take())
-        } else {
-            None
-        };
-
-        // Get sender for next channel (if not last task).
-        let tx = if task_idx < senders.len() {
-            senders.get(task_idx).and_then(|s| s.clone())
-        } else {
-            None
-        };
-
-        match task {
-            TaskType::convert(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::convert::processor::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::iterate(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::iterate::processor::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::log(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::log::processor::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::buffer(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::buffer::processor::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::script(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::script::processor::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::generate(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::http_request(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_http::request::ProcessorBuilder::new()
+    let handle = match task_desc.task_type {
+        TaskType::convert(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_core::task::convert::processor::ProcessorBuilder::new()
                             .config(config)
-                            .task_id(i)
-                            .task_type(task_type)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
                             .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
                     }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::http_webhook(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_http::webhook::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(i)
-                            .task_type(task_type)
-                            .task_context(task_context);
-
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
                     }
-                    .instrument(span),
-                );
-                blocking_tasks.push(task);
-            }
-
-            TaskType::nats_jetstream_subscriber(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_nats::jetstream::subscriber::SubscriberBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::nats_jetstream_publisher(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_nats::jetstream::publisher::PublisherBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::salesforce_pubsub_subscriber(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::salesforce_pubsub_publisher(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::salesforce_bulkapi_job_create(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let span = tracing::Span::current();
-                let task_type = task.as_str();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_salesforce::bulkapi::job_create::JobCreateBuilder::new()
-                                .config(config)
-                                .current_task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::salesforce_bulkapi_job_retrieve(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let span = tracing::Span::current();
-                let task_type = task.as_str();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_salesforce::bulkapi::job_retrieve::JobRetrieveBuilder::new()
-                                .config(config)
-                                .current_task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::object_store_read(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
-                            .config(config)
-                            .task_id(i)
-                            .task_type(task_type)
-                            .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::object_store_write(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
-                            .config(config)
-                            .task_id(i)
-                            .task_type(task_type)
-                            .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::gcp_bigquery_query(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_gcp::bigquery::query::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(i)
-                            .task_type(task_type)
-                            .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
-            TaskType::gcp_bigquery_storage_read(config) => {
-                let config = Arc::new(config.to_owned());
-                let task_context = Arc::clone(task_context);
-                let task_type = task.as_str();
-                let span = tracing::Span::current();
-                let task: JoinHandle<Result<(), Error>> = tokio::spawn(
-                    async move {
-                        let mut builder =
-                            flowgen_gcp::bigquery::storage_read::ProcessorBuilder::new()
-                                .config(config)
-                                .task_id(i)
-                                .task_type(task_type)
-                                .task_context(task_context);
-
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                );
-                background_tasks.push(task);
-            }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
         }
-    }
+        TaskType::iterate(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_core::task::iterate::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::log(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_core::task::log::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::buffer(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_core::task::buffer::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::script(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_core::task::script::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::generate(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::http_request(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_http::request::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::http_webhook(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_http::webhook::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::nats_jetstream_subscriber(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_nats::jetstream::subscriber::SubscriberBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::nats_jetstream_publisher(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_nats::jetstream::publisher::PublisherBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_pubsub_subscriber(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_pubsub_publisher(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_bulkapi_job_create(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::bulkapi::job_create::JobCreateBuilder::new()
+                            .config(config)
+                            .current_task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_bulkapi_job_retrieve(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::bulkapi::job_retrieve::JobRetrieveBuilder::new()
+                            .config(config)
+                            .current_task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::object_store_read(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::object_store_write(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::gcp_bigquery_query(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_gcp::bigquery::query::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::gcp_bigquery_storage_read(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_gcp::bigquery::storage_read::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+    };
 
-    Ok((blocking_tasks, background_tasks))
+    Ok(handle)
 }
 
 /// Builder for creating Flow instances.
@@ -1018,6 +1054,7 @@ impl FlowBuilder {
             resource_loader: self.resource_loader,
             task_manager: None,
             task_context: None,
+            background_handles: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }
@@ -1114,5 +1151,155 @@ mod tests {
         assert_eq!(flow.config, flow_config);
         assert!(flow.task_manager.is_none());
         assert!(flow.task_context.is_none());
+    }
+
+    #[test]
+    fn test_task_registry_creates_n_minus_1_channels() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                ],
+                require_leader_election: None,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        assert_eq!(registry.tasks.len(), 3);
+
+        let task0_has_input = registry.tasks[0].input_rx.is_some();
+        let task0_has_output = registry.tasks[0].output_tx.is_some();
+
+        let task1_has_input = registry.tasks[1].input_rx.is_some();
+        let task1_has_output = registry.tasks[1].output_tx.is_some();
+
+        let task2_has_input = registry.tasks[2].input_rx.is_some();
+        let task2_has_output = registry.tasks[2].output_tx.is_some();
+
+        assert!(!task0_has_input, "First task should not have input");
+        assert!(task0_has_output, "First task should have output");
+
+        assert!(task1_has_input, "Middle task should have input");
+        assert!(task1_has_output, "Middle task should have output");
+
+        assert!(task2_has_input, "Last task should have input");
+        assert!(!task2_has_output, "Last task should not have output");
+    }
+
+    #[test]
+    fn test_task_registry_single_task() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![TaskType::script(
+                    flowgen_core::task::script::config::Processor::default(),
+                )],
+                require_leader_election: None,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        assert_eq!(registry.tasks.len(), 1);
+
+        let task = &registry.tasks[0];
+        assert!(task.input_rx.is_none(), "Single task should not have input");
+        assert!(
+            task.output_tx.is_none(),
+            "Single task should not have output"
+        );
+    }
+
+    #[test]
+    fn test_task_registry_partition_blocking_vs_background() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![
+                    TaskType::http_webhook(flowgen_http::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                ],
+                require_leader_election: None,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let (blocking, background) = registry.partition();
+
+        assert_eq!(blocking.len(), 1, "Should have 1 blocking task (webhook)");
+        assert_eq!(
+            background.len(),
+            2,
+            "Should have 2 background tasks (scripts)"
+        );
+
+        assert!(
+            blocking[0].is_blocking,
+            "Blocking task should have is_blocking=true"
+        );
+        assert!(
+            !background[0].is_blocking,
+            "Background task should have is_blocking=false"
+        );
+        assert!(
+            !background[1].is_blocking,
+            "Background task should have is_blocking=false"
+        );
+    }
+
+    #[test]
+    fn test_task_registry_empty_flow() {
+        use crate::config::{Flow, FlowConfig};
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![],
+                require_leader_election: None,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        assert_eq!(registry.tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_task_registry_preserves_task_order() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                    TaskType::script(flowgen_core::task::script::config::Processor::default()),
+                ],
+                require_leader_election: None,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        assert_eq!(registry.tasks[0].id, 0);
+        assert_eq!(registry.tasks[1].id, 1);
+        assert_eq!(registry.tasks[2].id, 2);
     }
 }

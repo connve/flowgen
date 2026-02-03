@@ -1,4 +1,7 @@
-use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
+use super::config::{
+    WriteFormat, DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION,
+    DEFAULT_PARQUET_EXTENSION,
+};
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Utc};
 use flowgen_core::buffer::ToWriter;
@@ -165,18 +168,54 @@ impl EventHandler {
             _none => timestamp.to_string(),
         };
 
-        let extension = match &event.data {
-            flowgen_core::event::EventData::ArrowRecordBatch(_) => DEFAULT_CSV_EXTENSION,
-            flowgen_core::event::EventData::Avro(_) => DEFAULT_AVRO_EXTENSION,
-            flowgen_core::event::EventData::Json(_) => DEFAULT_JSON_EXTENSION,
+        // Determine output format and extension.
+        let (format, extension) = match &config.format {
+            WriteFormat::Auto => {
+                // Auto-detect format from event data type.
+                match &event.data {
+                    flowgen_core::event::EventData::ArrowRecordBatch(_) => {
+                        (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION)
+                    }
+                    flowgen_core::event::EventData::Avro(_) => {
+                        (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION)
+                    }
+                    flowgen_core::event::EventData::Json(_) => {
+                        (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
+                    }
+                }
+            }
+            WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
+            WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
+            WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
+            WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
         };
 
-        // Transform the event data to writer.
+        // Write data in the appropriate format.
         let mut writer = Vec::new();
-        event
-            .data
-            .to_writer(&mut writer)
-            .map_err(|source| Error::EventBuilder { source })?;
+        match (&event.data, &format) {
+            (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
+                // Write Arrow as Parquet (native columnar format).
+                let props = parquet::file::properties::WriterProperties::builder().build();
+                let mut parquet_writer =
+                    parquet::arrow::ArrowWriter::try_new(&mut writer, batch.schema(), Some(props))
+                        .map_err(|e| Error::Arrow {
+                            source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                        })?;
+                parquet_writer.write(batch).map_err(|e| Error::Arrow {
+                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                })?;
+                parquet_writer.close().map_err(|e| Error::Arrow {
+                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                })?;
+            }
+            _ => {
+                // Use default to_writer for other formats.
+                event
+                    .data
+                    .to_writer(&mut writer)
+                    .map_err(|source| Error::EventBuilder { source })?;
+            }
+        }
 
         let object_path = path.child(format!("{filename}.{extension}"));
 
@@ -469,6 +508,7 @@ mod tests {
             path: PathBuf::from("s3://bucket/path/"),
             credentials_path: None,
             client_options: None,
+            format: crate::config::WriteFormat::Auto,
             hive_partition_options: None,
             retry: None,
         });
@@ -497,5 +537,51 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
+    }
+
+    #[test]
+    fn test_parquet_format_auto_detection() {
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use flowgen_core::event::EventData;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+
+        let event_data = EventData::ArrowRecordBatch(batch);
+        let config = crate::config::WriteFormat::Auto;
+
+        let (format, extension) = match &config {
+            crate::config::WriteFormat::Auto => match &event_data {
+                EventData::ArrowRecordBatch(_) => (
+                    crate::config::WriteFormat::Parquet,
+                    crate::config::DEFAULT_PARQUET_EXTENSION,
+                ),
+                _ => panic!("Unexpected event type"),
+            },
+            _ => panic!("Expected Auto format"),
+        };
+
+        assert!(matches!(format, crate::config::WriteFormat::Parquet));
+        assert_eq!(extension, "parquet");
+    }
+
+    #[test]
+    fn test_explicit_parquet_format() {
+        let format = crate::config::WriteFormat::Parquet;
+        assert!(matches!(format, crate::config::WriteFormat::Parquet));
     }
 }

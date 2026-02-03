@@ -1,4 +1,7 @@
-use super::config::{DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION};
+use super::config::{
+    DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION,
+    DEFAULT_PARQUET_EXTENSION,
+};
 use bytes::{Bytes, BytesMut};
 use flowgen_core::buffer::{ContentType, FromReader};
 use flowgen_core::config::ConfigExt;
@@ -164,6 +167,10 @@ impl EventHandler {
                 }
             }
             DEFAULT_AVRO_EXTENSION => ContentType::Avro,
+            DEFAULT_PARQUET_EXTENSION => {
+                let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                ContentType::Parquet { batch_size }
+            }
             _ => {
                 warn!("Unsupported file extension: {}", extension);
                 return Ok(());
