@@ -161,7 +161,7 @@ impl TryFrom<&EventData> for Value {
                     .map_err(|e| Error::Avro { source: e })?;
                 let avro_value = from_avro_datum(&schema, &mut &data.raw_bytes[..], None)
                     .map_err(|e| Error::Avro { source: e })?;
-                serde_json::Value::try_from(avro_value).unwrap()
+                serde_json::Value::try_from(avro_value).map_err(|e| Error::Avro { source: e })?
             }
             EventData::Json(data) => data.clone(),
         };
@@ -295,6 +295,34 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                     events.push(EventData::ArrowRecordBatch(
                         batch.map_err(|e| Error::Arrow { source: e })?,
                     ));
+                }
+                Ok(events)
+            }
+
+            ContentType::Parquet { batch_size } => {
+                // Read all bytes into memory for Parquet (requires random access).
+                let mut buffer = Vec::new();
+                reader
+                    .read_to_end(&mut buffer)
+                    .map_err(|e| Error::IO { source: e })?;
+
+                let parquet_reader =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                        bytes::Bytes::from(buffer),
+                    )
+                    .map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?
+                    .with_batch_size(batch_size)
+                    .build()
+                    .map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+
+                let mut events = Vec::new();
+                for batch_result in parquet_reader {
+                    let batch = batch_result.map_err(|e| Error::Arrow { source: e })?;
+                    events.push(EventData::ArrowRecordBatch(batch));
                 }
                 Ok(events)
             }
@@ -458,6 +486,49 @@ mod tests {
                 assert_eq!(value["value"], 123);
             }
             _ => panic!("Expected JSON event data"),
+        }
+    }
+
+    #[test]
+    fn test_event_data_parquet_roundtrip() {
+        use arrow::array::{Int32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let original_batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+            ],
+        )
+        .unwrap();
+
+        let mut buffer = Vec::new();
+        let props = parquet::file::properties::WriterProperties::builder().build();
+        let mut parquet_writer =
+            parquet::arrow::ArrowWriter::try_new(&mut buffer, schema.clone(), Some(props)).unwrap();
+        parquet_writer.write(&original_batch).unwrap();
+        parquet_writer.close().unwrap();
+
+        let cursor = Cursor::new(buffer);
+        let events =
+            EventData::from_reader(cursor, ContentType::Parquet { batch_size: 1024 }).unwrap();
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            EventData::ArrowRecordBatch(batch) => {
+                assert_eq!(batch.num_rows(), 3);
+                assert_eq!(batch.num_columns(), 2);
+                assert_eq!(batch.schema(), schema);
+            }
+            _ => panic!("Expected Arrow RecordBatch"),
         }
     }
 }

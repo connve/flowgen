@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 arrow = { workspace = true }
 apache-avro = { workspace = true }
+parquet = { workspace = true }
 tonic = { workspace = true }
 async-nats = { workspace = true }
 bincode = { workspace = true }
