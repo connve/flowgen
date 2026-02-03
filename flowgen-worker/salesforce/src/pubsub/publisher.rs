@@ -318,7 +318,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!("{}", e);
-                                            // If this is an auth error, reconnect before retrying.
+                                            // Check if reconnect is needed (gRPC auth errors).
                                             if let Error::PubSub { ref source } = e {
                                                 if is_auth_error(source) {
                                                     let mut pubsub =
@@ -326,10 +326,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                                     if let Err(reconnect_err) =
                                                         pubsub.reconnect().await
                                                     {
-                                                        error!(
-                                                            "Failed to reconnect: {}",
-                                                            reconnect_err
-                                                        );
                                                         return Err(Error::PubSub {
                                                             source: reconnect_err,
                                                         });
