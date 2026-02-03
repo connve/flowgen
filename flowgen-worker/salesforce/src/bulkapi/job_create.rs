@@ -164,7 +164,7 @@ impl EventHandler {
         // Resolve query from inline or resource source.
         let query_string = match &config.query {
             Some(flowgen_core::resource::Source::Inline(soql)) => Some(soql.clone()),
-            Some(flowgen_core::resource::Source::Resource(key)) => {
+            Some(flowgen_core::resource::Source::Resource { resource }) => {
                 let loader = self
                     .resource_loader
                     .as_ref()
@@ -172,7 +172,7 @@ impl EventHandler {
                         source: flowgen_core::resource::Error::ResourcePathNotConfigured,
                     })?;
                 let template = loader
-                    .load(key)
+                    .load(resource)
                     .await
                     .map_err(|source| Error::ResourceLoad { source })?;
                 // Render the template with event data.

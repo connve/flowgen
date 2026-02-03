@@ -29,8 +29,7 @@ flow:
         credentials_path: /etc/sfdc/credentials.json
         job_type: query
         operation: query
-        query:
-          inline: "SELECT Id, Name, Industry, AnnualRevenue, CreatedDate, LastModifiedDate FROM Account WHERE LastModifiedDate >= {{event.data.last_run_iso}}"
+        query: "SELECT Id, Name, Industry, AnnualRevenue, CreatedDate, LastModifiedDate FROM Account WHERE LastModifiedDate >= {{event.data.last_run_iso}}"
         content_type: csv
         column_delimiter: comma
         line_ending: lf

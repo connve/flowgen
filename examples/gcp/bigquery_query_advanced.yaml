@@ -25,8 +25,7 @@ flow:
         # Common in enterprises where data and billing are separated
         job_project_id: billing-project
         # SQL query with parameterized values
-        query:
-          inline: "SELECT customer_id, SUM(amount) as total FROM `data-warehouse-project.analytics.orders` WHERE region = @region AND order_date >= @start_date GROUP BY customer_id"
+        query: "SELECT customer_id, SUM(amount) as total FROM `data-warehouse-project.analytics.orders` WHERE region = @region AND order_date >= @start_date GROUP BY customer_id"
         # Query parameters for SQL injection protection
         parameters:
           region: "EU"

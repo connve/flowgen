@@ -1,0 +1,28 @@
+flow:
+  name: script_resource_file
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 5 seconds.
+    - generate:
+        name: trigger
+        interval: 5s
+        count: 1
+
+    # External script file loaded from resource directory.
+    # Script is loaded from: <resource_path>/scripts/transform_data.rhai
+    # This approach is better for:
+    # - Complex transformation logic
+    # - Reusable scripts across multiple flows
+    # - Version controlled script files
+    # - Easier testing and development
+    - script:
+        name: transform_with_external_script
+        code:
+          resource: "scripts/transform_data.rhai"
+
+    # Log the transformed event to console.
+    - log:
+        name: log_result
+        level: info
+        structured: false

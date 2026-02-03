@@ -6,18 +6,50 @@
 use serde::{Deserialize, Serialize};
 
 /// Script processor configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
     /// Task name for identification.
     pub name: String,
     /// Script engine type (defaults to Rhai).
     #[serde(default)]
     pub engine: ScriptEngine,
-    /// Script source code to execute.
-    pub code: String,
+    /// Script source code to execute (inline or from resource file).
+    ///
+    /// # Examples
+    ///
+    /// Inline script:
+    /// ```yaml
+    /// code: "event.data.value = event.data.value * 2; event"
+    /// ```
+    ///
+    /// Inline multi-line script:
+    /// ```yaml
+    /// code: |
+    ///   let value = event.data.value;
+    ///   event.data.result = value * 2;
+    ///   event
+    /// ```
+    ///
+    /// External script file:
+    /// ```yaml
+    /// code:
+    ///   resource: "scripts/transform_data.rhai"
+    /// ```
+    pub code: crate::resource::Source,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
+}
+
+impl Default for Processor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            engine: ScriptEngine::default(),
+            code: crate::resource::Source::Inline(String::new()),
+            retry: None,
+        }
+    }
 }
 
 /// Supported script engine types.
@@ -38,13 +70,16 @@ mod tests {
         let config = Processor {
             name: "test_script".to_string(),
             engine: ScriptEngine::Rhai,
-            code: "data + 1".to_string(),
+            code: crate::resource::Source::Inline("data + 1".to_string()),
             retry: None,
         };
 
         assert_eq!(config.name, "test_script");
         assert_eq!(config.engine, ScriptEngine::Rhai);
-        assert_eq!(config.code, "data + 1");
+        assert_eq!(
+            config.code,
+            crate::resource::Source::Inline("data + 1".to_string())
+        );
     }
 
     #[test]
@@ -52,7 +87,7 @@ mod tests {
         let config = Processor::default();
         assert_eq!(config.name, "");
         assert_eq!(config.engine, ScriptEngine::Rhai);
-        assert_eq!(config.code, "");
+        assert_eq!(config.code, crate::resource::Source::Inline("".to_string()));
         assert!(config.retry.is_none());
     }
 
@@ -67,7 +102,7 @@ mod tests {
         let config = Processor {
             name: "transform".to_string(),
             engine: ScriptEngine::Rhai,
-            code: "data * 2".to_string(),
+            code: crate::resource::Source::Inline("data * 2".to_string()),
             retry: None,
         };
 
@@ -81,11 +116,31 @@ mod tests {
         let config = Processor {
             name: "clone_test".to_string(),
             engine: ScriptEngine::Rhai,
-            code: "data".to_string(),
+            code: crate::resource::Source::Inline("data".to_string()),
             retry: None,
         };
 
         let cloned = config.clone();
         assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn test_config_with_resource() {
+        let config = Processor {
+            name: "resource_script".to_string(),
+            engine: ScriptEngine::Rhai,
+            code: crate::resource::Source::Resource {
+                resource: "scripts/transform.rhai".to_string(),
+            },
+            retry: None,
+        };
+
+        assert_eq!(config.name, "resource_script");
+        match config.code {
+            crate::resource::Source::Resource { resource } => {
+                assert_eq!(resource, "scripts/transform.rhai");
+            }
+            _ => panic!("Expected Resource variant"),
+        }
     }
 }

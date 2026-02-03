@@ -209,8 +209,8 @@ impl Query {
     ) -> Result<String, ResolveError> {
         match &self.query {
             flowgen_core::resource::Source::Inline(sql) => Ok(sql.clone()),
-            flowgen_core::resource::Source::Resource(key) => resource_loader
-                .load(key)
+            flowgen_core::resource::Source::Resource { resource } => resource_loader
+                .load(resource)
                 .await
                 .map_err(|source| ResolveError::Resource { source }),
         }
@@ -244,9 +244,7 @@ mod tests {
             "name": "test",
             "credentials_path": "/test/creds.json",
             "project_id": "test-project",
-            "query": {
-                "inline": "SELECT 1"
-            }
+            "query": "SELECT 1"
         }"#;
         let query: Query = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -271,7 +269,9 @@ mod tests {
         let query: Query = serde_json::from_str(json).unwrap();
         assert_eq!(
             query.query,
-            flowgen_core::resource::Source::Resource("queries/get_data.sql".to_string())
+            flowgen_core::resource::Source::Resource {
+                resource: "queries/get_data.sql".to_string()
+            }
         );
     }
 

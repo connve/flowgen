@@ -218,7 +218,7 @@ impl crate::task::runner::Runner for Processor {
                 // Resolve schema from inline or resource source.
                 let schema_string = match &self.config.schema {
                     Some(crate::resource::Source::Inline(schema)) => schema.clone(),
-                    Some(crate::resource::Source::Resource(key)) => {
+                    Some(crate::resource::Source::Resource { resource }) => {
                         let loader =
                             self.task_context.resource_loader.as_ref().ok_or_else(|| {
                                 Error::ResourceLoad {
@@ -226,7 +226,7 @@ impl crate::task::runner::Runner for Processor {
                                 }
                             })?;
                         loader
-                            .load(key)
+                            .load(resource)
                             .await
                             .map_err(|source| Error::ResourceLoad { source })?
                     }

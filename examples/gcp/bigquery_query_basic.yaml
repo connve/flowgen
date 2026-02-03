@@ -18,8 +18,7 @@ flow:
         # GCP project ID where BigQuery resources are located
         project_id: my-project-id
         # SQL query (inline or resource file)
-        query:
-          inline: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
+        query: "SELECT id, customer_id, amount, order_date FROM `my-project-id.analytics.orders` WHERE order_date >= '2024-01-01' ORDER BY order_date DESC"
         # Optional: Maximum number of rows to return
         max_results: 10000
         # Optional: Query execution timeout (e.g., "30s", "5m", "1h")
