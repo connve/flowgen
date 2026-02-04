@@ -233,6 +233,222 @@ pub enum ResolveError {
     },
 }
 
+/// Job operation type for unified job processor.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOperation {
+    /// Create a new job (load, query, extract, copy).
+    Create,
+    /// Get job status and poll until completion.
+    Get,
+    /// Cancel a running job.
+    Cancel,
+    /// Delete job metadata.
+    Delete,
+}
+
+/// Unified configuration for BigQuery job operations.
+///
+/// This single config handles all job operations: create, get, cancel, and delete.
+/// The operation type determines which fields are required and what action is performed.
+///
+/// # Examples
+///
+/// Create a load job:
+/// ```yaml
+/// bigquery_job:
+///   name: import_events
+///   operation: create
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   source_uris:
+///     - "gs://my-bucket/data/*.parquet"
+///   destination_table:
+///     project_id: my-project-id
+///     dataset_id: analytics
+///     table_id: events
+///   source_format: parquet
+///   write_disposition: write_append
+///   autodetect: true
+/// ```
+///
+/// Poll job status:
+/// ```yaml
+/// bigquery_job:
+///   name: check_load_status
+///   operation: get
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+///   poll_interval: 5s
+///   max_poll_duration: 30m
+/// ```
+///
+/// Cancel a job:
+/// ```yaml
+/// bigquery_job:
+///   name: stop_job
+///   operation: cancel
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+/// ```
+///
+/// Delete job metadata:
+/// ```yaml
+/// bigquery_job:
+///   name: cleanup_job
+///   operation: delete
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct Job {
+    /// Unique task identifier.
+    pub name: String,
+    /// Job operation type (create, get, cancel, delete).
+    pub operation: JobOperation,
+    /// Path to GCP service account credentials JSON file.
+    pub credentials_path: PathBuf,
+    /// GCP project ID where BigQuery resources are located.
+    pub project_id: String,
+    /// Optional GCP project ID for running the job (billing project).
+    #[serde(default)]
+    pub job_project_id: Option<String>,
+    /// Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
+    #[serde(default)]
+    pub location: Option<String>,
+
+    // Fields for create operation
+    /// Job type for create operation (load, query, extract, copy). Default: load.
+    #[serde(default = "default_job_type")]
+    pub job_type: String,
+    /// GCS URIs of source files to load (create operation only).
+    #[serde(default)]
+    pub source_uris: Option<Vec<String>>,
+    /// Destination BigQuery table (create operation only).
+    #[serde(default)]
+    pub destination_table: Option<TableReference>,
+    /// Source file format (create operation only).
+    #[serde(default)]
+    pub source_format: Option<SourceFormat>,
+    /// How to handle existing data (create operation only).
+    #[serde(default)]
+    pub write_disposition: Option<WriteDisposition>,
+    /// Whether to automatically infer schema (create operation only).
+    #[serde(default)]
+    pub autodetect: Option<bool>,
+    /// Optional maximum number of bad records (create operation only).
+    #[serde(default)]
+    pub max_bad_records: Option<i32>,
+    /// Optional labels for the job.
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
+
+    // Fields for get/cancel/delete operations
+    /// Job ID (get, cancel, delete operations).
+    #[serde(default)]
+    pub job_id: Option<String>,
+
+    // Fields for get operation
+    /// Polling interval between status checks (get operation only).
+    #[serde(default = "default_poll_interval", with = "humantime_serde")]
+    pub poll_interval: Duration,
+    /// Maximum duration to poll before giving up (get operation only).
+    #[serde(default = "default_max_poll_duration", with = "humantime_serde")]
+    pub max_poll_duration: Duration,
+
+    /// Optional retry configuration.
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl ConfigExt for Job {}
+
+impl Job {
+    /// Returns the project ID to use for running the job.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
+    }
+}
+
+/// BigQuery table reference.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct TableReference {
+    /// GCP project ID containing the table.
+    pub project_id: String,
+    /// BigQuery dataset ID.
+    pub dataset_id: String,
+    /// BigQuery table ID.
+    pub table_id: String,
+}
+
+/// Source file formats for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+pub enum SourceFormat {
+    #[serde(rename = "PARQUET")]
+    Parquet,
+    #[serde(rename = "CSV")]
+    Csv,
+    #[serde(rename = "NEWLINE_DELIMITED_JSON")]
+    #[default]
+    NewlineDelimitedJson,
+    #[serde(rename = "AVRO")]
+    Avro,
+}
+
+impl SourceFormat {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SourceFormat::Parquet => "PARQUET",
+            SourceFormat::Csv => "CSV",
+            SourceFormat::NewlineDelimitedJson => "NEWLINE_DELIMITED_JSON",
+            SourceFormat::Avro => "AVRO",
+        }
+    }
+}
+
+/// Write disposition for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+pub enum WriteDisposition {
+    /// Append data to existing table. Create table if it doesn't exist.
+    #[serde(rename = "WRITE_APPEND")]
+    #[default]
+    WriteAppend,
+    /// Truncate table before loading data. Create table if it doesn't exist.
+    #[serde(rename = "WRITE_TRUNCATE")]
+    WriteTruncate,
+    /// Only load if table is empty. Fail if table exists and has data.
+    #[serde(rename = "WRITE_EMPTY")]
+    WriteEmpty,
+}
+
+impl WriteDisposition {
+    pub fn as_str(&self) -> &str {
+        match self {
+            WriteDisposition::WriteAppend => "WRITE_APPEND",
+            WriteDisposition::WriteTruncate => "WRITE_TRUNCATE",
+            WriteDisposition::WriteEmpty => "WRITE_EMPTY",
+        }
+    }
+}
+
+/// Default poll interval for job status checks (5 seconds).
+fn default_poll_interval() -> Duration {
+    Duration::from_secs(5)
+}
+
+/// Default maximum poll duration (30 minutes).
+fn default_max_poll_duration() -> Duration {
+    Duration::from_secs(1800)
+}
+
+/// Default job type for create operation.
+fn default_job_type() -> String {
+    "load".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

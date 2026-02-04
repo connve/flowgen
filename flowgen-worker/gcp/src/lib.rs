@@ -12,4 +12,6 @@ pub mod bigquery {
     pub mod query;
     /// BigQuery Storage Read API processor for high-throughput parallel table reads.
     pub mod storage_read;
+    /// Unified BigQuery job processor for all job operations (create, get, cancel, delete).
+    pub mod job;
 }

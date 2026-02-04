@@ -71,14 +71,14 @@ pub enum TaskType {
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     /// Salesforce Pub/Sub publisher task.
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
-    /// Salesforce Bulk API job create task.
-    salesforce_bulkapi_job_create(flowgen_salesforce::bulkapi::config::JobCreate),
-    /// Salesforce Bulk API job retrieve task.
-    salesforce_bulkapi_job_retrieve(flowgen_salesforce::bulkapi::config::JobRetrieve),
+    /// Salesforce Bulk API unified job operations (create, retrieve).
+    salesforce_bulkapi_job(flowgen_salesforce::bulkapi::config::Job),
     /// GCP BigQuery query task.
     gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
     /// GCP BigQuery Storage Read API task.
     gcp_bigquery_storage_read(flowgen_gcp::bigquery::config::StorageRead),
+    /// GCP BigQuery unified job operations (create, get, cancel, delete).
+    gcp_bigquery_job(flowgen_gcp::bigquery::config::Job),
 }
 
 impl TaskType {
@@ -99,10 +99,10 @@ impl TaskType {
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
-            TaskType::salesforce_bulkapi_job_create(_) => "salesforce_bulkapi_job_create",
-            TaskType::salesforce_bulkapi_job_retrieve(_) => "salesforce_bulkapi_job_retrieve",
+            TaskType::salesforce_bulkapi_job(_) => "salesforce_bulkapi_job",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
+            TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
         }
     }
 }

@@ -1,0 +1,41 @@
+flow:
+  name: bigquery_job_monitor
+  require_leader_election: true
+  tasks:
+
+    # This flow demonstrates polling a BigQuery job until completion.
+    # In production, you would typically trigger this flow from another flow
+    # that creates a job, passing the job_id via event data.
+    # For this example, we use a hardcoded job_id.
+    - generate:
+        name: trigger
+        interval: 3600s
+
+    # Poll job status every 5 seconds until completion (max 10 minutes).
+    # The get operation repeatedly calls the BigQuery API until the job
+    # reaches a terminal state (DONE) or polling times out.
+    - gcp_bigquery_job:
+        name: poll_job_status
+        # Operation type: get polls job status until completion
+        operation: get
+        project_id: my-gcp-project
+        credentials_path: /etc/gcp/credentials.json
+        job_type: load
+        # Job ID from the create operation (typically from event.data.id)
+        # In production: job_id: "{{event.data.job_id}}"
+        job_id: "job_abc123xyz"
+        # Poll every 5 seconds
+        poll_interval: 5s
+        # Give up after 10 minutes
+        max_poll_duration: 600s
+
+    # Log the final job status.
+    # Check event.data.status.state for "DONE" or event.data.status.error_result for errors.
+    - log:
+        name: log_job_status
+        level: info
+        structured: true
+
+    # Example downstream processing based on job completion:
+    # You can add conditional logic here to handle successful vs failed jobs.
+    # For example, send notifications, trigger downstream ETL, or retry failed jobs.

@@ -1,0 +1,42 @@
+flow:
+  name: bigquery_job_delete
+  require_leader_election: true
+  tasks:
+
+    # This flow demonstrates deleting BigQuery job metadata.
+    # Use this for cleanup after job completion or to remove sensitive job history.
+    # Note: This deletes job metadata only, not the data loaded by the job.
+    - generate:
+        name: trigger
+        interval: 86400s  # Daily cleanup
+
+    # Delete job metadata from BigQuery.
+    # This is useful for:
+    # - Removing old job history to reduce storage costs
+    # - Cleaning up failed jobs
+    # - Removing jobs with sensitive query information
+    # WARNING: Deleted jobs cannot be recovered or monitored
+    - gcp_bigquery_job:
+        name: delete_old_job
+        # Operation type: delete removes job metadata
+        operation: delete
+        project_id: my-gcp-project
+        credentials_path: /etc/gcp/credentials.json
+        job_type: query
+        # Job ID to delete (typically from event data or job list)
+        # In production: job_id: "{{event.data.job_id}}"
+        job_id: "job_abc123xyz"
+        # Polling not used for delete, but required fields have defaults
+        poll_interval: 1s
+        max_poll_duration: 60s
+
+    # Log the deletion result.
+    # The response confirms the job metadata was removed.
+    - log:
+        name: log_deletion
+        level: info
+        structured: true
+
+    # Example use case: Automated cleanup of jobs older than 30 days
+    # You could pair this with a BigQuery query to list old jobs,
+    # then iterate through them with delete operations.

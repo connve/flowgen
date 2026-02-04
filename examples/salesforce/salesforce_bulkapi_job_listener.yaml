@@ -47,13 +47,19 @@ flow:
     # Supports streaming: retrieves partial results during job execution, then final results on completion.
     # This eliminates polling and enables real-time data processing.
     # The job_id is dynamically extracted from the filtered event using template syntax.
-    - salesforce_bulkapi_job_retrieve:
+    - salesforce_bulkapi_job:
         name: get_job_details
+        # Operation type: retrieve downloads and parses job results
+        operation: retrieve
         credentials_path: /etc/sfdc/credentials.json
         job_type: query
         # Template syntax extracts job_id from the event data structure
         # Event data format: {"id": "job_id", "result_type": "...", ...}
         job_id: "{{event.data.id}}"
+        # Parse CSV with 10,000 rows per Arrow RecordBatch
+        batch_size: 10000
+        # First row contains column headers
+        has_header: true
 
     # Publish Arrow RecordBatch to NATS for downstream processing.
     # The Arrow format is efficient for columnar data operations and analytics.
