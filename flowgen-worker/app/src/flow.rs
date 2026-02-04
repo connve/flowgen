@@ -374,7 +374,6 @@ impl Flow {
     ///
     /// The caller should await `blocking_handles` before starting the HTTP server,
     /// but `background_handles` are already running and connected.
-    #[tracing::instrument(skip(self), name = "flow.spawn_all_tasks", fields(flow = %self.config.flow.name))]
     pub async fn spawn_all_tasks(&self) -> Result<TaskHandles, Error> {
         let task_context = self
             .task_context
@@ -412,7 +411,6 @@ impl Flow {
     /// Spawns initial setup tasks that must complete before the HTTP server starts.
     ///
     /// This is specifically for registering webhooks for non-leader-elected flows.
-    #[tracing::instrument(skip(self), name = "flow.run_http_handlers", fields(flow = %self.config.flow.name))]
     pub async fn run_http_handlers(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
         // Only non-leader-elected flows can have webhook handlers that run at setup.
         if self.is_leader_elected() {
