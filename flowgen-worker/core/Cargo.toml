@@ -37,3 +37,6 @@ rhai = { workspace = true }
 tokio-retry = { workspace = true }
 croner = { workspace = true }
 humantime-serde = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }

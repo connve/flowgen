@@ -359,12 +359,12 @@ async fn execute_query(
     // Resolve query from inline or resource source.
     let query_string = match &config.query {
         flowgen_core::resource::Source::Inline(sql) => sql.clone(),
-        flowgen_core::resource::Source::Resource(key) => {
+        flowgen_core::resource::Source::Resource { resource } => {
             let loader = resource_loader.ok_or_else(|| Error::ResourceLoad {
                 source: flowgen_core::resource::Error::ResourcePathNotConfigured,
             })?;
             loader
-                .load(key)
+                .load(resource)
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?
         }

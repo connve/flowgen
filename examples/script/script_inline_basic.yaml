@@ -1,0 +1,22 @@
+flow:
+  name: script_inline_basic
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 5 seconds.
+    - generate:
+        name: trigger
+        interval: 5s
+        count: 1
+
+    # Inline script (single line) to transform event data.
+    # This simple script multiplies a value by 2.
+    - script:
+        name: transform_value
+        code: "event.data.value = event.data.value * 2; event"
+
+    # Log the transformed event to console.
+    - log:
+        name: log_result
+        level: info
+        structured: false

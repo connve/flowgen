@@ -59,6 +59,11 @@ pub enum Error {
     InvalidUnixTimestamp { timestamp: i64 },
     #[error("Timestamp must be an integer, got type: {type_name}")]
     TimestampTypeError { type_name: String },
+    #[error("Failed to load script resource: {source}")]
+    ResourceLoad {
+        #[source]
+        source: crate::resource::Error,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -68,8 +73,8 @@ pub enum Error {
 
 /// Handles individual script execution operations.
 pub struct EventHandler {
-    /// Processor configuration settings.
-    config: Arc<super::config::Processor>,
+    /// Resolved script code (inline or loaded from resource file).
+    code: String,
     /// Channel sender for processed events.
     tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
@@ -112,7 +117,7 @@ impl EventHandler {
 
         let result: Dynamic = self
             .engine
-            .eval_with_scope(&mut scope, &self.config.code)
+            .eval_with_scope(&mut scope, &self.code)
             .map_err(|e| Error::ScriptExecution { source: e })?;
 
         // Convert the script result back to JSON.
@@ -268,8 +273,16 @@ impl crate::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor by setting up the Rhai engine.
+    /// Initializes the processor by setting up the Rhai engine and resolving script source.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
+        // Resolve script code from inline or resource source.
+        let script_code = self
+            .config
+            .code
+            .resolve(self._task_context.resource_loader.as_ref())
+            .await
+            .map_err(|source| Error::ResourceLoad { source })?;
+
         let mut engine = Engine::new();
 
         // Register function to parse RFC 2822 timestamps to Unix milliseconds.
@@ -356,7 +369,7 @@ impl crate::task::runner::Runner for Processor {
         });
 
         let event_handler = EventHandler {
-            config: Arc::clone(&self.config),
+            code: script_code,
             tx: self.tx.clone(),
             task_id: self.task_id,
             engine,
@@ -534,7 +547,7 @@ mod tests {
         let config = Arc::new(crate::task::script::config::Processor {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: "event".to_string(),
+            code: crate::resource::Source::Inline("event".to_string()),
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -567,17 +580,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_script_simple_transformation() {
-        let config = Arc::new(crate::task::script::config::Processor {
-            name: "test".to_string(),
-            engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: r#"#{ original: event.data, transformed: true }"#.to_string(),
-            retry: None,
-        });
-
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            config,
+            code: r#"#{ original: event.data, transformed: true }"#.to_string(),
             tx: Some(tx.clone()),
             task_id: 1,
             engine: Engine::new(),
@@ -613,18 +619,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_script_filter_null() {
-        let config = Arc::new(crate::task::script::config::Processor {
-            name: "test".to_string(),
-            engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: r#"if data.age < 18 { null } else { data }"#.to_string(),
-            retry: None,
-        });
-
         let (tx, mut rx) = mpsc::channel(100);
         let tx_clone = tx.clone();
 
         let event_handler = EventHandler {
-            config,
+            code: r#"if data.age < 18 { null } else { data }"#.to_string(),
             tx: Some(tx_clone),
             task_id: 1,
             engine: Engine::new(),
@@ -654,17 +653,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_script_array_output() {
-        let config = Arc::new(crate::task::script::config::Processor {
-            name: "test".to_string(),
-            engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: r#"[#{ id: 1 }, #{ id: 2 }, #{ id: 3 }]"#.to_string(),
-            retry: None,
-        });
-
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            config,
+            code: r#"[#{ id: 1 }, #{ id: 2 }, #{ id: 3 }]"#.to_string(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
@@ -707,17 +699,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_handler_arrow_input() {
-        let config = Arc::new(crate::task::script::config::Processor {
-            name: "test".to_string(),
-            engine: crate::task::script::config::ScriptEngine::Rhai,
-            code: "event".to_string(),
-            retry: None,
-        });
-
         let (tx, mut rx) = mpsc::channel(100);
 
         let event_handler = EventHandler {
-            config,
+            code: "event".to_string(),
             tx: Some(tx),
             task_id: 1,
             engine: Engine::new(),
