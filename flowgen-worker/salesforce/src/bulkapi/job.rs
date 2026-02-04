@@ -197,9 +197,9 @@ impl EventHandler {
         };
 
         // Configure HTTP client with endpoint and auth.
-        let mut client = self.client.post(
-            instance_url + super::config::DEFAULT_URI_PATH + config.job_type.as_str(),
-        );
+        let mut client = self
+            .client
+            .post(instance_url + super::config::DEFAULT_URI_PATH + config.job_type.as_str());
 
         client = client.bearer_auth(access_token);
         client = client.json(&payload);
@@ -252,7 +252,10 @@ impl EventHandler {
             .ok_or(Error::NoSalesforceInstanceURL)?;
         drop(sfdc_client);
 
-        let job_id = config.job_id.as_ref().ok_or(Error::MissingJobIdForRetrieve)?;
+        let job_id = config
+            .job_id
+            .as_ref()
+            .ok_or(Error::MissingJobIdForRetrieve)?;
 
         // Build API endpoint URL for downloading results.
         let url = format!(
