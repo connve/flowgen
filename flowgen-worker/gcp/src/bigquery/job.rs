@@ -61,42 +61,42 @@ impl std::fmt::Display for JobErrorWrapper {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to send event to channel")]
+    #[error("Failed to send event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Failed to build event")]
+    #[error("Failed to build event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Failed to render configuration template")]
+    #[error("Failed to render configuration template: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("BigQuery client authentication failed")]
+    #[error("BigQuery client authentication failed: {source}")]
     ClientAuth {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery client creation failed")]
+    #[error("BigQuery client creation failed: {source}")]
     ClientCreation {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery client connection failed")]
+    #[error("BigQuery client connection failed: {source}")]
     ClientConnection {
         #[source]
         source: gcloud_gax::conn::Error,
     },
-    #[error("BigQuery job operation failed")]
+    #[error("BigQuery job operation failed: {source}")]
     JobOperation {
         #[source]
         source: google_cloud_bigquery::http::error::Error,
     },
-    #[error("Failed to serialize job response to JSON")]
+    #[error("Failed to serialize job response to JSON: {source}")]
     JobSerialization {
         #[source]
         source: serde_json::Error,
@@ -105,7 +105,7 @@ pub enum Error {
     PollTimeout { duration: std::time::Duration },
     #[error("Job failed: {error}")]
     JobFailed { error: JobErrorWrapper },
-    #[error("Task failed after all retry attempts")]
+    #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,

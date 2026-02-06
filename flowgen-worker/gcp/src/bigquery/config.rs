@@ -386,15 +386,13 @@ pub struct TableReference {
 
 /// Source file formats for BigQuery load jobs.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SourceFormat {
-    #[serde(rename = "PARQUET")]
     Parquet,
-    #[serde(rename = "CSV")]
     Csv,
-    #[serde(rename = "NEWLINE_DELIMITED_JSON")]
+    #[serde(rename = "newline_delimited_json")]
     #[default]
     NewlineDelimitedJson,
-    #[serde(rename = "AVRO")]
     Avro,
 }
 
@@ -411,16 +409,17 @@ impl SourceFormat {
 
 /// Write disposition for BigQuery load jobs.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WriteDisposition {
     /// Append data to existing table. Create table if it doesn't exist.
-    #[serde(rename = "WRITE_APPEND")]
+    #[serde(rename = "write_append")]
     #[default]
     WriteAppend,
     /// Truncate table before loading data. Create table if it doesn't exist.
-    #[serde(rename = "WRITE_TRUNCATE")]
+    #[serde(rename = "write_truncate")]
     WriteTruncate,
     /// Only load if table is empty. Fail if table exists and has data.
-    #[serde(rename = "WRITE_EMPTY")]
+    #[serde(rename = "write_empty")]
     WriteEmpty,
 }
 
