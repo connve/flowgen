@@ -4,6 +4,7 @@
 //! Scripts can return objects, arrays, or null to control event emission.
 
 use crate::event::{Event, EventBuilder, EventData, EventExt};
+use chrono::{Datelike, Timelike};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
@@ -370,6 +371,100 @@ impl crate::task::runner::Runner for Processor {
         engine.register_fn("timestamp_now", || -> i64 {
             // Returns current Unix timestamp in seconds.
             chrono::Utc::now().timestamp()
+        });
+
+        // Register function to extract year from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_year",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract year from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.year() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract month from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_month",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract month (1-12) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.month() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract day from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_day",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract day of month (1-31) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.day() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract hour from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_hour",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract hour (0-23) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.hour() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to format timestamp as Hive partition path.
+        engine.register_fn(
+            "timestamp_to_hive_path",
+            |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+                // Format timestamp as Hive partition path: year=YYYY/month=MM/day=DD/hour=HH.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| {
+                        format!(
+                            "year={}/month={:02}/day={:02}/hour={:02}",
+                            dt.year(),
+                            dt.month(),
+                            dt.day(),
+                            dt.hour()
+                        )
+                    })
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to round timestamp down to hour boundary.
+        engine.register_fn("timestamp_round_to_hour", |timestamp_secs: i64| -> i64 {
+            // Rounds timestamp down to the start of the hour (e.g., 13:45:30 -> 13:00:00).
+            (timestamp_secs / 3600) * 3600
         });
 
         let event_handler = EventHandler {

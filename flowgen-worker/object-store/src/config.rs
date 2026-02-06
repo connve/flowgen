@@ -95,6 +95,8 @@ pub enum HiveParitionKeys {
     /// Partitions data by event date (year/month/day format).
     #[default]
     EventDate,
+    /// Partitions data by event hour (hour format).
+    EventHour,
 }
 
 /// Implement default ConfigExt traits.

@@ -3,7 +3,7 @@ use super::config::{
     DEFAULT_PARQUET_EXTENSION,
 };
 use bytes::Bytes;
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use flowgen_core::buffer::ToWriter;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
@@ -160,6 +160,10 @@ impl EventHandler {
                                     path = path.child(part);
                                 }
                             }
+                            crate::config::HiveParitionKeys::EventHour => {
+                                let hour_partition = self.format_hour_partition(&cd);
+                                path = path.child(hour_partition);
+                            }
                         }
                     }
                 }
@@ -266,11 +270,16 @@ impl EventHandler {
     /// Formats date into Hive partition format (year=YYYY/month=MM/day=DD).
     fn format_date_partition(&self, date: &DateTime<Utc>) -> String {
         format!(
-            "year={}/month={}/day={}",
+            "year={}/month={:02}/day={:02}",
             date.year(),
             date.month(),
             date.day()
         )
+    }
+
+    /// Formats hour into Hive partition format (hour=HH).
+    fn format_hour_partition(&self, date: &DateTime<Utc>) -> String {
+        format!("hour={:02}", date.hour())
     }
 }
 
