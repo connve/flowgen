@@ -126,132 +126,141 @@ impl EventHandler {
             return Ok(());
         }
 
-        let mut client_guard = self.client.lock().await;
-        let context = client_guard
-            .context
-            .as_mut()
-            .ok_or_else(|| Error::NoObjectStoreContext)?;
+        let event = Arc::new(event);
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            let mut client_guard = self.client.lock().await;
+            let context = client_guard
+                .context
+                .as_mut()
+                .ok_or_else(|| Error::NoObjectStoreContext)?;
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
-        let config_path_str = config.path.to_string_lossy();
-        let url = url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
-        let mut path = object_store::path::Path::from(url.path());
+            // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
+            let config_path_str = config.path.to_string_lossy();
+            let url =
+                url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
+            let mut path = object_store::path::Path::from(url.path());
 
-        let cd = Utc::now();
-        if let Some(hive_options) = &self.config.hive_partition_options {
-            if hive_options.enabled {
-                for partition_key in &hive_options.partition_keys {
-                    match partition_key {
-                        crate::config::HiveParitionKeys::EventDate => {
-                            let date_partition = self.format_date_partition(&cd);
-                            // Split the date partition by '/' and add each part as a child
-                            for part in date_partition.split('/') {
-                                path = path.child(part);
+            let cd = Utc::now();
+            if let Some(hive_options) = &self.config.hive_partition_options {
+                if hive_options.enabled {
+                    for partition_key in &hive_options.partition_keys {
+                        match partition_key {
+                            crate::config::HiveParitionKeys::EventDate => {
+                                let date_partition = self.format_date_partition(&cd);
+                                // Split the date partition by '/' and add each part as a child
+                                for part in date_partition.split('/') {
+                                    path = path.child(part);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        let timestamp = cd.timestamp_micros();
-        let filename = match event.id {
-            Some(id) => id,
-            _none => timestamp.to_string(),
-        };
+            let timestamp = cd.timestamp_micros();
+            let filename = match &event.id {
+                Some(id) => id.clone(),
+                _none => timestamp.to_string(),
+            };
 
-        // Determine output format and extension.
-        let (format, extension) = match &config.format {
-            WriteFormat::Auto => {
-                // Auto-detect format from event data type.
-                match &event.data {
-                    flowgen_core::event::EventData::ArrowRecordBatch(_) => {
-                        (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION)
-                    }
-                    flowgen_core::event::EventData::Avro(_) => {
-                        (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION)
-                    }
-                    flowgen_core::event::EventData::Json(_) => {
-                        (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
+            // Determine output format and extension.
+            let (format, extension) = match &config.format {
+                WriteFormat::Auto => {
+                    // Auto-detect format from event data type.
+                    match &event.data {
+                        flowgen_core::event::EventData::ArrowRecordBatch(_) => {
+                            (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION)
+                        }
+                        flowgen_core::event::EventData::Avro(_) => {
+                            (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION)
+                        }
+                        flowgen_core::event::EventData::Json(_) => {
+                            (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
+                        }
                     }
                 }
+                WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
+                WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
+                WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
+                WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
+            };
+
+            // Write data in the appropriate format.
+            let mut writer = Vec::new();
+            match (&event.data, &format) {
+                (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
+                    // Write Arrow as Parquet (native columnar format).
+                    let props = parquet::file::properties::WriterProperties::builder().build();
+                    let mut parquet_writer = parquet::arrow::ArrowWriter::try_new(
+                        &mut writer,
+                        batch.schema(),
+                        Some(props),
+                    )
+                    .map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                    parquet_writer.write(batch).map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                    parquet_writer.close().map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                }
+                _ => {
+                    // Use default to_writer for other formats.
+                    event
+                        .data
+                        .clone()
+                        .to_writer(&mut writer)
+                        .map_err(|source| Error::EventBuilder { source })?;
+                }
             }
-            WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
-            WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
-            WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
-            WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
-        };
 
-        // Write data in the appropriate format.
-        let mut writer = Vec::new();
-        match (&event.data, &format) {
-            (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
-                // Write Arrow as Parquet (native columnar format).
-                let props = parquet::file::properties::WriterProperties::builder().build();
-                let mut parquet_writer =
-                    parquet::arrow::ArrowWriter::try_new(&mut writer, batch.schema(), Some(props))
-                        .map_err(|e| Error::Arrow {
-                            source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                        })?;
-                parquet_writer.write(batch).map_err(|e| Error::Arrow {
-                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                })?;
-                parquet_writer.close().map_err(|e| Error::Arrow {
-                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                })?;
-            }
-            _ => {
-                // Use default to_writer for other formats.
-                event
-                    .data
-                    .to_writer(&mut writer)
-                    .map_err(|source| Error::EventBuilder { source })?;
-            }
-        }
+            let object_path = path.child(format!("{filename}.{extension}"));
 
-        let object_path = path.child(format!("{filename}.{extension}"));
+            // Upload processed data to object store.
+            let payload = PutPayload::from_bytes(Bytes::from(writer));
+            let put_result = context
+                .object_store
+                .put(&object_path, payload)
+                .await
+                .map_err(|e| Error::ObjectStore { source: e })?;
 
-        // Upload processed data to object store.
-        let payload = PutPayload::from_bytes(Bytes::from(writer));
-        let put_result = context
-            .object_store
-            .put(&object_path, payload)
-            .await
-            .map_err(|e| Error::ObjectStore { source: e })?;
+            let result = WriteResult {
+                status: WriteStatus::Success,
+                path: object_path.to_string(),
+                e_tag: put_result.e_tag.clone(),
+            };
 
-        let result = WriteResult {
-            status: WriteStatus::Success,
-            path: object_path.to_string(),
-            e_tag: put_result.e_tag.clone(),
-        };
+            // Build and send event.
+            let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
+            let mut e = EventBuilder::new()
+                .subject(self.config.name.to_owned())
+                .data(EventData::Json(data))
+                .task_id(self.task_id)
+                .task_type(self.task_type);
 
-        // Build and send event.
-        let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
-        let mut e = EventBuilder::new()
-            .subject(self.config.name.to_owned())
-            .data(EventData::Json(data))
-            .task_id(self.task_id)
-            .task_type(self.task_type);
+            if let Some(e_tag) = put_result.e_tag {
+                e = e.id(e_tag);
+            };
 
-        if let Some(e_tag) = put_result.e_tag {
-            e = e.id(e_tag);
-        };
+            let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
-        let e = e.build().map_err(|source| Error::EventBuilder { source })?;
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Formats date into Hive partition format (year=YYYY/month=MM/day=DD).

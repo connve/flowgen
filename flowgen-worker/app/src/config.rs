@@ -71,8 +71,8 @@ pub enum TaskType {
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     /// Salesforce Pub/Sub publisher task.
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
-    /// Salesforce Bulk API unified job operations (create, retrieve).
-    salesforce_bulkapi_job(flowgen_salesforce::bulkapi::config::Job),
+    /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
+    salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::config::QueryJob),
     /// GCP BigQuery query task.
     gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
     /// GCP BigQuery Storage Read API task.
@@ -99,7 +99,7 @@ impl TaskType {
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
-            TaskType::salesforce_bulkapi_job(_) => "salesforce_bulkapi_job",
+            TaskType::salesforce_bulkapi_query_job(_) => "salesforce_bulkapi_query_job",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",

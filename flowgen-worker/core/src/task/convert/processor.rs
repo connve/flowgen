@@ -118,71 +118,79 @@ impl EventHandler {
             return Ok(());
         }
 
-        let data = match event.data {
-            EventData::Json(mut data) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Avro => match &self.serializer {
-                    Some(serializer_opts) => {
-                        transform_keys(&mut data);
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let data = match &event.data {
+                EventData::Json(data) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Avro => match &self.serializer {
+                        Some(serializer_opts) => {
+                            let mut data = data.clone();
+                            transform_keys(&mut data);
 
-                        let mut serializer_config = serializer_opts.serializer_config.lock().await;
-                        let raw_bytes: Vec<u8> =
-                            serde_avro_fast::to_datum_vec(&data, &mut serializer_config)
-                                .map_err(|source| Error::SerdeAvro { source })?;
+                            let mut serializer_config =
+                                serializer_opts.serializer_config.lock().await;
+                            let raw_bytes: Vec<u8> =
+                                serde_avro_fast::to_datum_vec(&data, &mut serializer_config)
+                                    .map_err(|source| Error::SerdeAvro { source })?;
 
-                        EventData::Avro(AvroData {
-                            schema: serializer_opts.schema_string.clone(),
-                            raw_bytes,
-                        })
+                            EventData::Avro(AvroData {
+                                schema: serializer_opts.schema_string.clone(),
+                                raw_bytes,
+                            })
+                        }
+                        None => EventData::Json(data.clone()),
+                    },
+                    crate::task::convert::config::TargetFormat::Json => {
+                        EventData::Json(data.clone())
                     }
-                    None => EventData::Json(data),
                 },
-                crate::task::convert::config::TargetFormat::Json => EventData::Json(data),
-            },
-            EventData::ArrowRecordBatch(ref _batch) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Json => {
-                    let value = serde_json::Value::try_from(&event.data)
-                        .map_err(|source| Error::ArrowToJson { source })?;
-                    EventData::Json(value)
-                }
-                crate::task::convert::config::TargetFormat::Avro => {
-                    return Err(Error::ArrowToAvroNotSupported)
-                }
-            },
-            EventData::Avro(avro_data) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Json => {
-                    // Parse the schema
-                    let schema: serde_avro_fast::Schema = avro_data
-                        .schema
-                        .parse()
-                        .map_err(|source| Error::SerdeSchema { source })?;
+                EventData::ArrowRecordBatch(ref _batch) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Json => {
+                        let value = serde_json::Value::try_from(&event.data)
+                            .map_err(|source| Error::ArrowToJson { source })?;
+                        EventData::Json(value)
+                    }
+                    crate::task::convert::config::TargetFormat::Avro => {
+                        return Err(Error::ArrowToAvroNotSupported)
+                    }
+                },
+                EventData::Avro(avro_data) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Json => {
+                        // Parse the schema
+                        let schema: serde_avro_fast::Schema = avro_data
+                            .schema
+                            .parse()
+                            .map_err(|source| Error::SerdeSchema { source })?;
 
-                    // Deserialize Avro bytes to JSON value
-                    let json_value: Value =
-                        serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
-                            .map_err(|source| Error::SerdeAvroDe { source })?;
+                        // Deserialize Avro bytes to JSON value
+                        let json_value: Value =
+                            serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
+                                .map_err(|source| Error::SerdeAvroDe { source })?;
 
-                    EventData::Json(json_value)
-                }
-                crate::task::convert::config::TargetFormat::Avro => {
-                    // Avro to Avro passthrough
-                    EventData::Avro(avro_data)
-                }
-            },
-        };
+                        EventData::Json(json_value)
+                    }
+                    crate::task::convert::config::TargetFormat::Avro => {
+                        // Avro to Avro passthrough
+                        EventData::Avro(avro_data.clone())
+                    }
+                },
+            };
 
-        // Build and send event.
-        let e = EventBuilder::new()
-            .data(data)
-            .subject(self.config.name.to_owned())
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Build and send event.
+            let e = EventBuilder::new()
+                .data(data)
+                .subject(self.config.name.to_owned())
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+            Ok(())
+        })
+        .await
     }
 }
 

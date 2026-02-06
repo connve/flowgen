@@ -108,111 +108,118 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+        let event = Arc::new(event);
 
-        let mut client = match config.method {
-            crate::config::Method::Get => self.client.get(config.endpoint),
-            crate::config::Method::Post => self.client.post(config.endpoint),
-            crate::config::Method::Put => self.client.put(config.endpoint),
-            crate::config::Method::Delete => self.client.delete(config.endpoint),
-            crate::config::Method::Patch => self.client.patch(config.endpoint),
-            crate::config::Method::Head => self.client.head(config.endpoint),
-        };
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        if let Some(headers) = config.headers.to_owned() {
-            let mut header_map = HeaderMap::new();
-            for (key, value) in headers {
-                let header_name = HeaderName::try_from(key)
-                    .map_err(|source| Error::ReqwestInvalidHeaderName { source })?;
-                let header_value = HeaderValue::try_from(value)
-                    .map_err(|source| Error::ReqwestInvalidHeaderValue { source })?;
-                header_map.insert(header_name, header_value);
+            let mut client = match config.method {
+                crate::config::Method::Get => self.client.get(config.endpoint),
+                crate::config::Method::Post => self.client.post(config.endpoint),
+                crate::config::Method::Put => self.client.put(config.endpoint),
+                crate::config::Method::Delete => self.client.delete(config.endpoint),
+                crate::config::Method::Patch => self.client.patch(config.endpoint),
+                crate::config::Method::Head => self.client.head(config.endpoint),
+            };
+
+            if let Some(headers) = config.headers.to_owned() {
+                let mut header_map = HeaderMap::new();
+                for (key, value) in headers {
+                    let header_name = HeaderName::try_from(key)
+                        .map_err(|source| Error::ReqwestInvalidHeaderName { source })?;
+                    let header_value = HeaderValue::try_from(value)
+                        .map_err(|source| Error::ReqwestInvalidHeaderValue { source })?;
+                    header_map.insert(header_name, header_value);
+                }
+                client = client.headers(header_map);
             }
-            client = client.headers(header_map);
-        }
 
-        if let Some(payload) = &config.payload {
-            let event_data = if payload.from_event {
-                event_value
-                    .get("event")
-                    .and_then(|e| e.get("data"))
-                    .ok_or_else(|| Error::MissingEventData)?
-            } else {
-                &match &payload.object {
-                    Some(obj) => Value::Object(obj.to_owned()),
-                    None => match &payload.input {
-                        Some(input) => serde_json::from_str::<serde_json::Value>(input.as_str())
-                            .map_err(|source| Error::SerdeJson { source })?,
-                        None => return Err(Error::PayloadConfig),
-                    },
+            if let Some(payload) = &config.payload {
+                let event_data = if payload.from_event {
+                    event_value
+                        .get("event")
+                        .and_then(|e| e.get("data"))
+                        .ok_or_else(|| Error::MissingEventData)?
+                } else {
+                    &match &payload.object {
+                        Some(obj) => Value::Object(obj.to_owned()),
+                        None => match &payload.input {
+                            Some(input) => {
+                                serde_json::from_str::<serde_json::Value>(input.as_str())
+                                    .map_err(|source| Error::SerdeJson { source })?
+                            }
+                            None => return Err(Error::PayloadConfig),
+                        },
+                    }
+                };
+
+                client = match payload.send_as {
+                    crate::config::PayloadSendAs::Json => client.json(&event_data),
+                    crate::config::PayloadSendAs::UrlEncoded => client.form(&event_data),
+                    crate::config::PayloadSendAs::QueryParams => client.query(&event_data),
+                };
+            }
+
+            if let Some(credentials_path) = &config.credentials_path {
+                let credentials_string =
+                    fs::read_to_string(credentials_path).await.map_err(|e| {
+                        Error::ReadCredentials {
+                            path: credentials_path.clone(),
+                            source: e,
+                        }
+                    })?;
+                let credentials: Credentials = serde_json::from_str(&credentials_string)
+                    .map_err(|source| Error::SerdeJson { source })?;
+
+                if let Some(bearer_token) = credentials.bearer_auth {
+                    client = client.bearer_auth(bearer_token);
+                }
+
+                if let Some(basic_auth) = credentials.basic_auth {
+                    client = client.basic_auth(basic_auth.username, Some(basic_auth.password));
                 }
             };
 
-            client = match payload.send_as {
-                crate::config::PayloadSendAs::Json => client.json(&event_data),
-                crate::config::PayloadSendAs::UrlEncoded => client.form(&event_data),
-                crate::config::PayloadSendAs::QueryParams => client.query(&event_data),
-            };
-        }
+            let response = client
+                .send()
+                .await
+                .map_err(|source| Error::Reqwest { source })?;
 
-        if let Some(credentials_path) = &config.credentials_path {
-            let credentials_string =
-                fs::read_to_string(credentials_path)
-                    .await
-                    .map_err(|e| Error::ReadCredentials {
-                        path: credentials_path.clone(),
-                        source: e,
-                    })?;
-            let credentials: Credentials = serde_json::from_str(&credentials_string)
-                .map_err(|source| Error::SerdeJson { source })?;
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|source| Error::Reqwest { source })?;
 
-            if let Some(bearer_token) = credentials.bearer_auth {
-                client = client.bearer_auth(bearer_token);
+            if status.is_client_error() || status.is_server_error() {
+                return Err(Error::HttpError {
+                    status: status.as_u16(),
+                    body,
+                });
             }
 
-            if let Some(basic_auth) = credentials.basic_auth {
-                client = client.basic_auth(basic_auth.username, Some(basic_auth.password));
-            }
-        };
+            let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
 
-        let response = client
-            .send()
-            .await
-            .map_err(|source| Error::Reqwest { source })?;
+            let e = EventBuilder::new()
+                .data(EventData::Json(data))
+                .subject(self.config.name.to_owned())
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|source| Error::Reqwest { source })?;
-
-        if status.is_client_error() || status.is_server_error() {
-            return Err(Error::HttpError {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
-
-        let e = EventBuilder::new()
-            .data(EventData::Json(data))
-            .subject(self.config.name.to_owned())
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+            Ok(())
+        })
+        .await
     }
 }
 

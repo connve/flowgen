@@ -2,9 +2,6 @@ use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Salesforce Bulk API endpoint base path (API v65.0).
-pub const DEFAULT_URI_PATH: &str = "/services/data/v65.0/jobs/";
-
 /// Default batch size for CSV parsing (10,000 rows per RecordBatch).
 const fn default_batch_size() -> usize {
     10000
@@ -15,97 +12,74 @@ const fn default_has_header() -> bool {
     true
 }
 
-/// Processor for creating salesforce account query job.
-/// ```json
-/// {
-///    "salesforce_bulkapi_job_creator": {
-///         "credentials_path": "/path/to/salesforce_test_creds.json",
-///         "operation": "query",
-///         "job": "Select Id from Account",
-///         "content_type": "csv",
-///         "column_delimiter": "comma",
-///         "line_ending": "crlf"
-///     }
-///  }
-/// ```
-///
-/// Processor for creating salesforce account query all job.
-/// ```json
-/// {
-///    "salesforce_bulkapi_job_creator": {
-///         "credentials_path": "/path/to/salesforce_test_creds.json",
-///         "operation": "queryAll",
-///         "job": "Select Id from Account",
-///         "content_type": "csv",
-///         "column_delimiter": "comma",
-///         "line_ending": "crlf"
-///     }
-///  }
-/// ```
-/// Job operation type for unified job processor.
+/// Query job operations.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum JobOperation {
-    /// Create a new bulk API job.
+pub enum QueryJobOperation {
+    /// Create a new bulk query job.
     Create,
-    /// Retrieve/poll bulk API job status and results.
-    Retrieve,
+    /// Get job status and metadata.
+    Get,
+    /// Delete a job (removes job metadata and results).
+    Delete,
+    /// Abort a running job.
+    Abort,
+    /// Get job results (CSV data).
+    GetResults,
 }
 
-/// Unified configuration for Salesforce Bulk API job operations.
-///
-/// This single config handles both create and retrieve operations.
-/// The operation type determines which fields are required and what action is performed.
+/// Configuration for Salesforce Bulk API Query Job operations.
 ///
 /// # Examples
 ///
 /// Create a query job:
 /// ```yaml
-/// salesforce_bulkapi_job:
+/// salesforce_bulkapi_query_job:
 ///   name: query_accounts
 ///   operation: create
 ///   credentials_path: /path/to/salesforce_creds.json
-///   job_type: query
-///   operation_type: query
+///   query_operation: query
 ///   query: "SELECT Id, Name FROM Account"
 ///   content_type: csv
 ///   column_delimiter: comma
 ///   line_ending: lf
 /// ```
 ///
-/// Retrieve job results:
+/// Get job status:
 /// ```yaml
-/// salesforce_bulkapi_job:
-///   name: get_results
-///   operation: retrieve
+/// salesforce_bulkapi_query_job:
+///   name: get_job_status
+///   operation: get
 ///   credentials_path: /path/to/salesforce_creds.json
-///   job_type: query
+///   job_id: "{{event.data.id}}"
+/// ```
+///
+/// Get job results:
+/// ```yaml
+/// salesforce_bulkapi_query_job:
+///   name: get_results
+///   operation: get_results
+///   credentials_path: /path/to/salesforce_creds.json
 ///   job_id: "{{event.data.id}}"
 ///   batch_size: 10000
 ///   has_header: true
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct Job {
+pub struct QueryJob {
     /// Unique task identifier.
     pub name: String,
-    /// Job operation type (create, retrieve).
-    pub operation: JobOperation,
+    /// Query job operation type.
+    pub operation: QueryJobOperation,
     /// Path to Salesforce authentication credentials.
     pub credentials_path: PathBuf,
-    /// Salesforce Job Type like query, ingest.
-    #[serde(default)]
-    pub job_type: JobType,
 
     // Fields for create operation
-    /// SOQL query for query/queryAll operations (create only).
+    /// SOQL query string (create only).
     #[serde(default)]
     pub query: Option<flowgen_core::resource::Source>,
-    /// Salesforce object API name (create only).
-    #[serde(default)]
-    pub object: Option<String>,
-    /// Type of bulk operation to perform (create only).
-    #[serde(default, rename = "operation_type")]
-    pub operation_type: Option<Operation>,
+    /// Type of query operation (query or queryAll) (create only).
+    #[serde(default, rename = "query_operation")]
+    pub query_operation: Option<QueryOperation>,
     /// Output file format (create only).
     #[serde(default)]
     pub content_type: Option<ContentType>,
@@ -115,21 +89,17 @@ pub struct Job {
     /// Line termination style (create only).
     #[serde(default)]
     pub line_ending: Option<LineEnding>,
-    /// Assignment rule ID for Case or Lead objects (create only).
-    #[serde(default)]
-    pub assignment_rule_id: Option<String>,
-    /// External ID field name for upsert operations (create only).
-    #[serde(default)]
-    pub external_id_field_name: Option<String>,
 
-    // Fields for retrieve operation
-    /// Template for extracting job ID from event data (retrieve only).
+    // Fields for get, delete, abort, get_results operations
+    /// Job ID for get/delete/abort/get_results operations.
     #[serde(default)]
     pub job_id: Option<String>,
-    /// Number of rows per Arrow RecordBatch when parsing CSV results (retrieve only).
+
+    // Fields for get_results operation
+    /// Number of rows per Arrow RecordBatch when parsing CSV results (get_results only).
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    /// Whether CSV results include header row (retrieve only).
+    /// Whether CSV results include header row (get_results only).
     #[serde(default = "default_has_header")]
     pub has_header: bool,
 
@@ -138,32 +108,11 @@ pub struct Job {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
-impl ConfigExt for Job {}
+impl ConfigExt for QueryJob {}
 
-/// Salesforce Bulk API Job types.
+/// Salesforce Bulk API query operation types.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub enum JobType {
-    /// Query Job type.
-    #[default]
-    #[serde(rename = "query")]
-    Query,
-    /// Ingest Job type.
-    #[serde(rename = "ingest")]
-    Ingest,
-}
-
-impl JobType {
-    pub fn as_str(&self) -> &str {
-        match self {
-            JobType::Query => "query",
-            JobType::Ingest => "ingest",
-        }
-    }
-}
-
-/// Salesforce Bulk API operation types.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub enum Operation {
+pub enum QueryOperation {
     /// Query active records only.
     #[default]
     #[serde(rename = "query")]
@@ -171,21 +120,6 @@ pub enum Operation {
     /// Query including deleted/archived records.
     #[serde(rename = "queryAll")]
     QueryAll,
-    /// Create new records.
-    #[serde(rename = "insert")]
-    Insert,
-    /// Soft delete (move to recycle bin).
-    #[serde(rename = "delete")]
-    Delete,
-    /// Permanently delete records.
-    #[serde(rename = "hardDelete")]
-    HardDelete,
-    /// Update existing records.
-    #[serde(rename = "update")]
-    Update,
-    /// Insert or update based on external ID.
-    #[serde(rename = "upsert")]
-    Upsert,
 }
 
 /// Output file content types.
@@ -264,72 +198,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_operation_enum_defaults() {
-        let op = Operation::default();
-        assert_eq!(op, Operation::Query);
+    fn test_query_operation_enum_defaults() {
+        let op = QueryOperation::default();
+        assert_eq!(op, QueryOperation::Query);
     }
 
     #[test]
-    fn test_operation_serialization() {
+    fn test_query_operation_serialization() {
         assert_eq!(
-            serde_json::to_string(&Operation::Query).unwrap(),
+            serde_json::to_string(&QueryOperation::Query).unwrap(),
             "\"query\""
         );
         assert_eq!(
-            serde_json::to_string(&Operation::QueryAll).unwrap(),
+            serde_json::to_string(&QueryOperation::QueryAll).unwrap(),
             "\"queryAll\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Operation::Insert).unwrap(),
-            "\"insert\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Operation::Delete).unwrap(),
-            "\"delete\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Operation::HardDelete).unwrap(),
-            "\"hardDelete\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Operation::Update).unwrap(),
-            "\"update\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Operation::Upsert).unwrap(),
-            "\"upsert\""
         );
     }
 
     #[test]
-    fn test_operation_deserialization() {
+    fn test_query_operation_deserialization() {
         assert_eq!(
-            serde_json::from_str::<Operation>("\"query\"").unwrap(),
-            Operation::Query
+            serde_json::from_str::<QueryOperation>("\"query\"").unwrap(),
+            QueryOperation::Query
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"queryAll\"").unwrap(),
-            Operation::QueryAll
+            serde_json::from_str::<QueryOperation>("\"queryAll\"").unwrap(),
+            QueryOperation::QueryAll
+        );
+    }
+
+    #[test]
+    fn test_query_job_operation_serialization() {
+        assert_eq!(
+            serde_json::to_string(&QueryJobOperation::Create).unwrap(),
+            "\"create\""
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"insert\"").unwrap(),
-            Operation::Insert
+            serde_json::to_string(&QueryJobOperation::Get).unwrap(),
+            "\"get\""
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"delete\"").unwrap(),
-            Operation::Delete
+            serde_json::to_string(&QueryJobOperation::Delete).unwrap(),
+            "\"delete\""
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"hardDelete\"").unwrap(),
-            Operation::HardDelete
+            serde_json::to_string(&QueryJobOperation::Abort).unwrap(),
+            "\"abort\""
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"update\"").unwrap(),
-            Operation::Update
+            serde_json::to_string(&QueryJobOperation::GetResults).unwrap(),
+            "\"get_results\""
+        );
+    }
+
+    #[test]
+    fn test_query_job_operation_deserialization() {
+        assert_eq!(
+            serde_json::from_str::<QueryJobOperation>("\"create\"").unwrap(),
+            QueryJobOperation::Create
         );
         assert_eq!(
-            serde_json::from_str::<Operation>("\"upsert\"").unwrap(),
-            Operation::Upsert
+            serde_json::from_str::<QueryJobOperation>("\"get\"").unwrap(),
+            QueryJobOperation::Get
+        );
+        assert_eq!(
+            serde_json::from_str::<QueryJobOperation>("\"delete\"").unwrap(),
+            QueryJobOperation::Delete
+        );
+        assert_eq!(
+            serde_json::from_str::<QueryJobOperation>("\"abort\"").unwrap(),
+            QueryJobOperation::Abort
+        );
+        assert_eq!(
+            serde_json::from_str::<QueryJobOperation>("\"get_results\"").unwrap(),
+            QueryJobOperation::GetResults
         );
     }
 

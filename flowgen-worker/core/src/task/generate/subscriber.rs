@@ -116,6 +116,9 @@ impl EventHandler {
 
     /// Generates events at scheduled intervals.
     async fn handle(&self) -> Result<(), Error> {
+        // Note: This generator creates events from scratch (no incoming events),
+        // so we don't use with_event_context() here. EventBuilder::new() will
+        // create events with meta: None, which is correct for a pipeline starter.
         let mut counter = 0;
 
         // Get cache from task context if available.

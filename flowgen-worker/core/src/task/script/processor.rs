@@ -94,52 +94,56 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Store the original event for comparison after script execution.
-        let original_event = event.clone();
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let original_event = Arc::clone(&event);
 
-        // Convert the event to JSON string and parse with Rhai's native JSON parser.
-        // This avoids serde_json internal representation leaking into Rhai.
-        let value = Value::try_from(&event).map_err(|source| Error::EventConversion { source })?;
-        let event_obj = value["event"].to_owned();
-        let event_json = serde_json::to_string(&event_obj)
-            .map_err(|source| Error::JsonSerialization { source })?;
+            // Convert the event to JSON string and parse with Rhai's native JSON parser.
+            // This avoids serde_json internal representation leaking into Rhai.
+            let value = Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventConversion { source })?;
+            let event_obj = value["event"].to_owned();
+            let event_json = serde_json::to_string(&event_obj)
+                .map_err(|source| Error::JsonSerialization { source })?;
 
-        // Parse JSON using Rhai's engine to get native Rhai types.
-        let event_dynamic: Dynamic = self
-            .engine
-            .parse_json(event_json, true)
-            .map_err(|e| Error::ScriptExecution { source: e })?
-            .into();
+            // Parse JSON using Rhai's engine to get native Rhai types.
+            let event_dynamic: Dynamic = self
+                .engine
+                .parse_json(event_json, true)
+                .map_err(|e| Error::ScriptExecution { source: e })?
+                .into();
 
-        // Execute the script with the parsed event in scope.
-        let mut scope = Scope::new();
-        scope.push("event", event_dynamic);
+            // Execute the script with the parsed event in scope.
+            let mut scope = Scope::new();
+            scope.push("event", event_dynamic);
 
-        let result: Dynamic = self
-            .engine
-            .eval_with_scope(&mut scope, &self.code)
-            .map_err(|e| Error::ScriptExecution { source: e })?;
+            let result: Dynamic = self
+                .engine
+                .eval_with_scope(&mut scope, &self.code)
+                .map_err(|e| Error::ScriptExecution { source: e })?;
 
-        // Convert the script result back to JSON.
-        let result_json = dynamic_to_json(result)?;
+            // Convert the script result back to JSON.
+            let result_json = dynamic_to_json(result)?;
 
-        // Process the script result based on its type.
-        match result_json {
-            Value::Null => Ok(()),
-            Value::Array(arr) => {
-                // Emit multiple events, one per array element.
-                for value in arr {
-                    let new_event = self.generate_script_event(value, &original_event)?;
-                    self.emit_event(new_event).await?;
+            // Process the script result based on its type.
+            match result_json {
+                Value::Null => Ok(()),
+                Value::Array(arr) => {
+                    // Emit multiple events, one per array element.
+                    for value in arr {
+                        let new_event = self.generate_script_event(value, &original_event)?;
+                        self.emit_event(new_event).await?;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                value => {
+                    // Emit a single event.
+                    let new_event = self.generate_script_event(value, &original_event)?;
+                    self.emit_event(new_event).await
+                }
             }
-            value => {
-                // Emit a single event.
-                let new_event = self.generate_script_event(value, &original_event)?;
-                self.emit_event(new_event).await
-            }
-        }
+        })
+        .await
     }
 
     /// Generates a new event from the script result by comparing with the original event.

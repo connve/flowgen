@@ -13,16 +13,14 @@ flow:
     # - queryAll operation (includes deleted/archived records)
     # - Custom CSV formatting options
     # - Job creation with full metadata response
-    - salesforce_bulkapi_job:
+    - salesforce_bulkapi_query_job:
         name: query_all_contacts
-        # Operation type: create creates a new job, retrieve gets results
+        # Operation type: create creates a new bulk query job
         operation: create
         # Path to Salesforce OAuth credentials file
         credentials_path: /etc/sfdc/credentials.json
-        # Job type: query for data extraction, ingest for data loading
-        job_type: query
-        # Bulk API operation type: queryAll includes deleted and archived records
-        operation_type: queryAll
+        # Query operation: queryAll includes deleted and archived records
+        query_operation: queryAll
         # SOQL query loaded from external resource file
         # Resources are loaded from the configured resources directory
         query:

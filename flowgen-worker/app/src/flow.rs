@@ -109,9 +109,9 @@ pub enum Error {
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
     LeadershipChannelClosed,
-    /// Error in Salesforce Bulk API unified job operations.
+    /// Error in Salesforce Bulk API query job operations.
     #[error(transparent)]
-    SalesforceBulkApiJob(#[from] flowgen_salesforce::bulkapi::job::Error),
+    SalesforceBulkApiQueryJob(#[from] flowgen_salesforce::bulkapi::query_job::Error),
     /// Error in GCP BigQuery query task.
     #[error(transparent)]
     GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
@@ -832,22 +832,23 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::salesforce_bulkapi_job(config) => {
+        TaskType::salesforce_bulkapi_query_job(config) => {
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    let mut builder = flowgen_salesforce::bulkapi::job::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
+                    let mut builder =
+                        flowgen_salesforce::bulkapi::query_job::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
-                    builder.build().await?.run().await?;
+                    builder.build()?.run().await?;
                     Ok(())
                 }
                 .instrument(span),

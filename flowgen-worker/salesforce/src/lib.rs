@@ -18,6 +18,6 @@ pub mod pubsub {
 pub mod bulkapi {
     /// Configuration structures for Salesforce Bulk API operations.
     pub mod config;
-    /// Unified Salesforce Bulk API job operations (create, retrieve).
-    pub mod job;
+    /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
+    pub mod query_job;
 }

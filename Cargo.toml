@@ -11,8 +11,8 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { git = "https://github.com/connve/salesforce-rs" }
-salesforce_pubsub_v1 = { git = "https://github.com/connve/salesforce-rs" }
+salesforce_core = { git = "https://github.com/connve/salesforce-rs", branch = "feat/bulkiapi-v2" }
+salesforce_pubsub_v1 = { package = "salesforce-pubsub-v1", git = "https://github.com/connve/salesforce-rs", branch = "feat/bulkiapi-v2" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }

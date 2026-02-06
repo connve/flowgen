@@ -51,74 +51,28 @@ impl EventHandler {
 
         if self.config.structured {
             // Structured logging mode for Grafana/Loki
-            match &event.data {
-                crate::event::EventData::Json(json) => {
-                    let parsed_json = match json {
-                        serde_json::Value::String(json_str) => {
-                            serde_json::from_str::<serde_json::Value>(json_str)
-                                .unwrap_or_else(|_| json.clone())
-                        }
-                        other => other.clone(),
-                    };
-
-                    match self.config.level {
-                        super::config::LogLevel::Trace => trace!(data = ?parsed_json),
-                        super::config::LogLevel::Debug => debug!(data = ?parsed_json),
-                        super::config::LogLevel::Info => info!(data = ?parsed_json),
-                        super::config::LogLevel::Warn => warn!(data = ?parsed_json),
-                        super::config::LogLevel::Error => error!(data = ?parsed_json),
-                    }
-                }
-                other => match self.config.level {
-                    super::config::LogLevel::Trace => trace!(data = ?other),
-                    super::config::LogLevel::Debug => debug!(data = ?other),
-                    super::config::LogLevel::Info => info!(data = ?other),
-                    super::config::LogLevel::Warn => warn!(data = ?other),
-                    super::config::LogLevel::Error => error!(data = ?other),
-                },
+            match self.config.level {
+                super::config::LogLevel::Trace => trace!(event = ?event),
+                super::config::LogLevel::Debug => debug!(event = ?event),
+                super::config::LogLevel::Info => info!(event = ?event),
+                super::config::LogLevel::Warn => warn!(event = ?event),
+                super::config::LogLevel::Error => error!(event = ?event),
             }
         } else {
             // Pretty-printed mode for console readability
-            let log_message = match &event.data {
-                crate::event::EventData::Json(json) => match json {
-                    serde_json::Value::String(json_str) => {
-                        match serde_json::from_str::<serde_json::Value>(json_str) {
-                            Ok(parsed) => format!(
-                                "\n{}",
-                                serde_json::to_string_pretty(&parsed)
-                                    .unwrap_or_else(|_| json_str.clone())
-                            ),
-                            Err(_) => json_str.clone(),
-                        }
-                    }
-                    other_json => format!(
-                        "\n{}",
-                        serde_json::to_string_pretty(other_json)
-                            .unwrap_or_else(|_| format!("{other_json:?}"))
-                    ),
-                },
-                other => format!("{other:?}"),
-            };
-
             match self.config.level {
-                super::config::LogLevel::Trace => trace!("{}", log_message),
-                super::config::LogLevel::Debug => debug!("{}", log_message),
-                super::config::LogLevel::Info => info!("{}", log_message),
-                super::config::LogLevel::Warn => warn!("{}", log_message),
-                super::config::LogLevel::Error => error!("{}", log_message),
+                super::config::LogLevel::Trace => trace!("{}", event),
+                super::config::LogLevel::Debug => debug!("{}", event),
+                super::config::LogLevel::Info => info!("{}", event),
+                super::config::LogLevel::Warn => warn!("{}", event),
+                super::config::LogLevel::Error => error!("{}", event),
             }
         }
 
         // Pass the event through to the next task with updated task_id (if there is a next task)
-        let event = crate::event::EventBuilder::new()
-            .data(event.data)
-            .subject(event.subject)
-            .task_id(self.task_id)
-            .task_type(event.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
-
         if let Some(ref tx) = self.tx {
+            let mut event = event;
+            event.task_id = self.task_id;
             tx.send(event).await.map_err(|_| Error::SendMessage {
                 source: crate::event::Error::SendMessage,
             })?;

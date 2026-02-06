@@ -141,49 +141,57 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Render config to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+        let event = Arc::new(event);
 
-        // Execute operation based on type.
-        let result_data = match config.operation {
-            super::config::JobOperation::Create => {
-                let job = self.create_job(&config).await?;
-                serde_json::to_value(&job).map_err(|source| Error::JobSerialization { source })?
-            }
-            super::config::JobOperation::Get => {
-                let job = self.get_job(&config).await?;
-                serde_json::to_value(&job).map_err(|source| Error::JobSerialization { source })?
-            }
-            super::config::JobOperation::Cancel => {
-                let job = self.cancel_job(&config).await?;
-                serde_json::to_value(&job).map_err(|source| Error::JobSerialization { source })?
-            }
-            super::config::JobOperation::Delete => {
-                let response = self.delete_job(&config).await?;
-                serde_json::to_value(&response)
-                    .map_err(|source| Error::JobSerialization { source })?
-            }
-        };
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        let result_event = EventBuilder::new()
-            .data(EventData::Json(result_data))
-            .subject(format!("{}.{}", event.subject, config.name))
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Execute operation based on type.
+            let result_data = match config.operation {
+                super::config::JobOperation::Create => {
+                    let job = self.create_job(&config).await?;
+                    serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?
+                }
+                super::config::JobOperation::Get => {
+                    let job = self.get_job(&config).await?;
+                    serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?
+                }
+                super::config::JobOperation::Cancel => {
+                    let job = self.cancel_job(&config).await?;
+                    serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?
+                }
+                super::config::JobOperation::Delete => {
+                    let response = self.delete_job(&config).await?;
+                    serde_json::to_value(&response)
+                        .map_err(|source| Error::JobSerialization { source })?
+                }
+            };
 
-        result_event
-            .send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            let result_event = EventBuilder::new()
+                .data(EventData::Json(result_data))
+                .subject(format!("{}.{}", event.subject, config.name))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        Ok(())
+            result_event
+                .send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
     }
 
     /// Creates a BigQuery job and returns the complete job response.

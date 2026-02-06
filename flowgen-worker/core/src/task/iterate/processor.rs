@@ -57,60 +57,60 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        let json_data = match event.data {
-            EventData::Json(data) => data,
-            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
-            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
-        };
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let json_data = match &event.data {
+                EventData::Json(data) => data,
+                EventData::ArrowRecordBatch(_) => {
+                    return Err(Error::ExpectedJsonGotArrowRecordBatch)
+                }
+                EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
+            };
 
-        let array = match &self.config.iterate_key {
-            Some(key) => {
-                let value = json_data
-                    .get(key)
-                    .ok_or_else(|| Error::KeyNotFound(key.clone()))?;
-                match value {
+            let array = match &self.config.iterate_key {
+                Some(key) => {
+                    let value = json_data
+                        .get(key)
+                        .ok_or_else(|| Error::KeyNotFound(key.clone()))?;
+                    match value {
+                        Value::Array(arr) => arr.clone(),
+                        _ => {
+                            return Err(Error::ExpectedArray {
+                                key: key.clone(),
+                                got: format!("{value:?}"),
+                            })
+                        }
+                    }
+                }
+                None => match json_data {
                     Value::Array(arr) => arr.clone(),
                     _ => {
                         return Err(Error::ExpectedArray {
-                            key: key.clone(),
-                            got: format!("{value:?}"),
+                            key: "root".to_string(),
+                            got: format!("{json_data:?}"),
                         })
                     }
-                }
-            }
-            None => match json_data {
-                Value::Array(arr) => arr,
-                _ => {
-                    return Err(Error::ExpectedArray {
-                        key: "root".to_string(),
-                        got: format!("{json_data:?}"),
-                    })
-                }
-            },
-        };
+                },
+            };
 
-        for element in array.iter() {
-            let mut builder = EventBuilder::new()
-                .data(EventData::Json(element.clone()))
-                .subject(self.config.name.to_owned())
-                .task_id(self.task_id)
-                .task_type(self.task_type);
+            for element in array.iter() {
+                // EventBuilder::new() automatically preserves meta from the current event context
+                let e = EventBuilder::new()
+                    .data(EventData::Json(element.clone()))
+                    .subject(self.config.name.to_owned())
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
 
-            // Preserve metadata from the original event.
-            if let Some(meta) = &event.meta {
-                builder = builder.meta(meta.clone());
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
             }
 
-            let e = builder
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
-
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 

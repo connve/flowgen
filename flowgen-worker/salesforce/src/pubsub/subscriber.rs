@@ -19,7 +19,7 @@ pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
-        source: salesforce_core::pubsub::context::Error,
+        source: salesforce_core::pubsub::Error,
     },
     #[error("Authentication error: {source}")]
     Auth {
@@ -79,7 +79,7 @@ pub enum Error {
 /// to the event channel. Supports durable consumers with replay ID caching.
 pub struct EventHandler {
     /// Salesforce Pub/Sub client context
-    pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsub::Client>>,
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
@@ -93,8 +93,8 @@ pub struct EventHandler {
 }
 
 /// Checks if a gRPC error is due to an invalid/corrupted replay ID.
-fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
-    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+fn is_replay_id_error(error: &salesforce_core::pubsub::Error) -> bool {
+    if let salesforce_core::pubsub::Error::Tonic(status) = error {
         if let Some(error_code) = status.metadata().get("error-code") {
             if let Ok(code_str) = error_code.to_str() {
                 return code_str
@@ -108,8 +108,8 @@ fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
 }
 
 /// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &salesforce_core::pubsub::context::Error) -> bool {
-    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+fn is_auth_error(error: &salesforce_core::pubsub::Error) -> bool {
+    if let salesforce_core::pubsub::Error::Tonic(status) = error {
         let message = status.message();
         return message.contains("does not have valid authentication credentials")
             || message.contains("authentication exception occurred");
@@ -258,7 +258,7 @@ impl EventHandler {
                     Ok(fr) => fr.events,
                     Err(e) => {
                         return Err(Error::PubSub {
-                            source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                            source: salesforce_core::pubsub::Error::Tonic(Box::new(e)),
                         });
                     }
                 };
@@ -378,7 +378,7 @@ impl EventHandler {
                 Ok(fr) => fr.events,
                 Err(e) => {
                     return Err(Error::PubSub {
-                        source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                        source: salesforce_core::pubsub::Error::Tonic(Box::new(e)),
                     });
                 }
             };
@@ -454,7 +454,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .map_err(|e| Error::Auth { source: e })?;
 
         // Create Pub/Sub context.
-        let pubsub = salesforce_core::pubsub::context::Context::new(channel, sfdc_client)
+        let pubsub = salesforce_core::pubsub::Client::new(channel, sfdc_client)
             .map_err(|e| Error::PubSub { source: e })?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 

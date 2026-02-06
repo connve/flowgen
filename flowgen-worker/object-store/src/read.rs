@@ -116,134 +116,139 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Get cache from task context if available (not available for reader).
-        let cache: Option<&Arc<dyn flowgen_core::cache::Cache>> = None;
-        let mut client_guard = self.client.lock().await;
-        let context = client_guard
-            .context
-            .as_mut()
-            .ok_or_else(|| Error::NoObjectStoreContext)?;
+        let event = Arc::new(event);
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Get cache from task context if available (not available for reader).
+            let cache: Option<&Arc<dyn flowgen_core::cache::Cache>> = None;
+            let mut client_guard = self.client.lock().await;
+            let context = client_guard
+                .context
+                .as_mut()
+                .ok_or_else(|| Error::NoObjectStoreContext)?;
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
-        let config_path_str = config.path.to_string_lossy();
-        let url = url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
-        let path = object_store::path::Path::from(url.path());
+            // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
+            let config_path_str = config.path.to_string_lossy();
+            let url =
+                url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
+            let path = object_store::path::Path::from(url.path());
 
-        let result = context
-            .object_store
-            .get(&path)
-            .await
-            .map_err(|e| Error::ObjectStore { source: e })?;
+            let result = context
+                .object_store
+                .get(&path)
+                .await
+                .map_err(|e| Error::ObjectStore { source: e })?;
 
-        let extension = result
-            .meta
-            .location
-            .extension()
-            .ok_or_else(|| Error::NoFileExtension)?;
+            let extension = result
+                .meta
+                .location
+                .extension()
+                .ok_or_else(|| Error::NoFileExtension)?;
 
-        // Determine content type from file extension.
-        let content_type = match extension {
-            DEFAULT_JSON_EXTENSION => ContentType::Json,
-            DEFAULT_CSV_EXTENSION => {
-                let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-                let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
-                let delimiter = self
-                    .config
-                    .delimiter
-                    .as_ref()
-                    .and_then(|d| d.as_bytes().first().copied());
-                ContentType::Csv {
-                    batch_size,
-                    has_header,
-                    delimiter,
+            // Determine content type from file extension.
+            let content_type = match extension {
+                DEFAULT_JSON_EXTENSION => ContentType::Json,
+                DEFAULT_CSV_EXTENSION => {
+                    let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                    let has_header = self.config.has_header.unwrap_or(DEFAULT_HAS_HEADER);
+                    let delimiter = self
+                        .config
+                        .delimiter
+                        .as_ref()
+                        .and_then(|d| d.as_bytes().first().copied());
+                    ContentType::Csv {
+                        batch_size,
+                        has_header,
+                        delimiter,
+                    }
                 }
-            }
-            DEFAULT_AVRO_EXTENSION => ContentType::Avro,
-            DEFAULT_PARQUET_EXTENSION => {
-                let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-                ContentType::Parquet { batch_size }
-            }
-            _ => {
-                warn!("Unsupported file extension: {}", extension);
-                return Ok(());
-            }
-        };
-
-        // Parse payload into event data based on type.
-        let event_data_list = match result.payload {
-            GetResultPayload::File(file, _) => {
-                let reader = BufReader::new(file);
-                EventData::from_reader(reader, content_type.clone())
-                    .map_err(|source| Error::EventBuilder { source })?
-            }
-            GetResultPayload::Stream(mut stream) => {
-                // Collect stream into bytes.
-                let mut buffer = BytesMut::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|e| Error::ObjectStore { source: e })?;
-                    buffer.extend_from_slice(&chunk);
+                DEFAULT_AVRO_EXTENSION => ContentType::Avro,
+                DEFAULT_PARQUET_EXTENSION => {
+                    let batch_size = self.config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+                    ContentType::Parquet { batch_size }
                 }
-                let bytes = buffer.freeze();
+                _ => {
+                    warn!("Unsupported file extension: {}", extension);
+                    return Ok(());
+                }
+            };
 
-                // Parse bytes using Cursor for Seek support.
-                let cursor = Cursor::new(bytes);
-                let reader = BufReader::new(cursor);
-                EventData::from_reader(reader, content_type.clone())
-                    .map_err(|source| Error::EventBuilder { source })?
-            }
-        };
+            // Parse payload into event data based on type.
+            let event_data_list = match result.payload {
+                GetResultPayload::File(file, _) => {
+                    let reader = BufReader::new(file);
+                    EventData::from_reader(reader, content_type.clone())
+                        .map_err(|source| Error::EventBuilder { source })?
+                }
+                GetResultPayload::Stream(mut stream) => {
+                    // Collect stream into bytes.
+                    let mut buffer = BytesMut::new();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(|e| Error::ObjectStore { source: e })?;
+                        buffer.extend_from_slice(&chunk);
+                    }
+                    let bytes = buffer.freeze();
 
-        // Cache schema for CSV if configured.
-        if let ContentType::Csv { .. } = content_type {
-            if let Some(cache_options) = &self.config.cache_options {
-                if let Some(insert_key) = &cache_options.insert_key {
-                    if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
-                        let schema_bytes = Bytes::from(batch.schema().to_string());
-                        if let Some(cache) = cache {
-                            cache
-                                .put(insert_key.as_str(), schema_bytes)
-                                .await
-                                .map_err(|_| Error::Cache)?;
+                    // Parse bytes using Cursor for Seek support.
+                    let cursor = Cursor::new(bytes);
+                    let reader = BufReader::new(cursor);
+                    EventData::from_reader(reader, content_type.clone())
+                        .map_err(|source| Error::EventBuilder { source })?
+                }
+            };
+
+            // Cache schema for CSV if configured.
+            if let ContentType::Csv { .. } = content_type {
+                if let Some(cache_options) = &self.config.cache_options {
+                    if let Some(insert_key) = &cache_options.insert_key {
+                        if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
+                            let schema_bytes = Bytes::from(batch.schema().to_string());
+                            if let Some(cache) = cache {
+                                cache
+                                    .put(insert_key.as_str(), schema_bytes)
+                                    .await
+                                    .map_err(|_| Error::Cache)?;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Send events.
-        for event_data in event_data_list {
-            let e = EventBuilder::new()
-                .subject(self.config.name.to_owned())
-                .data(event_data)
-                .task_id(self.task_id)
-                .task_type(self.task_type)
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
+            // Send events.
+            for event_data in event_data_list {
+                let e = EventBuilder::new()
+                    .subject(self.config.name.to_owned())
+                    .data(event_data)
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
 
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
+            }
 
-        // Delete file from object store if configured.
-        if self.config.delete_after_read.unwrap_or(false) {
-            context
-                .object_store
-                .delete(&context.path)
-                .await
-                .map_err(|e| Error::ObjectStore { source: e })?;
-            info!("Successfully deleted file: {}", context.path.as_ref());
-        }
+            // Delete file from object store if configured.
+            if self.config.delete_after_read.unwrap_or(false) {
+                context
+                    .object_store
+                    .delete(&context.path)
+                    .await
+                    .map_err(|e| Error::ObjectStore { source: e })?;
+                info!("Successfully deleted file: {}", context.path.as_ref());
+            }
 
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 

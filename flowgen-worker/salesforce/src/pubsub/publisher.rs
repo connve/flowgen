@@ -12,8 +12,8 @@ use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
 /// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &salesforce_core::pubsub::context::Error) -> bool {
-    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+fn is_auth_error(error: &salesforce_core::pubsub::Error) -> bool {
+    if let salesforce_core::pubsub::Error::Tonic(status) = error {
         let message = status.message();
         return message.contains("does not have valid authentication credentials")
             || message.contains("authentication exception occurred");
@@ -27,7 +27,7 @@ pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
-        source: salesforce_core::pubsub::context::Error,
+        source: salesforce_core::pubsub::Error,
     },
     #[error("Authentication error: {source}")]
     Auth {
@@ -88,7 +88,7 @@ pub struct EventHandler {
     /// Publisher configuration.
     config: Arc<super::config::Publisher>,
     /// Pub/Sub connection context.
-    pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsub::Client>>,
     /// Topic name for publishing.
     topic: String,
     /// Schema ID for event serialization.
@@ -106,75 +106,81 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)?;
-        let config = self.config.render(&event_value)?;
-        let mut publish_payload = config.payload;
+        let event = Arc::new(event);
 
-        let now = Utc::now().timestamp_millis();
-        publish_payload.insert(
-            "CreatedDate".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(now)),
-        );
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())?;
+            let config = self.config.render(&event_value)?;
+            let mut publish_payload = config.payload;
 
-        // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait
-        let json_value = serde_json::Value::Object(publish_payload);
-        let record = AvroValue::from(json_value)
-            .resolve(self.schema.as_ref())
-            .map_err(|e| Error::Avro { source: e })?;
+            let now = Utc::now().timestamp_millis();
+            publish_payload.insert(
+                "CreatedDate".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(now)),
+            );
 
-        // Serialize the record directly without schema wrapper (Salesforce expects just the data)
-        let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
-            .map_err(|e| Error::Avro { source: e })?;
+            // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait
+            let json_value = serde_json::Value::Object(publish_payload);
+            let record = AvroValue::from(json_value)
+                .resolve(self.schema.as_ref())
+                .map_err(|e| Error::Avro { source: e })?;
 
-        let mut events = Vec::new();
-        let pe = ProducerEvent {
-            schema_id: self.schema_id.clone(),
-            payload: serialized_payload,
-            ..Default::default()
-        };
-        events.push(pe);
+            // Serialize the record directly without schema wrapper (Salesforce expects just the data)
+            let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
+                .map_err(|e| Error::Avro { source: e })?;
 
-        let resp = self
-            .pubsub
-            .lock()
-            .await
-            .publish(PublishRequest {
-                topic_name: self.topic.clone(),
-                events,
+            let mut events = Vec::new();
+            let pe = ProducerEvent {
+                schema_id: self.schema_id.clone(),
+                payload: serialized_payload,
                 ..Default::default()
-            })
-            .await
-            .map_err(|e| Error::PubSub { source: e })?
-            .into_inner();
+            };
+            events.push(pe);
 
-        // Generate subject prefix from topic name.
-        let subject = if let Some(stripped) = self
-            .topic
-            .replace('/', ".")
-            .to_lowercase()
-            .strip_prefix('.')
-        {
-            stripped.to_string()
-        } else {
-            self.topic.to_owned()
-        };
+            let resp = self
+                .pubsub
+                .lock()
+                .await
+                .publish(PublishRequest {
+                    topic_name: self.topic.clone(),
+                    events,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| Error::PubSub { source: e })?
+                .into_inner();
 
-        let resp_json = serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
+            // Generate subject prefix from topic name.
+            let subject = if let Some(stripped) = self
+                .topic
+                .replace('/', ".")
+                .to_lowercase()
+                .strip_prefix('.')
+            {
+                stripped.to_string()
+            } else {
+                self.topic.to_owned()
+            };
 
-        let e = flowgen_core::event::EventBuilder::new()
-            .data(EventData::Json(resp_json))
-            .subject(subject)
-            .id(resp.rpc_id)
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()?;
+            let resp_json =
+                serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            let e = flowgen_core::event::EventBuilder::new()
+                .data(EventData::Json(resp_json))
+                .subject(subject)
+                .id(resp.rpc_id)
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()?;
 
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -233,7 +239,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await
             .map_err(|e| Error::Auth { source: e })?;
 
-        let pubsub = salesforce_core::pubsub::context::Context::new(channel, sfdc_client)
+        let pubsub = salesforce_core::pubsub::Client::new(channel, sfdc_client)
             .map_err(|e| Error::PubSub { source: e })?;
 
         let pubsub = Arc::new(Mutex::new(pubsub));

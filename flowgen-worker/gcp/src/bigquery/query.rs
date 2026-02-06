@@ -117,33 +117,38 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Render config to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+        let event = Arc::new(event);
 
-        // Execute query.
-        let record_batch =
-            execute_query(&self.client, &config, self.resource_loader.as_ref()).await?;
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        // Build result event.
-        let result_event = EventBuilder::new()
-            .data(EventData::ArrowRecordBatch(record_batch))
-            .subject(format!("{}.{}", event.subject, config.name))
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Execute query.
+            let record_batch =
+                execute_query(&self.client, &config, self.resource_loader.as_ref()).await?;
 
-        result_event
-            .send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            // Build result event.
+            let result_event = EventBuilder::new()
+                .data(EventData::ArrowRecordBatch(record_batch))
+                .subject(format!("{}.{}", event.subject, config.name))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        Ok(())
+            result_event
+                .send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
     }
 }
 

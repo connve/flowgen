@@ -107,51 +107,57 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+        let event = Arc::new(event);
 
-        let e = event
-            .to_publish()
-            .map_err(|source| Error::MessageConversion { source })?;
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        let ack_future = self
-            .jetstream
-            .lock()
-            .await
-            .send_publish(config.subject, e)
-            .await
-            .map_err(|e| Error::Publish { source: e })?;
+            let e = event
+                .to_publish()
+                .map_err(|source| Error::MessageConversion { source })?;
 
-        // Apply timeout if configured, otherwise use default async-nats timeout.
-        let ack = if let Some(timeout) = config.ack_timeout {
-            match tokio::time::timeout(timeout, ack_future).await {
-                Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
-                Err(_) => return Err(Error::PublishAckTimeout(timeout)),
-            }
-        } else {
-            ack_future.await.map_err(|e| Error::Publish { source: e })?
-        };
-        let ack: PublishAck = ack.into();
-        let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
+            let ack_future = self
+                .jetstream
+                .lock()
+                .await
+                .send_publish(config.subject, e)
+                .await
+                .map_err(|e| Error::Publish { source: e })?;
 
-        let e = EventBuilder::new()
-            .subject(self.config.name.clone())
-            .data(EventData::Json(ack_json))
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Apply timeout if configured, otherwise use default async-nats timeout.
+            let ack = if let Some(timeout) = config.ack_timeout {
+                match tokio::time::timeout(timeout, ack_future).await {
+                    Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
+                    Err(_) => return Err(Error::PublishAckTimeout(timeout)),
+                }
+            } else {
+                ack_future.await.map_err(|e| Error::Publish { source: e })?
+            };
+            let ack: PublishAck = ack.into();
+            let ack_json =
+                serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            let e = EventBuilder::new()
+                .subject(self.config.name.clone())
+                .data(EventData::Json(ack_json))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
     }
 }
 

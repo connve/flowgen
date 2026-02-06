@@ -47,12 +47,11 @@ flow:
     # Supports streaming: retrieves partial results during job execution, then final results on completion.
     # This eliminates polling and enables real-time data processing.
     # The job_id is dynamically extracted from the filtered event using template syntax.
-    - salesforce_bulkapi_job:
-        name: get_job_details
-        # Operation type: retrieve downloads and parses job results
-        operation: retrieve
+    - salesforce_bulkapi_query_job:
+        name: get_job_results
+        # Operation type: get_results downloads and parses job results
+        operation: get_results
         credentials_path: /etc/sfdc/credentials.json
-        job_type: query
         # Template syntax extracts job_id from the event data structure
         # Event data format: {"id": "job_id", "result_type": "...", ...}
         job_id: "{{event.data.id}}"

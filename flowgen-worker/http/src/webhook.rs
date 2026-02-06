@@ -150,6 +150,10 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
+        // Note: This webhook handler creates events from scratch (from HTTP requests),
+        // so we don't use with_event_context() here. EventBuilder::new() will
+        // create events with meta: None, which is correct for a pipeline starter.
+
         // Validate the authentication and return error if request is not authorized.
         if let Err(auth_error) = self.validate_authentication(&headers) {
             error!("Webhook authentication failed for: {}", auth_error);
