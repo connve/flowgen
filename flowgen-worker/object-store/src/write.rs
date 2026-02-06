@@ -201,6 +201,11 @@ impl EventHandler {
             let mut writer = Vec::new();
             match (&event.data, &format) {
                 (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
+                    // Skip writing empty batches.
+                    if batch.num_rows() == 0 {
+                        return Ok(());
+                    }
+
                     // Write Arrow as Parquet (native columnar format).
                     let props = parquet::file::properties::WriterProperties::builder().build();
                     let mut parquet_writer = parquet::arrow::ArrowWriter::try_new(
