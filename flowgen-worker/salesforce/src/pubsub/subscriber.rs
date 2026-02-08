@@ -2,7 +2,7 @@ use flowgen_core::{
     client::Client,
     event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
-use salesforce_pubsub_v1::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
+use salesforce_core::pubsub::{FetchRequest, PubSubError, SchemaRequest, TopicRequest};
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_stream::StreamExt;
@@ -19,7 +19,7 @@ pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
-        source: salesforce_core::pubsub::Error,
+        source: PubSubError,
     },
     #[error("Authentication error: {source}")]
     Auth {
@@ -93,8 +93,8 @@ pub struct EventHandler {
 }
 
 /// Checks if a gRPC error is due to an invalid/corrupted replay ID.
-fn is_replay_id_error(error: &salesforce_core::pubsub::Error) -> bool {
-    if let salesforce_core::pubsub::Error::Tonic(status) = error {
+fn is_replay_id_error(error: &PubSubError) -> bool {
+    if let PubSubError::Tonic(status) = error {
         if let Some(error_code) = status.metadata().get("error-code") {
             if let Ok(code_str) = error_code.to_str() {
                 return code_str
@@ -108,8 +108,8 @@ fn is_replay_id_error(error: &salesforce_core::pubsub::Error) -> bool {
 }
 
 /// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &salesforce_core::pubsub::Error) -> bool {
-    if let salesforce_core::pubsub::Error::Tonic(status) = error {
+fn is_auth_error(error: &PubSubError) -> bool {
+    if let PubSubError::Tonic(status) = error {
         let message = status.message();
         return message.contains("does not have valid authentication credentials")
             || message.contains("authentication exception occurred");
@@ -258,7 +258,7 @@ impl EventHandler {
                     Ok(fr) => fr.events,
                     Err(e) => {
                         return Err(Error::PubSub {
-                            source: salesforce_core::pubsub::Error::Tonic(Box::new(e)),
+                            source: PubSubError::Tonic(Box::new(e)),
                         });
                     }
                 };
@@ -378,7 +378,7 @@ impl EventHandler {
                 Ok(fr) => fr.events,
                 Err(e) => {
                     return Err(Error::PubSub {
-                        source: salesforce_core::pubsub::Error::Tonic(Box::new(e)),
+                        source: PubSubError::Tonic(Box::new(e)),
                     });
                 }
             };

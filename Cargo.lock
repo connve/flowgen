@@ -2576,9 +2576,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "memchr"
-version = "2.7.6"
+version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "mime"
@@ -3821,7 +3821,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 [[package]]
 name = "salesforce-pubsub-v1"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#480dcce92cc18e79dd09721a69940f84ddef6ae2"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3845,7 +3845,7 @@ dependencies = [
 [[package]]
 name = "salesforce_core"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#480dcce92cc18e79dd09721a69940f84ddef6ae2"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -3865,7 +3865,7 @@ dependencies = [
 [[package]]
 name = "salesforce_core_v1"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#480dcce92cc18e79dd09721a69940f84ddef6ae2"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
 dependencies = [
  "bytes",
  "chrono",

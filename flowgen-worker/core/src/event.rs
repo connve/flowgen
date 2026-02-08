@@ -50,37 +50,111 @@ where
         .await
 }
 
+/// Builder for sending events with structured logging context.
+pub struct EventLogger<'a> {
+    event: Event,
+    tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
+    fields: Vec<(&'static str, String)>,
+}
+
+impl<'a> EventLogger<'a> {
+    /// Add a context field to the structured log output.
+    ///
+    /// # Example
+    /// ```ignore
+    /// event.send_with_logging(Some(&tx))
+    ///     .context("row_count", 1000)
+    ///     .context("external_id", "job-123")
+    ///     .await?;
+    /// ```
+    pub fn context(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        self.fields.push((key, value.to_string()));
+        self
+    }
+}
+
+// Implement IntoFuture to make EventLogger awaitable
+impl<'a> std::future::IntoFuture for EventLogger<'a> {
+    type Output = Result<(), Error>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let event_id = match &self.event.id {
+                Some(ref id) => id.to_string(),
+                None => self.event.timestamp.to_string(),
+            };
+            let subject = self.event.subject.clone();
+
+            if let Some(tx) = self.tx {
+                tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
+            }
+
+            // Build structured log with context fields
+            if self.fields.is_empty() {
+                info!(
+                    event.subject = %subject,
+                    event.id = %event_id,
+                );
+            } else {
+                // Create log record with dynamic fields
+                let field_str = self
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                info!(
+                    event.subject = %subject,
+                    event.id = %event_id,
+                    context = %field_str,
+                );
+            }
+
+            Ok(())
+        })
+    }
+}
+
 /// Extension trait for event processing with logging.
-#[async_trait::async_trait]
 pub trait EventExt {
     /// Logs event processing and optionally sends to the next task.
     ///
     /// This method always logs the event, then sends it to the next task if a sender is provided.
     /// Use this in task handlers to ensure visibility of event processing throughout the pipeline.
-    async fn send_with_logging(
+    ///
+    /// Returns a builder that allows adding context fields via `.context()` calls.
+    /// The builder implements `IntoFuture`, so you can await it directly.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Simple usage without context
+    /// event.send_with_logging(Some(&tx)).await?;
+    ///
+    /// // With context fields
+    /// event.send_with_logging(Some(&tx))
+    ///     .context("row_count", 1000)
+    ///     .context("external_id", "job-123")
+    ///     .await?;
+    /// ```
+    fn send_with_logging<'a>(
         self,
-        tx: Option<&tokio::sync::mpsc::Sender<Event>>,
-    ) -> Result<(), Error>;
+        tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
+    ) -> EventLogger<'a>;
 }
 
-#[async_trait::async_trait]
 impl EventExt for Event {
-    async fn send_with_logging(
+    fn send_with_logging<'a>(
         self,
-        tx: Option<&tokio::sync::mpsc::Sender<Event>>,
-    ) -> Result<(), Error> {
-        let suffix = match &self.id {
-            Some(ref id) => id.to_string(),
-            None => self.timestamp.to_string(),
-        };
-        let subject = self.subject.clone();
-
-        if let Some(tx) = tx {
-            tx.send(self).await.map_err(|_| Error::SendMessage)?;
+        tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
+    ) -> EventLogger<'a> {
+        EventLogger {
+            event: self,
+            tx,
+            fields: Vec::new(),
         }
-
-        info!("Event processed: {}.{}", subject, suffix);
-        Ok(())
     }
 }
 

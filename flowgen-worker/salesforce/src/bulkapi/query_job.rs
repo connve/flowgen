@@ -9,11 +9,21 @@ use salesforce_core::bulkapi::{
     ColumnDelimiter as SdkColumnDelimiter, ContentType as SdkContentType, CreateQueryJobRequest,
     LineEnding as SdkLineEnding, QueryOperation as SdkQueryOperation,
 };
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_stream::StreamExt;
 use tracing::{error, Instrument};
+
+/// Response for delete job operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteJobResponse {
+    /// The ID of the deleted job.
+    pub job_id: String,
+    /// Confirmation that the job was deleted.
+    pub deleted: bool,
+}
 
 /// Errors for Salesforce bulk query job operations.
 #[derive(thiserror::Error, Debug)]
@@ -177,7 +187,7 @@ impl EventHandler {
 
         // Create job using SDK.
         let query_client = self.client.query();
-        let job_info =
+        let mut job_info =
             query_client
                 .create_job(&request)
                 .await
@@ -194,6 +204,7 @@ impl EventHandler {
         let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
+            .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -211,7 +222,7 @@ impl EventHandler {
 
         // Get job info using SDK.
         let query_client = self.client.query();
-        let job_info = query_client
+        let mut job_info = query_client
             .get_job(job_id)
             .await
             .map_err(|e| Error::BulkApiQuery {
@@ -227,6 +238,7 @@ impl EventHandler {
         let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
+            .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -251,15 +263,21 @@ impl EventHandler {
                 source: Box::new(e),
             })?;
 
-        // Emit confirmation event.
-        let resp = serde_json::json!({
-            "job_id": job_id,
-            "deleted": true
-        });
+        // Create response struct.
+        let response = DeleteJobResponse {
+            job_id: job_id.to_string(),
+            deleted: true,
+        };
+
+        // Serialize response to JSON.
+        let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
+            source: flowgen_core::serde::Error::Serde { source: e },
+        })?;
 
         let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
+            .id(response.job_id)
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -277,12 +295,13 @@ impl EventHandler {
 
         // Abort job using SDK.
         let query_client = self.client.query();
-        let job_info = query_client
-            .abort_job(job_id)
-            .await
-            .map_err(|e| Error::BulkApiQuery {
-                source: Box::new(e),
-            })?;
+        let mut job_info =
+            query_client
+                .abort_job(job_id)
+                .await
+                .map_err(|e| Error::BulkApiQuery {
+                    source: Box::new(e),
+                })?;
 
         // Serialize the full QueryJobInfo payload to JSON.
         let resp = serde_json::to_value(&job_info).map_err(|e| Error::SerdeExt {
@@ -293,6 +312,7 @@ impl EventHandler {
         let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
+            .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -573,6 +593,38 @@ mod tests {
 
         let err = Error::MissingQuery;
         assert!(matches!(err, Error::MissingQuery));
+    }
+
+    #[test]
+    fn test_delete_job_response_creation() {
+        let response = DeleteJobResponse {
+            job_id: "750xx000000XXXX".to_string(),
+            deleted: true,
+        };
+
+        assert_eq!(response.job_id, "750xx000000XXXX");
+        assert!(response.deleted);
+    }
+
+    #[test]
+    fn test_delete_job_response_serialization() {
+        let response = DeleteJobResponse {
+            job_id: "750xx000000XXXX".to_string(),
+            deleted: true,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("750xx000000XXXX"));
+        assert!(json.contains("\"deleted\":true"));
+    }
+
+    #[test]
+    fn test_delete_job_response_deserialization() {
+        let json = r#"{"job_id":"750xx000000XXXX","deleted":true}"#;
+        let response: DeleteJobResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.job_id, "750xx000000XXXX");
+        assert!(response.deleted);
     }
 
     #[tokio::test]

@@ -129,15 +129,21 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute query.
-            let record_batch =
+            let (record_batch, job_id) =
                 execute_query(&self.client, &config, self.resource_loader.as_ref()).await?;
 
             // Build result event.
-            let result_event = EventBuilder::new()
+            let mut event_builder = EventBuilder::new()
                 .data(EventData::ArrowRecordBatch(record_batch))
                 .subject(format!("{}.{}", event.subject, config.name))
                 .task_id(self.task_id)
-                .task_type(self.task_type)
+                .task_type(self.task_type);
+
+            if let Some(id) = job_id {
+                event_builder = event_builder.id(id);
+            }
+
+            let result_event = event_builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
@@ -350,7 +356,7 @@ async fn execute_query(
     client: &Client,
     config: &super::config::Query,
     resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
-) -> Result<arrow::array::RecordBatch, Error> {
+) -> Result<(arrow::array::RecordBatch, Option<String>), Error> {
     // Resolve query from inline or resource source.
     let query_string = match &config.query {
         flowgen_core::resource::Source::Inline(sql) => sql.clone(),
@@ -406,7 +412,7 @@ async fn execute_query(
         .map_err(|source| Error::QueryExecution { source })?;
 
     // If query is not complete, poll for results using getQueryResults.
-    let (schema, job_ref, mut all_rows, mut page_token) = if !response.job_complete {
+    let (schema, mut job_ref, mut all_rows, mut page_token) = if !response.job_complete {
         let result = poll_query_results(client, &response).await?;
         (
             result.schema,
@@ -435,7 +441,16 @@ async fn execute_query(
     }
 
     // Convert to RecordBatch with schema and all rows.
-    response_to_record_batch(schema, all_rows)
+    let record_batch = response_to_record_batch(schema, all_rows)?;
+
+    // Extract job_id from job_reference (move instead of clone).
+    let job_id = if !job_ref.job_id.is_empty() {
+        Some(std::mem::take(&mut job_ref.job_id))
+    } else {
+        None
+    };
+
+    Ok((record_batch, job_id))
 }
 
 /// Poll for query completion using getQueryResults API.

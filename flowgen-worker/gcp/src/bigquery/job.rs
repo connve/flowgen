@@ -153,34 +153,59 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute operation based on type.
-            let result_data = match config.operation {
+            let (result_data, job_id) = match config.operation {
                 super::config::JobOperation::Create => {
-                    let job = self.create_job(&config).await?;
-                    serde_json::to_value(&job)
-                        .map_err(|source| Error::JobSerialization { source })?
+                    let mut job = self.create_job(&config).await?;
+                    let data = serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?;
+                    let job_id = if !job.job_reference.job_id.is_empty() {
+                        Some(std::mem::take(&mut job.job_reference.job_id))
+                    } else {
+                        None
+                    };
+                    (data, job_id)
                 }
                 super::config::JobOperation::Get => {
-                    let job = self.get_job(&config).await?;
-                    serde_json::to_value(&job)
-                        .map_err(|source| Error::JobSerialization { source })?
+                    let mut job = self.get_job(&config).await?;
+                    let data = serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?;
+                    let job_id = if !job.job_reference.job_id.is_empty() {
+                        Some(std::mem::take(&mut job.job_reference.job_id))
+                    } else {
+                        None
+                    };
+                    (data, job_id)
                 }
                 super::config::JobOperation::Cancel => {
-                    let job = self.cancel_job(&config).await?;
-                    serde_json::to_value(&job)
-                        .map_err(|source| Error::JobSerialization { source })?
+                    let mut job = self.cancel_job(&config).await?;
+                    let data = serde_json::to_value(&job)
+                        .map_err(|source| Error::JobSerialization { source })?;
+                    let job_id = if !job.job_reference.job_id.is_empty() {
+                        Some(std::mem::take(&mut job.job_reference.job_id))
+                    } else {
+                        None
+                    };
+                    (data, job_id)
                 }
                 super::config::JobOperation::Delete => {
                     let response = self.delete_job(&config).await?;
-                    serde_json::to_value(&response)
-                        .map_err(|source| Error::JobSerialization { source })?
+                    let data = serde_json::to_value(&response)
+                        .map_err(|source| Error::JobSerialization { source })?;
+                    (data, None)
                 }
             };
 
-            let result_event = EventBuilder::new()
+            let mut event_builder = EventBuilder::new()
                 .data(EventData::Json(result_data))
                 .subject(format!("{}.{}", event.subject, config.name))
                 .task_id(self.task_id)
-                .task_type(self.task_type)
+                .task_type(self.task_type);
+
+            if let Some(id) = job_id {
+                event_builder = event_builder.id(id);
+            }
+
+            let result_event = event_builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 

@@ -4,16 +4,16 @@ use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventData, EventExt};
 use futures_util::future;
-use salesforce_pubsub_v1::eventbus::v1::{
-    ProducerEvent, PublishRequest, SchemaRequest, TopicRequest,
+use salesforce_core::pubsub::{
+    ProducerEvent, PubSubError, PublishRequest, SchemaRequest, TopicRequest,
 };
 use std::sync::Arc;
 use tokio::sync::{mpsc::Receiver, Mutex};
 use tracing::{error, Instrument};
 
 /// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &salesforce_core::pubsub::Error) -> bool {
-    if let salesforce_core::pubsub::Error::Tonic(status) = error {
+fn is_auth_error(error: &PubSubError) -> bool {
+    if let PubSubError::Tonic(status) = error {
         let message = status.message();
         return message.contains("does not have valid authentication credentials")
             || message.contains("authentication exception occurred");
@@ -27,7 +27,7 @@ pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
-        source: salesforce_core::pubsub::Error,
+        source: PubSubError,
     },
     #[error("Authentication error: {source}")]
     Auth {
