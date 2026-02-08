@@ -200,22 +200,11 @@ pub struct HttpServerOptions {
     pub routes_prefix: Option<String>,
 }
 
-/// Host type for coordination.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HostType {
-    /// Kubernetes host.
-    K8s,
-}
-
 /// Host coordination configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HostOptions {
     /// Whether host coordination is enabled.
     pub enabled: bool,
-    /// Host type for coordination.
-    #[serde(rename = "type")]
-    pub host_type: HostType,
     /// Optional namespace for Kubernetes resources.
     pub namespace: Option<String>,
 }

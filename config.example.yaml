@@ -27,10 +27,10 @@ worker:
     # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
     routes_prefix: "/api/flowgen/workers"
 
-  # Host coordination configuration (optional).
-  host:
-    enabled: true
-    type: k8s
+  # K8s host coordination configuration (optional).
+  # Auto-detects when running in Kubernetes. Only specify to explicitly enable/disable.
+  # host:
+  #   enabled: true
 
   # Event channel buffer size (optional, defaults to 10M).
   # Controls memory allocation for broadcast channel between tasks.
