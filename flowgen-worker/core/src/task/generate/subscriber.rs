@@ -123,14 +123,11 @@ impl EventHandler {
 
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
+        let task_name = &self.config.name;
 
-        // Generate a cache_key based on flow name, task type, and task name.
-        let cache_key = format!(
-            "{flow_name}.{task_type}.{task_name}.last_run",
-            flow_name = self.task_context.flow.name,
-            task_type = self.task_type,
-            task_name = self.config.name
-        );
+        // Generate cache key with flow-scoped namespace.
+        let cache_key = format!("flow:{flow_name}:last_run:{task_name}");
 
         loop {
             // Calculate now timestamp.
@@ -609,8 +606,8 @@ mod tests {
         // Wait for the spawned task to complete (interval is 1s, so wait 1.5s to be safe).
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-        // Check that cache key was created with flow.task_type.task format
+        // Check that cache key was created with flow-scoped format.
         let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("test-flow.test.test.last_run"));
+        assert!(cache_data.contains_key("flow:test-flow:last_run:test"));
     }
 }

@@ -2,7 +2,7 @@ use super::config::{
     DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION,
     DEFAULT_PARQUET_EXTENSION,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use flowgen_core::buffer::{ContentType, FromReader};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventExt};
@@ -74,8 +74,6 @@ pub enum Error {
     NoObjectStoreContext,
     #[error("Could not retrieve file extension")]
     NoFileExtension,
-    #[error("Cache error")]
-    Cache,
     #[error("Host coordination error: {source}")]
     Host {
         #[source]
@@ -118,8 +116,6 @@ impl EventHandler {
 
         let event = Arc::new(event);
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Get cache from task context if available (not available for reader).
-            let cache: Option<&Arc<dyn flowgen_core::cache::Cache>> = None;
             let mut client_guard = self.client.lock().await;
             let context = client_guard
                 .context
@@ -203,23 +199,6 @@ impl EventHandler {
                         .map_err(|source| Error::EventBuilder { source })?
                 }
             };
-
-            // Cache schema for CSV if configured.
-            if let ContentType::Csv { .. } = content_type {
-                if let Some(cache_options) = &self.config.cache_options {
-                    if let Some(insert_key) = &cache_options.insert_key {
-                        if let Some(EventData::ArrowRecordBatch(batch)) = event_data_list.first() {
-                            let schema_bytes = Bytes::from(batch.schema().to_string());
-                            if let Some(cache) = cache {
-                                cache
-                                    .put(insert_key.as_str(), schema_bytes)
-                                    .await
-                                    .map_err(|_| Error::Cache)?;
-                            }
-                        }
-                    }
-                }
-            }
 
             // Send events.
             for event_data in event_data_list {
@@ -480,7 +459,6 @@ mod tests {
             client_options: None,
             batch_size: Some(500),
             has_header: Some(true),
-            cache_options: None,
             delete_after_read: None,
             delimiter: None,
             retry: None,

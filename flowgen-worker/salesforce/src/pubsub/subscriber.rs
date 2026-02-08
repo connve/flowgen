@@ -53,8 +53,6 @@ pub enum Error {
     },
     #[error("Missing required attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Cache error: {_0}")]
-    Cache(String),
     #[error("JSON error: {source}")]
     Serde {
         #[source]
@@ -67,8 +65,6 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
-    #[error("Error clearing invalid replay_id from cache: {0}")]
-    ReplayIdCacheClear(String),
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
 }
@@ -126,26 +122,9 @@ impl EventHandler {
         topic_name: &str,
     ) -> Result<(), Error> {
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
 
         for ce in events {
-            // Cache replay ID for durable consumer recovery (non-managed only).
-            if let Some(durable_consumer_opts) = self
-                .config
-                .topic
-                .durable_consumer_options
-                .as_ref()
-                .filter(|opts| opts.enabled && !opts.managed_subscription)
-            {
-                if let Some(cache) = cache {
-                    cache
-                        .put(&durable_consumer_opts.name, ce.replay_id.into())
-                        .await
-                        .map_err(|err| {
-                            Error::Cache(format!("Failed to cache replay ID: {err:?}"))
-                        })?;
-                }
-            }
-
             if let Some(event) = ce.event {
                 // Setup event data payload.
                 let data = AvroData {
@@ -173,6 +152,24 @@ impl EventHandler {
                 e.send_with_logging(self.tx.as_ref())
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
+
+                // Cache replay ID after successful event processing for non-managed durable consumers.
+                if self
+                    .config
+                    .topic
+                    .durable_consumer_options
+                    .as_ref()
+                    .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
+                {
+                    if let Some(cache) = cache {
+                        let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
+                        if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
+                            error!(
+                                "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -186,6 +183,7 @@ impl EventHandler {
     async fn handle(self) -> Result<(), Error> {
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
         // Get topic metadata.
         let topic_info = self
             .pubsub
@@ -283,11 +281,21 @@ impl EventHandler {
             .topic
             .durable_consumer_options
             .as_ref()
-            .filter(|opts| opts.enabled)
+            .filter(|opts| opts.enabled && !opts.managed_subscription)
         {
             // Try to load cached replay_id, or use configured preset.
+            let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
             let cached_replay_id = match cache {
-                Some(c) => c.get(&durable_consumer_opts.name).await.ok(),
+                Some(c) => match c.get(&cache_key).await {
+                    Ok(replay_id) => Some(replay_id),
+                    Err(e) => {
+                        warn!(
+                            "Failed to read replay_id from cache for flow {} topic {}: {}. Starting from preset.",
+                            flow_name, topic_name, e
+                        );
+                        None
+                    }
+                },
                 None => None,
             };
 
@@ -303,8 +311,8 @@ impl EventHandler {
                     // EARLIEST (1) starts from the earliest retained events in the retention window.
                     fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
                     warn!(
-                        "No cache entry found for key: {:?}, starting from {:?}",
-                        &durable_consumer_opts.name, &durable_consumer_opts.replay_preset
+                        "No cache entry found for flow {} topic {}, starting from {:?}",
+                        flow_name, topic_name, &durable_consumer_opts.replay_preset
                     );
                 }
             }
@@ -349,18 +357,21 @@ impl EventHandler {
                     warn!("Invalid replay_id detected, clearing from cache and retrying");
 
                     // Clear the invalid replay_id from cache so next retry starts fresh.
-                    if let Some(durable_consumer_opts) = self
+                    if self
                         .config
                         .topic
                         .durable_consumer_options
                         .as_ref()
-                        .filter(|opts| opts.enabled)
+                        .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                     {
                         if let Some(cache) = cache {
-                            cache
-                                .delete(&durable_consumer_opts.name)
-                                .await
-                                .map_err(|e| Error::ReplayIdCacheClear(e.to_string()))?;
+                            let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
+                            if let Err(e) = cache.delete(&cache_key).await {
+                                error!(
+                                    "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
+                                    flow_name, topic_name, e
+                                );
+                            }
                         }
                     }
 
