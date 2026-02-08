@@ -15,7 +15,7 @@ const DEFAULT_LEASE_RETRY_INTERVAL_SECS: u64 = 5;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to send event: {0}")]
+    #[error("Error sending event: {0}")]
     SendError(#[source] mpsc::error::SendError<TaskRegistration>),
     /// Host coordination error.
     #[error("Host coordination error")]
@@ -34,9 +34,9 @@ fn spawn_renewal_task(
         loop {
             interval.tick().await;
             if let Err(e) = host.renew_lease(&lease_name, None).await {
-                error!("Failed to renew lease for task: {}, {}", task_id, e);
+                error!(error = %e, task_id = %task_id, "Failed to renew lease");
             } else {
-                debug!("Successfully renewed lease for task: {}", task_id);
+                debug!(task_id = %task_id, "Successfully renewed lease");
             }
         }
     })
@@ -205,8 +205,8 @@ impl TaskManager {
                     .send(result)
                     .map_err(|e| {
                         error!(
-                            "Failed to send leader election result for task: {}, {}",
-                            registration.task_id, e
+                            task_id = %registration.task_id,
+                            "Failed to send leader election result: {:?}", e
                         );
                     })
                     .ok();

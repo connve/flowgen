@@ -8,13 +8,13 @@ use flowgen_core::event::{AvroData, EventBuilder, EventData};
 #[non_exhaustive]
 pub enum Error {
     /// Apache Arrow error during data serialization or deserialization.
-    #[error("Apache Arrow serialization/deserialization failed: {source}")]
+    #[error("Apache Arrow error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,
     },
     /// JSON serialization or deserialization error.
-    #[error("JSON serialization/deserialization failed: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
@@ -23,13 +23,13 @@ pub enum Error {
     #[error(transparent)]
     Event(#[from] flowgen_core::event::Error),
     /// Binary encoding or decoding error.
-    #[error("Binary encoding/decoding failed: {source}")]
+    #[error("Binary encoding error: {source}")]
     Bincode {
         #[source]
         source: bincode::Error,
     },
     /// Expected record batch data is missing or unavailable.
-    #[error("Error getting record batch")]
+    #[error("Record batch is missing")]
     NoRecordBatch(),
 }
 

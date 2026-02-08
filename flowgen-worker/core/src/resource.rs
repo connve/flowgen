@@ -71,7 +71,7 @@ impl Source {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to read resource '{key}': {source}")]
+    #[error("Error reading resource '{key}': {source}")]
     ReadResource {
         key: String,
         #[source]

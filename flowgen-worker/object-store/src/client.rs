@@ -4,12 +4,12 @@ use url::Url;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Invalid object store URL format with error: {source}")]
+    #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]
         source: url::ParseError,
     },
-    #[error("Object store operation failed with error: {source}")]
+    #[error("Object store error: {source}")]
     ObjectStore {
         #[source]
         source: object_store::Error,

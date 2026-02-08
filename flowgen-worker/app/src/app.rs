@@ -65,14 +65,30 @@ impl App {
     pub async fn start(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
-        let glob_pattern = app_config
+        let flows_path = app_config
             .flows
             .path
             .as_ref()
-            .and_then(|path| path.to_str())
             .ok_or(Error::InvalidFlowsPath)?;
 
-        let flow_configs: Vec<FlowConfig> = glob::glob(glob_pattern)
+        let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
+
+        // Check if path contains wildcards (backward compatibility).
+        let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
+            // Use the path directly as a glob pattern (old behavior).
+            vec![flows_path_str.to_string()]
+        } else {
+            // Treat as base path and construct recursive glob patterns (new behavior).
+            crate::config::FLOW_CONFIG_EXTENSIONS
+                .iter()
+                .map(|ext| format!("{}/**/*.{}", flows_path_str.trim_end_matches('/'), ext))
+                .collect()
+        };
+
+        let mut flow_configs: Vec<FlowConfig> = Vec::new();
+
+        for glob_pattern in glob_patterns {
+            let matched_flows: Vec<FlowConfig> = glob::glob(&glob_pattern)
             .map_err(|e| Error::Pattern { source: e })?
             .filter_map(|path| {
                 match path {
@@ -119,6 +135,9 @@ impl App {
                 }
             })
             .collect();
+
+            flow_configs.extend(matched_flows);
+        }
 
         // Create shared HTTP Server if enabled.
         let http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>> = match app_config

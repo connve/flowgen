@@ -226,7 +226,7 @@ impl Query {
 /// Errors that can occur when resolving query configuration.
 #[derive(thiserror::Error, Debug)]
 pub enum ResolveError {
-    #[error("Failed to load resource: {source}")]
+    #[error("Error loading resource: {source}")]
     Resource {
         #[source]
         source: flowgen_core::resource::Error,

@@ -15,6 +15,9 @@ fn default_nats_url() -> String {
 /// Default cache database name.
 pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 
+/// Supported flow configuration file extensions for recursive discovery.
+pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
+
 /// Top-level configuration for an individual flow.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfig {
@@ -169,7 +172,10 @@ pub struct CacheOptions {
 /// Flow loading configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowOptions {
-    /// Path pattern for discovering flow configuration files (glob pattern supported).
+    /// Path for discovering flow configuration files.
+    /// Can be either:
+    /// - A base directory path (e.g., "/flows") - will recursively discover all .yaml, .yml, and .json files
+    /// - A glob pattern (e.g., "/flows/*.yaml") - for backward compatibility, uses pattern directly
     pub path: Option<PathBuf>,
 }
 

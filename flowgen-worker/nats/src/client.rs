@@ -23,24 +23,25 @@ pub struct NKeyCredentials {
 /// Errors that can occur during NATS client operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Failed to read NATS credentials file at {path} with error: {source}")]
+    #[error("Error reading credentials file '{path}': {source}")]
     ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("Failed to parse NATS credentials JSON with error: {source}")]
+    #[error("Error parsing credentials file: {source}")]
     ParseCredentials {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Invalid NATS URL format with error: {source}")]
+    #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]
         source: url::ParseError,
     },
-    #[error("Failed to connect to NATS server with error: {source}")]
+    #[error("Connection to '{url}' failed: {source}")]
     Connect {
+        url: String,
         #[source]
         source: async_nats::ConnectError,
     },
@@ -94,7 +95,10 @@ impl flowgen_core::client::Client for Client {
         let nats_client = connect_options
             .connect(url)
             .await
-            .map_err(|e| Error::Connect { source: e })?;
+            .map_err(|e| Error::Connect {
+                url: url.to_string(),
+                source: e,
+            })?;
 
         // Initialize JetStream context.
         let jetstream = async_nats::jetstream::new(nats_client);

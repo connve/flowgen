@@ -36,12 +36,12 @@ pub enum Error {
         #[source]
         source: tokio::task::JoinError,
     },
-    #[error("Failed to send event message: {source}")]
+    #[error("Error sending event message: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Binary encoding/decoding failed with error: {source}")]
+    #[error("Binary encoding error: {source}")]
     Bincode {
         #[source]
         source: bincode::Error,
@@ -55,7 +55,7 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Cache error: {_0}")]
     Cache(String),
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     Serde {
         #[source]
         source: serde_json::Error,
@@ -67,7 +67,7 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
-    #[error("Failed to clear invalid replay_id from cache: {0}")]
+    #[error("Error clearing invalid replay_id from cache: {0}")]
     ReplayIdCacheClear(String),
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
@@ -485,7 +485,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     let event_handler = match self.init().await {
                         Ok(handler) => handler,
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to initialize subscriber");
                             return Err(e);
                         }
                     };
@@ -494,7 +494,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     match event_handler.handle().await {
                         Ok(()) => Ok(()),
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to process messages");
                             Err(e)
                         }
                     }
@@ -502,12 +502,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Subscriber failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),

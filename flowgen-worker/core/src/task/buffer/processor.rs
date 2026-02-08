@@ -19,12 +19,12 @@ use tracing::error;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
@@ -35,7 +35,7 @@ pub enum Error {
     ExpectedJsonGotAvro,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Failed to render buffer key template: {source}")]
+    #[error("Error rendering buffer key template: {source}")]
     Render {
         #[source]
         source: crate::config::Error,
@@ -45,7 +45,7 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("Buffer flush serialization failed: {source}")]
+    #[error("Buffer flush serialization error: {source}")]
     FlushSerialization {
         #[source]
         source: serde_json::Error,
@@ -143,7 +143,7 @@ impl Processor {
             let flush_result = match serde_json::to_value(flush_data) {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("{}", Error::FlushSerialization { source: e });
+                    error!(error = %e, "Failed to serialize flush data");
                     return;
                 }
             };
@@ -161,14 +161,14 @@ impl Processor {
 
             let event = match event_builder.build() {
                 Ok(e) => e,
-                Err(source) => {
-                    error!("{}", Error::EventBuilder { source });
+                Err(e) => {
+                    error!(error = %e, "Failed to build flush event");
                     return;
                 }
             };
 
-            if let Err(source) = event.send_with_logging(tx.as_ref()).await {
-                error!("{}", Error::SendMessage { source });
+            if let Err(e) = event.send_with_logging(tx.as_ref()).await {
+                error!(error = %e, "Failed to send flush event");
             }
         });
     }
@@ -396,7 +396,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize buffer processor");
                     Err(e)
                 }
             }
@@ -405,19 +405,14 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(_) => {}
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Buffer processor failed after all retry attempts");
                 return Ok(());
             }
         };
 
         // Run the main event processing loop with buffer accumulation.
         if let Err(e) = self.process_events().await {
-            error!("{}", e);
+            error!(error = %e, "Failed to process events");
         }
 
         Ok(())

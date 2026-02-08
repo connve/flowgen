@@ -7,27 +7,27 @@ use std::path::PathBuf;
 /// Errors during NATS-based cache interaction.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("NATS client authentication failed with error: {source}")]
+    #[error("NATS client error: {source}")]
     ClientAuth {
         #[source]
         source: crate::client::Error,
     },
-    #[error("KV store entry access failed with error: {source}")]
+    #[error("KV entry access error: {source}")]
     KVEntry {
         #[source]
         source: async_nats::jetstream::kv::EntryError,
     },
-    #[error("KV store put operation failed with error: {source}")]
+    #[error("KV put error: {source}")]
     KVPut {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
-    #[error("KV store delete operation failed with error: {source}")]
+    #[error("KV delete error: {source}")]
     KVDelete {
         #[source]
         source: async_nats::jetstream::kv::UpdateError,
     },
-    #[error("KV bucket creation failed with error: {source}")]
+    #[error("KV bucket creation error: {source}")]
     KVBucketCreate {
         #[source]
         source: async_nats::jetstream::context::CreateKeyValueError,

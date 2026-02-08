@@ -17,32 +17,32 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("ArrowRecordBatch to JSON conversion failed with error: {source}")]
+    #[error("ArrowRecordBatch to JSON conversion error: {source}")]
     ArrowToJson {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Avro serialization failed with error: {source}")]
+    #[error("Avro serialization error: {source}")]
     SerdeAvro {
         #[source]
         source: serde_avro_fast::ser::SerError,
     },
-    #[error("Avro deserialization failed with error: {source}")]
+    #[error("Avro deserialization error: {source}")]
     SerdeAvroDe {
         #[source]
         source: serde_avro_fast::de::DeError,
     },
-    #[error("Avro schema parsing failed with error: {source}")]
+    #[error("Avro schema parsing error: {source}")]
     SerdeSchema {
         #[source]
         source: serde_avro_fast::schema::SchemaError,
@@ -60,7 +60,7 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("Failed to load resource: {source}")]
+    #[error("Error loading resource: {source}")]
     ResourceLoad {
         #[source]
         source: crate::resource::Error,
@@ -283,7 +283,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize convert processor");
                     Err(e)
                 }
             }
@@ -292,12 +292,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Convert processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -313,7 +308,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to convert event");
                                         Err(e)
                                     }
                                 }
@@ -321,12 +316,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Convert failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -25,47 +25,47 @@ const DEFAULT_HAS_HEADER: bool = true;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Reader event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("IO operation failed with error: {source}")]
+    #[error("IO error: {source}")]
     IO {
         #[source]
         source: std::io::Error,
     },
-    #[error("Arrow operation failed with error: {source}")]
+    #[error("Arrow error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,
     },
-    #[error("Avro operation failed with error: {source}")]
+    #[error("Avro error: {source}")]
     Avro {
         #[source]
         source: apache_avro::Error,
     },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Object store operation failed with error: {source}")]
+    #[error("Object store error: {source}")]
     ObjectStore {
         #[source]
         source: object_store::Error,
     },
-    #[error("Object store client failed with error: {source}")]
+    #[error("Object store client error: {source}")]
     ObjectStoreClient {
         #[source]
         source: super::client::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
@@ -76,12 +76,12 @@ pub enum Error {
     NoFileExtension,
     #[error("Cache error")]
     Cache,
-    #[error("Host coordination failed with error: {source}")]
+    #[error("Host coordination error: {source}")]
     Host {
         #[source]
         source: flowgen_core::host::Error,
     },
-    #[error("Invalid URL format with error: {source}")]
+    #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]
         source: url::ParseError,
@@ -318,7 +318,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize reader");
                     Err(e)
                 }
             }
@@ -327,12 +327,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Reader failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -349,7 +344,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to read object");
                                         Err(e)
                                     }
                                 }
@@ -357,12 +352,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Read failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

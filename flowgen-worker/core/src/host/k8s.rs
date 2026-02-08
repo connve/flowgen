@@ -18,44 +18,44 @@ use tracing::{debug, info};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Connection to Kubernetes API failed with error: {source}")]
+    #[error("Kubernetes API connection error: {source}")]
     KubernetesClient {
         #[source]
         source: kube::Error,
     },
-    #[error("Reading namespace from service account failed with error: {source}")]
+    #[error("Error reading namespace from service account: {source}")]
     NamespaceRead {
         #[source]
         source: std::io::Error,
     },
     #[error("Kubernetes Client is not connect / setup properly")]
     KubernetesClientNotConnected,
-    #[error("Lease creation failed with error: {source}")]
+    #[error("Lease creation error: {source}")]
     CreateLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease get failed with error: {source}")]
+    #[error("Lease get error: {source}")]
     GetLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease renewal failed with error: {source}")]
+    #[error("Lease renewal error: {source}")]
     RenewLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease takeover failed with error: {source}")]
+    #[error("Lease takeover error: {source}")]
     TakeoverLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease deletion failed with error: {source}")]
+    #[error("Lease deletion error: {source}")]
     DeleteLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease pathing failed with error: {source}")]
+    #[error("Lease patch error: {source}")]
     PatchLease {
         #[source]
         source: kube::Error,

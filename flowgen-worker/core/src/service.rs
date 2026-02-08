@@ -18,12 +18,12 @@ pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to construct URI from endpoint: {source}")]
+    #[error("Invalid URI: {source}")]
     InvalidUri {
         #[source]
         source: tonic::codegen::http::uri::InvalidUri,
     },
-    #[error("Transport error during connection: {source}")]
+    #[error("Transport error: {source}")]
     TransportError {
         #[source]
         source: tonic::transport::Error,

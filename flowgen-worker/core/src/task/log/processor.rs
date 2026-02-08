@@ -9,12 +9,12 @@ use tracing::{debug, error, info, trace, warn, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
@@ -126,7 +126,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize log processor");
                     Err(e)
                 }
             }
@@ -135,12 +135,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Log processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -156,7 +151,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to log event");
                                         Err(e)
                                     }
                                 }
@@ -164,12 +159,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Log failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

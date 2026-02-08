@@ -31,17 +31,17 @@ pub struct SystemInfo {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Subscriber event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Cache operation failed with error: {_0}")]
+    #[error("Cache error: {_0}")]
     Cache(String),
     #[error("System time error: {source}")]
     SystemTime {
@@ -65,7 +65,7 @@ pub enum Error {
     },
     #[error("Cron schedule has no next occurrence")]
     CronNoNextOccurrence,
-    #[error("Configuration validation failed: {source}")]
+    #[error("Configuration validation error: {source}")]
     ConfigValidation {
         #[source]
         source: crate::task::generate::config::ConfigError,
@@ -266,7 +266,7 @@ impl crate::task::runner::Runner for Subscriber {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize generate subscriber");
                     Err(e)
                 }
             }
@@ -275,12 +275,7 @@ impl crate::task::runner::Runner for Subscriber {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Generate subscriber failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -295,12 +290,7 @@ impl crate::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Generate failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),

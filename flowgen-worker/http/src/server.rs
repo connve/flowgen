@@ -18,14 +18,14 @@ const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to bind TCP listener on specified port.
-    #[error("Failed to bind TCP listener on port {port}: {source}")]
+    #[error("Error binding TCP listener on port {port}: {source}")]
     BindListener {
         port: u16,
         #[source]
         source: std::io::Error,
     },
     /// Failed to serve HTTP requests.
-    #[error("Failed to serve HTTP requests: {source}")]
+    #[error("Error serving HTTP requests: {source}")]
     ServeHttp {
         #[source]
         source: std::io::Error,

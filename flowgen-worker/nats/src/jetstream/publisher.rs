@@ -33,59 +33,59 @@ impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Publisher event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("NATS client failed with error: {source}")]
+    #[error("NATS client error: {source}")]
     ClientAuth {
         #[source]
         source: crate::client::Error,
     },
-    #[error("Failed to publish message to JetStream with error: {source}")]
+    #[error("Publish error: {source}")]
     Publish {
         #[source]
         source: async_nats::jetstream::context::PublishError,
     },
-    #[error("Stream management failed with error: {source}")]
+    #[error("Stream error: {source}")]
     Stream {
         #[source]
         source: super::stream::Error,
     },
-    #[error("Message conversion failed with error: {source}")]
+    #[error("Message conversion error: {source}")]
     MessageConversion {
         #[source]
         source: super::message::Error,
     },
-    #[error("JSON serialization failed with error: {source}")]
+    #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination failed with error: {source}")]
+    #[error("Host coordination error: {source}")]
     Host {
         #[source]
         source: flowgen_core::host::Error,
     },
     #[error("Stream configuration is missing")]
     NoStream,
-    #[error("Client is missing or not initialized properly")]
+    #[error("Client is missing or not initialized")]
     MissingClient,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Publish acknowledgment timed out after {:?}", _0)]
-    PublishAckTimeout(std::time::Duration),
+    #[error("Publish acknowledgment timed out after {timeout:?}")]
+    PublishAckTimeout { timeout: std::time::Duration },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -126,7 +126,7 @@ impl EventHandler {
                 .jetstream
                 .lock()
                 .await
-                .send_publish(config.subject, e)
+                .send_publish(config.subject.clone(), e)
                 .await
                 .map_err(|e| Error::Publish { source: e })?;
 
@@ -134,7 +134,7 @@ impl EventHandler {
             let ack = if let Some(timeout) = config.ack_timeout {
                 match tokio::time::timeout(timeout, ack_future).await {
                     Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
-                    Err(_) => return Err(Error::PublishAckTimeout(timeout)),
+                    Err(_) => return Err(Error::PublishAckTimeout { timeout }),
                 }
             } else {
                 ack_future.await.map_err(|e| Error::Publish { source: e })?
@@ -232,7 +232,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize publisher");
                     Err(e)
                 }
             }
@@ -241,12 +241,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Publisher failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -264,7 +259,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to publish message");
                                         Err(e)
                                     }
                                 }
@@ -272,12 +267,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Failed to publish message after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

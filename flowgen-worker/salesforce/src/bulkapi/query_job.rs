@@ -19,7 +19,7 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to send event message: {source}")]
+    #[error("Error sending event message: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
@@ -52,7 +52,7 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("Failed to load resource: {source}")]
+    #[error("Error loading resource: {source}")]
     ResourceLoad {
         #[source]
         source: flowgen_core::resource::Error,
@@ -409,7 +409,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize bulk query job processor");
                     Err(e)
                 }
             }
@@ -418,12 +418,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Bulk query job processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -441,7 +436,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!("{}", e);
+                                            error!(error = %e, "Failed to process bulk query job");
                                             // Check if reconnect is needed for auth errors.
                                             let needs_reconnect = matches!(
                                                 &e,
@@ -456,10 +451,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                 if let Err(reconnect_err) =
                                                     (*sfdc_client).reconnect().await
                                                 {
-                                                    error!(
-                                                        "Failed to reconnect: {}",
-                                                        reconnect_err
-                                                    );
+                                                    error!(error = %reconnect_err, "Failed to reconnect");
                                                     return Err(Error::SalesforceAuth(
                                                         reconnect_err,
                                                     ));
@@ -472,12 +464,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(
-                                        "{}",
-                                        Error::RetryExhausted {
-                                            source: Box::new(err)
-                                        }
-                                    );
+                                    error!(error = %err, "Bulk query job failed after all retry attempts");
                                 }
                             }
                             .instrument(tracing::Span::current()),

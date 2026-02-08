@@ -13,47 +13,47 @@ use tracing::{error, Instrument};
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("NATS client failed with error: {source}")]
+    #[error("NATS client error: {source}")]
     Client {
         #[source]
         source: crate::client::Error,
     },
-    #[error("Message conversion failed with error: {source}")]
+    #[error("Message conversion error: {source}")]
     MessageConversion {
         #[source]
         source: crate::jetstream::message::Error,
     },
-    #[error("JetStream consumer operation failed with error: {source}")]
+    #[error("Consumer creation error: {source}")]
     Consumer {
         #[source]
         source: async_nats::jetstream::stream::ConsumerError,
     },
-    #[error("JetStream consumer stream failed with error: {source}")]
+    #[error("Consumer stream error: {source}")]
     ConsumerStream {
         #[source]
         source: async_nats::jetstream::consumer::StreamError,
     },
-    #[error("JetStream consumer batch fetch failed with error: {source}")]
+    #[error("Message batch fetch error: {source}")]
     ConsumerBatch {
         #[source]
         source: async_nats::jetstream::consumer::pull::BatchError,
     },
-    #[error("JetStream stream management failed with error: {source}")]
+    #[error("Stream management error: {source}")]
     StreamManagement {
         #[source]
         source: super::stream::Error,
     },
-    #[error("Failed to get JetStream stream with error: {source}")]
+    #[error("Error getting stream: {source}")]
     GetStream {
         #[source]
         source: async_nats::jetstream::context::GetStreamError,
     },
-    #[error("Failed to subscribe to NATS subject with error: {source}")]
+    #[error("Subscription error: {source}")]
     Subscribe {
         #[source]
         source: async_nats::SubscribeError,
@@ -279,7 +279,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     let event_handler = match self.init().await {
                         Ok(handler) => handler,
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to initialize subscriber");
                             return Err(e);
                         }
                     };
@@ -287,7 +287,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     match event_handler.handle().await {
                         Ok(()) => Ok(()),
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to process messages");
                             Err(e)
                         }
                     }
@@ -295,12 +295,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Subscriber failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),

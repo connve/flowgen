@@ -15,42 +15,42 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Script execution failed with error: {source}")]
+    #[error("Script execution error: {source}")]
     ScriptExecution {
         #[source]
         source: Box<rhai::EvalAltResult>,
     },
-    #[error("Event conversion failed with error: {source}")]
+    #[error("Event conversion error: {source}")]
     EventConversion {
         #[source]
         source: crate::event::Error,
     },
     #[error("Script returned invalid type: {0}")]
     InvalidReturnType(String),
-    #[error("Failed to serialize event to JSON: {source}")]
+    #[error("Error serializing event to JSON: {source}")]
     JsonSerialization {
         #[source]
         source: serde_json::Error,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Failed to parse RFC 2822 timestamp '{timestamp}': {source}")]
+    #[error("Error parsing RFC 2822 timestamp '{timestamp}': {source}")]
     ParseRFC2822Timestamp {
         timestamp: String,
         #[source]
         source: chrono::ParseError,
     },
-    #[error("Failed to parse RFC 3339 timestamp '{timestamp}': {source}")]
+    #[error("Error parsing RFC 3339 timestamp '{timestamp}': {source}")]
     ParseRFC3339Timestamp {
         timestamp: String,
         #[source]
@@ -60,7 +60,7 @@ pub enum Error {
     InvalidUnixTimestamp { timestamp: i64 },
     #[error("Timestamp must be an integer, got type: {type_name}")]
     TimestampTypeError { type_name: String },
-    #[error("Failed to load script resource: {source}")]
+    #[error("Error loading script resource: {source}")]
     ResourceLoad {
         #[source]
         source: crate::resource::Error,
@@ -488,7 +488,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize script processor");
                     Err(e)
                 }
             }
@@ -497,12 +497,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Script processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -518,7 +513,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to execute script");
                                         Err(e)
                                     }
                                 }
@@ -526,12 +521,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Script execution failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

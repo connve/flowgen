@@ -23,48 +23,48 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Request event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Failed to read credentials file at {path} with error: {source}")]
+    #[error("Error reading credentials file at {path}: {source}")]
     ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("HTTP request failed with error: {source}. This may be caused by invalid headers, malformed URL, unsupported request body format, or network issues")]
+    #[error("HTTP request error: {source}")]
     Reqwest {
         #[source]
         source: reqwest::Error,
     },
-    #[error("Invalid HTTP header name with error: {source}")]
+    #[error("Invalid HTTP header name: {source}")]
     ReqwestInvalidHeaderName {
         #[source]
         source: reqwest::header::InvalidHeaderName,
     },
-    #[error("Invalid HTTP header value with error: {source}")]
+    #[error("Invalid HTTP header value: {source}")]
     ReqwestInvalidHeaderValue {
         #[source]
         source: reqwest::header::InvalidHeaderValue,
     },
-    #[error("Host coordination failed with error: {source}")]
+    #[error("Host coordination error: {source}")]
     Host {
         #[source]
         source: flowgen_core::host::Error,
@@ -274,7 +274,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize request processor");
                     Err(e)
                 }
             }
@@ -283,12 +283,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Request processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -306,7 +301,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to process HTTP request");
                                         Err(e)
                                     }
                                 }
@@ -314,12 +309,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "HTTP request failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

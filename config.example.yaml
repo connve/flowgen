@@ -9,6 +9,7 @@ cache:
   type: nats
 
 # Flow discovery configuration (shared across worker and server).
+# Path can be either a base directory path (e.g., "flows") - recursively loads all .yaml, .yml, and .json files.
 flows:
   path: "path_to_configs_folder"
 

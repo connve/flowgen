@@ -61,42 +61,42 @@ impl std::fmt::Display for JobErrorWrapper {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to send event to channel: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Failed to build event: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Failed to render configuration template: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("BigQuery client authentication failed: {source}")]
+    #[error("BigQuery client authentication error: {source}")]
     ClientAuth {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery client creation failed: {source}")]
+    #[error("BigQuery client creation error: {source}")]
     ClientCreation {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery client connection failed: {source}")]
+    #[error("BigQuery client connection error: {source}")]
     ClientConnection {
         #[source]
         source: gcloud_gax::conn::Error,
     },
-    #[error("BigQuery job operation failed: {source}")]
+    #[error("BigQuery job operation error: {source}")]
     JobOperation {
         #[source]
         source: google_cloud_bigquery::http::error::Error,
     },
-    #[error("Failed to serialize job response to JSON: {source}")]
+    #[error("Error serializing job response to JSON: {source}")]
     JobSerialization {
         #[source]
         source: serde_json::Error,
@@ -408,7 +408,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize job processor");
                     Err(e)
                 }
             }
@@ -417,12 +417,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Job processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -438,7 +433,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to process job");
                                         Err(e)
                                     }
                                 }
@@ -446,15 +441,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(e) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(e)
-                                    }
-                                );
+                                error!(error = %e, "Job failed after all retry attempts");
                             }
                         }
-                        .in_current_span(),
+                        .instrument(tracing::Span::current()),
                     );
                 }
                 None => return Ok(()),

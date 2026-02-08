@@ -290,7 +290,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize publisher");
                     Err(e)
                 }
             }
@@ -299,12 +299,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Publisher failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -323,7 +318,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                     match event_handler.handle(event.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!("{}", e);
+                                            error!(error = %e, "Failed to publish message");
                                             // Check if reconnect is needed (gRPC auth errors).
                                             if let Error::PubSub { ref source } = e {
                                                 if is_auth_error(source) {
@@ -345,12 +340,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(
-                                        "{}",
-                                        Error::RetryExhausted {
-                                            source: Box::new(err)
-                                        }
-                                    );
+                                    error!(error = %err, "Failed to publish message after all retry attempts");
                                 }
                             }
                             .instrument(tracing::Span::current()),

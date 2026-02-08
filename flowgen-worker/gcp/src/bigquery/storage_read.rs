@@ -53,42 +53,42 @@ impl StructDecodable for RecordBatchMarker {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Storage read event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("BigQuery Storage Read client authentication failed with error: {source}")]
+    #[error("BigQuery Storage Read client authentication error: {source}")]
     ClientAuth {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery Storage Read client creation failed with error: {source}")]
+    #[error("BigQuery Storage Read client creation error: {source}")]
     ClientCreation {
         #[source]
         source: gcloud_auth::error::Error,
     },
-    #[error("BigQuery Storage Read client connection failed with error: {source}")]
+    #[error("BigQuery Storage Read client connection error: {source}")]
     ClientConnection {
         #[source]
         source: gcloud_gax::conn::Error,
     },
-    #[error("BigQuery Storage Read operation failed with error: {source}")]
+    #[error("Storage Read operation error: {source}")]
     StorageRead {
         #[source]
         source: google_cloud_bigquery::storage::Error,
     },
-    #[error("BigQuery table metadata retrieval failed with error: {source}")]
+    #[error("Table metadata retrieval error: {source}")]
     TableMetadata {
         #[source]
         source: google_cloud_bigquery::http::error::Error,
@@ -106,7 +106,7 @@ pub enum Error {
     NoDataReturned,
     #[error("Table schema is missing")]
     MissingSchema,
-    #[error("Arrow RecordBatch construction failed with error: {source}")]
+    #[error("Arrow RecordBatch construction error: {source}")]
     RecordBatchConstruction {
         #[source]
         source: arrow::error::ArrowError,
@@ -228,7 +228,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize storage read processor");
                     Err(e)
                 }
             }
@@ -237,12 +237,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Storage read processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -258,7 +253,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to read from storage");
                                         Err(e)
                                     }
                                 }
@@ -266,15 +261,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(e) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(e)
-                                    }
-                                );
+                                error!(error = %e, "Storage read failed after all retry attempts");
                             }
                         }
-                        .in_current_span(),
+                        .instrument(tracing::Span::current()),
                     );
                 }
                 None => return Ok(()),

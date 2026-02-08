@@ -88,22 +88,22 @@ impl EventExt for Event {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("IO operation failed with error: {source}")]
+    #[error("IO error: {source}")]
     IO {
         #[source]
         source: std::io::Error,
     },
-    #[error("Arrow data processing failed with error: {source}")]
+    #[error("Arrow error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,
     },
-    #[error("Avro operation failed with error: {source}")]
+    #[error("Avro error: {source}")]
     Avro {
         #[source]
         source: apache_avro::Error,
     },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::error::Error,
@@ -112,7 +112,7 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Content type conversion not supported: {from} to {to}")]
     UnsupportedContentTypeConversion { from: String, to: String },
-    #[error("Sending event to channel failed (receiver dropped)")]
+    #[error("Error sending event to channel (receiver dropped)")]
     SendMessage,
 }
 
