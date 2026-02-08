@@ -9,14 +9,14 @@ use tracing::{error, info, warn, Instrument};
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
+    #[error("IO error on path {path}: {source}")]
     IO {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     /// File system error occurred while globbing flow configuration files.
-    #[error("Failed to glob flow configuration files: {source}")]
+    #[error("Error globbing flow configuration files: {source}")]
     Glob {
         #[source]
         source: glob::GlobError,
@@ -28,7 +28,7 @@ pub enum Error {
         source: glob::PatternError,
     },
     /// Configuration parsing or deserialization error.
-    #[error("Failed to parse configuration: {source}")]
+    #[error("Error parsing configuration: {source}")]
     Config {
         #[source]
         source: config::ConfigError,
@@ -37,7 +37,7 @@ pub enum Error {
     #[error("Flow path is not configured or invalid. Please set 'flows.path' in your configuration (e.g., flows.path: \"/etc/app/flows/*.yaml\")")]
     InvalidFlowsPath,
     /// Kubernetes host creation error.
-    #[error("Failed to create Kubernetes host: {source}")]
+    #[error("Error creating Kubernetes host: {source}")]
     Kube {
         #[source]
         source: kube::Error,

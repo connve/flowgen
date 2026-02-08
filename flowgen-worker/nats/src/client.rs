@@ -39,7 +39,7 @@ pub enum Error {
         #[source]
         source: url::ParseError,
     },
-    #[error("Connection to '{url}' failed: {source}")]
+    #[error("Error connecting to '{url}': {source}")]
     Connect {
         url: String,
         #[source]

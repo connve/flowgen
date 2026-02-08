@@ -104,7 +104,7 @@ pub enum Error {
     #[error("Task manager not initialized: init() must be called first")]
     TaskManagerNotInitialized,
     /// Failed to register flow for leader election.
-    #[error("Failed to register flow for leader election: {0}")]
+    #[error("Error registering flow for leader election: {0}")]
     LeaderElectionRegistrationFailed(String),
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
@@ -122,10 +122,10 @@ pub enum Error {
     #[error(transparent)]
     GcpBigQueryJob(#[from] flowgen_gcp::bigquery::job::Error),
     /// Failed to store background task handles for later monitoring.
-    #[error("Failed to store background task handles")]
+    #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
     /// Failed to retrieve background task handles for monitoring.
-    #[error("Failed to retrieve background task handles")]
+    #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
 }
 

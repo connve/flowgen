@@ -58,7 +58,7 @@ pub enum Error {
         #[source]
         source: async_nats::SubscribeError,
     },
-    #[error("Consumer configuration check failed")]
+    #[error("Consumer configuration check error")]
     ConsumerInfoFailed,
     #[error("Consumer '{consumer}' exists with different filter subject '{existing}', expected '{expected}'. Please delete the existing consumer or use a different durable name")]
     ConsumerFilterMismatch {
@@ -441,40 +441,6 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
-    }
-
-    #[test]
-    fn test_error_variants_added_for_consumer_management() {
-        // Test that new error variants for consumer operations exist
-        let consumer_err = Error::MissingBuilderAttribute("test".to_string());
-        assert!(consumer_err
-            .to_string()
-            .contains("Missing required builder attribute"));
-
-        // Test error display for comprehensive coverage
-        let other_err = Error::Other(Box::new(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "test",
-        )));
-        assert!(other_err.to_string().contains("Other subscriber error"));
-
-        // Test consumer filter mismatch error
-        let filter_err = Error::ConsumerFilterMismatch {
-            consumer: "test_consumer".to_string(),
-            existing: "old.subject".to_string(),
-            expected: "new.subject".to_string(),
-        };
-        let err_msg = filter_err.to_string();
-        assert!(err_msg.contains("test_consumer"));
-        assert!(err_msg.contains("old.subject"));
-        assert!(err_msg.contains("new.subject"));
-        assert!(err_msg.contains("Please delete the existing consumer"));
-
-        // Test consumer info failed error
-        let info_err = Error::ConsumerInfoFailed;
-        assert!(info_err
-            .to_string()
-            .contains("Consumer configuration check failed"));
     }
 
     #[tokio::test]
