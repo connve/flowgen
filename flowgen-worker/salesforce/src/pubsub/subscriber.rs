@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
-const DEFAULT_NUM_REQUESTED: i32 = 100;
+const DEFAULT_NUM_REQUESTED: i32 = 200;
 const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
 const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
 
@@ -311,8 +311,8 @@ impl EventHandler {
                     // EARLIEST (1) starts from the earliest retained events in the retention window.
                     fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
                     warn!(
-                        "No cache entry found for flow {} topic {}, starting from {:?}",
-                        flow_name, topic_name, &durable_consumer_opts.replay_preset
+                        "No cached replay_id found for flow {flow_name} topic {topic_name}, starting from {:?}",
+                        &durable_consumer_opts.replay_preset
                     );
                 }
             }
