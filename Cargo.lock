@@ -1361,7 +1361,6 @@ dependencies = [
  "futures-util",
  "oauth2",
  "reqwest",
- "salesforce-pubsub-v1",
  "salesforce_core",
  "serde",
  "serde_avro_fast",
@@ -3821,7 +3820,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 [[package]]
 name = "salesforce-pubsub-v1"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
+source = "git+https://github.com/connve/salesforce-rs#ffee47c4712a5cd6e1f27a8a9cab89ca9d60ae43"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3845,7 +3844,7 @@ dependencies = [
 [[package]]
 name = "salesforce_core"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
+source = "git+https://github.com/connve/salesforce-rs#ffee47c4712a5cd6e1f27a8a9cab89ca9d60ae43"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -3865,7 +3864,7 @@ dependencies = [
 [[package]]
 name = "salesforce_core_v1"
 version = "0.4.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fbulkiapi-v2#9ad1e8d7cafd7329c779efc39ed94fd8a1514ba1"
+source = "git+https://github.com/connve/salesforce-rs#ffee47c4712a5cd6e1f27a8a9cab89ca9d60ae43"
 dependencies = [
  "bytes",
  "chrono",

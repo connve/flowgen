@@ -2,7 +2,10 @@ use flowgen_core::{
     client::Client,
     event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
-use salesforce_core::pubsub::{FetchRequest, PubSubError, SchemaRequest, TopicRequest};
+use salesforce_core::pubsub::{
+    eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
+    FetchRequest, PubSubError, SchemaRequest, TopicRequest,
+};
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_stream::StreamExt;
@@ -11,6 +14,12 @@ use tracing::{error, warn, Instrument};
 const DEFAULT_NUM_REQUESTED: i32 = 200;
 const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
 const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
+
+/// Sanitizes a topic name to create a valid NATS KV cache key.
+/// Removes leading/trailing slashes and replaces internal slashes with hyphens.
+fn sanitize_topic_name(topic_name: &str) -> String {
+    topic_name.trim_matches('/').replace('/', "-")
+}
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -117,8 +126,8 @@ impl EventHandler {
     /// Processes a batch of events from Salesforce Pub/Sub.
     async fn process_events(
         &self,
-        events: Vec<salesforce_pubsub_v1::eventbus::v1::ConsumerEvent>,
-        schema_info: &salesforce_pubsub_v1::eventbus::v1::SchemaInfo,
+        events: Vec<ConsumerEvent>,
+        schema_info: &SchemaInfo,
         topic_name: &str,
     ) -> Result<(), Error> {
         let cache = self.task_context.cache.as_ref();
@@ -162,7 +171,8 @@ impl EventHandler {
                     .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                 {
                     if let Some(cache) = cache {
-                        let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
+                        let sanitized_topic = sanitize_topic_name(topic_name);
+                        let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
                         if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
                             error!(
                                 "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
@@ -235,7 +245,7 @@ impl EventHandler {
                 .as_ref()
                 .ok_or(Error::MissingManagedSubscriptionConfig)?;
 
-            let managed_request = salesforce_pubsub_v1::eventbus::v1::ManagedFetchRequest {
+            let managed_request = ManagedFetchRequest {
                 developer_name: durable_consumer_opts.name.clone(),
                 num_requested,
                 ..Default::default()
@@ -284,18 +294,10 @@ impl EventHandler {
             .filter(|opts| opts.enabled && !opts.managed_subscription)
         {
             // Try to load cached replay_id, or use configured preset.
-            let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
+            let sanitized_topic = sanitize_topic_name(topic_name);
+            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
             let cached_replay_id = match cache {
-                Some(c) => match c.get(&cache_key).await {
-                    Ok(replay_id) => Some(replay_id),
-                    Err(e) => {
-                        warn!(
-                            "Failed to read replay_id from cache for flow {} topic {}: {}. Starting from preset.",
-                            flow_name, topic_name, e
-                        );
-                        None
-                    }
-                },
+                Some(c) => c.get(&cache_key).await.ok(),
                 None => None,
             };
 
@@ -365,7 +367,8 @@ impl EventHandler {
                         .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                     {
                         if let Some(cache) = cache {
-                            let cache_key = format!("flow:{flow_name}:replay_id:{topic_name}");
+                            let sanitized_topic = sanitize_topic_name(topic_name);
+                            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
                             if let Err(e) = cache.delete(&cache_key).await {
                                 error!(
                                     "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
@@ -621,6 +624,27 @@ mod tests {
                 .build()
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn test_sanitize_topic_name() {
+        // Test with leading slash.
+        assert_eq!(sanitize_topic_name("/event/Test__e"), "event-Test__e");
+
+        // Test with leading and trailing slashes.
+        assert_eq!(sanitize_topic_name("/data/MyData/"), "data-MyData");
+
+        // Test with multiple slashes.
+        assert_eq!(
+            sanitize_topic_name("/event/BulkApi2JobEvent"),
+            "event-BulkApi2JobEvent"
+        );
+
+        // Test without slashes.
+        assert_eq!(sanitize_topic_name("simple"), "simple");
+
+        // Test with only slashes.
+        assert_eq!(sanitize_topic_name("///"), "");
     }
 
     #[tokio::test]

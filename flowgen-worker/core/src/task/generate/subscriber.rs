@@ -127,7 +127,7 @@ impl EventHandler {
         let task_name = &self.config.name;
 
         // Generate cache key with flow-scoped namespace.
-        let cache_key = format!("flow:{flow_name}:last_run:{task_name}");
+        let cache_key = format!("flow.{flow_name}.last_run.{task_name}");
 
         loop {
             // Calculate now timestamp.
@@ -608,6 +608,6 @@ mod tests {
 
         // Check that cache key was created with flow-scoped format.
         let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("flow:test-flow:last_run:test"));
+        assert!(cache_data.contains_key("flow.test-flow.last_run.test"));
     }
 }

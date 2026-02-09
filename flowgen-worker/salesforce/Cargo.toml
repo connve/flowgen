@@ -17,7 +17,6 @@ thiserror = { workspace = true }
 url = { workspace = true }
 flowgen_core = { path = "../core" }
 salesforce_core = { workspace = true }
-salesforce_pubsub_v1 = { workspace = true }
 oauth2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
