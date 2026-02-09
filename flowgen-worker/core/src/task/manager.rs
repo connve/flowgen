@@ -15,7 +15,7 @@ const DEFAULT_LEASE_RETRY_INTERVAL_SECS: u64 = 5;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Failed to send event: {0}")]
+    #[error("Error sending event: {0}")]
     SendError(#[source] mpsc::error::SendError<TaskRegistration>),
     /// Host coordination error.
     #[error("Host coordination error")]
@@ -34,9 +34,9 @@ fn spawn_renewal_task(
         loop {
             interval.tick().await;
             if let Err(e) = host.renew_lease(&lease_name, None).await {
-                error!("Failed to renew lease for task: {}, {}", task_id, e);
+                error!(error = %e, task_id = %task_id, "Failed to renew lease");
             } else {
-                debug!("Successfully renewed lease for task: {}", task_id);
+                debug!(task_id = %task_id, "Successfully renewed lease");
             }
         }
     })
@@ -61,16 +61,22 @@ pub enum LeaderElectionResult {
 
 /// Task registration event.
 pub struct TaskRegistration {
+    /// Unique identifier for the task.
     task_id: String,
+    /// Optional leader election configuration.
     leader_election_options: Option<LeaderElectionOptions>,
+    /// Channel to send leader election result back to task.
     response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
 }
 
 /// Centralized task lifecycle manager.
 /// Handles task registration, coordination, and resource management.
 pub struct TaskManager {
+    /// Channel sender for task registration events.
     tx: Arc<Mutex<Option<UnboundedSender<TaskRegistration>>>>,
+    /// Optional K8s host for leader election.
     host: Option<Arc<dyn crate::host::Host>>,
+    /// Active lease renewal tasks indexed by task ID.
     active_leases: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
@@ -188,8 +194,8 @@ impl TaskManager {
                         }
                     } else {
                         // No host available.
-                        warn!(
-                            "Leader election requested for task: {} but no host configured",
+                        debug!(
+                            "Leader election requested for task: {} but no K8s host configured",
                             registration.task_id
                         );
                         LeaderElectionResult::NoElection
@@ -205,8 +211,8 @@ impl TaskManager {
                     .send(result)
                     .map_err(|e| {
                         error!(
-                            "Failed to send leader election result for task: {}, {}",
-                            registration.task_id, e
+                            task_id = %registration.task_id,
+                            "Failed to send leader election result: {:?}", e
                         );
                     })
                     .ok();

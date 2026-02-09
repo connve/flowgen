@@ -13,12 +13,12 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
@@ -57,60 +57,60 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        let json_data = match event.data {
-            EventData::Json(data) => data,
-            EventData::ArrowRecordBatch(_) => return Err(Error::ExpectedJsonGotArrowRecordBatch),
-            EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
-        };
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let json_data = match &event.data {
+                EventData::Json(data) => data,
+                EventData::ArrowRecordBatch(_) => {
+                    return Err(Error::ExpectedJsonGotArrowRecordBatch)
+                }
+                EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
+            };
 
-        let array = match &self.config.iterate_key {
-            Some(key) => {
-                let value = json_data
-                    .get(key)
-                    .ok_or_else(|| Error::KeyNotFound(key.clone()))?;
-                match value {
+            let array = match &self.config.iterate_key {
+                Some(key) => {
+                    let value = json_data
+                        .get(key)
+                        .ok_or_else(|| Error::KeyNotFound(key.clone()))?;
+                    match value {
+                        Value::Array(arr) => arr.clone(),
+                        _ => {
+                            return Err(Error::ExpectedArray {
+                                key: key.clone(),
+                                got: format!("{value:?}"),
+                            })
+                        }
+                    }
+                }
+                None => match json_data {
                     Value::Array(arr) => arr.clone(),
                     _ => {
                         return Err(Error::ExpectedArray {
-                            key: key.clone(),
-                            got: format!("{value:?}"),
+                            key: "root".to_string(),
+                            got: format!("{json_data:?}"),
                         })
                     }
-                }
-            }
-            None => match json_data {
-                Value::Array(arr) => arr,
-                _ => {
-                    return Err(Error::ExpectedArray {
-                        key: "root".to_string(),
-                        got: format!("{json_data:?}"),
-                    })
-                }
-            },
-        };
+                },
+            };
 
-        for element in array.iter() {
-            let mut builder = EventBuilder::new()
-                .data(EventData::Json(element.clone()))
-                .subject(self.config.name.to_owned())
-                .task_id(self.task_id)
-                .task_type(self.task_type);
+            for element in array.iter() {
+                // EventBuilder::new() automatically preserves meta from the current event context
+                let e = EventBuilder::new()
+                    .data(EventData::Json(element.clone()))
+                    .subject(self.config.name.to_owned())
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
 
-            // Preserve metadata from the original event.
-            if let Some(meta) = &event.meta {
-                builder = builder.meta(meta.clone());
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
             }
 
-            let e = builder
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
-
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -158,7 +158,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize iterate processor");
                     Err(e)
                 }
             }
@@ -167,12 +167,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Iterate processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -188,7 +183,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to iterate event");
                                         Err(e)
                                     }
                                 }
@@ -196,12 +191,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Iterate failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

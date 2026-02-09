@@ -1,0 +1,49 @@
+flow:
+  name: bigquery_job_load
+  require_leader_election: true
+  tasks:
+
+    # Trigger job creation every 30 minutes.
+    - generate:
+        name: trigger
+        interval: 1800s
+
+    # Create a BigQuery load job to import Parquet files from GCS into a table.
+    # The create operation submits the job and returns immediately with job metadata.
+    # Use the companion flow 'bigquery_job_monitor' to poll job status until completion.
+    - gcp_bigquery_job:
+        name: load_parquet_data
+        # Operation type: create submits a new job
+        operation: create
+        project_id: my-gcp-project
+        credentials_path: /etc/gcp/credentials.json
+        # Job type: load imports data from external source
+        job_type: load
+        # Source files in GCS (supports wildcards)
+        source_uris:
+          - "gs://my-bucket/data/sales/*.parquet"
+        # Destination table reference
+        destination_table:
+          project_id: my-gcp-project
+          dataset_id: analytics
+          table_id: sales_data
+        # Parquet format (auto-detect schema)
+        source_format: parquet
+        # Append to existing table, fail if table doesn't exist
+        write_disposition: write_append
+        create_disposition: create_never
+        # Auto-detect schema from Parquet files
+        autodetect: true
+
+    # Log the job metadata including job_id needed for monitoring.
+    # The job_id can be used to poll status or cancel the job.
+    - log:
+        name: log_job_info
+        level: info
+        structured: true
+
+    # NOTE: To monitor job completion, use the 'bigquery_job_monitor' flow.
+    # That flow polls job status until it reaches a terminal state (DONE or error).
+    # This separates job submission from monitoring for better flow composition.
+    #
+    # See: examples/gcp/bigquery_job_monitor.yaml

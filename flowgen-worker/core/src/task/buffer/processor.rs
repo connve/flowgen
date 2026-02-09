@@ -7,7 +7,7 @@
 use crate::config::ConfigExt;
 use crate::event::{Event, EventBuilder, EventData, EventExt};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,12 +19,12 @@ use tracing::error;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
@@ -35,7 +35,7 @@ pub enum Error {
     ExpectedJsonGotAvro,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Failed to render buffer key template: {source}")]
+    #[error("Error rendering buffer key template: {source}")]
     Render {
         #[source]
         source: crate::config::Error,
@@ -45,7 +45,7 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("Buffer flush serialization failed: {source}")]
+    #[error("Buffer flush serialization error: {source}")]
     FlushSerialization {
         #[source]
         source: serde_json::Error,
@@ -113,7 +113,14 @@ impl Processor {
     /// * `buffer` - Vector of accumulated events to flush.
     /// * `reason` - The reason this flush was triggered.
     /// * `partition_key` - Optional key that was used to group these events.
-    fn flush_buffer(&self, buffer: Vec<Value>, reason: FlushReason, partition_key: Option<String>) {
+    /// * `meta` - Optional meta from the first event in the buffer to preserve.
+    fn flush_buffer(
+        &self,
+        buffer: Vec<Value>,
+        reason: FlushReason,
+        partition_key: Option<String>,
+        meta: Option<Map<String, Value>>,
+    ) {
         if buffer.is_empty() {
             return;
         }
@@ -136,27 +143,32 @@ impl Processor {
             let flush_result = match serde_json::to_value(flush_data) {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("{}", Error::FlushSerialization { source: e });
+                    error!(error = %e, "Failed to serialize flush data");
                     return;
                 }
             };
 
-            let event = match EventBuilder::new()
+            let mut event_builder = EventBuilder::new()
                 .data(EventData::Json(flush_result))
                 .subject(config_name)
                 .task_id(task_id)
-                .task_type(task_type)
-                .build()
-            {
+                .task_type(task_type);
+
+            // Preserve meta if it exists.
+            if let Some(meta) = meta {
+                event_builder = event_builder.meta(meta);
+            }
+
+            let event = match event_builder.build() {
                 Ok(e) => e,
-                Err(source) => {
-                    error!("{}", Error::EventBuilder { source });
+                Err(e) => {
+                    error!(error = %e, "Failed to build flush event");
                     return;
                 }
             };
 
-            if let Err(source) = event.send_with_logging(tx.as_ref()).await {
-                error!("{}", Error::SendMessage { source });
+            if let Err(e) = event.send_with_logging(tx.as_ref()).await {
+                error!(error = %e, "Failed to send flush event");
             }
         });
     }
@@ -184,6 +196,7 @@ impl Processor {
     /// Processes events with a single buffer (no keying).
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
+        let mut buffer_meta: Option<Map<String, Value>> = None;
         let mut last_flush = Instant::now();
 
         loop {
@@ -197,6 +210,11 @@ impl Processor {
                 result = self.rx.recv() => {
                     match result {
                         Some(event) => {
+                            // Capture meta from first event in buffer.
+                            if buffer.is_empty() {
+                                buffer_meta = event.meta.clone();
+                            }
+
                             // Extract JSON data from event.
                             let json_data = match event.data {
                                 EventData::Json(data) => data,
@@ -213,14 +231,15 @@ impl Processor {
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                                self.flush_buffer(flush_buffer, FlushReason::Size, None);
+                                let flush_meta = buffer_meta.take();
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta);
                                 last_flush = Instant::now();
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None);
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta);
                             }
                             return Ok(());
                         }
@@ -230,7 +249,8 @@ impl Processor {
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None);
+                    let flush_meta = buffer_meta.take();
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta);
                     last_flush = Instant::now();
                 }
             }
@@ -241,6 +261,7 @@ impl Processor {
     async fn process_events_keyed(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
         let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
+        let mut buffer_metas: HashMap<String, Map<String, Value>> = HashMap::with_capacity(16);
         let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {
@@ -284,12 +305,16 @@ impl Processor {
                             // Get or create buffer for this key with pre-allocated capacity.
                             use std::collections::hash_map::Entry;
                             let buffer_size = self.config.size;
-                            match buffers.entry(rendered_key) {
+                            match buffers.entry(rendered_key.clone()) {
                                 Entry::Vacant(vacant) => {
                                     let key = vacant.key().clone();
                                     let mut buffer = Vec::with_capacity(buffer_size);
                                     buffer.push(json_data);
                                     vacant.insert(buffer);
+                                    // Capture meta from first event in this keyed buffer.
+                                    if let Some(meta) = event.meta {
+                                        buffer_metas.insert(key.clone(), meta);
+                                    }
                                     last_flush_times.insert(key, Instant::now());
                                 }
                                 Entry::Occupied(mut occupied) => {
@@ -300,7 +325,8 @@ impl Processor {
                                     if buffer.len() >= buffer_size {
                                         let key = occupied.key().clone();
                                         let buffer_to_flush = occupied.remove();
-                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()));
+                                        let buffer_meta = buffer_metas.remove(&key);
+                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta);
                                         last_flush_times.insert(key, Instant::now());
                                     }
                                 }
@@ -310,7 +336,8 @@ impl Processor {
                             // Channel closed, flush all remaining buffers and exit.
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key));
+                                    let buffer_meta = buffer_metas.remove(&key);
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_meta);
                                 }
                             }
                             return Ok(());
@@ -334,7 +361,8 @@ impl Processor {
                     for key in keys_to_flush {
                         if let Some(buffer) = buffers.remove(&key) {
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()));
+                                let buffer_meta = buffer_metas.remove(&key);
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta);
                             }
                         }
                         last_flush_times.insert(key, now);
@@ -368,7 +396,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize buffer processor");
                     Err(e)
                 }
             }
@@ -377,19 +405,14 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(_) => {}
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Buffer processor failed after all retry attempts");
                 return Ok(());
             }
         };
 
         // Run the main event processing loop with buffer accumulation.
         if let Err(e) = self.process_events().await {
-            error!("{}", e);
+            error!(error = %e, "Failed to process events");
         }
 
         Ok(())

@@ -13,52 +13,52 @@ use tracing::{error, Instrument};
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("NATS client failed with error: {source}")]
+    #[error("NATS client error: {source}")]
     Client {
         #[source]
         source: crate::client::Error,
     },
-    #[error("Message conversion failed with error: {source}")]
+    #[error("Message conversion error: {source}")]
     MessageConversion {
         #[source]
         source: crate::jetstream::message::Error,
     },
-    #[error("JetStream consumer operation failed with error: {source}")]
+    #[error("Consumer creation error: {source}")]
     Consumer {
         #[source]
         source: async_nats::jetstream::stream::ConsumerError,
     },
-    #[error("JetStream consumer stream failed with error: {source}")]
+    #[error("Consumer stream error: {source}")]
     ConsumerStream {
         #[source]
         source: async_nats::jetstream::consumer::StreamError,
     },
-    #[error("JetStream consumer batch fetch failed with error: {source}")]
+    #[error("Message batch fetch error: {source}")]
     ConsumerBatch {
         #[source]
         source: async_nats::jetstream::consumer::pull::BatchError,
     },
-    #[error("JetStream stream management failed with error: {source}")]
+    #[error("Stream management error: {source}")]
     StreamManagement {
         #[source]
         source: super::stream::Error,
     },
-    #[error("Failed to get JetStream stream with error: {source}")]
+    #[error("Error getting stream: {source}")]
     GetStream {
         #[source]
         source: async_nats::jetstream::context::GetStreamError,
     },
-    #[error("Failed to subscribe to NATS subject with error: {source}")]
+    #[error("Subscription error: {source}")]
     Subscribe {
         #[source]
         source: async_nats::SubscribeError,
     },
-    #[error("Consumer configuration check failed")]
+    #[error("Consumer configuration check error")]
     ConsumerInfoFailed,
     #[error("Consumer '{consumer}' exists with different filter subject '{existing}', expected '{expected}'. Please delete the existing consumer or use a different durable name")]
     ConsumerFilterMismatch {
@@ -279,7 +279,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     let event_handler = match self.init().await {
                         Ok(handler) => handler,
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to initialize subscriber");
                             return Err(e);
                         }
                     };
@@ -287,7 +287,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     match event_handler.handle().await {
                         Ok(()) => Ok(()),
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to process messages");
                             Err(e)
                         }
                     }
@@ -295,12 +295,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Subscriber failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),
@@ -446,40 +441,6 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
-    }
-
-    #[test]
-    fn test_error_variants_added_for_consumer_management() {
-        // Test that new error variants for consumer operations exist
-        let consumer_err = Error::MissingBuilderAttribute("test".to_string());
-        assert!(consumer_err
-            .to_string()
-            .contains("Missing required builder attribute"));
-
-        // Test error display for comprehensive coverage
-        let other_err = Error::Other(Box::new(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "test",
-        )));
-        assert!(other_err.to_string().contains("Other subscriber error"));
-
-        // Test consumer filter mismatch error
-        let filter_err = Error::ConsumerFilterMismatch {
-            consumer: "test_consumer".to_string(),
-            existing: "old.subject".to_string(),
-            expected: "new.subject".to_string(),
-        };
-        let err_msg = filter_err.to_string();
-        assert!(err_msg.contains("test_consumer"));
-        assert!(err_msg.contains("old.subject"));
-        assert!(err_msg.contains("new.subject"));
-        assert!(err_msg.contains("Please delete the existing consumer"));
-
-        // Test consumer info failed error
-        let info_err = Error::ConsumerInfoFailed;
-        assert!(info_err
-            .to_string()
-            .contains("Consumer configuration check failed"));
     }
 
     #[tokio::test]

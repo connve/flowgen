@@ -11,13 +11,13 @@ use serde::{de::DeserializeOwned, Serialize};
 #[non_exhaustive]
 pub enum Error {
     /// Template rendering failed due to invalid syntax or missing variables.
-    #[error("Template rendering failed: {source}")]
+    #[error("Template rendering error: {source}")]
     Render {
         #[source]
         source: handlebars::RenderError,
     },
     /// JSON serialization or deserialization error during template processing.
-    #[error("JSON serialization/deserialization failed: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,

@@ -22,33 +22,33 @@ const DEFAULT_PAYLOAD_KEY: &str = "payload";
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed with error: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Webhook event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Axum HTTP processing failed with error: {source}")]
+    #[error("Axum HTTP error: {source}")]
     Axum {
         #[source]
         source: axum::Error,
     },
-    #[error("Failed to read credentials file at {path} with error: {source}")]
+    #[error("Error reading credentials file at {path}: {source}")]
     ReadCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("Task manager failed with error: {source}")]
+    #[error("Task manager error: {source}")]
     TaskManager {
         #[source]
         source: flowgen_core::task::manager::Error,
@@ -150,6 +150,10 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
+        // Note: This webhook handler creates events from scratch (from HTTP requests),
+        // so we don't use with_event_context() here. EventBuilder::new() will
+        // create events with meta: None, which is correct for a pipeline starter.
+
         // Validate the authentication and return error if request is not authorized.
         if let Err(auth_error) = self.validate_authentication(&headers) {
             error!("Webhook authentication failed for: {}", auth_error);
@@ -255,7 +259,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize webhook processor");
                     Err(e)
                 }
             }
@@ -264,12 +268,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Webhook processor failed after all retry attempts");
                 return Ok(());
             }
         };

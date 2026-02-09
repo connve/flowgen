@@ -9,6 +9,7 @@ cache:
   type: nats
 
 # Flow discovery configuration (shared across worker and server).
+# Path can be either a base directory path (e.g., "flows") - recursively loads all .yaml, .yml, and .json files.
 flows:
   path: "path_to_configs_folder"
 
@@ -26,10 +27,10 @@ worker:
     # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
     routes_prefix: "/api/flowgen/workers"
 
-  # Host coordination configuration (optional).
-  host:
-    enabled: true
-    type: k8s
+  # K8s host coordination configuration (optional).
+  # Auto-detects when running in Kubernetes. Only specify to explicitly enable/disable.
+  # host:
+  #   enabled: true
 
   # Event channel buffer size (optional, defaults to 10M).
   # Controls memory allocation for broadcast channel between tasks.

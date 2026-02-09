@@ -10,13 +10,13 @@ use std::str::FromStr;
 #[non_exhaustive]
 pub enum Error {
     /// JSON serialization or deserialization error.
-    #[error("JSON serialization/deserialization failed: {source}")]
+    #[error("JSON error: {source}")]
     Serde {
         #[source]
         source: serde_json::Error,
     },
     /// Arrow data processing error.
-    #[error("Arrow data processing failed: {source}")]
+    #[error("Arrow error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,

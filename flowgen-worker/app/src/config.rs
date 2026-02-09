@@ -15,6 +15,9 @@ fn default_nats_url() -> String {
 /// Default cache database name.
 pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 
+/// Supported flow configuration file extensions for recursive discovery.
+pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
+
 /// Top-level configuration for an individual flow.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfig {
@@ -71,14 +74,14 @@ pub enum TaskType {
     salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
     /// Salesforce Pub/Sub publisher task.
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
-    /// Salesforce Bulk API job create task.
-    salesforce_bulkapi_job_create(flowgen_salesforce::bulkapi::config::JobCreate),
-    /// Salesforce Bulk API job retrieve task.
-    salesforce_bulkapi_job_retrieve(flowgen_salesforce::bulkapi::config::JobRetrieve),
+    /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
+    salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::config::QueryJob),
     /// GCP BigQuery query task.
     gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
     /// GCP BigQuery Storage Read API task.
     gcp_bigquery_storage_read(flowgen_gcp::bigquery::config::StorageRead),
+    /// GCP BigQuery unified job operations (create, get, cancel, delete).
+    gcp_bigquery_job(flowgen_gcp::bigquery::config::Job),
 }
 
 impl TaskType {
@@ -99,10 +102,10 @@ impl TaskType {
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
-            TaskType::salesforce_bulkapi_job_create(_) => "salesforce_bulkapi_job_create",
-            TaskType::salesforce_bulkapi_job_retrieve(_) => "salesforce_bulkapi_job_retrieve",
+            TaskType::salesforce_bulkapi_query_job(_) => "salesforce_bulkapi_query_job",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
+            TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
         }
     }
 }
@@ -169,7 +172,10 @@ pub struct CacheOptions {
 /// Flow loading configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowOptions {
-    /// Path pattern for discovering flow configuration files (glob pattern supported).
+    /// Path for discovering flow configuration files.
+    /// Can be either:
+    /// - A base directory path (e.g., "/flows") - will recursively discover all .yaml, .yml, and .json files
+    /// - A glob pattern (e.g., "/flows/*.yaml") - for backward compatibility, uses pattern directly
     pub path: Option<PathBuf>,
 }
 
@@ -194,22 +200,11 @@ pub struct HttpServerOptions {
     pub routes_prefix: Option<String>,
 }
 
-/// Host type for coordination.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HostType {
-    /// Kubernetes host.
-    K8s,
-}
-
 /// Host coordination configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HostOptions {
     /// Whether host coordination is enabled.
     pub enabled: bool,
-    /// Host type for coordination.
-    #[serde(rename = "type")]
-    pub host_type: HostType,
     /// Optional namespace for Kubernetes resources.
     pub namespace: Option<String>,
 }

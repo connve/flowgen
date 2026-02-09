@@ -24,11 +24,13 @@ flow:
     # Create query job with time-based filter using LastModifiedDate.
     # Using >= operator ensures we capture records modified at the exact boundary timestamp.
     # This may result in duplicate records but ensures no data loss.
-    - salesforce_bulkapi_job_create:
+    - salesforce_bulkapi_query_job:
         name: query_modified_accounts
+        # Operation type: create creates a new bulk query job
+        operation: create
         credentials_path: /etc/sfdc/credentials.json
-        job_type: query
-        operation: query
+        # Query operation: query for active records only (excludes deleted/archived)
+        query_operation: query
         query: "SELECT Id, Name, Industry, AnnualRevenue, CreatedDate, LastModifiedDate FROM Account WHERE LastModifiedDate >= {{event.data.last_run_iso}}"
         content_type: csv
         column_delimiter: comma

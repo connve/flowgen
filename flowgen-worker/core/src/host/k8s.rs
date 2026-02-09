@@ -18,44 +18,44 @@ use tracing::{debug, info};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Connection to Kubernetes API failed with error: {source}")]
+    #[error("Kubernetes API connection error: {source}")]
     KubernetesClient {
         #[source]
         source: kube::Error,
     },
-    #[error("Reading namespace from service account failed with error: {source}")]
+    #[error("Error reading namespace from service account: {source}")]
     NamespaceRead {
         #[source]
         source: std::io::Error,
     },
-    #[error("Kubernetes Client is not connect / setup properly")]
+    #[error("Kubernetes client is not connected")]
     KubernetesClientNotConnected,
-    #[error("Lease creation failed with error: {source}")]
+    #[error("Lease creation error: {source}")]
     CreateLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease get failed with error: {source}")]
+    #[error("Lease get error: {source}")]
     GetLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease renewal failed with error: {source}")]
+    #[error("Lease renewal error: {source}")]
     RenewLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease takeover failed with error: {source}")]
+    #[error("Lease takeover error: {source}")]
     TakeoverLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease deletion failed with error: {source}")]
+    #[error("Lease deletion error: {source}")]
     DeleteLease {
         #[source]
         source: kube::Error,
     },
-    #[error("Lease pathing failed with error: {source}")]
+    #[error("Lease patch error: {source}")]
     PatchLease {
         #[source]
         source: kube::Error,
@@ -68,10 +68,17 @@ pub enum Error {
     LeaseHeldByOther { name: String, holder: String },
     #[error("Missing required attribute: {0}")]
     MissingBuilderAttribute(String),
+    #[error("Not running in Kubernetes cluster (service account token not found at /var/run/secrets/kubernetes.io/serviceaccount/)")]
+    NotInKubernetesCluster,
+    #[error(
+        "Could not detect pod identity: POD_NAME and HOSTNAME environment variables are not set"
+    )]
+    MissingPodIdentity,
 }
 
 /// Default lease duration in seconds.
-const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
+/// Set to 15s for fast failover following K8s controller best practices.
+const DEFAULT_LEASE_DURATION_SECS: i32 = 15;
 
 /// Kubernetes host coordinator for lease management.
 #[derive(Clone)]
@@ -102,6 +109,12 @@ impl FlowgenClient for K8sHost {
 
     #[tracing::instrument(skip(self), name = "k8s.connect")]
     async fn connect(mut self) -> Result<Self, Self::Error> {
+        // Check if running in Kubernetes by detecting service account token
+        let sa_token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+        if !tokio::fs::try_exists(sa_token_path).await.unwrap_or(false) {
+            return Err(Error::NotInKubernetesCluster);
+        }
+
         let client = Client::try_default()
             .await
             .map_err(|source| Error::KubernetesClient { source })?;
@@ -117,8 +130,10 @@ impl FlowgenClient for K8sHost {
         self.namespace = namespace.clone();
         self.client = Some(Arc::new(client));
         info!(
-            "Successfully connected to Kubernetes cluster in namespace: {}",
-            namespace
+            namespace = %namespace,
+            holder = %self.holder_identity,
+            lease_duration_secs = self.lease_duration_secs,
+            "K8s host coordinator connected"
         );
         Ok(self)
     }
@@ -334,14 +349,29 @@ impl K8sHostBuilder {
 
     /// Builds the K8sHost instance without connecting.
     /// Namespace will be auto-detected from service account during connect().
+    /// Holder identity will be auto-detected from POD_NAME or HOSTNAME environment variables.
     pub fn build(self) -> Result<K8sHost, Error> {
+        // Auto-detect holder_identity if not provided
+        let holder_identity = match self.holder_identity {
+            Some(id) => id,
+            None => {
+                // Try POD_NAME (K8s standard), then HOSTNAME
+                std::env::var("POD_NAME")
+                    .or_else(|_| std::env::var("HOSTNAME"))
+                    .map_err(|_| Error::MissingPodIdentity)?
+            }
+        };
+
+        tracing::debug!(
+            holder_identity = %holder_identity,
+            "K8s host coordinator initialized"
+        );
+
         Ok(K8sHost {
             client: None,
             namespace: String::new(), // Will be set during connect()
             lease_duration_secs: self.lease_duration_secs,
-            holder_identity: self
-                .holder_identity
-                .ok_or_else(|| Error::MissingBuilderAttribute("holder_identity".to_string()))?,
+            holder_identity,
         })
     }
 }
@@ -475,12 +505,23 @@ mod tests {
 
     #[test]
     fn test_builder_missing_holder_identity() {
+        // Temporarily unset POD_NAME and HOSTNAME to test error case
+        let _pod_name = std::env::var("POD_NAME").ok();
+        let _hostname = std::env::var("HOSTNAME").ok();
+        std::env::remove_var("POD_NAME");
+        std::env::remove_var("HOSTNAME");
+
         let result = K8sHostBuilder::new().build();
 
-        assert!(matches!(
-            result,
-            Err(Error::MissingBuilderAttribute(attr)) if attr == "holder_identity"
-        ));
+        assert!(matches!(result, Err(Error::MissingPodIdentity)));
+
+        // Restore environment variables if they existed
+        if let Some(pod_name) = _pod_name {
+            std::env::set_var("POD_NAME", pod_name);
+        }
+        if let Some(hostname) = _hostname {
+            std::env::set_var("HOSTNAME", hostname);
+        }
     }
 
     #[test]

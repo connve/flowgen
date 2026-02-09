@@ -4,6 +4,7 @@
 //! Scripts can return objects, arrays, or null to control event emission.
 
 use crate::event::{Event, EventBuilder, EventData, EventExt};
+use chrono::{Datelike, Timelike};
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
@@ -14,42 +15,42 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Script execution failed with error: {source}")]
+    #[error("Script execution error: {source}")]
     ScriptExecution {
         #[source]
         source: Box<rhai::EvalAltResult>,
     },
-    #[error("Event conversion failed with error: {source}")]
+    #[error("Event conversion error: {source}")]
     EventConversion {
         #[source]
         source: crate::event::Error,
     },
     #[error("Script returned invalid type: {0}")]
     InvalidReturnType(String),
-    #[error("Failed to serialize event to JSON: {source}")]
+    #[error("Error serializing event to JSON: {source}")]
     JsonSerialization {
         #[source]
         source: serde_json::Error,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Failed to parse RFC 2822 timestamp '{timestamp}': {source}")]
+    #[error("Error parsing RFC 2822 timestamp '{timestamp}': {source}")]
     ParseRFC2822Timestamp {
         timestamp: String,
         #[source]
         source: chrono::ParseError,
     },
-    #[error("Failed to parse RFC 3339 timestamp '{timestamp}': {source}")]
+    #[error("Error parsing RFC 3339 timestamp '{timestamp}': {source}")]
     ParseRFC3339Timestamp {
         timestamp: String,
         #[source]
@@ -59,7 +60,7 @@ pub enum Error {
     InvalidUnixTimestamp { timestamp: i64 },
     #[error("Timestamp must be an integer, got type: {type_name}")]
     TimestampTypeError { type_name: String },
-    #[error("Failed to load script resource: {source}")]
+    #[error("Error loading script resource: {source}")]
     ResourceLoad {
         #[source]
         source: crate::resource::Error,
@@ -94,52 +95,56 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Store the original event for comparison after script execution.
-        let original_event = event.clone();
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let original_event = Arc::clone(&event);
 
-        // Convert the event to JSON string and parse with Rhai's native JSON parser.
-        // This avoids serde_json internal representation leaking into Rhai.
-        let value = Value::try_from(&event).map_err(|source| Error::EventConversion { source })?;
-        let event_obj = value["event"].to_owned();
-        let event_json = serde_json::to_string(&event_obj)
-            .map_err(|source| Error::JsonSerialization { source })?;
+            // Convert the event to JSON string and parse with Rhai's native JSON parser.
+            // This avoids serde_json internal representation leaking into Rhai.
+            let value = Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventConversion { source })?;
+            let event_obj = value["event"].to_owned();
+            let event_json = serde_json::to_string(&event_obj)
+                .map_err(|source| Error::JsonSerialization { source })?;
 
-        // Parse JSON using Rhai's engine to get native Rhai types.
-        let event_dynamic: Dynamic = self
-            .engine
-            .parse_json(event_json, true)
-            .map_err(|e| Error::ScriptExecution { source: e })?
-            .into();
+            // Parse JSON using Rhai's engine to get native Rhai types.
+            let event_dynamic: Dynamic = self
+                .engine
+                .parse_json(event_json, true)
+                .map_err(|e| Error::ScriptExecution { source: e })?
+                .into();
 
-        // Execute the script with the parsed event in scope.
-        let mut scope = Scope::new();
-        scope.push("event", event_dynamic);
+            // Execute the script with the parsed event in scope.
+            let mut scope = Scope::new();
+            scope.push("event", event_dynamic);
 
-        let result: Dynamic = self
-            .engine
-            .eval_with_scope(&mut scope, &self.code)
-            .map_err(|e| Error::ScriptExecution { source: e })?;
+            let result: Dynamic = self
+                .engine
+                .eval_with_scope(&mut scope, &self.code)
+                .map_err(|e| Error::ScriptExecution { source: e })?;
 
-        // Convert the script result back to JSON.
-        let result_json = dynamic_to_json(result)?;
+            // Convert the script result back to JSON.
+            let result_json = dynamic_to_json(result)?;
 
-        // Process the script result based on its type.
-        match result_json {
-            Value::Null => Ok(()),
-            Value::Array(arr) => {
-                // Emit multiple events, one per array element.
-                for value in arr {
-                    let new_event = self.generate_script_event(value, &original_event)?;
-                    self.emit_event(new_event).await?;
+            // Process the script result based on its type.
+            match result_json {
+                Value::Null => Ok(()),
+                Value::Array(arr) => {
+                    // Emit multiple events, one per array element.
+                    for value in arr {
+                        let new_event = self.generate_script_event(value, &original_event)?;
+                        self.emit_event(new_event).await?;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                value => {
+                    // Emit a single event.
+                    let new_event = self.generate_script_event(value, &original_event)?;
+                    self.emit_event(new_event).await
+                }
             }
-            value => {
-                // Emit a single event.
-                let new_event = self.generate_script_event(value, &original_event)?;
-                self.emit_event(new_event).await
-            }
-        }
+        })
+        .await
     }
 
     /// Generates a new event from the script result by comparing with the original event.
@@ -368,6 +373,100 @@ impl crate::task::runner::Runner for Processor {
             chrono::Utc::now().timestamp()
         });
 
+        // Register function to extract year from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_year",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract year from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.year() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract month from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_month",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract month (1-12) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.month() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract day from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_day",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract day of month (1-31) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.day() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to extract hour from Unix timestamp.
+        engine.register_fn(
+            "timestamp_to_hour",
+            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+                // Extract hour (0-23) from Unix timestamp in seconds.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.hour() as i64)
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to format timestamp as Hive partition path.
+        engine.register_fn(
+            "timestamp_to_hive_path",
+            |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+                // Format timestamp as Hive partition path: year=YYYY/month=MM/day=DD/hour=HH.
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| {
+                        format!(
+                            "year={}/month={:02}/day={:02}/hour={:02}",
+                            dt.year(),
+                            dt.month(),
+                            dt.day(),
+                            dt.hour()
+                        )
+                    })
+                    .ok_or_else(|| {
+                        let err = Error::InvalidUnixTimestamp {
+                            timestamp: timestamp_secs,
+                        };
+                        err.to_string().into()
+                    })
+            },
+        );
+
+        // Register function to round timestamp down to hour boundary.
+        engine.register_fn("timestamp_round_to_hour", |timestamp_secs: i64| -> i64 {
+            // Rounds timestamp down to the start of the hour (e.g., 13:45:30 -> 13:00:00).
+            (timestamp_secs / 3600) * 3600
+        });
+
         let event_handler = EventHandler {
             code: script_code,
             tx: self.tx.clone(),
@@ -389,7 +488,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize script processor");
                     Err(e)
                 }
             }
@@ -398,12 +497,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Script processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -419,7 +513,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to execute script");
                                         Err(e)
                                     }
                                 }
@@ -427,12 +521,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Script execution failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -33,59 +33,59 @@ impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Publisher event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("NATS client failed with error: {source}")]
+    #[error("NATS client error: {source}")]
     ClientAuth {
         #[source]
         source: crate::client::Error,
     },
-    #[error("Failed to publish message to JetStream with error: {source}")]
+    #[error("Publish error: {source}")]
     Publish {
         #[source]
         source: async_nats::jetstream::context::PublishError,
     },
-    #[error("Stream management failed with error: {source}")]
+    #[error("Stream error: {source}")]
     Stream {
         #[source]
         source: super::stream::Error,
     },
-    #[error("Message conversion failed with error: {source}")]
+    #[error("Message conversion error: {source}")]
     MessageConversion {
         #[source]
         source: super::message::Error,
     },
-    #[error("JSON serialization failed with error: {source}")]
+    #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination failed with error: {source}")]
+    #[error("Host coordination error: {source}")]
     Host {
         #[source]
         source: flowgen_core::host::Error,
     },
     #[error("Stream configuration is missing")]
     NoStream,
-    #[error("Client is missing or not initialized properly")]
+    #[error("Client is missing or not initialized")]
     MissingClient,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Publish acknowledgment timed out after {:?}", _0)]
-    PublishAckTimeout(std::time::Duration),
+    #[error("Publish acknowledgment timed out after {timeout:?}")]
+    PublishAckTimeout { timeout: std::time::Duration },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -107,51 +107,57 @@ impl EventHandler {
             return Ok(());
         }
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+        let event = Arc::new(event);
 
-        let e = event
-            .to_publish()
-            .map_err(|source| Error::MessageConversion { source })?;
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        let ack_future = self
-            .jetstream
-            .lock()
-            .await
-            .send_publish(config.subject, e)
-            .await
-            .map_err(|e| Error::Publish { source: e })?;
+            let e = event
+                .to_publish()
+                .map_err(|source| Error::MessageConversion { source })?;
 
-        // Apply timeout if configured, otherwise use default async-nats timeout.
-        let ack = if let Some(timeout) = config.ack_timeout {
-            match tokio::time::timeout(timeout, ack_future).await {
-                Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
-                Err(_) => return Err(Error::PublishAckTimeout(timeout)),
-            }
-        } else {
-            ack_future.await.map_err(|e| Error::Publish { source: e })?
-        };
-        let ack: PublishAck = ack.into();
-        let ack_json = serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
+            let ack_future = self
+                .jetstream
+                .lock()
+                .await
+                .send_publish(config.subject.clone(), e)
+                .await
+                .map_err(|e| Error::Publish { source: e })?;
 
-        let e = EventBuilder::new()
-            .subject(self.config.name.clone())
-            .data(EventData::Json(ack_json))
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Apply timeout if configured, otherwise use default async-nats timeout.
+            let ack = if let Some(timeout) = config.ack_timeout {
+                match tokio::time::timeout(timeout, ack_future).await {
+                    Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
+                    Err(_) => return Err(Error::PublishAckTimeout { timeout }),
+                }
+            } else {
+                ack_future.await.map_err(|e| Error::Publish { source: e })?
+            };
+            let ack: PublishAck = ack.into();
+            let ack_json =
+                serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
+            let e = EventBuilder::new()
+                .subject(self.config.name.clone())
+                .data(EventData::Json(ack_json))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -226,7 +232,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize publisher");
                     Err(e)
                 }
             }
@@ -235,12 +241,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Publisher failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -258,7 +259,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to publish message");
                                         Err(e)
                                     }
                                 }
@@ -266,12 +267,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Failed to publish message after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

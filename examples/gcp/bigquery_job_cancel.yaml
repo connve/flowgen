@@ -1,0 +1,38 @@
+flow:
+  name: bigquery_job_cancel
+  require_leader_election: true
+  tasks:
+
+    # This flow demonstrates canceling a running BigQuery job.
+    # Typically triggered by external events (user action, timeout, etc.)
+    # For this example, we use a generate task with a hardcoded job_id.
+    - generate:
+        name: trigger
+        interval: 3600s
+
+    # Cancel a running BigQuery job.
+    # This is useful for stopping long-running queries or cleaning up failed jobs.
+    # The cancel operation sends a cancellation request and returns the updated job state.
+    - gcp_bigquery_job:
+        name: cancel_long_running_job
+        # Operation type: cancel stops a running job
+        operation: cancel
+        project_id: my-gcp-project
+        credentials_path: /etc/gcp/credentials.json
+        job_type: query
+        # Job ID to cancel (typically from event data or external trigger)
+        # In production: job_id: "{{event.data.job_id}}"
+        job_id: "job_abc123xyz"
+        # Polling not used for cancel, but required fields have defaults
+        poll_interval: 1s
+        max_poll_duration: 60s
+
+    # Log the cancellation result.
+    # The response includes the updated job state after cancellation.
+    - log:
+        name: log_cancellation
+        level: info
+        structured: true
+
+    # Example: Send notification that job was canceled
+    # You can add webhook or pubsub tasks here to notify stakeholders

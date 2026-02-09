@@ -4,17 +4,17 @@ use std::time::Duration;
 /// Errors that can occur during stream operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("JetStream create failed with error: {source}")]
+    #[error("Stream creation error: {source}")]
     CreateStream {
         #[source]
         source: async_nats::jetstream::context::CreateStreamError,
     },
-    #[error("JetStream get failed with error: {source}")]
+    #[error("Error getting stream: {source}")]
     GetStream {
         #[source]
         source: async_nats::jetstream::context::GetStreamError,
     },
-    #[error("JetStream request failed with error: {source}")]
+    #[error("Stream request error: {source}")]
     Request {
         #[source]
         source: async_nats::jetstream::context::RequestError,

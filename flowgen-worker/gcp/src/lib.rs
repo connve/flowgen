@@ -8,6 +8,8 @@
 pub mod bigquery {
     /// Configuration structures for BigQuery operations.
     pub mod config;
+    /// Unified BigQuery job processor for all job operations (create, get, cancel, delete).
+    pub mod job;
     /// BigQuery query processor implementation for executing SQL queries.
     pub mod query;
     /// BigQuery Storage Read API processor for high-throughput parallel table reads.

@@ -3,7 +3,7 @@
 //! Defines settings for CSV file reading and writing, including batch sizes,
 //! headers, caching, and file paths.
 
-use flowgen_core::{cache::CacheOptions, config::ConfigExt};
+use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -33,8 +33,6 @@ pub struct ReadProcessor {
     pub has_header: Option<bool>,
     /// CSV delimiter character (defaults to comma if not specified).
     pub delimiter: Option<String>,
-    /// Caching configuration for performance optimization.
-    pub cache_options: Option<CacheOptions>,
     /// Delete the file from object store after successfully reading it.
     pub delete_after_read: Option<bool>,
     /// Optional retry configuration (overrides app-level retry config).
@@ -95,6 +93,8 @@ pub enum HiveParitionKeys {
     /// Partitions data by event date (year/month/day format).
     #[default]
     EventDate,
+    /// Partitions data by event hour (hour format).
+    EventHour,
 }
 
 /// Implement default ConfigExt traits.
@@ -120,7 +120,6 @@ mod tests {
             batch_size: Some(500),
             has_header: Some(true),
             delimiter: None,
-            cache_options: None,
             delete_after_read: None,
             retry: None,
         };
@@ -146,7 +145,6 @@ mod tests {
             batch_size: Some(1000),
             has_header: Some(false),
             delimiter: None,
-            cache_options: None,
             delete_after_read: None,
             retry: None,
         };
@@ -255,7 +253,6 @@ mod tests {
             batch_size: Some(100),
             has_header: Some(true),
             delimiter: None,
-            cache_options: None,
             delete_after_read: None,
             retry: None,
         };
@@ -281,7 +278,6 @@ mod tests {
             batch_size: None,
             has_header: None,
             delimiter: None,
-            cache_options: None,
             delete_after_read: Some(true),
             retry: None,
         };
@@ -299,7 +295,6 @@ mod tests {
             batch_size: None,
             has_header: None,
             delimiter: None,
-            cache_options: None,
             delete_after_read: Some(false),
             retry: None,
         };
@@ -317,7 +312,6 @@ mod tests {
             batch_size: None,
             has_header: None,
             delimiter: None,
-            cache_options: None,
             delete_after_read: None,
             retry: None,
         };

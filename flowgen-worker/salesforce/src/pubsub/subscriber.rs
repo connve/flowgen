@@ -2,15 +2,24 @@ use flowgen_core::{
     client::Client,
     event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
-use salesforce_pubsub_v1::eventbus::v1::{FetchRequest, SchemaRequest, TopicRequest};
+use salesforce_core::pubsub::{
+    eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
+    FetchRequest, PubSubError, SchemaRequest, TopicRequest,
+};
 use std::sync::Arc;
 use tokio::sync::{mpsc::Sender, Mutex};
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
-const DEFAULT_NUM_REQUESTED: i32 = 100;
+const DEFAULT_NUM_REQUESTED: i32 = 200;
 const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
 const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
+
+/// Sanitizes a topic name to create a valid NATS KV cache key.
+/// Removes leading/trailing slashes and replaces internal slashes with hyphens.
+fn sanitize_topic_name(topic_name: &str) -> String {
+    topic_name.trim_matches('/').replace('/', "-")
+}
 
 /// Errors that can occur during Salesforce Pub/Sub subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -19,7 +28,7 @@ pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
         #[source]
-        source: salesforce_core::pubsub::context::Error,
+        source: PubSubError,
     },
     #[error("Authentication error: {source}")]
     Auth {
@@ -36,12 +45,12 @@ pub enum Error {
         #[source]
         source: tokio::task::JoinError,
     },
-    #[error("Failed to send event message: {source}")]
+    #[error("Error sending event message: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Binary encoding/decoding failed with error: {source}")]
+    #[error("Binary encoding error: {source}")]
     Bincode {
         #[source]
         source: bincode::Error,
@@ -53,9 +62,7 @@ pub enum Error {
     },
     #[error("Missing required attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Cache error: {_0}")]
-    Cache(String),
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     Serde {
         #[source]
         source: serde_json::Error,
@@ -67,8 +74,6 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
-    #[error("Failed to clear invalid replay_id from cache: {0}")]
-    ReplayIdCacheClear(String),
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
 }
@@ -79,7 +84,7 @@ pub enum Error {
 /// to the event channel. Supports durable consumers with replay ID caching.
 pub struct EventHandler {
     /// Salesforce Pub/Sub client context
-    pubsub: Arc<Mutex<salesforce_core::pubsub::context::Context>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsub::Client>>,
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
@@ -93,8 +98,8 @@ pub struct EventHandler {
 }
 
 /// Checks if a gRPC error is due to an invalid/corrupted replay ID.
-fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
-    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+fn is_replay_id_error(error: &PubSubError) -> bool {
+    if let PubSubError::Tonic(status) = error {
         if let Some(error_code) = status.metadata().get("error-code") {
             if let Ok(code_str) = error_code.to_str() {
                 return code_str
@@ -108,8 +113,8 @@ fn is_replay_id_error(error: &salesforce_core::pubsub::context::Error) -> bool {
 }
 
 /// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &salesforce_core::pubsub::context::Error) -> bool {
-    if let salesforce_core::pubsub::context::Error::Tonic(status) = error {
+fn is_auth_error(error: &PubSubError) -> bool {
+    if let PubSubError::Tonic(status) = error {
         let message = status.message();
         return message.contains("does not have valid authentication credentials")
             || message.contains("authentication exception occurred");
@@ -121,31 +126,14 @@ impl EventHandler {
     /// Processes a batch of events from Salesforce Pub/Sub.
     async fn process_events(
         &self,
-        events: Vec<salesforce_pubsub_v1::eventbus::v1::ConsumerEvent>,
-        schema_info: &salesforce_pubsub_v1::eventbus::v1::SchemaInfo,
+        events: Vec<ConsumerEvent>,
+        schema_info: &SchemaInfo,
         topic_name: &str,
     ) -> Result<(), Error> {
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
 
         for ce in events {
-            // Cache replay ID for durable consumer recovery (non-managed only).
-            if let Some(durable_consumer_opts) = self
-                .config
-                .topic
-                .durable_consumer_options
-                .as_ref()
-                .filter(|opts| opts.enabled && !opts.managed_subscription)
-            {
-                if let Some(cache) = cache {
-                    cache
-                        .put(&durable_consumer_opts.name, ce.replay_id.into())
-                        .await
-                        .map_err(|err| {
-                            Error::Cache(format!("Failed to cache replay ID: {err:?}"))
-                        })?;
-                }
-            }
-
             if let Some(event) = ce.event {
                 // Setup event data payload.
                 let data = AvroData {
@@ -173,6 +161,25 @@ impl EventHandler {
                 e.send_with_logging(self.tx.as_ref())
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
+
+                // Cache replay ID after successful event processing for non-managed durable consumers.
+                if self
+                    .config
+                    .topic
+                    .durable_consumer_options
+                    .as_ref()
+                    .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
+                {
+                    if let Some(cache) = cache {
+                        let sanitized_topic = sanitize_topic_name(topic_name);
+                        let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                        if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
+                            error!(
+                                "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -186,6 +193,7 @@ impl EventHandler {
     async fn handle(self) -> Result<(), Error> {
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
         // Get topic metadata.
         let topic_info = self
             .pubsub
@@ -237,7 +245,7 @@ impl EventHandler {
                 .as_ref()
                 .ok_or(Error::MissingManagedSubscriptionConfig)?;
 
-            let managed_request = salesforce_pubsub_v1::eventbus::v1::ManagedFetchRequest {
+            let managed_request = ManagedFetchRequest {
                 developer_name: durable_consumer_opts.name.clone(),
                 num_requested,
                 ..Default::default()
@@ -258,7 +266,7 @@ impl EventHandler {
                     Ok(fr) => fr.events,
                     Err(e) => {
                         return Err(Error::PubSub {
-                            source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                            source: PubSubError::Tonic(Box::new(e)),
                         });
                     }
                 };
@@ -283,11 +291,13 @@ impl EventHandler {
             .topic
             .durable_consumer_options
             .as_ref()
-            .filter(|opts| opts.enabled)
+            .filter(|opts| opts.enabled && !opts.managed_subscription)
         {
             // Try to load cached replay_id, or use configured preset.
+            let sanitized_topic = sanitize_topic_name(topic_name);
+            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
             let cached_replay_id = match cache {
-                Some(c) => c.get(&durable_consumer_opts.name).await.ok(),
+                Some(c) => c.get(&cache_key).await.ok(),
                 None => None,
             };
 
@@ -303,8 +313,8 @@ impl EventHandler {
                     // EARLIEST (1) starts from the earliest retained events in the retention window.
                     fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
                     warn!(
-                        "No cache entry found for key: {:?}, starting from {:?}",
-                        &durable_consumer_opts.name, &durable_consumer_opts.replay_preset
+                        "No cached replay_id found for flow {flow_name} topic {topic_name}, starting from {:?}",
+                        &durable_consumer_opts.replay_preset
                     );
                 }
             }
@@ -349,18 +359,22 @@ impl EventHandler {
                     warn!("Invalid replay_id detected, clearing from cache and retrying");
 
                     // Clear the invalid replay_id from cache so next retry starts fresh.
-                    if let Some(durable_consumer_opts) = self
+                    if self
                         .config
                         .topic
                         .durable_consumer_options
                         .as_ref()
-                        .filter(|opts| opts.enabled)
+                        .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                     {
                         if let Some(cache) = cache {
-                            cache
-                                .delete(&durable_consumer_opts.name)
-                                .await
-                                .map_err(|e| Error::ReplayIdCacheClear(e.to_string()))?;
+                            let sanitized_topic = sanitize_topic_name(topic_name);
+                            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                            if let Err(e) = cache.delete(&cache_key).await {
+                                error!(
+                                    "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
+                                    flow_name, topic_name, e
+                                );
+                            }
                         }
                     }
 
@@ -378,7 +392,7 @@ impl EventHandler {
                 Ok(fr) => fr.events,
                 Err(e) => {
                     return Err(Error::PubSub {
-                        source: salesforce_core::pubsub::context::Error::Tonic(Box::new(e)),
+                        source: PubSubError::Tonic(Box::new(e)),
                     });
                 }
             };
@@ -454,7 +468,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .map_err(|e| Error::Auth { source: e })?;
 
         // Create Pub/Sub context.
-        let pubsub = salesforce_core::pubsub::context::Context::new(channel, sfdc_client)
+        let pubsub = salesforce_core::pubsub::Client::new(channel, sfdc_client)
             .map_err(|e| Error::PubSub { source: e })?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
@@ -485,7 +499,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     let event_handler = match self.init().await {
                         Ok(handler) => handler,
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to initialize subscriber");
                             return Err(e);
                         }
                     };
@@ -494,7 +508,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     match event_handler.handle().await {
                         Ok(()) => Ok(()),
                         Err(e) => {
-                            error!("{}", e);
+                            error!(error = %e, "Failed to process messages");
                             Err(e)
                         }
                     }
@@ -502,12 +516,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Subscriber failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),
@@ -615,6 +624,27 @@ mod tests {
                 .build()
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn test_sanitize_topic_name() {
+        // Test with leading slash.
+        assert_eq!(sanitize_topic_name("/event/Test__e"), "event-Test__e");
+
+        // Test with leading and trailing slashes.
+        assert_eq!(sanitize_topic_name("/data/MyData/"), "data-MyData");
+
+        // Test with multiple slashes.
+        assert_eq!(
+            sanitize_topic_name("/event/BulkApi2JobEvent"),
+            "event-BulkApi2JobEvent"
+        );
+
+        // Test without slashes.
+        assert_eq!(sanitize_topic_name("simple"), "simple");
+
+        // Test with only slashes.
+        assert_eq!(sanitize_topic_name("///"), "");
     }
 
     #[tokio::test]

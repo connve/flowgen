@@ -17,32 +17,32 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Processor event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("ArrowRecordBatch to JSON conversion failed with error: {source}")]
+    #[error("ArrowRecordBatch to JSON conversion error: {source}")]
     ArrowToJson {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Avro serialization failed with error: {source}")]
+    #[error("Avro serialization error: {source}")]
     SerdeAvro {
         #[source]
         source: serde_avro_fast::ser::SerError,
     },
-    #[error("Avro deserialization failed with error: {source}")]
+    #[error("Avro deserialization error: {source}")]
     SerdeAvroDe {
         #[source]
         source: serde_avro_fast::de::DeError,
     },
-    #[error("Avro schema parsing failed with error: {source}")]
+    #[error("Avro schema parsing error: {source}")]
     SerdeSchema {
         #[source]
         source: serde_avro_fast::schema::SchemaError,
@@ -60,7 +60,7 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("Failed to load resource: {source}")]
+    #[error("Error loading resource: {source}")]
     ResourceLoad {
         #[source]
         source: crate::resource::Error,
@@ -118,71 +118,79 @@ impl EventHandler {
             return Ok(());
         }
 
-        let data = match event.data {
-            EventData::Json(mut data) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Avro => match &self.serializer {
-                    Some(serializer_opts) => {
-                        transform_keys(&mut data);
+        let event = Arc::new(event);
+        crate::event::with_event_context(&Arc::clone(&event), async move {
+            let data = match &event.data {
+                EventData::Json(data) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Avro => match &self.serializer {
+                        Some(serializer_opts) => {
+                            let mut data = data.clone();
+                            transform_keys(&mut data);
 
-                        let mut serializer_config = serializer_opts.serializer_config.lock().await;
-                        let raw_bytes: Vec<u8> =
-                            serde_avro_fast::to_datum_vec(&data, &mut serializer_config)
-                                .map_err(|source| Error::SerdeAvro { source })?;
+                            let mut serializer_config =
+                                serializer_opts.serializer_config.lock().await;
+                            let raw_bytes: Vec<u8> =
+                                serde_avro_fast::to_datum_vec(&data, &mut serializer_config)
+                                    .map_err(|source| Error::SerdeAvro { source })?;
 
-                        EventData::Avro(AvroData {
-                            schema: serializer_opts.schema_string.clone(),
-                            raw_bytes,
-                        })
+                            EventData::Avro(AvroData {
+                                schema: serializer_opts.schema_string.clone(),
+                                raw_bytes,
+                            })
+                        }
+                        None => EventData::Json(data.clone()),
+                    },
+                    crate::task::convert::config::TargetFormat::Json => {
+                        EventData::Json(data.clone())
                     }
-                    None => EventData::Json(data),
                 },
-                crate::task::convert::config::TargetFormat::Json => EventData::Json(data),
-            },
-            EventData::ArrowRecordBatch(ref _batch) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Json => {
-                    let value = serde_json::Value::try_from(&event.data)
-                        .map_err(|source| Error::ArrowToJson { source })?;
-                    EventData::Json(value)
-                }
-                crate::task::convert::config::TargetFormat::Avro => {
-                    return Err(Error::ArrowToAvroNotSupported)
-                }
-            },
-            EventData::Avro(avro_data) => match self.config.target_format {
-                crate::task::convert::config::TargetFormat::Json => {
-                    // Parse the schema
-                    let schema: serde_avro_fast::Schema = avro_data
-                        .schema
-                        .parse()
-                        .map_err(|source| Error::SerdeSchema { source })?;
+                EventData::ArrowRecordBatch(ref _batch) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Json => {
+                        let value = serde_json::Value::try_from(&event.data)
+                            .map_err(|source| Error::ArrowToJson { source })?;
+                        EventData::Json(value)
+                    }
+                    crate::task::convert::config::TargetFormat::Avro => {
+                        return Err(Error::ArrowToAvroNotSupported)
+                    }
+                },
+                EventData::Avro(avro_data) => match self.config.target_format {
+                    crate::task::convert::config::TargetFormat::Json => {
+                        // Parse the schema
+                        let schema: serde_avro_fast::Schema = avro_data
+                            .schema
+                            .parse()
+                            .map_err(|source| Error::SerdeSchema { source })?;
 
-                    // Deserialize Avro bytes to JSON value
-                    let json_value: Value =
-                        serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
-                            .map_err(|source| Error::SerdeAvroDe { source })?;
+                        // Deserialize Avro bytes to JSON value
+                        let json_value: Value =
+                            serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
+                                .map_err(|source| Error::SerdeAvroDe { source })?;
 
-                    EventData::Json(json_value)
-                }
-                crate::task::convert::config::TargetFormat::Avro => {
-                    // Avro to Avro passthrough
-                    EventData::Avro(avro_data)
-                }
-            },
-        };
+                        EventData::Json(json_value)
+                    }
+                    crate::task::convert::config::TargetFormat::Avro => {
+                        // Avro to Avro passthrough
+                        EventData::Avro(avro_data.clone())
+                    }
+                },
+            };
 
-        // Build and send event.
-        let e = EventBuilder::new()
-            .data(data)
-            .subject(self.config.name.to_owned())
-            .task_id(self.task_id)
-            .task_type(self.task_type)
-            .build()
-            .map_err(|source| Error::EventBuilder { source })?;
+            // Build and send event.
+            let e = EventBuilder::new()
+                .data(data)
+                .subject(self.config.name.to_owned())
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
-        Ok(())
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -275,7 +283,7 @@ impl crate::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize convert processor");
                     Err(e)
                 }
             }
@@ -284,12 +292,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Convert processor failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -305,7 +308,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to convert event");
                                         Err(e)
                                     }
                                 }
@@ -313,12 +316,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Convert failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),

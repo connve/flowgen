@@ -31,17 +31,17 @@ pub struct SystemInfo {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Subscriber event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: crate::event::Error,
     },
-    #[error("Cache operation failed with error: {_0}")]
+    #[error("Cache error: {_0}")]
     Cache(String),
     #[error("System time error: {source}")]
     SystemTime {
@@ -65,7 +65,7 @@ pub enum Error {
     },
     #[error("Cron schedule has no next occurrence")]
     CronNoNextOccurrence,
-    #[error("Configuration validation failed: {source}")]
+    #[error("Configuration validation error: {source}")]
     ConfigValidation {
         #[source]
         source: crate::task::generate::config::ConfigError,
@@ -116,18 +116,18 @@ impl EventHandler {
 
     /// Generates events at scheduled intervals.
     async fn handle(&self) -> Result<(), Error> {
+        // Note: This generator creates events from scratch (no incoming events),
+        // so we don't use with_event_context() here. EventBuilder::new() will
+        // create events with meta: None, which is correct for a pipeline starter.
         let mut counter = 0;
 
         // Get cache from task context if available.
         let cache = self.task_context.cache.as_ref();
+        let flow_name = &self.task_context.flow.name;
+        let task_name = &self.config.name;
 
-        // Generate a cache_key based on flow name, task type, and task name.
-        let cache_key = format!(
-            "{flow_name}.{task_type}.{task_name}.last_run",
-            flow_name = self.task_context.flow.name,
-            task_type = self.task_type,
-            task_name = self.config.name
-        );
+        // Generate cache key with flow-scoped namespace.
+        let cache_key = format!("flow.{flow_name}.last_run.{task_name}");
 
         loop {
             // Calculate now timestamp.
@@ -263,7 +263,7 @@ impl crate::task::runner::Runner for Subscriber {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize generate subscriber");
                     Err(e)
                 }
             }
@@ -272,12 +272,7 @@ impl crate::task::runner::Runner for Subscriber {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Generate subscriber failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -292,12 +287,7 @@ impl crate::task::runner::Runner for Subscriber {
                 .await;
 
                 if let Err(e) = result {
-                    error!(
-                        "{}",
-                        Error::RetryExhausted {
-                            source: Box::new(e)
-                        }
-                    );
+                    error!(error = %e, "Generate failed after all retry attempts");
                 }
             }
             .instrument(tracing::Span::current()),
@@ -616,8 +606,8 @@ mod tests {
         // Wait for the spawned task to complete (interval is 1s, so wait 1.5s to be safe).
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-        // Check that cache key was created with flow.task_type.task format
+        // Check that cache key was created with flow-scoped format.
         let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("test-flow.test.test.last_run"));
+        assert!(cache_data.contains_key("flow.test-flow.last_run.test"));
     }
 }

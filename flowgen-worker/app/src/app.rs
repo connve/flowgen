@@ -9,14 +9,14 @@ use tracing::{error, info, warn, Instrument};
 #[non_exhaustive]
 pub enum Error {
     /// Input/output operation failed.
-    #[error("IO operation failed on path {path}: {source}")]
+    #[error("IO error on path {path}: {source}")]
     IO {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },
     /// File system error occurred while globbing flow configuration files.
-    #[error("Failed to glob flow configuration files: {source}")]
+    #[error("Error globbing flow configuration files: {source}")]
     Glob {
         #[source]
         source: glob::GlobError,
@@ -28,7 +28,7 @@ pub enum Error {
         source: glob::PatternError,
     },
     /// Configuration parsing or deserialization error.
-    #[error("Failed to parse configuration: {source}")]
+    #[error("Error parsing configuration: {source}")]
     Config {
         #[source]
         source: config::ConfigError,
@@ -37,7 +37,7 @@ pub enum Error {
     #[error("Flow path is not configured or invalid. Please set 'flows.path' in your configuration (e.g., flows.path: \"/etc/app/flows/*.yaml\")")]
     InvalidFlowsPath,
     /// Kubernetes host creation error.
-    #[error("Failed to create Kubernetes host: {source}")]
+    #[error("Error creating Kubernetes host: {source}")]
     Kube {
         #[source]
         source: kube::Error,
@@ -45,9 +45,6 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
-    /// Missing HOSTNAME or POD_NAME environment variable for K8s host coordination.
-    #[error("HOSTNAME or POD_NAME must be set for K8s host coordination")]
-    MissingK8EnvVariables(#[source] std::env::VarError),
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -65,14 +62,30 @@ impl App {
     pub async fn start(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
-        let glob_pattern = app_config
+        let flows_path = app_config
             .flows
             .path
             .as_ref()
-            .and_then(|path| path.to_str())
             .ok_or(Error::InvalidFlowsPath)?;
 
-        let flow_configs: Vec<FlowConfig> = glob::glob(glob_pattern)
+        let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
+
+        // Check if path contains wildcards (backward compatibility).
+        let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
+            // Use the path directly as a glob pattern (old behavior).
+            vec![flows_path_str.to_string()]
+        } else {
+            // Treat as base path and construct recursive glob patterns (new behavior).
+            crate::config::FLOW_CONFIG_EXTENSIONS
+                .iter()
+                .map(|ext| format!("{}/**/*.{}", flows_path_str.trim_end_matches('/'), ext))
+                .collect()
+        };
+
+        let mut flow_configs: Vec<FlowConfig> = Vec::new();
+
+        for glob_pattern in glob_patterns {
+            let matched_flows: Vec<FlowConfig> = glob::glob(&glob_pattern)
             .map_err(|e| Error::Pattern { source: e })?
             .filter_map(|path| {
                 match path {
@@ -120,6 +133,9 @@ impl App {
             })
             .collect();
 
+            flow_configs.extend(matched_flows);
+        }
+
         // Create shared HTTP Server if enabled.
         let http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>> = match app_config
             .worker
@@ -150,7 +166,7 @@ impl App {
                         .url(cache_config.url.clone())
                         .build()
                         .map_err(|e| {
-                            warn!("Failed to build cache: {}. Continuing without cache.", e);
+                            warn!("Failed to build cache: {}", e);
                             e
                         })
                         .ok()
@@ -160,10 +176,7 @@ impl App {
                                     .init(db_name)
                                     .await
                                     .map_err(|e| {
-                                        warn!(
-                                        "Failed to initialize cache: {}. Continuing without cache.",
-                                        e
-                                    );
+                                        warn!("Failed to initialize cache: {}", e);
                                         e
                                     })
                                     .ok()
@@ -177,42 +190,52 @@ impl App {
                 None
             };
 
-        // Create host client if configured.
-        let host_client = if let Some(host) =
-            app_config.worker.as_ref().and_then(|w| w.host.as_ref())
-        {
-            if host.enabled {
-                match &host.host_type {
-                    crate::config::HostType::K8s => {
-                        // Get holder identity from environment variable.
-                        let holder_identity = std::env::var("HOSTNAME")
-                            .or_else(|_| std::env::var("POD_NAME"))
-                            .map_err(Error::MissingK8EnvVariables)?;
+        // Helper to check if running in Kubernetes
+        let is_in_k8s =
+            || std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
 
-                        let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new()
-                            .holder_identity(holder_identity);
-
-                        match host_builder
-                            .build()
-                            .map_err(|e| Error::Host(Box::new(e)))?
-                            .connect()
-                            .await
-                        {
-                            Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
-                                as std::sync::Arc<dyn flowgen_core::host::Host>),
-                            Err(e) => {
-                                warn!("Continuing without host coordination due to error: {}", e);
-                                None
-                            }
-                        }
-                    }
-                }
-            } else {
+        // Create host client with auto-detection
+        let host_client = match app_config.worker.as_ref().and_then(|w| w.host.as_ref()) {
+            Some(host) if host.enabled => {
+                // User enabled host coordination in config
+                info!("K8s host coordination enabled in config");
+                create_k8s_host().await
+            }
+            Some(host) if !host.enabled => {
+                // User disabled in config
+                info!("K8s host coordination disabled in config");
                 None
             }
-        } else {
-            None
+            None if is_in_k8s() => {
+                // Auto-detect: running in K8s but no config
+                info!("Auto-detected Kubernetes environment, enabling K8s host coordination");
+                create_k8s_host().await
+            }
+            _ => {
+                // Not in K8s, no config needed
+                None
+            }
         };
+
+        async fn create_k8s_host() -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
+            // Builder auto-detects holder_identity from POD_NAME/HOSTNAME
+            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new();
+
+            match host_builder.build() {
+                Ok(host) => match host.connect().await {
+                    Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
+                        as std::sync::Arc<dyn flowgen_core::host::Host>),
+                    Err(e) => {
+                        warn!("K8s host coordinator failed to connect: {}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to build K8s host coordinator: {}", e);
+                    None
+                }
+            }
+        }
 
         // Create resource loader from app config if configured.
         let resource_loader = app_config.resources.as_ref().map(|resource_options| {

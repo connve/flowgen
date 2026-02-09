@@ -3,7 +3,7 @@ use super::config::{
     DEFAULT_PARQUET_EXTENSION,
 };
 use bytes::Bytes;
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use flowgen_core::buffer::ToWriter;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
@@ -39,57 +39,57 @@ pub struct WriteResult {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Sending event to channel failed: {source}")]
+    #[error("Error sending event to channel: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("Writer event builder failed with error: {source}")]
+    #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
-    #[error("IO operation failed with error: {source}")]
+    #[error("IO error: {source}")]
     IO {
         #[source]
         source: std::io::Error,
     },
-    #[error("Arrow operation failed with error: {source}")]
+    #[error("Arrow error: {source}")]
     Arrow {
         #[source]
         source: arrow::error::ArrowError,
     },
-    #[error("Avro operation failed with error: {source}")]
+    #[error("Avro error: {source}")]
     Avro {
         #[source]
         source: apache_avro::Error,
     },
-    #[error("JSON serialization/deserialization failed with error: {source}")]
+    #[error("JSON error: {source}")]
     SerdeJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Object store operation failed with error: {source}")]
+    #[error("Object store error: {source}")]
     ObjectStore {
         #[source]
         source: object_store::Error,
     },
-    #[error("Object store client failed with error: {source}")]
+    #[error("Object store client error: {source}")]
     ObjectStoreClient {
         #[source]
         source: super::client::Error,
     },
-    #[error("Configuration template rendering failed with error: {source}")]
+    #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination failed with error: {source}")]
+    #[error("Host coordination error: {source}")]
     Host {
         #[source]
         source: flowgen_core::host::Error,
     },
-    #[error("Invalid URL format with error: {source}")]
+    #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]
         source: url::ParseError,
@@ -126,142 +126,165 @@ impl EventHandler {
             return Ok(());
         }
 
-        let mut client_guard = self.client.lock().await;
-        let context = client_guard
-            .context
-            .as_mut()
-            .ok_or_else(|| Error::NoObjectStoreContext)?;
+        let event = Arc::new(event);
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            let mut client_guard = self.client.lock().await;
+            let context = client_guard
+                .context
+                .as_mut()
+                .ok_or_else(|| Error::NoObjectStoreContext)?;
 
-        // Render config with to support templates inside configuration.
-        let event_value = serde_json::value::Value::try_from(&event)
-            .map_err(|source| Error::EventBuilder { source })?;
-        let config = self
-            .config
-            .render(&event_value)
-            .map_err(|source| Error::ConfigRender { source })?;
+            // Render config with to support templates inside configuration.
+            let event_value = serde_json::value::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
-        // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
-        let config_path_str = config.path.to_string_lossy();
-        let url = url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
-        let mut path = object_store::path::Path::from(url.path());
+            // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
+            let config_path_str = config.path.to_string_lossy();
+            let url =
+                url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
+            let mut path = object_store::path::Path::from(url.path());
 
-        let cd = Utc::now();
-        if let Some(hive_options) = &self.config.hive_partition_options {
-            if hive_options.enabled {
-                for partition_key in &hive_options.partition_keys {
-                    match partition_key {
-                        crate::config::HiveParitionKeys::EventDate => {
-                            let date_partition = self.format_date_partition(&cd);
-                            // Split the date partition by '/' and add each part as a child
-                            for part in date_partition.split('/') {
-                                path = path.child(part);
+            let cd = Utc::now();
+            if let Some(hive_options) = &self.config.hive_partition_options {
+                if hive_options.enabled {
+                    for partition_key in &hive_options.partition_keys {
+                        match partition_key {
+                            crate::config::HiveParitionKeys::EventDate => {
+                                let date_partition = self.format_date_partition(&cd);
+                                // Split the date partition by '/' and add each part as a child
+                                for part in date_partition.split('/') {
+                                    path = path.child(part);
+                                }
+                            }
+                            crate::config::HiveParitionKeys::EventHour => {
+                                let hour_partition = self.format_hour_partition(&cd);
+                                path = path.child(hour_partition);
                             }
                         }
                     }
                 }
             }
-        }
 
-        let timestamp = cd.timestamp_micros();
-        let filename = match event.id {
-            Some(id) => id,
-            _none => timestamp.to_string(),
-        };
+            let timestamp = cd.timestamp_micros();
+            let filename = match &event.id {
+                Some(id) => id.clone(),
+                _none => timestamp.to_string(),
+            };
 
-        // Determine output format and extension.
-        let (format, extension) = match &config.format {
-            WriteFormat::Auto => {
-                // Auto-detect format from event data type.
-                match &event.data {
-                    flowgen_core::event::EventData::ArrowRecordBatch(_) => {
-                        (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION)
-                    }
-                    flowgen_core::event::EventData::Avro(_) => {
-                        (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION)
-                    }
-                    flowgen_core::event::EventData::Json(_) => {
-                        (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
+            // Determine output format and extension.
+            let (format, extension) = match &config.format {
+                WriteFormat::Auto => {
+                    // Auto-detect format from event data type.
+                    match &event.data {
+                        flowgen_core::event::EventData::ArrowRecordBatch(_) => {
+                            (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION)
+                        }
+                        flowgen_core::event::EventData::Avro(_) => {
+                            (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION)
+                        }
+                        flowgen_core::event::EventData::Json(_) => {
+                            (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
+                        }
                     }
                 }
+                WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
+                WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
+                WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
+                WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
+            };
+
+            // Write data in the appropriate format.
+            let mut writer = Vec::new();
+            match (&event.data, &format) {
+                (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
+                    // Skip writing empty batches.
+                    if batch.num_rows() == 0 {
+                        return Ok(());
+                    }
+
+                    // Write Arrow as Parquet (native columnar format).
+                    let props = parquet::file::properties::WriterProperties::builder().build();
+                    let mut parquet_writer = parquet::arrow::ArrowWriter::try_new(
+                        &mut writer,
+                        batch.schema(),
+                        Some(props),
+                    )
+                    .map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                    parquet_writer.write(batch).map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                    parquet_writer.close().map_err(|e| Error::Arrow {
+                        source: arrow::error::ArrowError::ExternalError(Box::new(e)),
+                    })?;
+                }
+                _ => {
+                    // Use default to_writer for other formats.
+                    event
+                        .data
+                        .clone()
+                        .to_writer(&mut writer)
+                        .map_err(|source| Error::EventBuilder { source })?;
+                }
             }
-            WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
-            WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
-            WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
-            WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
-        };
 
-        // Write data in the appropriate format.
-        let mut writer = Vec::new();
-        match (&event.data, &format) {
-            (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
-                // Write Arrow as Parquet (native columnar format).
-                let props = parquet::file::properties::WriterProperties::builder().build();
-                let mut parquet_writer =
-                    parquet::arrow::ArrowWriter::try_new(&mut writer, batch.schema(), Some(props))
-                        .map_err(|e| Error::Arrow {
-                            source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                        })?;
-                parquet_writer.write(batch).map_err(|e| Error::Arrow {
-                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                })?;
-                parquet_writer.close().map_err(|e| Error::Arrow {
-                    source: arrow::error::ArrowError::ExternalError(Box::new(e)),
-                })?;
-            }
-            _ => {
-                // Use default to_writer for other formats.
-                event
-                    .data
-                    .to_writer(&mut writer)
-                    .map_err(|source| Error::EventBuilder { source })?;
-            }
-        }
+            let object_path = path.child(format!("{filename}.{extension}"));
 
-        let object_path = path.child(format!("{filename}.{extension}"));
+            // Upload processed data to object store.
+            let payload = PutPayload::from_bytes(Bytes::from(writer));
+            let put_result = context
+                .object_store
+                .put(&object_path, payload)
+                .await
+                .map_err(|e| Error::ObjectStore { source: e })?;
 
-        // Upload processed data to object store.
-        let payload = PutPayload::from_bytes(Bytes::from(writer));
-        let put_result = context
-            .object_store
-            .put(&object_path, payload)
-            .await
-            .map_err(|e| Error::ObjectStore { source: e })?;
+            let result = WriteResult {
+                status: WriteStatus::Success,
+                path: object_path.to_string(),
+                e_tag: put_result.e_tag.clone(),
+            };
 
-        let result = WriteResult {
-            status: WriteStatus::Success,
-            path: object_path.to_string(),
-            e_tag: put_result.e_tag.clone(),
-        };
+            // Build and send event.
+            let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
+            let mut e = EventBuilder::new()
+                .subject(self.config.name.to_owned())
+                .data(EventData::Json(data))
+                .task_id(self.task_id)
+                .task_type(self.task_type);
 
-        // Build and send event.
-        let data = serde_json::to_value(&result).map_err(|e| Error::SerdeJson { source: e })?;
-        let mut e = EventBuilder::new()
-            .subject(self.config.name.to_owned())
-            .data(EventData::Json(data))
-            .task_id(self.task_id)
-            .task_type(self.task_type);
+            if let Some(e_tag) = put_result.e_tag {
+                e = e.id(e_tag);
+            };
 
-        if let Some(e_tag) = put_result.e_tag {
-            e = e.id(e_tag);
-        };
+            let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
-        let e = e.build().map_err(|source| Error::EventBuilder { source })?;
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
 
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|source| Error::SendMessage { source })?;
-
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Formats date into Hive partition format (year=YYYY/month=MM/day=DD).
     fn format_date_partition(&self, date: &DateTime<Utc>) -> String {
         format!(
-            "year={}/month={}/day={}",
+            "year={}/month={:02}/day={:02}",
             date.year(),
             date.month(),
             date.day()
         )
+    }
+
+    /// Formats hour into Hive partition format (hour=HH).
+    fn format_hour_partition(&self, date: &DateTime<Utc>) -> String {
+        format!("hour={:02}", date.hour())
     }
 }
 
@@ -331,7 +354,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!("{}", e);
+                    error!(error = %e, "Failed to initialize writer");
                     Err(e)
                 }
             }
@@ -340,12 +363,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(
-                    "{}",
-                    Error::RetryExhausted {
-                        source: Box::new(e)
-                    }
-                );
+                error!(error = %e, "Writer failed after all retry attempts");
                 return Ok(());
             }
         };
@@ -364,7 +382,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!("{}", e);
+                                        error!(error = %e, "Failed to write object");
                                         Err(e)
                                     }
                                 }
@@ -372,12 +390,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(
-                                    "{}",
-                                    Error::RetryExhausted {
-                                        source: Box::new(err)
-                                    }
-                                );
+                                error!(error = %err, "Write failed after all retry attempts");
                             }
                         }
                         .instrument(tracing::Span::current()),
