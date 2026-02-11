@@ -289,33 +289,25 @@ impl App {
             }
         }
 
-        // Run HTTP handlers and wait for them to register (only if HTTP server is enabled).
-        if app_config
-            .worker
-            .as_ref()
-            .and_then(|w| w.http_server.as_ref())
-            .is_some_and(|http| http.enabled)
-        {
-            let mut http_handler_tasks = Vec::new();
-            for flow in &flows {
-                match flow.run_http_handlers().await {
-                    Ok(handles) => http_handler_tasks.extend(handles),
-                    Err(e) => {
-                        error!("Failed to run http handlers for {}: {}", flow.name(), e);
-                    }
+        let mut http_handler_tasks = Vec::new();
+        for flow in &flows {
+            match flow.run_http_handlers().await {
+                Ok(handles) => http_handler_tasks.extend(handles),
+                Err(e) => {
+                    error!("Failed to run http handlers for {}: {}", flow.name(), e);
                 }
             }
+        }
 
-            if !http_handler_tasks.is_empty() {
-                info!(
-                    "Waiting for {} HTTP handler(s) to complete setup...",
-                    http_handler_tasks.len()
-                );
-                let results = futures_util::future::join_all(http_handler_tasks).await;
-                for result in results {
-                    if let Err(e) = result {
-                        error!("HTTP handler setup task panicked: {}", e);
-                    }
+        if !http_handler_tasks.is_empty() {
+            info!(
+                "Waiting for {} HTTP handler(s) to complete setup...",
+                http_handler_tasks.len()
+            );
+            let results = futures_util::future::join_all(http_handler_tasks).await;
+            for result in results {
+                if let Err(e) = result {
+                    error!("Failed to complete HTTP handler setup: {}", e);
                 }
             }
         }
