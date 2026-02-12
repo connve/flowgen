@@ -468,131 +468,170 @@ impl Flow {
             .await
             .map_err(|e| Error::LeaderElectionRegistrationFailed(e.to_string()))?;
 
-        // Main lifecycle loop.
+        let mut tasks_spawned = false;
+
+        // Wait for initial leadership state
         loop {
-            // Wait for leadership state.
-            loop {
-                match leadership_rx.recv().await {
-                    Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
-                        info!("Flow {} acquired leadership", flow_id);
+            match leadership_rx.recv().await {
+                Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
+                    if !tasks_spawned {
+                        info!("Flow {} acquired leadership, will spawn tasks", flow_id);
+                        tasks_spawned = true;
 
-                        // Drain additional messages to prevent duplicate task spawning.
-                        let mut lost_leadership = false;
-                        while let Ok(status) = leadership_rx.try_recv() {
-                            match status {
-                                flowgen_core::task::manager::LeaderElectionResult::Leader => {
-                                    debug!("Flow {} draining duplicate Leader message", flow_id);
-                                }
-                                flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
-                                    warn!("Flow {} lost leadership before spawning tasks", flow_id);
-                                    lost_leadership = true;
-                                    break;
-                                }
-                                flowgen_core::task::manager::LeaderElectionResult::NoElection => {}
-                            }
+                        // Drain duplicate Leader messages
+                        while let Ok(flowgen_core::task::manager::LeaderElectionResult::Leader) =
+                            leadership_rx.try_recv()
+                        {
+                            debug!("Flow {} received duplicate Leader message during initial drain, ignoring", flow_id);
                         }
-
-                        if lost_leadership {
-                            continue;
-                        }
-
-                        info!("Flow {} spawning tasks", flow_id);
                         break;
-                    }
-                    Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
-                        debug!("Flow {} is not leader, waiting for leadership", flow_id);
-                    }
-                    Some(flowgen_core::task::manager::LeaderElectionResult::NoElection) => {
+                    } else {
                         debug!(
-                            "No leader election for flow {}, spawning tasks immediately",
+                            "Flow {} received duplicate Leader message, ignoring",
                             flow_id
                         );
-                        break;
-                    }
-                    None => {
-                        info!("Flow {} leadership channel closed, exiting", flow_id);
-                        return Ok(());
                     }
                 }
+                Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
+                    debug!("Flow {} is not leader, waiting for leadership", flow_id);
+                    tasks_spawned = false;
+                }
+                Some(flowgen_core::task::manager::LeaderElectionResult::NoElection) => {
+                    debug!(
+                        "No leader election for flow {}, spawning tasks immediately",
+                        flow_id
+                    );
+                    tasks_spawned = true;
+                    break;
+                }
+                None => {
+                    info!("Flow {} leadership channel closed, exiting", flow_id);
+                    return Ok(());
+                }
             }
+        }
 
-            // 2. Get or spawn tasks.
-            let mut background_tasks = if !is_leader_elected {
-                // For non-leader-elected flows, retrieve the already-spawned background tasks.
-                let mut lock = self
-                    .background_handles
-                    .lock()
-                    .map_err(|_| Error::BackgroundHandlesRetrieveFailed)?;
+        let mut background_tasks = if !is_leader_elected {
+            // Retrieve already-spawned background tasks
+            let mut lock = self
+                .background_handles
+                .lock()
+                .map_err(|_| Error::BackgroundHandlesRetrieveFailed)?;
 
-                lock.take()
-                    .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?
-            } else {
-                // For leader-elected flows, spawn all tasks fresh.
-                let handles = self.spawn_all_tasks().await?;
-                handles
-                    .blocking_handles
-                    .into_iter()
-                    .chain(handles.background_handles)
-                    .collect()
-            };
+            lock.take()
+                .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?
+        } else {
+            // Spawn tasks for this leadership tenure
+            let handles = self.spawn_all_tasks().await?;
+            handles
+                .blocking_handles
+                .into_iter()
+                .chain(handles.background_handles)
+                .collect()
+        };
 
-            if background_tasks.is_empty() {
-                info!("Flow {} has no tasks to monitor.", flow_id);
-                return Ok(());
-            }
+        if background_tasks.is_empty() {
+            info!("Flow {} has no tasks to monitor.", flow_id);
+            return Ok(());
+        }
 
-            // 3. Monitor tasks.
-            if is_leader_elected {
-                // For leader-elected flows, monitor leadership and abort tasks if leadership is lost.
+        if is_leader_elected {
+            // Monitor leadership and tasks
+            loop {
                 let all_completed = loop {
                     tokio::select! {
                         biased;
                         Some(status) = leadership_rx.recv() => {
-                            if status == flowgen_core::task::manager::LeaderElectionResult::NotLeader {
-                                debug!("Flow {} lost leadership, aborting all tasks", flow_id);
-                                for task in &background_tasks {
-                                    task.abort();
+                            match status {
+                                flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
+                                    warn!("Flow {} lost leadership, aborting all tasks", flow_id);
+                                    for task in &background_tasks {
+                                        task.abort();
+                                    }
+                                    break false;
                                 }
-                                break false; // Lost leadership, may need to re-acquire.
-                            } else if status == flowgen_core::task::manager::LeaderElectionResult::Leader {
-                                debug!(
-                                    "Flow {} received additional Leader message while monitoring tasks, ignoring",
-                                    flow_id
-                                );
+                                flowgen_core::task::manager::LeaderElectionResult::Leader => {
+                                    if tasks_spawned {
+                                        debug!("Flow {} received duplicate Leader message while tasks running, ignoring", flow_id);
+                                    } else {
+                                        warn!("Flow {} received unexpected Leader message, tasks already running", flow_id);
+                                    }
+                                }
+                                flowgen_core::task::manager::LeaderElectionResult::NoElection => {}
                             }
                         }
                         results = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
-                            // Check if any tasks failed.
                             for (idx, result) in results.iter().enumerate() {
                                 if let Err(e) = result {
                                     error!("Task {} failed: {}", idx, e);
                                 }
                             }
                             info!("All tasks completed for flow {}", flow_id);
-                            break true; // All tasks completed successfully.
+                            break true;
                         }
                     }
                 };
 
                 if all_completed {
-                    // All tasks finished, exit main loop.
                     break;
                 }
-                // Otherwise, lost leadership - clear aborted tasks and loop back to re-acquire.
-                background_tasks.clear();
-            } else {
-                // For non-leader-elected flows, just wait for all tasks to complete.
-                let results = futures::future::join_all(background_tasks).await;
 
-                // Check if any tasks failed.
-                for (idx, result) in results.iter().enumerate() {
-                    if let Err(e) = result {
-                        error!("Task {} failed: {}", idx, e);
+                // Lost leadership - wait to re-acquire
+                background_tasks.clear();
+                tasks_spawned = false;
+
+                loop {
+                    match leadership_rx.recv().await {
+                        Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
+                            if !tasks_spawned {
+                                info!("Flow {} re-acquired leadership, will spawn tasks", flow_id);
+                                tasks_spawned = true;
+
+                                // Drain duplicate Leader messages
+                                while let Ok(
+                                    flowgen_core::task::manager::LeaderElectionResult::Leader,
+                                ) = leadership_rx.try_recv()
+                                {
+                                    debug!("Flow {} received duplicate Leader message during re-acquisition drain, ignoring", flow_id);
+                                }
+                                break;
+                            } else {
+                                debug!("Flow {} received duplicate Leader message during re-acquisition, ignoring", flow_id);
+                            }
+                        }
+                        Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
+                            debug!("Flow {} still not leader, waiting", flow_id);
+                            tasks_spawned = false;
+                        }
+                        Some(flowgen_core::task::manager::LeaderElectionResult::NoElection) => {
+                            tasks_spawned = true;
+                            break;
+                        }
+                        None => {
+                            info!("Flow {} leadership channel closed, exiting", flow_id);
+                            return Ok(());
+                        }
                     }
                 }
-                info!("All tasks completed for flow {}", flow_id);
-                break; // Exit main loop as the work is done.
+
+                // Re-spawn tasks
+                let handles = self.spawn_all_tasks().await?;
+                background_tasks = handles
+                    .blocking_handles
+                    .into_iter()
+                    .chain(handles.background_handles)
+                    .collect();
             }
+        } else {
+            // Wait for all tasks to complete
+            let results = futures::future::join_all(background_tasks).await;
+
+            for (idx, result) in results.iter().enumerate() {
+                if let Err(e) = result {
+                    error!("Task {} failed: {}", idx, e);
+                }
+            }
+            info!("All tasks completed for flow {}", flow_id);
         }
         Ok(())
     }
