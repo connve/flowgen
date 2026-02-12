@@ -470,11 +470,33 @@ impl Flow {
 
         // Main lifecycle loop.
         loop {
-            // 1. Wait for leadership state.
+            // Wait for leadership state.
             loop {
                 match leadership_rx.recv().await {
                     Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
-                        info!("Flow {} acquired leadership, spawning tasks", flow_id);
+                        info!("Flow {} acquired leadership", flow_id);
+
+                        // Drain additional messages to prevent duplicate task spawning.
+                        let mut lost_leadership = false;
+                        while let Ok(status) = leadership_rx.try_recv() {
+                            match status {
+                                flowgen_core::task::manager::LeaderElectionResult::Leader => {
+                                    debug!("Flow {} draining duplicate Leader message", flow_id);
+                                }
+                                flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
+                                    warn!("Flow {} lost leadership before spawning tasks", flow_id);
+                                    lost_leadership = true;
+                                    break;
+                                }
+                                flowgen_core::task::manager::LeaderElectionResult::NoElection => {}
+                            }
+                        }
+
+                        if lost_leadership {
+                            continue;
+                        }
+
+                        info!("Flow {} spawning tasks", flow_id);
                         break;
                     }
                     Some(flowgen_core::task::manager::LeaderElectionResult::NotLeader) => {
@@ -532,6 +554,11 @@ impl Flow {
                                     task.abort();
                                 }
                                 break false; // Lost leadership, may need to re-acquire.
+                            } else if status == flowgen_core::task::manager::LeaderElectionResult::Leader {
+                                debug!(
+                                    "Flow {} received additional Leader message while monitoring tasks, ignoring",
+                                    flow_id
+                                );
                             }
                         }
                         results = futures::future::join_all(&mut background_tasks), if !background_tasks.is_empty() => {
