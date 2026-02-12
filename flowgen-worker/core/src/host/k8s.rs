@@ -77,8 +77,8 @@ pub enum Error {
 }
 
 /// Default lease duration in seconds.
-/// Set to 15s for fast failover following K8s controller best practices.
-const DEFAULT_LEASE_DURATION_SECS: i32 = 15;
+/// Set to 60s to handle network hiccups while still allowing reasonable failover time.
+const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
 
 /// Kubernetes host coordinator for lease management.
 #[derive(Clone)]
