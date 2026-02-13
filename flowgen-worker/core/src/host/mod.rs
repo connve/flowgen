@@ -21,4 +21,8 @@ pub trait Host: Send + Sync + std::fmt::Debug {
 
     /// Renews an existing lease.
     async fn renew_lease(&self, name: &str, namespace: Option<&str>) -> Result<(), Error>;
+
+    /// Verifies that this instance holds the lease by checking cache.
+    /// Returns true if we hold the lease, false otherwise.
+    async fn verify_lease_ownership(&self, name: &str) -> Result<bool, Error>;
 }

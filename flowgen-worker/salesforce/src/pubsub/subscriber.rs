@@ -130,7 +130,7 @@ impl EventHandler {
         schema_info: &SchemaInfo,
         topic_name: &str,
     ) -> Result<(), Error> {
-        let cache = self.task_context.cache.as_ref();
+        let cache = &self.task_context.cache;
         let flow_name = &self.task_context.flow.name;
 
         for ce in events {
@@ -170,14 +170,12 @@ impl EventHandler {
                     .as_ref()
                     .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                 {
-                    if let Some(cache) = cache {
-                        let sanitized_topic = sanitize_topic_name(topic_name);
-                        let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                        if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
-                            error!(
-                                "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
-                            );
-                        }
+                    let sanitized_topic = sanitize_topic_name(topic_name);
+                    let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                    if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
+                        error!(
+                            "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
+                        );
                     }
                 }
             }
@@ -191,8 +189,8 @@ impl EventHandler {
     /// Fetches topic and schema info, establishes subscription with optional
     /// replay ID, then processes incoming events in a loop.
     async fn handle(self) -> Result<(), Error> {
-        // Get cache from task context if available.
-        let cache = self.task_context.cache.as_ref();
+        // Get cache from task context.
+        let cache = &self.task_context.cache;
         let flow_name = &self.task_context.flow.name;
         // Get topic metadata.
         let topic_info = self
@@ -296,21 +294,14 @@ impl EventHandler {
             // Try to load cached replay_id, or use configured preset.
             let sanitized_topic = sanitize_topic_name(topic_name);
             let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-            let cached_replay_id = match cache {
-                Some(c) => c.get(&cache_key).await.ok(),
-                None => None,
-            };
+            let cached_replay_id = cache.get(&cache_key).await.ok();
 
-            match cached_replay_id {
+            match cached_replay_id.flatten() {
                 Some(reply_id) => {
-                    // Found cached replay_id - use it to resume from last processed event.
                     fetch_request.replay_id = reply_id.into();
-                    fetch_request.replay_preset = 2; // CUSTOM preset when using replay_id.
+                    fetch_request.replay_preset = 2;
                 }
                 None => {
-                    // No cached replay_id found - use replay_preset to determine start position.
-                    // LATEST (0) starts from the tip of the stream.
-                    // EARLIEST (1) starts from the earliest retained events in the retention window.
                     fetch_request.replay_preset = durable_consumer_opts.replay_preset.to_i32();
                     warn!(
                         "No cached replay_id found for flow {flow_name} topic {topic_name}, starting from {:?}",
@@ -366,15 +357,13 @@ impl EventHandler {
                         .as_ref()
                         .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                     {
-                        if let Some(cache) = cache {
-                            let sanitized_topic = sanitize_topic_name(topic_name);
-                            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                            if let Err(e) = cache.delete(&cache_key).await {
-                                error!(
-                                    "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
-                                    flow_name, topic_name, e
-                                );
-                            }
+                        let sanitized_topic = sanitize_topic_name(topic_name);
+                        let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                        if let Err(e) = cache.delete(&cache_key).await {
+                            error!(
+                                "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
+                                flow_name, topic_name, e
+                            );
                         }
                     }
 
@@ -616,11 +605,14 @@ mod tests {
             Value::String("Clone Test".to_string()),
         );
         let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
         Arc::new(
             flowgen_core::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .cache(cache)
                 .build()
                 .unwrap(),
         )

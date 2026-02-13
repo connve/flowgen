@@ -957,6 +957,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1220,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1231,6 +1245,7 @@ dependencies = [
  "bytes",
  "chrono",
  "croner",
+ "dashmap",
  "futures-util",
  "handlebars",
  "humantime-serde",
@@ -1253,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1278,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1299,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1326,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1349,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1376,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "arrow",
  "config",

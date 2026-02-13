@@ -121,8 +121,8 @@ impl EventHandler {
         // create events with meta: None, which is correct for a pipeline starter.
         let mut counter = 0;
 
-        // Get cache from task context if available.
-        let cache = self.task_context.cache.as_ref();
+        // Get cache from task context.
+        let cache = &self.task_context.cache;
         let flow_name = &self.task_context.flow.name;
         let task_name = &self.config.name;
 
@@ -137,14 +137,12 @@ impl EventHandler {
                 .as_secs();
 
             // Get last_run from cache or return none.
-            let last_run = match cache {
-                Some(c) => c
-                    .get(&cache_key)
-                    .await
-                    .ok()
-                    .and_then(|bytes| String::from_utf8_lossy(&bytes).parse::<u64>().ok()),
-                None => None,
-            };
+            let last_run = cache
+                .get(&cache_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8_lossy(&bytes).parse::<u64>().ok());
 
             // Calculate next run time for interval or cron.
             let next_run_time = self.calculate_next_run(now, last_run)?;
@@ -163,12 +161,9 @@ impl EventHandler {
 
             // Update cache with current execution time before sending the event to ensure
             // we don't lose track of execution times if the process crashes.
-            if let Some(cache) = cache {
-                if let Err(cache_err) = cache.put(&cache_key, current_time.to_string().into()).await
-                {
-                    // Log warn for cache errors.
-                    warn!("Failed to update cache: {:?}", cache_err);
-                }
+            if let Err(cache_err) = cache.put(&cache_key, current_time.to_string().into()).await {
+                // Log warn for cache errors.
+                warn!("Failed to update cache: {:?}", cache_err);
             }
 
             // Determine if there will be a next run
@@ -394,11 +389,14 @@ mod tests {
             Value::String("Clone Test".to_string()),
         );
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .cache(cache)
                 .build()
                 .unwrap(),
         )
@@ -426,16 +424,11 @@ mod tests {
             }
         }
 
-        async fn get(&self, key: &str) -> Result<bytes::Bytes, crate::cache::Error> {
+        async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, crate::cache::Error> {
             if self.should_error {
                 Err(Box::new(MockError))
             } else {
-                self.data
-                    .lock()
-                    .await
-                    .get(key)
-                    .cloned()
-                    .ok_or_else(|| Box::new(MockError) as crate::cache::Error)
+                Ok(self.data.lock().await.get(key).cloned())
             }
         }
 
@@ -582,12 +575,15 @@ mod tests {
             Value::String("Cache Test".to_string()),
         );
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let task_context = Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
-                .cache(Some(mock_cache.clone() as Arc<dyn crate::cache::Cache>))
+                .cache(cache)
+                .cache(mock_cache.clone() as Arc<dyn crate::cache::Cache>)
                 .build()
                 .unwrap(),
         );

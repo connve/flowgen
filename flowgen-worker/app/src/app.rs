@@ -2,7 +2,7 @@ use crate::config::{AppConfig, FlowConfig};
 use config::Config;
 use flowgen_core::client::Client;
 use std::sync::Arc;
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Errors that can occur during application execution.
 #[derive(thiserror::Error, Debug)]
@@ -45,6 +45,75 @@ pub enum Error {
     /// Host coordination error.
     #[error(transparent)]
     Host(#[from] flowgen_core::host::Error),
+    /// Flow build error.
+    #[error("Flow build failed: {source}")]
+    FlowBuild {
+        #[source]
+        source: crate::flow::Error,
+    },
+    /// Flow initialization error.
+    #[error("Flow initialization failed for {flow_name}: {source}")]
+    FlowInit {
+        flow_name: String,
+        #[source]
+        source: crate::flow::Error,
+    },
+    /// HTTP handler startup error.
+    #[error("Failed to run HTTP handlers for {flow_name}: {source}")]
+    HttpHandlerStartup {
+        flow_name: String,
+        #[source]
+        source: crate::flow::Error,
+    },
+    /// HTTP handler setup completion error.
+    #[error("Failed to complete HTTP handler setup: {source}")]
+    HttpHandlerSetup {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    /// HTTP server startup error.
+    #[error("Failed to start HTTP server: {source}")]
+    HttpServerStart {
+        #[source]
+        source: flowgen_http::server::Error,
+    },
+    /// HTTP server downcast error.
+    #[error("Failed to downcast HTTP server to concrete type")]
+    HttpServerDowncast,
+    /// Background task panic error.
+    #[error("Background task panicked: {source}")]
+    BackgroundTaskPanic {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    /// Flow file read error.
+    #[error("Failed to read flow file {path:?}: {source}")]
+    FlowFileRead {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Flow config parse error.
+    #[error("Failed to parse flow config {path:?}: {source}")]
+    FlowConfigParse {
+        path: std::path::PathBuf,
+        #[source]
+        source: config::ConfigError,
+    },
+    /// Flow config deserialization error.
+    #[error("Failed to deserialize flow config {path:?}: {source}")]
+    FlowConfigDeserialize {
+        path: std::path::PathBuf,
+        #[source]
+        source: config::ConfigError,
+    },
+    /// Flow file path canonicalization error.
+    #[error("Failed to resolve canonical path for {path:?}: {source}")]
+    FlowFileCanonicalize {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -83,55 +152,87 @@ impl App {
         };
 
         let mut flow_configs: Vec<FlowConfig> = Vec::new();
+        let mut seen_paths = std::collections::HashSet::new();
 
         for glob_pattern in glob_patterns {
             let matched_flows: Vec<FlowConfig> = glob::glob(&glob_pattern)
-            .map_err(|e| Error::Pattern { source: e })?
-            .filter_map(|path| {
-                match path {
-                    Ok(path) => {
-                        info!("Loading flow: {:?}", path);
-                        let contents = match std::fs::read_to_string(&path) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                error!("Failed to read flow file {:?}: {}. Skipping this flow.", path, e);
+                .map_err(|e| Error::Pattern { source: e })?
+                .filter_map(|path| {
+                    match path {
+                        Ok(path) => {
+                            let canonical_path = match std::fs::canonicalize(&path) {
+                                Ok(p) => p,
+                                Err(source) => {
+                                    let err = Error::FlowFileCanonicalize {
+                                        path: path.clone(),
+                                        source,
+                                    };
+                                    error!("{}. Skipping this flow.", err);
+                                    return None;
+                                }
+                            };
+
+                            if seen_paths.contains(&canonical_path) {
+                                debug!("Skipping duplicate flow (symlink): {:?}", path);
                                 return None;
                             }
-                        };
+                            seen_paths.insert(canonical_path);
 
-                        // Determine file format from extension.
-                        let file_format = match path.extension().and_then(|s| s.to_str()) {
-                            Some("yaml") | Some("yml") => config::FileFormat::Yaml,
-                            Some("json") => config::FileFormat::Json,
-                            _ => config::FileFormat::Json,
-                        };
+                            info!("Loading flow: {:?}", path);
+                            let contents = match std::fs::read_to_string(&path) {
+                                Ok(c) => c,
+                                Err(source) => {
+                                    let err = Error::FlowFileRead {
+                                        path: path.clone(),
+                                        source,
+                                    };
+                                    error!("{}. Skipping this flow.", err);
+                                    return None;
+                                }
+                            };
 
-                        let config = match Config::builder()
-                            .add_source(config::File::from_str(&contents, file_format))
-                            .build()
-                        {
-                            Ok(c) => c,
-                            Err(e) => {
-                                error!("Failed to parse flow config {:?}: {}. Skipping this flow.", path, e);
-                                return None;
-                            }
-                        };
+                            // Determine file format from extension.
+                            let file_format = match path.extension().and_then(|s| s.to_str()) {
+                                Some("yaml") | Some("yml") => config::FileFormat::Yaml,
+                                Some("json") => config::FileFormat::Json,
+                                _ => config::FileFormat::Json,
+                            };
 
-                        match config.try_deserialize::<FlowConfig>() {
-                            Ok(flow_config) => Some(flow_config),
-                            Err(e) => {
-                                error!("Failed to deserialize flow config {:?}: {}. Skipping this flow.", path, e);
-                                None
+                            let config = match Config::builder()
+                                .add_source(config::File::from_str(&contents, file_format))
+                                .build()
+                            {
+                                Ok(c) => c,
+                                Err(source) => {
+                                    let err = Error::FlowConfigParse {
+                                        path: path.clone(),
+                                        source,
+                                    };
+                                    error!("{}. Skipping this flow.", err);
+                                    return None;
+                                }
+                            };
+
+                            match config.try_deserialize::<FlowConfig>() {
+                                Ok(flow_config) => Some(flow_config),
+                                Err(source) => {
+                                    let err = Error::FlowConfigDeserialize {
+                                        path: path.clone(),
+                                        source,
+                                    };
+                                    error!("{}. Skipping this flow.", err);
+                                    None
+                                }
                             }
                         }
+                        Err(source) => {
+                            let err = Error::Glob { source };
+                            error!("{}. Skipping.", err);
+                            None
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to read flow path: {}. Skipping.", e);
-                        None
-                    }
-                }
-            })
-            .collect();
+                })
+                .collect();
 
             flow_configs.extend(matched_flows);
         }
@@ -152,8 +253,7 @@ impl App {
             _ => None,
         };
 
-        // Create shared cache if configured.
-        let cache: Option<Arc<flowgen_nats::cache::Cache>> =
+        let cache: Arc<dyn flowgen_core::cache::Cache> =
             if let Some(cache_config) = &app_config.cache {
                 if cache_config.enabled {
                     let db_name = cache_config
@@ -161,65 +261,61 @@ impl App {
                         .as_deref()
                         .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
 
-                    flowgen_nats::cache::CacheBuilder::new()
+                    match flowgen_nats::cache::CacheBuilder::new()
                         .credentials_path(cache_config.credentials_path.clone())
                         .url(cache_config.url.clone())
                         .build()
-                        .map_err(|e| {
-                            warn!("Failed to build cache: {}", e);
-                            e
-                        })
-                        .ok()
                         .and_then(|builder| {
-                            futures::executor::block_on(async {
-                                builder
-                                    .init(db_name)
-                                    .await
-                                    .map_err(|e| {
-                                        warn!("Failed to initialize cache: {}", e);
-                                        e
-                                    })
-                                    .ok()
-                            })
-                        })
-                        .map(Arc::new)
+                            futures::executor::block_on(async { builder.init(db_name).await })
+                        }) {
+                        Ok(nats_cache) => {
+                            info!("Using NATS distributed cache");
+                            Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
+                        }
+                        Err(e) => {
+                            warn!(
+                            "Failed to initialize NATS cache: {}, falling back to in-memory cache",
+                            e
+                        );
+                            Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                                as Arc<dyn flowgen_core::cache::Cache>
+                        }
+                    }
                 } else {
-                    None
+                    info!("Cache disabled in config, using in-memory cache");
+                    Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                        as Arc<dyn flowgen_core::cache::Cache>
                 }
             } else {
-                None
+                info!("No cache configured, using in-memory cache");
+                Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                    as Arc<dyn flowgen_core::cache::Cache>
             };
 
         // Helper to check if running in Kubernetes
         let is_in_k8s =
             || std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
 
-        // Create host client with auto-detection
         let host_client = match app_config.worker.as_ref().and_then(|w| w.host.as_ref()) {
             Some(host) if host.enabled => {
-                // User enabled host coordination in config
                 info!("K8s host coordination enabled in config");
-                create_k8s_host().await
+                create_k8s_host(Arc::clone(&cache)).await
             }
             Some(host) if !host.enabled => {
-                // User disabled in config
                 info!("K8s host coordination disabled in config");
                 None
             }
             None if is_in_k8s() => {
-                // Auto-detect: running in K8s but no config
                 info!("Auto-detected Kubernetes environment, enabling K8s host coordination");
-                create_k8s_host().await
+                create_k8s_host(Arc::clone(&cache)).await
             }
-            _ => {
-                // Not in K8s, no config needed
-                None
-            }
+            _ => None,
         };
 
-        async fn create_k8s_host() -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
-            // Builder auto-detects holder_identity from POD_NAME/HOSTNAME
-            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new();
+        async fn create_k8s_host(
+            cache: Arc<dyn flowgen_core::cache::Cache>,
+        ) -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
+            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new().cache(cache);
 
             match host_builder.build() {
                 Ok(host) => match host.connect().await {
@@ -247,14 +343,11 @@ impl App {
         for config in flow_configs {
             let http_server = http_server.as_ref().map(Arc::clone);
             let host = host_client.as_ref().map(Arc::clone);
-            let cache = cache
-                .as_ref()
-                .map(|c| Arc::clone(c) as Arc<dyn flowgen_core::cache::Cache>);
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
                 .host(host)
-                .cache(cache);
+                .cache(Arc::clone(&cache));
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);
@@ -275,8 +368,9 @@ impl App {
 
             match flow_builder.build() {
                 Ok(flow) => flows.push(flow),
-                Err(e) => {
-                    error!("Flow build failed: {}", e);
+                Err(source) => {
+                    let err = Error::FlowBuild { source };
+                    error!("{}", err);
                     continue;
                 }
             };
@@ -284,8 +378,12 @@ impl App {
 
         // Initialize flow setup.
         for flow in &mut flows {
-            if let Err(e) = flow.init().await {
-                error!("Flow initialization failed for {}: {}", flow.name(), e);
+            if let Err(source) = flow.init().await {
+                let err = Error::FlowInit {
+                    flow_name: flow.name().to_string(),
+                    source,
+                };
+                error!("{}", err);
             }
         }
 
@@ -293,8 +391,12 @@ impl App {
         for flow in &flows {
             match flow.run_http_handlers().await {
                 Ok(handles) => http_handler_tasks.extend(handles),
-                Err(e) => {
-                    error!("Failed to run http handlers for {}: {}", flow.name(), e);
+                Err(source) => {
+                    let err = Error::HttpHandlerStartup {
+                        flow_name: flow.name().to_string(),
+                        source,
+                    };
+                    error!("{}", err);
                 }
             }
         }
@@ -306,8 +408,9 @@ impl App {
             );
             let results = futures_util::future::join_all(http_handler_tasks).await;
             for result in results {
-                if let Err(e) = result {
-                    error!("Failed to complete HTTP handler setup: {}", e);
+                if let Err(source) = result {
+                    let err = Error::HttpHandlerSetup { source };
+                    error!("{}", err);
                 }
             }
         }
@@ -328,11 +431,12 @@ impl App {
                         .as_any()
                         .downcast_ref::<flowgen_http::server::HttpServer>()
                     {
-                        if let Err(e) = server.start_server(configured_port).await {
-                            error!("Failed to start HTTP Server: {}", e);
+                        if let Err(source) = server.start_server(configured_port).await {
+                            let err = Error::HttpServerStart { source };
+                            error!("{}", err);
                         }
                     } else {
-                        error!("Failed to downcast HTTP Server to concrete type");
+                        error!("{}", Error::HttpServerDowncast);
                     }
                 }
                 .instrument(span),
@@ -348,8 +452,9 @@ impl App {
         // Wait for all background flows and the server to complete.
         let results = futures_util::future::join_all(background_handles).await;
         for result in results {
-            if let Err(e) = result {
-                error!("Background task panicked: {}", e);
+            if let Err(source) = result {
+                let err = Error::BackgroundTaskPanic { source };
+                error!("{}", err);
             }
         }
 
