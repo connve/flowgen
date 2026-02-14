@@ -2,7 +2,7 @@ use crate::config::{AppConfig, FlowConfig};
 use config::Config;
 use flowgen_core::client::Client;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 /// Errors that can occur during application execution.
 #[derive(thiserror::Error, Debug)]
@@ -173,12 +173,12 @@ impl App {
                             };
 
                             if seen_paths.contains(&canonical_path) {
-                                debug!("Skipping duplicate flow (symlink): {:?}", path);
+                                info!("Skipping duplicate flow (symlink): original={:?}, canonical={:?}", path, canonical_path);
                                 return None;
                             }
-                            seen_paths.insert(canonical_path);
+                            seen_paths.insert(canonical_path.clone());
 
-                            info!("Loading flow: {:?}", path);
+                            info!("Loading flow: {:?} (canonical: {:?})", path, canonical_path);
                             let contents = match std::fs::read_to_string(&path) {
                                 Ok(c) => c,
                                 Err(source) => {
@@ -299,7 +299,7 @@ impl App {
         let host_client = match app_config.worker.as_ref().and_then(|w| w.host.as_ref()) {
             Some(host) if host.enabled => {
                 info!("K8s host coordination enabled in config");
-                create_k8s_host(Arc::clone(&cache)).await
+                create_k8s_host().await
             }
             Some(host) if !host.enabled => {
                 info!("K8s host coordination disabled in config");
@@ -307,15 +307,13 @@ impl App {
             }
             None if is_in_k8s() => {
                 info!("Auto-detected Kubernetes environment, enabling K8s host coordination");
-                create_k8s_host(Arc::clone(&cache)).await
+                create_k8s_host().await
             }
             _ => None,
         };
 
-        async fn create_k8s_host(
-            cache: Arc<dyn flowgen_core::cache::Cache>,
-        ) -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
-            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new().cache(cache);
+        async fn create_k8s_host() -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
+            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new();
 
             match host_builder.build() {
                 Ok(host) => match host.connect().await {

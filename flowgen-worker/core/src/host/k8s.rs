@@ -12,7 +12,7 @@ use kube::{
     Client,
 };
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Errors specific to Kubernetes host operations.
 #[derive(thiserror::Error, Debug)]
@@ -84,28 +84,6 @@ pub enum Error {
 /// Set to 60s to handle network hiccups while still allowing reasonable failover time.
 const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
 
-/// Cache key prefix for platform lease data to separate from user data.
-/// Uses "platform:" prefix to distinguish from user workflow cache entries.
-const LEASE_CACHE_PREFIX: &str = "platform:lease";
-
-/// Lease ownership information stored in cache for cross-pod verification.
-///
-/// This struct is serialized to JSON and stored in the shared cache with a TTL
-/// matching the Kubernetes lease duration. It allows pods to verify lease ownership
-/// before spawning tasks, providing an additional safety layer beyond Kubernetes API.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct LeaseInfo {
-    /// Pod identity (typically pod name) that currently holds the lease.
-    holder: String,
-    /// Kubernetes namespace where the lease exists.
-    namespace: String,
-    /// ISO 8601 timestamp when the lease was acquired or taken over.
-    acquired_at: String,
-    /// Action that created this cache entry: "create", "takeover", or "renew".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<String>,
-}
-
 /// Kubernetes host coordinator for lease management.
 #[derive(Clone)]
 pub struct K8sHost {
@@ -117,8 +95,6 @@ pub struct K8sHost {
     lease_duration_secs: i32,
     /// Holder identity (typically pod name).
     holder_identity: String,
-    /// Optional cache for lease verification.
-    cache: Option<Arc<dyn crate::cache::Cache>>,
 }
 
 impl std::fmt::Debug for K8sHost {
@@ -128,7 +104,6 @@ impl std::fmt::Debug for K8sHost {
             .field("namespace", &self.namespace)
             .field("lease_duration_secs", &self.lease_duration_secs)
             .field("holder_identity", &self.holder_identity)
-            .field("cache", &self.cache.as_ref().map(|_| "Cache"))
             .finish()
     }
 }
@@ -198,33 +173,11 @@ impl Host for K8sHost {
 
         match api.create(&PostParams::default(), &lease).await {
             Ok(_) => {
-                info!("Created lease: {} in namespace: {}", name, namespace);
-
-                if let Some(ref cache) = self.cache {
-                    let cache_key = format!("{LEASE_CACHE_PREFIX}:{namespace}:{name}");
-                    let lease_info = LeaseInfo {
-                        holder: self.holder_identity.clone(),
-                        namespace: namespace.to_string(),
-                        acquired_at: chrono::Utc::now().to_rfc3339(),
-                        action: Some("create".to_string()),
-                    };
-                    if let Ok(json_bytes) = serde_json::to_vec(&lease_info) {
-                        if let Err(e) = cache.put(&cache_key, bytes::Bytes::from(json_bytes)).await
-                        {
-                            warn!("Failed to write lease to cache: {}", e);
-                        }
-                    }
-                } else {
-                    debug!("No cache configured, skipping lease cache write");
-                }
-
+                info!("Pod {} acquired lease {}", self.holder_identity, name);
                 Ok(())
             }
             Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
-                debug!(
-                    "Lease already exists: {} in namespace: {}, checking holder",
-                    name, namespace
-                );
+                debug!("Lease {} already exists, checking holder", name);
 
                 let existing_lease = api
                     .get(name)
@@ -253,10 +206,7 @@ impl Host for K8sHost {
                 };
 
                 if existing_holder == &self.holder_identity {
-                    debug!(
-                        "We hold the lease: {} in namespace: {}, renewing",
-                        name, namespace
-                    );
+                    debug!("Pod {} renewing lease {}", self.holder_identity, name);
 
                     let renew_patch = serde_json::json!({
                         "spec": {
@@ -270,12 +220,12 @@ impl Host for K8sHost {
                             Box::new(Error::RenewLease { source }) as crate::host::Error
                         })?;
 
-                    debug!("Renewed lease: {} in namespace: {}", name, namespace);
+                    debug!("Pod {} renewed lease {}", self.holder_identity, name);
                     Ok(())
                 } else if is_expired {
                     debug!(
-                        "Lease {} in namespace {} is expired, attempting takeover from {}",
-                        name, namespace, existing_holder
+                        "Pod {} attempting to take over expired lease {} from {}",
+                        self.holder_identity, name, existing_holder
                     );
 
                     if existing_lease.metadata.resource_version.is_none() {
@@ -296,35 +246,15 @@ impl Host for K8sHost {
                     {
                         Ok(_) => {
                             info!(
-                                "Successfully took over expired lease: {} in namespace: {}",
-                                name, namespace
+                                "Pod {} took over expired lease {} from {}",
+                                self.holder_identity, name, existing_holder
                             );
-
-                            if let Some(ref cache) = self.cache {
-                                let cache_key = format!("{LEASE_CACHE_PREFIX}:{namespace}:{name}");
-                                let lease_info = LeaseInfo {
-                                    holder: self.holder_identity.clone(),
-                                    namespace: namespace.to_string(),
-                                    acquired_at: chrono::Utc::now().to_rfc3339(),
-                                    action: Some("takeover".to_string()),
-                                };
-                                if let Ok(json_bytes) = serde_json::to_vec(&lease_info) {
-                                    if let Err(e) =
-                                        cache.put(&cache_key, bytes::Bytes::from(json_bytes)).await
-                                    {
-                                        warn!("Failed to write lease takeover to cache: {}", e);
-                                    }
-                                }
-                            } else {
-                                debug!("No cache configured, skipping lease takeover cache write");
-                            }
-
                             Ok(())
                         }
                         Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
                             debug!(
-                                "Failed to take over lease {} - another pod won the takeover race (409 conflict)",
-                                name
+                                "Pod {} lost takeover race for lease {} to another pod",
+                                self.holder_identity, name
                             );
                             Err(Box::new(Error::LeaseTakeoverRaceCondition {
                                 name: name.to_string(),
@@ -362,49 +292,8 @@ impl Host for K8sHost {
             .await
             .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
-        info!("Deleted lease: {} in namespace: {}", name, namespace);
+        info!("Pod {} deleted lease {}", self.holder_identity, name);
         Ok(())
-    }
-
-    #[tracing::instrument(skip(self), name = "k8s.verify_lease_ownership", fields(lease_name = %name))]
-    async fn verify_lease_ownership(&self, name: &str) -> Result<bool, crate::host::Error> {
-        let cache = match &self.cache {
-            Some(c) => c,
-            None => return Ok(true),
-        };
-
-        let cache_key = format!("{}:{}:{}", LEASE_CACHE_PREFIX, self.namespace, name);
-
-        match cache.get(&cache_key).await {
-            Ok(Some(data)) => match serde_json::from_slice::<LeaseInfo>(&data) {
-                Ok(lease_info) => {
-                    let is_owner = lease_info.holder == self.holder_identity;
-
-                    if !is_owner {
-                        tracing::warn!(
-                            lease = %name,
-                            cached_holder = %lease_info.holder,
-                            our_identity = %self.holder_identity,
-                            "Cache verification failed: another pod holds the lease"
-                        );
-                    }
-
-                    Ok(is_owner)
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to parse cached lease info: {}", e);
-                    Ok(true)
-                }
-            },
-            Ok(None) => {
-                tracing::debug!("Lease {} not found in cache, trusting K8s API", name);
-                Ok(true)
-            }
-            Err(e) => {
-                tracing::warn!("Cache error while verifying lease {}: {}", name, e);
-                Ok(true)
-            }
-        }
     }
 
     #[tracing::instrument(skip(self), name = "k8s.renew_lease", fields(lease_name = %name))]
@@ -430,7 +319,7 @@ impl Host for K8sHost {
             .await
             .map_err(|source| Box::new(Error::PatchLease { source }) as crate::host::Error)?;
 
-        debug!("Renewed lease: {} in namespace: {}", name, namespace);
+        debug!("Pod {} renewed lease {}", self.holder_identity, name);
         Ok(())
     }
 }
@@ -439,7 +328,6 @@ impl Host for K8sHost {
 pub struct K8sHostBuilder {
     lease_duration_secs: i32,
     holder_identity: Option<String>,
-    cache: Option<Arc<dyn crate::cache::Cache>>,
 }
 
 impl Default for K8sHostBuilder {
@@ -447,7 +335,6 @@ impl Default for K8sHostBuilder {
         Self {
             lease_duration_secs: DEFAULT_LEASE_DURATION_SECS,
             holder_identity: None,
-            cache: None,
         }
     }
 }
@@ -467,16 +354,6 @@ impl K8sHostBuilder {
     /// Sets the holder identity (typically pod name).
     pub fn holder_identity(mut self, identity: String) -> Self {
         self.holder_identity = Some(identity);
-        self
-    }
-
-    /// Sets the cache for lease ownership verification.
-    ///
-    /// When configured, the host will write lease ownership information to cache
-    /// and verify ownership before task spawning. This provides an additional
-    /// safety layer to prevent multiple pods from running the same tasks.
-    pub fn cache(mut self, cache: Arc<dyn crate::cache::Cache>) -> Self {
-        self.cache = Some(cache);
         self
     }
 
@@ -505,7 +382,6 @@ impl K8sHostBuilder {
             namespace: String::new(), // Will be set during connect()
             lease_duration_secs: self.lease_duration_secs,
             holder_identity,
-            cache: self.cache,
         })
     }
 }
@@ -521,7 +397,6 @@ mod tests {
             namespace: "test-namespace".to_string(),
             lease_duration_secs: DEFAULT_LEASE_DURATION_SECS,
             holder_identity: holder.to_string(),
-            cache: None,
         }
     }
 

@@ -20,6 +20,16 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
+    #[error("JetStream publish error: {source}")]
+    JetStreamPublish {
+        #[source]
+        source: async_nats::jetstream::context::PublishError,
+    },
+    #[error("JetStream publish acknowledgment error: {source}")]
+    JetStreamPublishAck {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::context::PublishErrorKind>,
+    },
     #[error("KV delete error: {source}")]
     KVDelete {
         #[source]
@@ -44,6 +54,7 @@ pub struct Cache {
     credentials_path: PathBuf,
     url: String,
     store: Option<async_nats::jetstream::kv::Store>,
+    jetstream: Option<async_nats::jetstream::Context>,
 }
 
 impl Cache {
@@ -68,6 +79,7 @@ impl Cache {
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: bucket.to_string(),
                     history: 10,
+                    limit_markers: None, // Enable per-key TTL without maximum limit
                     ..Default::default()
                 })
                 .await
@@ -75,21 +87,57 @@ impl Cache {
         };
 
         self.store = Some(store);
+        self.jetstream = Some(jetstream);
         Ok(self)
     }
 }
 
 #[async_trait::async_trait]
 impl flowgen_core::cache::Cache for Cache {
-    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), flowgen_core::cache::Error> {
+    async fn put(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<(), flowgen_core::cache::Error> {
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
-        store
-            .put(key, value)
-            .await
-            .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
+
+        if let Some(ttl) = ttl_secs {
+            let jetstream = self.jetstream.as_ref().ok_or_else(|| {
+                Box::new(Error::MissingJetStreamContext) as flowgen_core::cache::Error
+            })?;
+
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(
+                async_nats::header::NATS_MESSAGE_TTL,
+                async_nats::HeaderValue::from(ttl),
+            );
+
+            let subject = format!(
+                "{}{}",
+                store.put_prefix.as_ref().unwrap_or(&store.prefix),
+                key
+            );
+
+            jetstream
+                .publish_with_headers(subject, headers, value)
+                .await
+                .map_err(|source| {
+                    Box::new(Error::JetStreamPublish { source }) as flowgen_core::cache::Error
+                })?
+                .await
+                .map_err(|source| {
+                    Box::new(Error::JetStreamPublishAck { source }) as flowgen_core::cache::Error
+                })?;
+        } else {
+            store
+                .put(key, value)
+                .await
+                .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
+        }
         Ok(())
     }
 

@@ -32,7 +32,9 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Arguments
     /// * `key` - The key to store the value under
     /// * `value` - The binary data to store
-    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Error>;
+    /// * `ttl_secs` - Optional time-to-live in seconds. If None, value persists indefinitely.
+    async fn put(&self, key: &str, value: bytes::Bytes, ttl_secs: Option<u64>)
+        -> Result<(), Error>;
 
     /// Retrieves a value from the cache by key.
     ///
@@ -80,7 +82,12 @@ mod tests {
 
     #[async_trait]
     impl Cache for MockCache {
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Error> {
+        async fn put(
+            &self,
+            _key: &str,
+            _value: bytes::Bytes,
+            _ttl_secs: Option<u64>,
+        ) -> Result<(), Error> {
             if self.should_error {
                 Err(Box::new(MockError))
             } else {
@@ -113,7 +120,7 @@ mod tests {
         };
 
         let result = cache
-            .put("test_key", bytes::Bytes::from("test_value"))
+            .put("test_key", bytes::Bytes::from("test_value"), None)
             .await;
         assert!(result.is_ok());
     }

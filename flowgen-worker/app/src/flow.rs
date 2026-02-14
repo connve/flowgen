@@ -475,7 +475,7 @@ impl Flow {
             match leadership_rx.recv().await {
                 Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                     if !tasks_spawned {
-                        info!("Flow {} acquired leadership, will spawn tasks", flow_id);
+                        info!("Acquired leadership for flow {}, spawning tasks", flow_id);
                         tasks_spawned = true;
 
                         // Drain duplicate Leader messages
@@ -584,7 +584,10 @@ impl Flow {
                     match leadership_rx.recv().await {
                         Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                             if !tasks_spawned {
-                                info!("Flow {} re-acquired leadership, will spawn tasks", flow_id);
+                                info!(
+                                    "Re-acquired leadership for flow {}, spawning tasks",
+                                    flow_id
+                                );
                                 tasks_spawned = true;
 
                                 // Drain duplicate Leader messages

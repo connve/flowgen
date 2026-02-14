@@ -83,6 +83,8 @@ jobs:
           build-args: |
             SERVICE_NAME=flowgen_worker
             COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   create-release:
     needs: [detect-version, build-and-push-docker]

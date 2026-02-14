@@ -30,7 +30,14 @@ impl MemoryCache {
 
 #[async_trait::async_trait]
 impl super::Cache for MemoryCache {
-    async fn put(&self, key: &str, value: Bytes) -> Result<(), super::Error> {
+    /// Note: In-memory cache does not support TTL expiration.
+    /// For TTL support, use a distributed cache like NATS.
+    async fn put(
+        &self,
+        key: &str,
+        value: Bytes,
+        _ttl_secs: Option<u64>,
+    ) -> Result<(), super::Error> {
         self.data.insert(key.to_string(), value);
         Ok(())
     }
@@ -56,7 +63,7 @@ mod tests {
         let key = "test_key";
         let value = Bytes::from("test_value");
 
-        cache.put(key, value.clone()).await.unwrap();
+        cache.put(key, value.clone(), None).await.unwrap();
         let result = cache.get(key).await.unwrap();
 
         assert_eq!(result, Some(value));
@@ -75,7 +82,7 @@ mod tests {
         let key = "test_key";
         let value = Bytes::from("test_value");
 
-        cache.put(key, value.clone()).await.unwrap();
+        cache.put(key, value.clone(), None).await.unwrap();
         cache.delete(key).await.unwrap();
         let result = cache.get(key).await.unwrap();
 
@@ -89,8 +96,8 @@ mod tests {
         let value1 = Bytes::from("value1");
         let value2 = Bytes::from("value2");
 
-        cache.put(key, value1).await.unwrap();
-        cache.put(key, value2.clone()).await.unwrap();
+        cache.put(key, value1, None).await.unwrap();
+        cache.put(key, value2.clone(), None).await.unwrap();
         let result = cache.get(key).await.unwrap();
 
         assert_eq!(result, Some(value2));
@@ -103,7 +110,7 @@ mod tests {
         let key = "test_key";
         let value = Bytes::from("test_value");
 
-        cache1.put(key, value.clone()).await.unwrap();
+        cache1.put(key, value.clone(), None).await.unwrap();
         let result = cache2.get(key).await.unwrap();
 
         assert_eq!(result, Some(value));

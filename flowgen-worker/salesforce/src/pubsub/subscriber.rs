@@ -172,7 +172,7 @@ impl EventHandler {
                 {
                     let sanitized_topic = sanitize_topic_name(topic_name);
                     let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                    if let Err(e) = cache.put(&cache_key, ce.replay_id.into()).await {
+                    if let Err(e) = cache.put(&cache_key, ce.replay_id.into(), None).await {
                         error!(
                             "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
                         );

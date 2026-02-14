@@ -161,7 +161,10 @@ impl EventHandler {
 
             // Update cache with current execution time before sending the event to ensure
             // we don't lose track of execution times if the process crashes.
-            if let Err(cache_err) = cache.put(&cache_key, current_time.to_string().into()).await {
+            if let Err(cache_err) = cache
+                .put(&cache_key, current_time.to_string().into(), None)
+                .await
+            {
                 // Log warn for cache errors.
                 warn!("Failed to update cache: {:?}", cache_err);
             }
@@ -415,7 +418,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for MockCache {
-        async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), crate::cache::Error> {
+        async fn put(
+            &self,
+            key: &str,
+            value: bytes::Bytes,
+            _ttl_secs: Option<u64>,
+        ) -> Result<(), crate::cache::Error> {
             if self.should_error {
                 Err(Box::new(MockError))
             } else {
