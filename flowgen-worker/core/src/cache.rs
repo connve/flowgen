@@ -3,6 +3,8 @@
 //! Provides traits and configuration for key-value caching systems used by
 //! tasks that need to maintain state between runs, such as replay identifiers.
 
+pub mod memory;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -11,7 +13,7 @@ use std::fmt::Debug;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Configuration options for cache operations.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CacheOptions {
     /// Optional key override for cache insertion operations.
     pub insert_key: Option<String>,
@@ -30,7 +32,9 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Arguments
     /// * `key` - The key to store the value under
     /// * `value` - The binary data to store
-    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), Error>;
+    /// * `ttl_secs` - Optional time-to-live in seconds. If None, value persists indefinitely.
+    async fn put(&self, key: &str, value: bytes::Bytes, ttl_secs: Option<u64>)
+        -> Result<(), Error>;
 
     /// Retrieves a value from the cache by key.
     ///
@@ -38,8 +42,10 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// * `key` - The key to retrieve the value for
     ///
     /// # Returns
-    /// The cached binary data or an error if the key is not found
-    async fn get(&self, key: &str) -> Result<bytes::Bytes, Error>;
+    /// * `Ok(Some(data))` - Key exists with data
+    /// * `Ok(None)` - Key not found
+    /// * `Err(e)` - Operation failed (connection error, auth error, etc.)
+    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, Error>;
 
     /// Deletes a value from the cache by key.
     ///
@@ -76,7 +82,12 @@ mod tests {
 
     #[async_trait]
     impl Cache for MockCache {
-        async fn put(&self, _key: &str, _value: bytes::Bytes) -> Result<(), Error> {
+        async fn put(
+            &self,
+            _key: &str,
+            _value: bytes::Bytes,
+            _ttl_secs: Option<u64>,
+        ) -> Result<(), Error> {
             if self.should_error {
                 Err(Box::new(MockError))
             } else {
@@ -84,11 +95,11 @@ mod tests {
             }
         }
 
-        async fn get(&self, key: &str) -> Result<bytes::Bytes, Error> {
+        async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, Error> {
             if self.should_error {
                 Err(Box::new(MockError))
             } else {
-                Ok(self.data.get(key).cloned().unwrap_or_default())
+                Ok(self.data.get(key).cloned())
             }
         }
 
@@ -109,7 +120,7 @@ mod tests {
         };
 
         let result = cache
-            .put("test_key", bytes::Bytes::from("test_value"))
+            .put("test_key", bytes::Bytes::from("test_value"), None)
             .await;
         assert!(result.is_ok());
     }
@@ -129,7 +140,19 @@ mod tests {
 
         let result = cache.get("existing_key").await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), bytes::Bytes::from("existing_value"));
+        assert_eq!(result.unwrap(), Some(bytes::Bytes::from("existing_value")));
+    }
+
+    #[tokio::test]
+    async fn test_cache_get_not_found() {
+        let cache = MockCache {
+            data: HashMap::new(),
+            should_error: false,
+        };
+
+        let result = cache.get("nonexistent_key").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 
     #[test]

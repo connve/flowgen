@@ -29,8 +29,8 @@ pub struct TaskContext {
     pub flow: FlowOptions,
     /// Task manager for centralized task lifecycle management.
     pub task_manager: std::sync::Arc<crate::task::manager::TaskManager>,
-    /// Optional shared cache for task operations.
-    pub cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
+    /// Shared cache for task operations.
+    pub cache: std::sync::Arc<dyn crate::cache::Cache>,
     /// Optional shared HTTP server for webhook tasks.
     pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
     /// Optional resource loader for loading external assets (SQL files, templates, etc.).
@@ -44,7 +44,7 @@ impl std::fmt::Debug for TaskContext {
         f.debug_struct("TaskContext")
             .field("flow", &self.flow)
             .field("task_manager", &"<TaskManager>")
-            .field("cache", &self.cache.as_ref().map(|_| "<Cache>"))
+            .field("cache", &"<Cache>")
             .field(
                 "http_server",
                 &self.http_server.as_ref().map(|_| "<HttpServer>"),
@@ -64,7 +64,7 @@ pub struct TaskContextBuilder {
     flow_labels: Option<Map<String, Value>>,
     /// Task manager for centralized task lifecycle management.
     task_manager: Option<std::sync::Arc<crate::task::manager::TaskManager>>,
-    /// Optional shared cache for task operations.
+    /// Shared cache for task operations.
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
     /// Optional shared HTTP server for webhook tasks.
     http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
@@ -110,12 +110,12 @@ impl TaskContextBuilder {
         self
     }
 
-    /// Sets the optional cache for task operations.
+    /// Sets the cache for task operations.
     ///
     /// # Arguments
-    /// * `cache` - Optional cache instance
-    pub fn cache(mut self, cache: Option<std::sync::Arc<dyn crate::cache::Cache>>) -> Self {
-        self.cache = cache;
+    /// * `cache` - Cache instance
+    pub fn cache(mut self, cache: std::sync::Arc<dyn crate::cache::Cache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -167,7 +167,9 @@ impl TaskContextBuilder {
             task_manager: self
                 .task_manager
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_manager".to_string()))?,
-            cache: self.cache,
+            cache: self
+                .cache
+                .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
             http_server: self.http_server,
             resource_loader: self.resource_loader,
             retry: self.retry,
@@ -194,10 +196,13 @@ mod tests {
         labels.insert("environment".to_string(), Value::String("test".to_string()));
 
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
             .flow_name("test-flow".to_string())
             .flow_labels(Some(labels.clone()))
             .task_manager(task_manager)
+            .cache(cache)
             .build()
             .unwrap();
 
@@ -222,9 +227,12 @@ mod tests {
     #[test]
     fn test_task_context_builder_defaults() {
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
             .flow_name("default-test".to_string())
             .task_manager(task_manager)
+            .cache(cache)
             .build()
             .unwrap();
 
@@ -242,10 +250,13 @@ mod tests {
         labels.insert("type".to_string(), Value::String("test".to_string()));
 
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
             .flow_name("chain-test".to_string())
             .flow_labels(Some(labels.clone()))
             .task_manager(task_manager)
+            .cache(cache)
             .build()
             .unwrap();
 
@@ -262,10 +273,13 @@ mod tests {
         );
 
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
             .flow_name("clone-test".to_string())
             .flow_labels(Some(labels.clone()))
             .task_manager(task_manager)
+            .cache(cache)
             .build()
             .unwrap();
 

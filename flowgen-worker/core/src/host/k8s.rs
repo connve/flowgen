@@ -64,8 +64,12 @@ pub enum Error {
     MissingLeaseSpec,
     #[error("Existing lease has no holder identity")]
     MissingHolderIdentity,
+    #[error("Existing lease has no resource version")]
+    MissingResourceVersion,
     #[error("Lease {name} is held by another instance: {holder}")]
     LeaseHeldByOther { name: String, holder: String },
+    #[error("Failed to acquire lease {name}: lost race condition to another pod during takeover attempt")]
+    LeaseTakeoverRaceCondition { name: String },
     #[error("Missing required attribute: {0}")]
     MissingBuilderAttribute(String),
     #[error("Not running in Kubernetes cluster (service account token not found at /var/run/secrets/kubernetes.io/serviceaccount/)")]
@@ -169,16 +173,12 @@ impl Host for K8sHost {
 
         match api.create(&PostParams::default(), &lease).await {
             Ok(_) => {
-                info!("Created lease: {} in namespace: {}", name, namespace);
+                info!("Pod {} acquired lease {}", self.holder_identity, name);
                 Ok(())
             }
             Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
-                debug!(
-                    "Lease already exists: {} in namespace: {}, checking holder",
-                    name, namespace
-                );
+                debug!("Lease {} already exists, checking holder", name);
 
-                // Lease already exists, check if we're the holder.
                 let existing_lease = api
                     .get(name)
                     .await
@@ -194,7 +194,6 @@ impl Host for K8sHost {
                     .as_ref()
                     .ok_or_else(|| Box::new(Error::MissingHolderIdentity) as crate::host::Error)?;
 
-                // Check if lease is expired.
                 let is_expired = if let (Some(renew_time), Some(duration)) =
                     (spec.renew_time.as_ref(), spec.lease_duration_seconds)
                 {
@@ -207,11 +206,7 @@ impl Host for K8sHost {
                 };
 
                 if existing_holder == &self.holder_identity {
-                    // We're the holder, renew the lease.
-                    debug!(
-                        "We hold the lease: {} in namespace: {}, renewing",
-                        name, namespace
-                    );
+                    debug!("Pod {} renewing lease {}", self.holder_identity, name);
 
                     let renew_patch = serde_json::json!({
                         "spec": {
@@ -225,36 +220,51 @@ impl Host for K8sHost {
                             Box::new(Error::RenewLease { source }) as crate::host::Error
                         })?;
 
-                    debug!("Renewed lease: {} in namespace: {}", name, namespace);
+                    debug!("Pod {} renewed lease {}", self.holder_identity, name);
                     Ok(())
                 } else if is_expired {
-                    // Lease is expired, take it over.
                     debug!(
-                        "Lease {} in namespace {} is expired, taking over from {}",
-                        name, namespace, existing_holder
+                        "Pod {} attempting to take over expired lease {} from {}",
+                        self.holder_identity, name, existing_holder
                     );
 
-                    let takeover_patch = serde_json::json!({
-                        "spec": {
-                            "holderIdentity": self.holder_identity,
-                            "acquireTime": MicroTime(chrono::Utc::now()),
-                            "renewTime": MicroTime(chrono::Utc::now()),
-                        }
-                    });
+                    if existing_lease.metadata.resource_version.is_none() {
+                        return Err(Box::new(Error::MissingResourceVersion) as crate::host::Error);
+                    }
 
-                    api.patch(name, &PatchParams::default(), &Patch::Merge(takeover_patch))
+                    let mut updated_lease = existing_lease.clone();
+                    if let Some(ref mut spec) = updated_lease.spec {
+                        let now = MicroTime(chrono::Utc::now());
+                        spec.holder_identity = Some(self.holder_identity.clone());
+                        spec.acquire_time = Some(now.clone());
+                        spec.renew_time = Some(now);
+                    }
+
+                    match api
+                        .replace(name, &PostParams::default(), &updated_lease)
                         .await
-                        .map_err(|source| {
-                            Box::new(Error::TakeoverLease { source }) as crate::host::Error
-                        })?;
-
-                    info!(
-                        "Took over expired lease: {} in namespace: {}",
-                        name, namespace
-                    );
-                    Ok(())
+                    {
+                        Ok(_) => {
+                            info!(
+                                "Pod {} took over expired lease {} from {}",
+                                self.holder_identity, name, existing_holder
+                            );
+                            Ok(())
+                        }
+                        Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
+                            debug!(
+                                "Pod {} lost takeover race for lease {} to another pod",
+                                self.holder_identity, name
+                            );
+                            Err(Box::new(Error::LeaseTakeoverRaceCondition {
+                                name: name.to_string(),
+                            }) as crate::host::Error)
+                        }
+                        Err(source) => {
+                            Err(Box::new(Error::TakeoverLease { source }) as crate::host::Error)
+                        }
+                    }
                 } else {
-                    // Someone else holds the lease and it's not expired.
                     Err(Box::new(Error::LeaseHeldByOther {
                         name: name.to_string(),
                         holder: existing_holder.clone(),
@@ -282,7 +292,7 @@ impl Host for K8sHost {
             .await
             .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
-        info!("Deleted lease: {} in namespace: {}", name, namespace);
+        info!("Pod {} deleted lease {}", self.holder_identity, name);
         Ok(())
     }
 
@@ -309,7 +319,7 @@ impl Host for K8sHost {
             .await
             .map_err(|source| Box::new(Error::PatchLease { source }) as crate::host::Error)?;
 
-        debug!("Renewed lease: {} in namespace: {}", name, namespace);
+        debug!("Pod {} renewed lease {}", self.holder_identity, name);
         Ok(())
     }
 }

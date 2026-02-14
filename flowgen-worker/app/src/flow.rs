@@ -257,8 +257,8 @@ pub struct Flow {
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
     /// An optional client for host-level coordination (e.g., Kubernetes), passed in from the main application.
     host: Option<Arc<dyn flowgen_core::host::Host>>,
-    /// An optional shared cache, passed in from the main application.
-    cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+    /// Shared cache, passed in from the main application.
+    cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
@@ -323,7 +323,7 @@ impl Flow {
             .flow_name(self.config.flow.name.clone())
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(Arc::clone(&task_manager))
-            .cache(self.cache.clone())
+            .cache(Arc::clone(&self.cache))
             .http_server(self.http_server.clone())
             .resource_loader(self.resource_loader.clone());
 
@@ -475,7 +475,7 @@ impl Flow {
             match leadership_rx.recv().await {
                 Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                     if !tasks_spawned {
-                        info!("Flow {} acquired leadership, will spawn tasks", flow_id);
+                        info!("Acquired leadership for flow {}, spawning tasks", flow_id);
                         tasks_spawned = true;
 
                         // Drain duplicate Leader messages
@@ -584,7 +584,10 @@ impl Flow {
                     match leadership_rx.recv().await {
                         Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                             if !tasks_spawned {
-                                info!("Flow {} re-acquired leadership, will spawn tasks", flow_id);
+                                info!(
+                                    "Re-acquired leadership for flow {}, spawning tasks",
+                                    flow_id
+                                );
                                 tasks_spawned = true;
 
                                 // Drain duplicate Leader messages
@@ -1039,7 +1042,7 @@ pub struct FlowBuilder {
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
     /// Optional host client for coordination.
     host: Option<Arc<dyn flowgen_core::host::Host>>,
-    /// Optional shared cache instance.
+    /// Shared cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
     event_buffer_size: Option<usize>,
@@ -1074,8 +1077,8 @@ impl FlowBuilder {
     }
 
     /// Sets the shared cache instance.
-    pub fn cache(mut self, cache: Option<Arc<dyn flowgen_core::cache::Cache>>) -> Self {
-        self.cache = cache;
+    pub fn cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -1111,7 +1114,9 @@ impl FlowBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
             host: self.host,
-            cache: self.cache,
+            cache: self
+                .cache
+                .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
@@ -1184,8 +1189,10 @@ mod tests {
                 require_leader_election: None,
             },
         });
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
 
-        let result = FlowBuilder::new().config(flow_config).build();
+        let result = FlowBuilder::new().config(flow_config).cache(cache).build();
 
         assert!(result.is_ok());
         let flow = result.unwrap();
@@ -1203,10 +1210,13 @@ mod tests {
             },
         });
         let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
 
         let result = FlowBuilder::new()
             .config(flow_config.clone())
             .http_server(server)
+            .cache(cache)
             .build();
 
         assert!(result.is_ok());

@@ -1,10 +1,8 @@
-//! NATS JetStream Key-Value store based cache implementation.
-//! Includes [`Cache`], [`CacheBuilder`], and [`Error`].
+//! NATS JetStream Key-Value store cache implementation.
 
 use flowgen_core::client::Client as FlowgenClientTrait;
 use std::path::PathBuf;
 
-/// Errors during NATS-based cache interaction.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("NATS client error: {source}")]
@@ -22,6 +20,16 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::kv::PutError,
     },
+    #[error("JetStream publish error: {source}")]
+    JetStreamPublish {
+        #[source]
+        source: async_nats::jetstream::context::PublishError,
+    },
+    #[error("JetStream publish acknowledgment error: {source}")]
+    JetStreamPublishAck {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::context::PublishErrorKind>,
+    },
     #[error("KV delete error: {source}")]
     KVDelete {
         #[source]
@@ -32,8 +40,6 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::context::CreateKeyValueError,
     },
-    #[error("No value in provided buffer")]
-    EmptyBuffer,
     #[error("Missing required value KV Store")]
     MissingKVStore,
     #[error("Missing required value JetStream Context")]
@@ -42,31 +48,18 @@ pub enum Error {
     MissingBuilderAttribute(String),
 }
 
-/// NATS JetStream Key-Value (KV) store cache.
-///
-/// Interact with a NATS KV bucket. Create with [`CacheBuilder`].
+/// NATS JetStream Key-Value store cache.
 #[derive(Debug, Default)]
 pub struct Cache {
-    /// Path to NATS credentials file.
     credentials_path: PathBuf,
-    /// NATS server URL. Defaults to "localhost:4222".
     url: String,
-    /// NATS JetStream KV store instance; `None` until `init()`.
     store: Option<async_nats::jetstream::kv::Store>,
+    jetstream: Option<async_nats::jetstream::Context>,
 }
 
 impl Cache {
     /// Connects to NATS and initializes the KV bucket.
-    ///
-    /// Consumes `self`, returns `Cache` with an active KV store connection.
-    ///
-    /// # Arguments
-    /// * `bucket` - NATS JetStream KV bucket name.
-    ///
-    /// # Errors
-    /// If NATS connection, authentication, or KV bucket access/creation fails.
     pub async fn init(mut self, bucket: &str) -> Result<Self, Error> {
-        // Connect to NATS.
         let client = crate::client::ClientBuilder::new()
             .credentials_path(self.credentials_path.clone())
             .url(self.url.clone())
@@ -80,13 +73,13 @@ impl Cache {
             .jetstream
             .ok_or_else(|| Error::MissingJetStreamContext)?;
 
-        // Get or create KV store.
         let store = match jetstream.get_key_value(bucket).await {
             Ok(store) => store,
             Err(_) => jetstream
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: bucket.to_string(),
                     history: 10,
+                    limit_markers: None, // Enable per-key TTL without maximum limit
                     ..Default::default()
                 })
                 .await
@@ -94,60 +87,71 @@ impl Cache {
         };
 
         self.store = Some(store);
+        self.jetstream = Some(jetstream);
         Ok(self)
     }
 }
 
 #[async_trait::async_trait]
 impl flowgen_core::cache::Cache for Cache {
-    /// Puts a key-value pair into the NATS KV store.
-    ///
-    /// # Arguments
-    /// * `key` - Key for the value.
-    /// * `value` - Value to store.
-    ///
-    /// # Errors
-    /// If store is uninitialized or NATS `put` fails.
-    async fn put(&self, key: &str, value: bytes::Bytes) -> Result<(), flowgen_core::cache::Error> {
+    async fn put(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<(), flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
+
+        if let Some(ttl) = ttl_secs {
+            let jetstream = self.jetstream.as_ref().ok_or_else(|| {
+                Box::new(Error::MissingJetStreamContext) as flowgen_core::cache::Error
+            })?;
+
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(
+                async_nats::header::NATS_MESSAGE_TTL,
+                async_nats::HeaderValue::from(ttl),
+            );
+
+            let subject = format!(
+                "{}{}",
+                store.put_prefix.as_ref().unwrap_or(&store.prefix),
+                key
+            );
+
+            jetstream
+                .publish_with_headers(subject, headers, value)
+                .await
+                .map_err(|source| {
+                    Box::new(Error::JetStreamPublish { source }) as flowgen_core::cache::Error
+                })?
+                .await
+                .map_err(|source| {
+                    Box::new(Error::JetStreamPublishAck { source }) as flowgen_core::cache::Error
+                })?;
+        } else {
+            store
+                .put(key, value)
+                .await
+                .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
+        }
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, flowgen_core::cache::Error> {
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
         store
-            .put(key, value)
-            .await
-            .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
-        Ok(())
-    }
-
-    /// Retrieves a value from the NATS KV store.
-    ///
-    /// # Arguments
-    /// * `key` - Key of the value to retrieve.
-    ///
-    /// # Errors
-    /// If store is uninitialized, NATS `get` fails, or key not found/value empty.
-    async fn get(&self, key: &str) -> Result<bytes::Bytes, flowgen_core::cache::Error> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
-        // Map Ok(None) (key not found/empty) from NATS to Error::EmptyBuffer.
-        let bytes = store
             .get(key)
             .await
-            .map_err(|e| Box::new(Error::KVEntry { source: e }) as flowgen_core::cache::Error)?
-            .ok_or_else(|| Box::new(Error::EmptyBuffer) as flowgen_core::cache::Error)?;
-        Ok(bytes)
+            .map_err(|e| Box::new(Error::KVEntry { source: e }) as flowgen_core::cache::Error)
     }
 
-    /// Deletes a key from the NATS KV store.
-    ///
-    /// # Arguments
-    /// * `key` - Key to delete.
-    ///
-    /// # Errors
-    /// If store is uninitialized or NATS `delete` fails.
     async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
         let store = self
             .store
@@ -278,7 +282,6 @@ mod tests {
 
     #[test]
     fn test_cache_structure() {
-        // Test that Cache can be constructed and has the expected structure
         let path = PathBuf::from("/test/creds.jwt");
         let cache = Cache {
             credentials_path: path.clone(),
@@ -288,8 +291,4 @@ mod tests {
         assert_eq!(cache.credentials_path, path);
         assert!(cache.store.is_none());
     }
-
-    // Note: We cannot easily test the async methods (init, put, get) without
-    // a real NATS server connection, but we can test the builder pattern
-    // and error types which cover the main functionality
 }

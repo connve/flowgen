@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, warn, Instrument};
 
 /// Lease renewal interval in seconds.
 const DEFAULT_LEASE_RENEWAL_INTERVAL_SECS: u64 = 10;
@@ -35,8 +35,6 @@ fn spawn_renewal_task(
             interval.tick().await;
             if let Err(e) = host.renew_lease(&lease_name, None).await {
                 error!(error = %e, task_id = %task_id, "Failed to renew lease");
-            } else {
-                debug!(task_id = %task_id, "Successfully renewed lease");
             }
         }
     })
@@ -97,14 +95,14 @@ impl TaskManager {
         tokio::spawn(
             async move {
                 while let Some(registration) = rx.recv().await {
-                info!("Received task registration: {:?}", registration.task_id);
+                debug!("Received task registration: {:?}", registration.task_id);
                 let result = if registration.leader_election_options.is_some() {
                     if let Some(ref host_client) = host {
                         // Sanitize task_id to be DNS-safe (RFC 1123): replace underscores with hyphens.
                         let lease_name = registration.task_id.replace('_', "-").to_lowercase();
                         match host_client.create_lease(&lease_name).await {
                             Ok(_) => {
-                                // Successfully acquired the lease, spawn renewal task.
+                                // Successfully acquired the lease from K8s API (authoritative source).
                                 let renewal_handle = spawn_renewal_task(
                                     registration.task_id.clone(),
                                     lease_name.clone(),
@@ -140,7 +138,7 @@ impl TaskManager {
                                         interval.tick().await;
                                         match host.create_lease(&lease_name_clone).await {
                                             Ok(_) => {
-                                                // Successfully acquired the lease, notify task.
+                                                // Successfully acquired the lease from K8s API (authoritative source).
                                                 debug!(
                                                     "Acquired lease for task: {} after retry",
                                                     task_id
@@ -262,8 +260,6 @@ impl TaskManager {
 
                 if let Err(e) = host.delete_lease(&lease_name, None).await {
                     warn!("Failed to delete lease {} on shutdown: {}", lease_name, e);
-                } else {
-                    debug!("Deleted lease: {} on shutdown", lease_name);
                 }
             }
         }

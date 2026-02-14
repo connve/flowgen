@@ -418,11 +418,14 @@ mod tests {
             Value::String("Clone Test".to_string()),
         );
         let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
         Arc::new(
             flowgen_core::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
+                .cache(cache)
                 .build()
                 .unwrap(),
         )

@@ -720,7 +720,8 @@ mod tests {
             task_manager,
             retry: None,
             resource_loader: None,
-            cache: None,
+            cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
         });
 
@@ -776,7 +777,8 @@ mod tests {
             task_manager,
             retry: None,
             resource_loader: None,
-            cache: None,
+            cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
         });
 

@@ -1,5 +1,5 @@
 use arrow::ipc::writer::StreamWriter;
-use async_nats::jetstream::context::Publish;
+use async_nats::jetstream::message::PublishMessage;
 use bincode::{deserialize, serialize};
 use flowgen_core::event::{AvroData, EventBuilder, EventData};
 
@@ -37,7 +37,7 @@ pub enum Error {
 pub trait FlowgenMessageExt {
     type Error;
     /// Convert a flowgen event to a NATS JetStream publish message.
-    fn to_publish(&self) -> Result<Publish, Self::Error>;
+    fn to_publish(&self) -> Result<PublishMessage, Self::Error>;
 }
 
 /// Trait for converting NATS messages to flowgen events.
@@ -53,8 +53,8 @@ pub trait NatsMessageExt {
 
 impl FlowgenMessageExt for flowgen_core::event::Event {
     type Error = Error;
-    fn to_publish(&self) -> Result<Publish, Self::Error> {
-        let mut event = Publish::build();
+    fn to_publish(&self) -> Result<PublishMessage, Self::Error> {
+        let mut event = PublishMessage::build();
         if let Some(id) = &self.id {
             event = event.message_id(id)
         }

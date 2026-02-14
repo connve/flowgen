@@ -631,10 +631,13 @@ mod tests {
         });
         let (tx, rx) = mpsc::channel(10);
         let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
         let task_context = Arc::new(
             flowgen_core::task::context::TaskContextBuilder::new()
                 .flow_name("test".to_string())
                 .task_manager(task_manager)
+                .cache(cache)
                 .build()
                 .unwrap(),
         );
