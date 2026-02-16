@@ -56,6 +56,9 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        {{- with $worker.env }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ $worker.service.port }}

@@ -91,6 +91,12 @@ flowgen-worker:
     configPath: /etc/app/config.yaml
     rustLog: "info,async_nats=warn"
 
+  # Environment variables accessible in flow configs via {{env.VAR_NAME}}
+  env: []
+    # Example:
+    # - name: MY_VAR
+    #   value: "my-value"
+
   volumes:
     config:
       enabled: true

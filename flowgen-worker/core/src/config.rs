@@ -147,7 +147,17 @@ pub trait ConfigExt {
     {
         let mut config_value =
             serde_json::to_value(self).map_err(|e| Error::SerdeJson { source: e })?;
-        let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+        let mut data_value =
+            serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+
+        // Add environment variables to the data context under "env" key.
+        // This allows templates to use {{env.VAR_NAME}} syntax.
+        if let serde_json::Value::Object(ref mut map) = data_value {
+            let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+            let env_value =
+                serde_json::to_value(&env_vars).map_err(|e| Error::SerdeJson { source: e })?;
+            map.insert("env".to_string(), env_value);
+        }
 
         let mut handlebars = Handlebars::new();
         // Disable HTML escaping since we're rendering JSON, not HTML
@@ -273,5 +283,54 @@ mod tests {
         let data = json!({"event": {"data": {"field": "value"}}});
         let rendered = render_template(template, &data).unwrap();
         assert_eq!(rendered, "value");
+    }
+
+    #[test]
+    fn test_config_render_with_env_vars() {
+        // Set test environment variable
+        std::env::set_var("TEST_PROJECT_ID", "my-test-project");
+        std::env::set_var("TEST_DATASET", "analytics");
+
+        let config = TestConfig {
+            name: "{{env.TEST_PROJECT_ID}}".to_string(),
+            value: 42,
+            url: "https://example.com/{{env.TEST_DATASET}}".to_string(),
+        };
+
+        let data = json!({});
+        let rendered = config.render(&data).unwrap();
+
+        assert_eq!(rendered.name, "my-test-project");
+        assert_eq!(rendered.url, "https://example.com/analytics");
+        assert_eq!(rendered.value, 42);
+
+        // Clean up
+        std::env::remove_var("TEST_PROJECT_ID");
+        std::env::remove_var("TEST_DATASET");
+    }
+
+    #[test]
+    fn test_config_render_with_env_and_event_vars() {
+        std::env::set_var("TEST_BASE_URL", "https://api.example.com");
+
+        let config = TestConfig {
+            name: "{{user.name}}".to_string(),
+            value: 100,
+            url: "{{env.TEST_BASE_URL}}/{{user.id}}".to_string(),
+        };
+
+        let data = json!({
+            "user": {
+                "name": "Alice",
+                "id": "456"
+            }
+        });
+
+        let rendered = config.render(&data).unwrap();
+
+        assert_eq!(rendered.name, "Alice");
+        assert_eq!(rendered.url, "https://api.example.com/456");
+
+        std::env::remove_var("TEST_BASE_URL");
     }
 }
