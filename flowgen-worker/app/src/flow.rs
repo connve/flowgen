@@ -88,6 +88,12 @@ pub enum Error {
     /// Error in object store write task.
     #[error(transparent)]
     ObjectStoreWrite(#[from] flowgen_object_store::write::Error),
+    /// Error in object store list task.
+    #[error(transparent)]
+    ObjectStoreList(#[from] flowgen_object_store::list::Error),
+    /// Error in object store move task.
+    #[error(transparent)]
+    ObjectStoreMove(#[from] flowgen_object_store::r#move::Error),
     /// Error in generate subscriber task.
     #[error(transparent)]
     GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
@@ -949,6 +955,48 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::object_store_list(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_object_store::list::ListProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::object_store_move(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_object_store::r#move::MoveProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)

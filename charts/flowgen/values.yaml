@@ -45,6 +45,9 @@ flowgen-worker:
     runAsNonRoot: true
     runAsUser: 65534
 
+  # Termination grace period must be >= preStop sleep duration
+  terminationGracePeriodSeconds: 45
+
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:
@@ -53,6 +56,15 @@ flowgen-worker:
     readOnlyRootFilesystem: true
     seccompProfile:
       type: RuntimeDefault
+
+  # Lifecycle hooks for graceful shutdown during rollouts
+  lifecycle:
+    preStop:
+      exec:
+        # Sleep for 30 seconds to allow leader election lease to expire gracefully.
+        # This prevents new pods from waiting the full lease duration (60s) during rollouts.
+        # Adjust this value based on your lease_duration_secs setting.
+        command: ["/bin/sh", "-c", "sleep 30"]
 
   service:
     type: ClusterIP

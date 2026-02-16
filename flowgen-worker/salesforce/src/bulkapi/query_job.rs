@@ -364,11 +364,23 @@ impl EventHandler {
             events.push(EventData::ArrowRecordBatch(empty_batch));
         }
 
-        // Emit all parsed events.
-        for event_data in events {
+        // Emit all parsed events with job_id-based event IDs.
+        // Set event.id to job_id-batch_index for traceable, idempotent file naming.
+        // This allows correlating files back to Salesforce jobs while handling multiple batches.
+        let num_events = events.len();
+        for (batch_index, event_data) in events.into_iter().enumerate() {
+            let event_id = if num_events == 1 {
+                // Single batch: use job_id directly
+                job_id.clone()
+            } else {
+                // Multiple batches: append batch index
+                format!("{job_id}-{batch_index}")
+            };
+
             let e = EventBuilder::new()
                 .data(event_data)
                 .subject(config.name.to_owned())
+                .id(event_id)
                 .task_id(self.current_task_id)
                 .task_type(self.task_type)
                 .build()?;

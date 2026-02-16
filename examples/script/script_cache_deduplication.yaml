@@ -1,0 +1,43 @@
+flow:
+  name: script_cache_deduplication
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 10 seconds for testing.
+    - generate:
+        name: trigger
+        interval: 10s
+
+    # Script that uses ctx.cache to deduplicate events.
+    # This pattern is useful for preventing reprocessing of the same data.
+    - script:
+        name: deduplicate_with_cache
+        code: |
+          // Generate a unique key for this event (e.g., based on ID or content hash)
+          let event_id = event.data.id;
+          let cache_key = "processed:" + event_id;
+
+          // Check if we've already processed this event
+          let already_processed = ctx.cache.get(cache_key);
+
+          if already_processed != () {
+            // Event already processed, skip it by returning null
+            print("Event " + event_id + " already processed, skipping");
+            return null;
+          }
+
+          // Mark as processed with 24 hour TTL (86400 seconds)
+          ctx.cache.put(cache_key, "true", 86400);
+
+          // Add processing metadata
+          ctx.meta.processed_at = timestamp_now();
+          ctx.meta.cache_key = cache_key;
+
+          // Return event for downstream processing
+          event
+
+    # Log only new (non-duplicate) events.
+    - log:
+        name: log_new_events
+        level: info
+        structured: false

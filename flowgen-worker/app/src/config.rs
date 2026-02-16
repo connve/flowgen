@@ -60,6 +60,10 @@ pub enum TaskType {
     object_store_read(flowgen_object_store::config::ReadProcessor),
     /// Object store write task.
     object_store_write(flowgen_object_store::config::WriteProcessor),
+    /// Object store list task.
+    object_store_list(flowgen_object_store::config::ListProcessor),
+    /// Object store move task.
+    object_store_move(flowgen_object_store::config::MoveProcessor),
     /// Data generation task.
     generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
@@ -95,6 +99,8 @@ impl TaskType {
             TaskType::buffer(_) => "buffer",
             TaskType::object_store_read(_) => "object_store_read",
             TaskType::object_store_write(_) => "object_store_write",
+            TaskType::object_store_list(_) => "object_store_list",
+            TaskType::object_store_move(_) => "object_store_move",
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
             TaskType::http_webhook(_) => "http_webhook",

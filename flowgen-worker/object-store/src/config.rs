@@ -40,6 +40,40 @@ pub struct ReadProcessor {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
+/// Object Store list processor configuration.
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+pub struct ListProcessor {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to the object store or file location.
+    pub path: PathBuf,
+    /// Optional path to credentials file.
+    pub credentials_path: Option<PathBuf>,
+    /// Additional client connection options.
+    pub client_options: Option<HashMap<String, String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+/// Object Store move processor configuration.
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+pub struct MoveProcessor {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Source path pattern (supports wildcards).
+    pub source: PathBuf,
+    /// Destination path for moved files.
+    pub destination: PathBuf,
+    /// Optional path to credentials file.
+    pub credentials_path: Option<PathBuf>,
+    /// Additional client connection options.
+    pub client_options: Option<HashMap<String, String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
 /// Output format for writing data to object storage.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -100,6 +134,8 @@ pub enum HiveParitionKeys {
 /// Implement default ConfigExt traits.
 impl ConfigExt for ReadProcessor {}
 impl ConfigExt for WriteProcessor {}
+impl ConfigExt for ListProcessor {}
+impl ConfigExt for MoveProcessor {}
 
 #[cfg(test)]
 mod tests {

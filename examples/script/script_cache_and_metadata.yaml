@@ -1,0 +1,96 @@
+flow:
+  name: script_cache_and_metadata
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 30 seconds.
+    - generate:
+        name: trigger
+        interval: 30s
+
+    # Comprehensive example demonstrating both ctx.cache and ctx.meta usage.
+    - script:
+        name: process_with_cache_and_metadata
+        code: |
+          // ============================================
+          // CACHE OPERATIONS (ctx.cache)
+          // ============================================
+
+          // 1. Check rate limiting using cache
+          let rate_limit_key = "rate_limit:user:" + event.data.user_id;
+          let request_count = ctx.cache.get(rate_limit_key);
+
+          if request_count == () {
+            // First request in this window, set to 1 with 60 second TTL
+            ctx.cache.put(rate_limit_key, "1", 60);
+          } else {
+            let count = parse_int(request_count);
+            if count >= 10 {
+              // Rate limit exceeded
+              ctx.meta.rate_limited = true;
+              ctx.meta.reason = "exceeded_10_requests_per_minute";
+              return null;
+            }
+            // Increment counter
+            ctx.cache.put(rate_limit_key, to_string(count + 1), 60);
+          }
+
+          // 2. Use cache for computed values (avoid recomputation)
+          let user_id = event.data.user_id;
+          let user_profile_key = "user_profile:" + user_id;
+          let cached_profile = ctx.cache.get(user_profile_key);
+
+          let user_profile;
+          if cached_profile != () {
+            // Use cached profile
+            user_profile = cached_profile;
+            ctx.meta.profile_source = "cache";
+          } else {
+            // Simulate expensive profile computation
+            user_profile = "premium_user";  // In reality, fetch from API or compute
+            // Cache for 1 hour (3600 seconds)
+            ctx.cache.put(user_profile_key, user_profile, 3600);
+            ctx.meta.profile_source = "computed";
+          }
+
+          // ============================================
+          // METADATA OPERATIONS (ctx.meta)
+          // ============================================
+
+          // 1. Add processing metadata
+          ctx.meta.processed_at = timestamp_now();
+          ctx.meta.processor_version = "2.1";
+          ctx.meta.user_profile = user_profile;
+
+          // 2. Add conditional metadata based on data
+          if event.data.amount > 1000 {
+            ctx.meta.requires_approval = true;
+            ctx.meta.approval_threshold = "high_value";
+          }
+
+          // 3. Track transformations
+          ctx.meta.transformations_applied = [
+            "rate_limit_check",
+            "profile_enrichment",
+            "amount_validation"
+          ];
+
+          // ============================================
+          // CACHE CLEANUP (optional)
+          // ============================================
+
+          // Delete cache entries when no longer needed
+          if event.data.clear_cache == true {
+            ctx.cache.delete(user_profile_key);
+            ctx.meta.cache_cleared = true;
+          }
+
+          // Return enriched event with metadata
+          event.data.user_profile = user_profile;
+          event
+
+    # Log the enriched event with full metadata.
+    - log:
+        name: log_enriched_event
+        level: info
+        structured: true

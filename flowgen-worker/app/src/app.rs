@@ -173,12 +173,10 @@ impl App {
                             };
 
                             if seen_paths.contains(&canonical_path) {
-                                info!("Skipping duplicate flow (symlink): original={:?}, canonical={:?}", path, canonical_path);
                                 return None;
                             }
                             seen_paths.insert(canonical_path.clone());
 
-                            info!("Loading flow: {:?} (canonical: {:?})", path, canonical_path);
                             let contents = match std::fs::read_to_string(&path) {
                                 Ok(c) => c,
                                 Err(source) => {
@@ -214,7 +212,10 @@ impl App {
                             };
 
                             match config.try_deserialize::<FlowConfig>() {
-                                Ok(flow_config) => Some(flow_config),
+                                Ok(flow_config) => {
+                                    info!("Loaded flow: {}", flow_config.flow.name);
+                                    Some(flow_config)
+                                }
                                 Err(source) => {
                                     let err = Error::FlowConfigDeserialize {
                                         path: path.clone(),
