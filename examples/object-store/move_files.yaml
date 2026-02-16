@@ -1,0 +1,56 @@
+flow:
+  require_leader_election: true
+  name: move_files_after_processing
+  tasks:
+    # Generate triggers the flow every 5 minutes.
+    - generate:
+        name: trigger
+        interval: 5m
+
+    # Object store list finds all parquet files in the source directory.
+    - object_store_list:
+        name: list_unprocessed_files
+        path: gs://my-bucket/incoming/*.parquet
+        credentials_path: /etc/gcp/credentials.json
+
+    # Script checks if there are files to process and prepares metadata.
+    - script:
+        name: check_files
+        code: |
+          if event.data.files.len() == 0 {
+            return ();
+          }
+
+          ctx.meta.file_count = event.data.files.len();
+          ctx.meta.source_pattern = event.data.path;
+          event
+
+    # Load files to BigQuery staging table.
+    - gcp_bigquery_job:
+        name: load_to_bigquery
+        operation: create
+        project_id: my-project
+        credentials_path: /etc/gcp/credentials.json
+        job_type: load
+        source_uris:
+          - "gs://my-bucket/incoming/*.parquet"
+        destination_table:
+          project_id: my-project
+          dataset_id: staging
+          table_id: data
+        source_format: parquet
+        write_disposition: write_append
+        create_disposition: create_if_needed
+        autodetect: true
+
+    # Object store move archives processed files to a different location.
+    # Files are copied to destination then deleted from source (atomic move).
+    - object_store_move:
+        name: archive_processed_files
+        source: gs://my-bucket/incoming/*.parquet
+        destination: gs://my-bucket/processed/
+        credentials_path: /etc/gcp/credentials.json
+
+    # Log prints the move result with file count.
+    - log:
+        name: print_move_result

@@ -1,0 +1,68 @@
+flow:
+  name: script_metadata_tracking
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 5 seconds.
+    - generate:
+        name: trigger
+        interval: 5s
+        count: 1
+
+    # First script adds initial metadata.
+    - script:
+        name: add_initial_metadata
+        code: |
+          // Add metadata that will persist through the event chain
+          ctx.meta.processing_started = timestamp_now();
+          ctx.meta.flow_step = "validation";
+          ctx.meta.version = "1.0";
+
+          // Validate the data
+          if event.data.amount == () {
+            ctx.meta.validation_error = "missing_amount";
+            return null;
+          }
+
+          ctx.meta.validation_status = "passed";
+          event
+
+    # Second script enriches data and updates metadata.
+    - script:
+        name: enrich_and_track
+        code: |
+          // Access metadata from previous step
+          let started_at = ctx.meta.processing_started;
+
+          // Enrich the data
+          event.data.enriched = true;
+          event.data.doubled_amount = event.data.amount * 2;
+
+          // Update metadata to track enrichment
+          ctx.meta.flow_step = "enrichment";
+          ctx.meta.enrichment_completed = timestamp_now();
+          ctx.meta.fields_added = ["enriched", "doubled_amount"];
+
+          event
+
+    # Final script logs metadata chain.
+    - script:
+        name: finalize_with_metadata
+        code: |
+          // Add final metadata
+          ctx.meta.flow_step = "finalization";
+          ctx.meta.processing_completed = timestamp_now();
+
+          // Calculate processing duration (if timestamps are available)
+          ctx.meta.status = "completed";
+
+          // Log the full metadata chain
+          print("Processing metadata: " + ctx.meta);
+
+          event
+
+    # Log the final event with all metadata.
+    - log:
+        name: log_with_metadata
+        level: info
+        structured: true

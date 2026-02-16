@@ -1,0 +1,30 @@
+flow:
+  name: script_advanced_external
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+
+    # Complex script loaded from external file.
+    # Demonstrates idempotency, stateful processing, and metadata tracking.
+    # Script is loaded from: <resource_path>/scripts/cache_and_metadata_advanced.rhai
+    #
+    # This pattern is recommended for:
+    # - Production workflows with complex logic
+    # - Idempotent processing requirements
+    # - Stateful transformations (running totals, aggregations)
+    # - Advanced caching strategies
+    # - Comprehensive metadata tracking
+    - script:
+        name: process_with_advanced_script
+        code:
+          resource: "scripts/cache_and_metadata_advanced.rhai"
+
+    # Log the enriched event with metadata.
+    - log:
+        name: log_result
+        level: info
+        structured: true

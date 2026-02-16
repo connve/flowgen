@@ -4,14 +4,14 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.53.0"
+version = "0.54.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { git = "https://github.com/connve/salesforce-rs" }
+salesforce_core = { git = "https://github.com/connve/salesforce-rs", branch = "feat/improved-http-client-handling" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }

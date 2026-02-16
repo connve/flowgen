@@ -31,6 +31,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "flowgen-worker.serviceAccountName" . }}
+      {{- with $worker.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
       securityContext:
         {{- toYaml $worker.podSecurityContext | nindent 8 }}
       containers:
@@ -40,6 +43,10 @@ spec:
           {{- toYaml $worker.securityContext | nindent 12 }}
         image: "{{ .Values.global.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+        {{- with $worker.lifecycle }}
+        lifecycle:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
         env:
         - name: CONFIG_PATH
           value: {{ $worker.config.configPath }}

@@ -1,0 +1,20 @@
+flow:
+  require_leader_election: true
+  name: list_files
+  tasks:
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # Object store list returns metadata for all files matching the path pattern.
+    # Useful for discovering files before processing them.
+    - object_store_list:
+        name: list_gcs_files
+        path: gs://my-bucket/data/*.parquet
+        credentials_path: /etc/gcp/credentials.json
+
+    # Log prints the list result with file count and metadata.
+    - log:
+        name: print_files

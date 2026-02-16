@@ -84,8 +84,27 @@ pub struct EventHandler {
     engine: Engine,
     /// Task type for event categorization and logging.
     task_type: &'static str,
-    /// Task context (unused but kept for consistency).
-    _task_context: Arc<crate::task::context::TaskContext>,
+    /// Task context for cache access.
+    task_context: Arc<crate::task::context::TaskContext>,
+}
+
+/// Wrapper for cache access from Rhai scripts.
+///
+/// This type is registered with the Rhai engine to enable scripts to interact
+/// with the distributed cache via `ctx.cache` methods. The wrapper is necessary
+/// because Rhai cannot directly call async Rust functions, so we use
+/// `tokio::runtime::Handle::current().block_on()` within the registered methods
+/// to bridge the sync/async boundary. This is safe because each script execution
+/// runs in its own spawned tokio task.
+///
+/// Cache keys are automatically namespaced by flow name to prevent collisions
+/// between different flows using the same cache instance.
+#[derive(Clone)]
+struct CacheHandle {
+    /// The distributed cache backend (NATS KV, Redis, or in-memory).
+    cache: Arc<dyn crate::cache::Cache>,
+    /// Flow name used for automatic key namespacing.
+    flow_name: String,
 }
 
 impl EventHandler {
@@ -114,17 +133,60 @@ impl EventHandler {
                 .map_err(|e| Error::ScriptExecution { source: e })?
                 .into();
 
-            // Execute the script with the parsed event in scope.
+            // Create context object for script access to runtime capabilities.
+            // The ctx object exposes cache operations via ctx.cache.get/put/delete
+            // and event metadata via ctx.meta, allowing scripts to manage state
+            // and persist metadata changes through the event chain.
+            let mut ctx_map = rhai::Map::new();
+
+            // Add cache handle to enable distributed caching from scripts.
+            // Cache keys are automatically namespaced by flow name.
+            let cache_handle = CacheHandle {
+                cache: Arc::clone(&self.task_context.cache),
+                flow_name: self.task_context.flow.name.clone(),
+            };
+            ctx_map.insert("cache".into(), Dynamic::from(cache_handle));
+
+            // Add event metadata to allow scripts to read and modify it.
+            // Scripts can modify ctx.meta and changes will be preserved in the output event.
+            let meta_dynamic = if let Some(meta) = &original_event.meta {
+                let meta_json = serde_json::to_string(meta)
+                    .map_err(|source| Error::JsonSerialization { source })?;
+                self.engine
+                    .parse_json(meta_json, true)
+                    .map_err(|e| Error::ScriptExecution { source: e })?
+                    .into()
+            } else {
+                Dynamic::from(rhai::Map::new())
+            };
+            ctx_map.insert("meta".into(), meta_dynamic);
+
+            // Execute the script with the parsed event and ctx in scope.
             let mut scope = Scope::new();
             scope.push("event", event_dynamic);
+            scope.push("ctx", Dynamic::from(ctx_map));
 
             let result: Dynamic = self
                 .engine
                 .eval_with_scope(&mut scope, &self.code)
                 .map_err(|e| Error::ScriptExecution { source: e })?;
 
+            // Extract ctx from scope after script execution.
+            let ctx_dynamic = scope.get_value::<Dynamic>("ctx");
+
+            // Extract ctx.meta from the ctx map to capture any modifications made by the script.
+            // Scripts can modify metadata (e.g., ctx.meta.processed = true) and those changes
+            // will be preserved in the output event, maintaining state through the event chain.
+            let meta_from_ctx = ctx_dynamic.and_then(|ctx| {
+                ctx.try_cast::<rhai::Map>()
+                    .and_then(|map| map.get("meta").cloned())
+            });
+
             // Convert the script result back to JSON.
             let result_json = dynamic_to_json(result)?;
+
+            // Convert ctx.meta to JSON for event generation.
+            let meta_json = meta_from_ctx.and_then(|m| dynamic_to_json(m).ok());
 
             // Process the script result based on its type.
             match result_json {
@@ -132,14 +194,16 @@ impl EventHandler {
                 Value::Array(arr) => {
                     // Emit multiple events, one per array element.
                     for value in arr {
-                        let new_event = self.generate_script_event(value, &original_event)?;
+                        let new_event =
+                            self.generate_script_event(value, &original_event, meta_json.as_ref())?;
                         self.emit_event(new_event).await?;
                     }
                     Ok(())
                 }
                 value => {
                     // Emit a single event.
-                    let new_event = self.generate_script_event(value, &original_event)?;
+                    let new_event =
+                        self.generate_script_event(value, &original_event, meta_json.as_ref())?;
                     self.emit_event(new_event).await
                 }
             }
@@ -152,14 +216,22 @@ impl EventHandler {
     /// Preserves the original data format (Avro, Arrow, or JSON) when the script has not
     /// modified the data content. This allows scripts to modify metadata fields like subject
     /// or id while maintaining efficient binary formats through the pipeline.
-    fn generate_script_event(&self, result: Value, original_event: &Event) -> Result<Event, Error> {
+    ///
+    /// The `ctx_meta` parameter contains metadata extracted from `ctx.meta` after script
+    /// execution, allowing scripts to persist metadata changes through the event chain.
+    fn generate_script_event(
+        &self,
+        result: Value,
+        original_event: &Event,
+        ctx_meta: Option<&Value>,
+    ) -> Result<Event, Error> {
         // Convert the original event data to JSON for comparison.
         let original_data_json = Value::try_from(&original_event.data)
             .map_err(|source| Error::EventConversion { source })?;
 
-        let (subject, data, id, meta) = match result {
+        let (subject, data, id) = match result {
             Value::Object(ref obj) => {
-                // Script returned an object, which may contain subject, data, id, or _meta.
+                // Script returned an object, which may contain subject, data, or id.
                 let subject = obj
                     .get("subject")
                     .and_then(|s| s.as_str())
@@ -184,22 +256,7 @@ impl EventHandler {
                     .map(|s| s.to_string())
                     .or_else(|| original_event.id.clone());
 
-                // Extract _meta if present in script output.
-                // If _meta key exists and is an object, use it.
-                // If _meta is null, clear metadata (set to None).
-                // If _meta is not an object, preserve original metadata.
-                // If _meta key is absent, preserve original metadata.
-                let meta = if obj.contains_key("_meta") {
-                    match obj.get("_meta") {
-                        Some(Value::Object(m)) => Some(m.clone()),
-                        Some(Value::Null) => None,
-                        _ => original_event.meta.clone(), // Invalid type, preserve original.
-                    }
-                } else {
-                    original_event.meta.clone()
-                };
-
-                (subject, data, id, meta)
+                (subject, data, id)
             }
             value => {
                 // Script returned a non-object value, treat it as data.
@@ -214,9 +271,17 @@ impl EventHandler {
                     original_event.subject.clone(),
                     data,
                     original_event.id.clone(),
-                    original_event.meta.clone(),
                 )
             }
+        };
+
+        // Use ctx.meta from scope if provided, otherwise preserve original metadata.
+        // This allows scripts to modify metadata that persists through the event chain.
+        let meta = match ctx_meta {
+            Some(Value::Object(m)) => Some(m.clone()),
+            Some(Value::Null) => None,
+            None => original_event.meta.clone(),
+            _ => original_event.meta.clone(), // Invalid type, preserve original.
         };
 
         // Build the new event with the processed fields.
@@ -467,13 +532,70 @@ impl crate::task::runner::Runner for Processor {
             (timestamp_secs / 3600) * 3600
         });
 
+        // Register cache methods on CacheHandle type to enable distributed caching from Rhai scripts.
+        // These methods bridge Rhai's synchronous execution model with Rust's async cache operations
+        // by using block_on within each spawned script task.
+        engine.register_type_with_name::<CacheHandle>("CacheHandle");
+
+        // Register ctx.cache.get(key) -> Option<String>.
+        // Retrieves a value from the distributed cache. Returns None if the key does not exist
+        // or if the cached value is not valid UTF-8.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn("get", |handle: &mut CacheHandle, key: &str| -> String {
+            let namespaced_key = format!("{}.{}", handle.flow_name, key);
+            let cache = handle.cache.clone();
+            tokio::task::block_in_place(move || {
+                tokio::runtime::Handle::current().block_on(async move {
+                    match cache.get(&namespaced_key).await {
+                        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                })
+            })
+        });
+
+        // Register ctx.cache.put(key, value, ttl_seconds) -> bool.
+        // Stores a value in the distributed cache with a time-to-live in seconds.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn(
+            "put",
+            |handle: &mut CacheHandle, key: &str, value: i64, ttl_secs: i64| -> bool {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                let value_str = value.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let bytes = bytes::Bytes::from(value_str);
+                        cache
+                            .put(&namespaced_key, bytes, Some(ttl_secs as u64))
+                            .await
+                            .is_ok()
+                    })
+                })
+            },
+        );
+
+        // Register ctx.cache.delete(key) -> bool.
+        // Removes a value from the distributed cache.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn("delete", |handle: &mut CacheHandle, key: &str| -> bool {
+            let namespaced_key = format!("{}.{}", handle.flow_name, key);
+            let cache = handle.cache.clone();
+            tokio::task::block_in_place(move || {
+                tokio::runtime::Handle::current()
+                    .block_on(async move { cache.delete(&namespaced_key).await.is_ok() })
+            })
+        });
+
         let event_handler = EventHandler {
             code: script_code,
             tx: self.tx.clone(),
             task_id: self.task_id,
             engine,
             task_type: self.task_type,
-            _task_context: Arc::clone(&self._task_context),
+            task_context: Arc::clone(&self._task_context),
         };
 
         Ok(event_handler)
@@ -680,7 +802,7 @@ mod tests {
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -720,7 +842,7 @@ mod tests {
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -753,7 +875,7 @@ mod tests {
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -799,7 +921,7 @@ mod tests {
             task_id: 1,
             engine: Engine::new(),
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         // Create an ArrowRecordBatch event

@@ -1,0 +1,75 @@
+flow:
+  name: script_incremental_processing
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow every 5 minutes to check for new files.
+    - generate:
+        name: trigger
+        interval: 5m
+
+    # Read files from object store (returns list of files).
+    - object-store-read:
+        name: list_files
+        bucket: my-data-bucket
+        prefix: "input/"
+        credentials_path: "/etc/secrets/gcp-credentials.json"
+
+    # Script that filters out already processed files using cache.
+    # This enables incremental processing without moving/deleting files.
+    - script:
+        name: filter_unprocessed_files
+        code: |
+          // Get file metadata
+          let file_name = event.data.name;
+          let file_hash = event.data.md5Hash;
+
+          // Create cache key combining name and hash to detect file changes
+          let cache_key = "file_processed:" + file_name + ":" + file_hash;
+
+          // Check if this exact file version was already processed
+          let already_processed = ctx.cache.get(cache_key);
+
+          if already_processed != () {
+            // File already processed, skip it
+            print("Skipping already processed file: " + file_name);
+            return null;
+          }
+
+          // Mark file as being processed (with 7 day TTL = 604800 seconds)
+          ctx.cache.put(cache_key, timestamp_now(), 604800);
+
+          // Add tracking metadata
+          ctx.meta.file_name = file_name;
+          ctx.meta.file_hash = file_hash;
+          ctx.meta.processing_started = timestamp_now();
+          ctx.meta.cache_key = cache_key;
+
+          // Return event for downstream processing
+          event
+
+    # Load and process the file data.
+    - bigquery-batch-upsert:
+        name: load_to_bigquery
+        project_id: my-project
+        dataset_id: my_dataset
+        table_id: my_table
+        credentials_path: "/etc/secrets/gcp-credentials.json"
+        write_disposition: append
+
+    # Log successful processing.
+    - script:
+        name: log_completion
+        code: |
+          // Update metadata with completion status
+          ctx.meta.processing_completed = timestamp_now();
+          ctx.meta.status = "success";
+
+          print("Successfully processed file: " + ctx.meta.file_name);
+
+          event
+
+    - log:
+        name: log_result
+        level: info
+        structured: true
