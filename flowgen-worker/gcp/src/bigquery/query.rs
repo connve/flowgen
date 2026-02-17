@@ -224,7 +224,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize query processor");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -249,7 +249,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to execute query");
-                                        Err(e)
+                                        Err(tokio_retry::RetryError::transient(e))
                                     }
                                 }
                             })

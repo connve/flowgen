@@ -245,7 +245,7 @@ impl Runner for ListProcessor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize lister");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -271,7 +271,7 @@ impl Runner for ListProcessor {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to list objects");
-                                        Err(e)
+                                        Err(tokio_retry::RetryError::transient(e))
                                     }
                                 }
                             })

@@ -298,7 +298,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize reader");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -324,7 +324,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to read object");
-                                        Err(e)
+                                        Err(tokio_retry::RetryError::transient(e))
                                     }
                                 }
                             })

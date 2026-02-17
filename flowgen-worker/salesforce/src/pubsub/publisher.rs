@@ -291,7 +291,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize publisher");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -327,13 +327,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                                     if let Err(reconnect_err) =
                                                         pubsub.reconnect().await
                                                     {
-                                                        return Err(Error::PubSub {
+                                                        return Err(tokio_retry::RetryError::transient(Error::PubSub {
                                                             source: reconnect_err,
-                                                        });
+                                                        }));
                                                     }
                                                 }
                                             }
-                                            Err(e)
+                                            Err(tokio_retry::RetryError::transient(e))
                                         }
                                     }
                                 })

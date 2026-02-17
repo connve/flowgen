@@ -233,7 +233,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize publisher");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -260,7 +260,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to publish message");
-                                        Err(e)
+                                        Err(tokio_retry::RetryError::transient(e))
                                     }
                                 }
                             })
