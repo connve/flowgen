@@ -442,7 +442,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize bulk query job processor");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -484,12 +484,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     (*sfdc_client).reconnect().await
                                                 {
                                                     error!(error = %reconnect_err, "Failed to reconnect");
-                                                    return Err(Error::SalesforceAuth(
+                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth(
                                                         reconnect_err,
-                                                    ));
+                                                    )));
                                                 }
                                             }
-                                            Err(e)
+                                            Err(tokio_retry::RetryError::transient(e))
                                         }
                                     }
                                 })

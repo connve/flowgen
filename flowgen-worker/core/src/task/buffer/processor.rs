@@ -397,7 +397,7 @@ impl crate::task::runner::Runner for Processor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize buffer processor");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })

@@ -489,7 +489,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                         Ok(handler) => handler,
                         Err(e) => {
                             error!(error = %e, "Failed to initialize subscriber");
-                            return Err(e);
+                            return Err(tokio_retry::RetryError::transient(e));
                         }
                     };
 
@@ -498,7 +498,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                         Ok(()) => Ok(()),
                         Err(e) => {
                             error!(error = %e, "Failed to process messages");
-                            Err(e)
+                            Err(tokio_retry::RetryError::transient(e))
                         }
                     }
                 })

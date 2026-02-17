@@ -262,7 +262,7 @@ impl crate::task::runner::Runner for Subscriber {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize generate subscriber");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -280,7 +280,10 @@ impl crate::task::runner::Runner for Subscriber {
         tokio::spawn(
             async move {
                 let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                    event_handler.handle().await
+                    event_handler
+                        .handle()
+                        .await
+                        .map_err(tokio_retry::RetryError::transient)
                 })
                 .await;
 

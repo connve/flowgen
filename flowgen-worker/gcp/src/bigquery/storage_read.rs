@@ -229,7 +229,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
                     error!(error = %e, "Failed to initialize storage read processor");
-                    Err(e)
+                    Err(tokio_retry::RetryError::transient(e))
                 }
             }
         })
@@ -254,7 +254,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to read from storage");
-                                        Err(e)
+                                        Err(tokio_retry::RetryError::transient(e))
                                     }
                                 }
                             })
