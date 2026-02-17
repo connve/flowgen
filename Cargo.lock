@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.54.0"
+version = "0.56.0"
 dependencies = [
  "arrow",
  "config",
@@ -3861,8 +3861,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce-pubsub-v1"
-version = "0.5.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fimproved-http-client-handling#ceadde5628f4480fee0f94950d6f935279beb092"
+version = "0.6.0"
+source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3885,8 +3885,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core"
-version = "0.5.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fimproved-http-client-handling#ceadde5628f4480fee0f94950d6f935279beb092"
+version = "0.6.0"
+source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -3905,8 +3905,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_v1"
-version = "0.5.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fimproved-http-client-handling#ceadde5628f4480fee0f94950d6f935279beb092"
+version = "0.6.0"
+source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
 dependencies = [
  "bytes",
  "chrono",
