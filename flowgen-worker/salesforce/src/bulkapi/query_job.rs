@@ -377,6 +377,11 @@ impl EventHandler {
                 format!("{job_id}-{batch_index}")
             };
 
+            let num_records = match &event_data {
+                EventData::ArrowRecordBatch(batch) => batch.num_rows(),
+                _ => 0,
+            };
+
             let e = EventBuilder::new()
                 .data(event_data)
                 .subject(config.name.to_owned())
@@ -386,6 +391,7 @@ impl EventHandler {
                 .build()?;
 
             e.send_with_logging(self.tx.as_ref())
+                .context("num_records", num_records)
                 .await
                 .map_err(|e| Error::SendMessage { source: e })?;
         }
@@ -411,8 +417,10 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
+        let init_config = self.config.render(&serde_json::json!({}))?;
+
         let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(self.config.credentials_path.clone())
+            .credentials_path(init_config.credentials_path.clone())
             .build()?
             .connect()
             .await?;
@@ -432,7 +440,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
@@ -469,12 +477,16 @@ impl flowgen_core::task::runner::Runner for Processor {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!(error = %e, "Failed to process bulk query job");
-                                            // Check if reconnect is needed for auth errors.
-                                            let needs_reconnect = matches!(
-                                                &e,
-                                                Error::SalesforceAuth(
-                                                    salesforce_core::client::Error::NoRefreshToken
-                                                ) | Error::BulkApiQuery { .. }
+                                            // Only reconnect for actual auth failures.
+                                            // Communication errors (network timeouts, connection
+                                            // refused) are transient and don't need a full OAuth
+                                            // reconnect — the bulk API client gets a fresh access
+                                            // token automatically on the next attempt.
+                                            let needs_reconnect = matches!(&e,
+                                                Error::SalesforceAuth(_)
+                                            ) || matches!(&e,
+                                                Error::BulkApiQuery { source }
+                                                    if matches!(source.as_ref(), salesforce_core::bulkapi::QueryError::Auth { .. })
                                             );
 
                                             if needs_reconnect {

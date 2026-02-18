@@ -6,6 +6,7 @@
 use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
@@ -65,6 +66,11 @@ pub enum Error {
     RetryExhausted {
         #[source]
         source: Box<Error>,
+    },
+    #[error("Config template rendering error: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
     },
 }
 
@@ -224,10 +230,12 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let config = Arc::clone(&self.config);
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
 
-        // Load credentials at task creation time.
-        let credentials = match &config.credentials_path {
+        let credentials = match &init_config.credentials_path {
             Some(path) => {
                 let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
                     path: path.clone(),
@@ -250,7 +258,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

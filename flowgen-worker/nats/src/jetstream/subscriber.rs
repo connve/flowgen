@@ -2,6 +2,7 @@ use super::message::NatsMessageExt;
 use async_nats::jetstream::{self};
 use flowgen_core::{
     client::Client,
+    config::ConfigExt,
     event::{Event, EventExt},
 };
 use std::sync::Arc;
@@ -81,6 +82,11 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
+    #[error("Config template rendering error: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
 }
 
 /// Event handler for processing NATS messages.
@@ -190,9 +196,14 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     /// - Getting or creating JetStream stream and consumer
     /// - Validating consumer configuration
     async fn init(&self) -> Result<EventHandler, Error> {
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials_path.clone())
-            .url(self.config.url.clone())
+            .credentials_path(init_config.credentials_path.clone())
+            .url(init_config.url.clone())
             .build()
             .map_err(|source| Error::Client { source })?
             .connect()
@@ -218,15 +229,14 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .await
                 .map_err(|source| Error::GetStream { source })?;
 
-            let durable_name = self
-                .config
+            let durable_name = init_config
                 .durable_name
                 .as_ref()
                 .ok_or_else(|| Error::MissingDurableName)?;
 
             let consumer_config = jetstream::consumer::pull::Config {
                 durable_name: Some(durable_name.clone()),
-                filter_subject: self.config.subject.clone(),
+                filter_subject: init_config.subject.clone(),
                 ..Default::default()
             };
 
@@ -238,11 +248,11 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                         .map_err(|_| Error::ConsumerInfoFailed)?;
                     let current_filter = consumer_info.config.filter_subject.clone();
 
-                    if current_filter != self.config.subject {
+                    if current_filter != init_config.subject {
                         return Err(Error::ConsumerFilterMismatch {
                             consumer: durable_name.clone(),
                             existing: current_filter,
-                            expected: self.config.subject.clone(),
+                            expected: init_config.subject.clone(),
                         });
                     } else {
                         existing_consumer
@@ -268,7 +278,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         }
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

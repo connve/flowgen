@@ -54,8 +54,11 @@ impl RetryConfig {
 
         // ExponentialBackoff uses base^n * factor formula.
         // With base=2 and factor=initial_ms/2: first delay = 2 * (initial_ms/2) = initial_ms.
+        // Clamping to 1 prevents integer truncation to zero for sub-2ms backoff values,
+        // which would otherwise disable all delay between retries.
+        let factor = (initial_ms / 2).max(1);
         let base_strategy = ExponentialBackoff::from_millis(2)
-            .factor(initial_ms / 2)
+            .factor(factor)
             .map(jitter);
 
         match self.max_attempts {
@@ -180,5 +183,17 @@ mod tests {
         "#;
         let config: RetryConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.initial_backoff, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_strategy_sub_2ms_does_not_produce_zero_delays() {
+        let config = RetryConfig {
+            max_attempts: Some(5),
+            initial_backoff: Duration::from_millis(1),
+        };
+        let delays: Vec<Duration> = config.strategy().collect();
+        for d in &delays {
+            assert!(*d > Duration::ZERO, "delay must not be zero");
+        }
     }
 }

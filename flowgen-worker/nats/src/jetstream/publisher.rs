@@ -189,9 +189,14 @@ impl flowgen_core::task::runner::Runner for Publisher {
     /// - Connecting to NATS with credentials
     /// - Creating or updating JetStream stream
     async fn init(&self) -> Result<EventHandler, Error> {
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
         let client = crate::client::ClientBuilder::new()
-            .credentials_path(self.config.credentials_path.clone())
-            .url(self.config.url.clone())
+            .credentials_path(init_config.credentials_path.clone())
+            .url(init_config.url.clone())
             .build()
             .map_err(|source| Error::ClientAuth { source })?
             .connect()
@@ -223,7 +228,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         }
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

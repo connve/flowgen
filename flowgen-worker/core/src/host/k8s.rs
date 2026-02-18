@@ -173,7 +173,7 @@ impl Host for K8sHost {
 
         match api.create(&PostParams::default(), &lease).await {
             Ok(_) => {
-                info!("Pod {} acquired lease {}", self.holder_identity, name);
+                info!(holder = %self.holder_identity, "Acquired lease");
                 Ok(())
             }
             Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
@@ -246,8 +246,9 @@ impl Host for K8sHost {
                     {
                         Ok(_) => {
                             info!(
-                                "Pod {} took over expired lease {} from {}",
-                                self.holder_identity, name, existing_holder
+                                holder = %self.holder_identity,
+                                previous_holder = %existing_holder,
+                                "Took over expired lease"
                             );
                             Ok(())
                         }
@@ -292,7 +293,7 @@ impl Host for K8sHost {
             .await
             .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
-        info!("Pod {} deleted lease {}", self.holder_identity, name);
+        info!(holder = %self.holder_identity, "Deleted lease");
         Ok(())
     }
 

@@ -416,9 +416,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.15.4"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b7b6141e96a8c160799cc2d5adecd5cbbe5054cb8c7c4af53da0f83bb7ad256"
+checksum = "d9a7b350e3bb1767102698302bc37256cbd48422809984b98d292c40e2579aa9"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "arrow",
  "config",
@@ -1409,6 +1409,7 @@ dependencies = [
  "futures-util",
  "glob",
  "kube",
+ "native-tls",
  "serde",
  "serde_json",
  "tempfile",
@@ -2608,6 +2609,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
 ]
 
 [[package]]
@@ -3861,8 +3871,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce-pubsub-v1"
-version = "0.6.0"
-source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
+version = "0.7.0"
+source = "git+https://github.com/connve/salesforce-rs#e79b9f3b7c028f23b5466c3032a89a02dd1d5f8c"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3885,8 +3895,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core"
-version = "0.6.0"
-source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
+version = "0.7.0"
+source = "git+https://github.com/connve/salesforce-rs#e79b9f3b7c028f23b5466c3032a89a02dd1d5f8c"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -3905,8 +3915,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_v1"
-version = "0.6.0"
-source = "git+https://github.com/connve/salesforce-rs#3419d9cfbff25e2438a4599cec49d20b933ca329"
+version = "0.7.0"
+source = "git+https://github.com/connve/salesforce-rs#e79b9f3b7c028f23b5466c3032a89a02dd1d5f8c"
 dependencies = [
  "bytes",
  "chrono",
@@ -5000,10 +5010,14 @@ version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]
@@ -5832,9 +5846,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.6.0"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7948af682ccbc3342b6e9420e8c51c1fe5d7bf7756002b4a3c6cabfe96a7e3c"
+checksum = "c745c48e1007337ed136dc99df34128b9faa6ed542d80a1c673cf55a6d7236c8"
 
 [[package]]
 name = "zmij"

@@ -151,6 +151,7 @@ impl EventHandler {
                 .map(FileInfo::from)
                 .collect();
 
+            let num_files = files.len();
             let list_result = ListResult {
                 path: config_path_str.to_string(),
                 files,
@@ -172,6 +173,7 @@ impl EventHandler {
                 .map_err(|source| Error::EventBuilder { source })?;
 
             e.send_with_logging(self.tx.as_ref())
+                .context("num_files", num_files)
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
 
@@ -205,8 +207,12 @@ impl Runner for ListProcessor {
 
     /// Initializes the lister by establishing object store client connection.
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Build object store client with conditional configuration.
-        let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
+        let mut client_builder = super::client::ClientBuilder::new().path(init_config.path);
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
@@ -235,7 +241,7 @@ impl Runner for ListProcessor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

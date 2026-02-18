@@ -213,7 +213,7 @@ impl App {
 
                             match config.try_deserialize::<FlowConfig>() {
                                 Ok(flow_config) => {
-                                    info!("Loaded flow: {}", flow_config.flow.name);
+                                    info!(flow = %flow_config.flow.name, "Loaded flow");
                                     Some(flow_config)
                                 }
                                 Err(source) => {

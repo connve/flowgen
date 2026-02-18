@@ -49,9 +49,7 @@ spec:
         {{- end }}
         env:
         - name: CONFIG_PATH
-          value: {{ $worker.config.configPath }}
-        - name: RUST_LOG
-          value: {{ $worker.config.rustLog | quote }}
+          value: {{ $worker.config.path }}
         - name: POD_NAME
           valueFrom:
             fieldRef:

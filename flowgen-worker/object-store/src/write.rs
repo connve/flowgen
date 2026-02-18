@@ -198,6 +198,10 @@ impl EventHandler {
             };
 
             // Write data in the appropriate format.
+            let num_records = match &event.data {
+                flowgen_core::event::EventData::ArrowRecordBatch(batch) => batch.num_rows(),
+                _ => 0,
+            };
             let mut writer = Vec::new();
             match (&event.data, &format) {
                 (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
@@ -264,6 +268,7 @@ impl EventHandler {
             let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
             e.send_with_logging(self.tx.as_ref())
+                .context("num_records", num_records)
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
 
@@ -315,8 +320,12 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
     /// This method performs all setup operations that can fail, including:
     /// - Building and connecting the object store client with credentials
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Build object store client with conditional configuration.
-        let mut client_builder = super::client::ClientBuilder::new().path(self.config.path.clone());
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
+        let mut client_builder = super::client::ClientBuilder::new().path(init_config.path);
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
@@ -345,7 +354,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
