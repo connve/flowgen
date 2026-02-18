@@ -1,5 +1,6 @@
 use flowgen_core::{
     client::Client,
+    config::ConfigExt,
     event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
 use salesforce_core::pubsub::{
@@ -74,6 +75,11 @@ pub enum Error {
     },
     #[error("Stream ended unexpectedly, connection may have been lost")]
     StreamEnded,
+    #[error("Config template rendering error: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
 }
@@ -424,10 +430,15 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     /// - Authenticating with Salesforce
     /// - Building Pub/Sub context
     async fn init(&self) -> Result<EventHandler, Error> {
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
         // Determine Pub/Sub endpoint.
-        let endpoint = match &self.config.endpoint {
-            Some(endpoint) => endpoint,
-            None => &format!(
+        let endpoint = match &init_config.endpoint {
+            Some(endpoint) => endpoint.clone(),
+            None => format!(
                 "{}:{}",
                 super::config::DEFAULT_PUBSUB_URL,
                 super::config::DEFAULT_PUBSUB_PORT
@@ -436,7 +447,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Create gRPC service connection.
         let service = flowgen_core::service::ServiceBuilder::new()
-            .endpoint(endpoint.to_owned())
+            .endpoint(endpoint)
             .build()
             .map_err(|e| Error::Service { source: e })?
             .connect()
@@ -449,7 +460,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Authenticate with Salesforce.
         let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(self.config.credentials_path.clone())
+            .credentials_path(init_config.credentials_path.clone())
             .build()
             .map_err(|e| Error::Auth { source: e })?
             .connect()
@@ -473,7 +484,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     }
 
     /// Runs the subscriber by initializing and spawning the event handler task.
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         // Merge app-level and task-level retry config.
         let retry_config =

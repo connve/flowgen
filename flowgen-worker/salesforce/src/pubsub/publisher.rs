@@ -213,7 +213,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
     /// - Authenticating with credentials
     /// - Retrieving topic information and schema
     async fn init(&self) -> Result<EventHandler, Error> {
-        let config = self.config.as_ref();
+        let init_config = self.config.render(&serde_json::json!({}))?;
 
         let service = flowgen_core::service::ServiceBuilder::new()
             .endpoint(format!(
@@ -232,7 +232,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         })?;
 
         let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(config.credentials_path.clone())
+            .credentials_path(init_config.credentials_path.clone())
             .build()
             .map_err(|e| Error::Auth { source: e })?
             .connect()
@@ -248,7 +248,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .lock()
             .await
             .get_topic(TopicRequest {
-                topic_name: self.config.topic.clone(),
+                topic_name: init_config.topic.clone(),
             })
             .await
             .map_err(|e| Error::PubSub { source: e })?
@@ -270,7 +270,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             pubsub,
-            topic: config.topic.to_owned(),
+            topic: init_config.topic.to_owned(),
             schema_id: schema_info.schema_id,
             schema: Arc::new(schema),
             task_id: self.task_id,
@@ -281,7 +281,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);

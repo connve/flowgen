@@ -29,5 +29,6 @@ config = { workspace = true }
 glob = { workspace = true }
 serde_json = { workspace = true }
 kube = { workspace = true }
+native-tls = { workspace = true }
 [dev-dependencies]
 tempfile = "3.8"

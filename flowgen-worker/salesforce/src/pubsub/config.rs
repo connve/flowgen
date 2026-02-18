@@ -330,6 +330,7 @@ pub struct DurableConsumerOptions {
 }
 
 impl ConfigExt for Publisher {}
+impl ConfigExt for Subscriber {}
 
 #[cfg(test)]
 mod tests {

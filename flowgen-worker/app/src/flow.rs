@@ -481,7 +481,7 @@ impl Flow {
             match leadership_rx.recv().await {
                 Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                     if !tasks_spawned {
-                        info!("Acquired leadership for flow {}, spawning tasks", flow_id);
+                        info!("Acquired leadership, spawning tasks");
                         tasks_spawned = true;
 
                         // Drain duplicate Leader messages
@@ -511,7 +511,7 @@ impl Flow {
                     break;
                 }
                 None => {
-                    info!("Flow {} leadership channel closed, exiting", flow_id);
+                    info!("Leadership channel closed, exiting");
                     return Ok(());
                 }
             }
@@ -537,7 +537,7 @@ impl Flow {
         };
 
         if background_tasks.is_empty() {
-            info!("Flow {} has no tasks to monitor.", flow_id);
+            info!("No tasks to monitor");
             return Ok(());
         }
 
@@ -550,7 +550,7 @@ impl Flow {
                         Some(status) = leadership_rx.recv() => {
                             match status {
                                 flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
-                                    warn!("Flow {} lost leadership, aborting all tasks", flow_id);
+                                    warn!("Lost leadership, aborting all tasks");
                                     for task in &background_tasks {
                                         task.abort();
                                     }
@@ -560,7 +560,7 @@ impl Flow {
                                     if tasks_spawned {
                                         debug!("Flow {} received duplicate Leader message while tasks running, ignoring", flow_id);
                                     } else {
-                                        warn!("Flow {} received unexpected Leader message, tasks already running", flow_id);
+                                        warn!("Received unexpected Leader message, tasks already running");
                                     }
                                 }
                                 flowgen_core::task::manager::LeaderElectionResult::NoElection => {}
@@ -572,7 +572,7 @@ impl Flow {
                                     error!("Task {} failed: {}", idx, e);
                                 }
                             }
-                            info!("All tasks completed for flow {}", flow_id);
+                            info!("All tasks completed");
                             break true;
                         }
                     }
@@ -590,10 +590,7 @@ impl Flow {
                     match leadership_rx.recv().await {
                         Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
                             if !tasks_spawned {
-                                info!(
-                                    "Re-acquired leadership for flow {}, spawning tasks",
-                                    flow_id
-                                );
+                                info!("Re-acquired leadership, spawning tasks");
                                 tasks_spawned = true;
 
                                 // Drain duplicate Leader messages
@@ -617,7 +614,7 @@ impl Flow {
                             break;
                         }
                         None => {
-                            info!("Flow {} leadership channel closed, exiting", flow_id);
+                            info!("Leadership channel closed, exiting");
                             return Ok(());
                         }
                     }
@@ -640,7 +637,7 @@ impl Flow {
                     error!("Task {} failed: {}", idx, e);
                 }
             }
-            info!("All tasks completed for flow {}", flow_id);
+            info!("All tasks completed");
         }
         Ok(())
     }

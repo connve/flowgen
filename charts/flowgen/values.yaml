@@ -88,14 +88,14 @@ flowgen-worker:
         verbs: ["get", "list", "create", "update", "patch", "delete"]
 
   config:
-    configPath: /etc/app/config.yaml
-    rustLog: "info,async_nats=warn"
+    path: /etc/app/config.yaml
 
-  # Environment variables accessible in flow configs via {{env.VAR_NAME}}
+  # Environment variables passed to the container.
+  # Also accessible in flow configs via {{env.VAR_NAME}}.
+  # Example:
+  # - name: RUST_LOG
+  #   value: "info,async_nats=warn"
   env: []
-    # Example:
-    # - name: MY_VAR
-    #   value: "my-value"
 
   volumes:
     config:
