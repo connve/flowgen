@@ -212,7 +212,20 @@ impl Runner for MoveProcessor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let mut client_builder = super::client::ClientBuilder::new().path(init_config.source);
+        // Strip any glob pattern before building the client — the URL passed to
+        // parse_url_opts must be valid, and glob characters cause percent-encoding
+        // that breaks bucket/container name extraction in the object store backend.
+        let client_path = {
+            let path_str = init_config.source.to_string_lossy();
+            let stripped = path_str
+                .split('*')
+                .next()
+                .unwrap_or(&path_str)
+                .trim_end_matches('/');
+            std::path::PathBuf::from(stripped)
+        };
+
+        let mut client_builder = super::client::ClientBuilder::new().path(client_path);
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());

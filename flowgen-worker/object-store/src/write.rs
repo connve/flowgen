@@ -199,8 +199,8 @@ impl EventHandler {
 
             // Write data in the appropriate format.
             let num_records = match &event.data {
-                flowgen_core::event::EventData::ArrowRecordBatch(batch) => batch.num_rows(),
-                _ => 0,
+                flowgen_core::event::EventData::ArrowRecordBatch(batch) => Some(batch.num_rows()),
+                _ => None,
             };
             let mut writer = Vec::new();
             match (&event.data, &format) {
@@ -267,10 +267,12 @@ impl EventHandler {
 
             let e = e.build().map_err(|source| Error::EventBuilder { source })?;
 
-            e.send_with_logging(self.tx.as_ref())
-                .context("num_records", num_records)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            let send = e.send_with_logging(self.tx.as_ref());
+            let send = match num_records {
+                Some(n) => send.context("num_records", n),
+                None => send,
+            };
+            send.await.map_err(|source| Error::SendMessage { source })?;
 
             Ok(())
         })
