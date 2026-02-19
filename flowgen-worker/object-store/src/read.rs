@@ -203,8 +203,10 @@ impl EventHandler {
             // Send events.
             for event_data in event_data_list {
                 let num_records = match &event_data {
-                    flowgen_core::event::EventData::ArrowRecordBatch(batch) => batch.num_rows(),
-                    _ => 0,
+                    flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
+                        Some(batch.num_rows())
+                    }
+                    _ => None,
                 };
 
                 let e = EventBuilder::new()
@@ -215,10 +217,12 @@ impl EventHandler {
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
-                e.send_with_logging(self.tx.as_ref())
-                    .context("num_records", num_records)
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
+                let send = e.send_with_logging(self.tx.as_ref());
+                let send = match num_records {
+                    Some(n) => send.context("num_records", n),
+                    None => send,
+                };
+                send.await.map_err(|source| Error::SendMessage { source })?;
             }
 
             // Delete file from object store if configured.
