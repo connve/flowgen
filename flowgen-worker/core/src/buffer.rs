@@ -17,6 +17,10 @@ pub enum ContentType {
         has_header: bool,
         /// CSV delimiter character (defaults to comma if not specified).
         delimiter: Option<u8>,
+        /// Maximum number of rows to sample for schema inference.
+        /// None means scan all rows for accurate type detection.
+        /// Some(n) scans only first n rows for faster inference on large files.
+        infer_schema_max_records: Option<usize>,
     },
     /// Apache Avro content format.
     Avro,
@@ -73,10 +77,11 @@ mod tests {
             batch_size: 100,
             has_header: true,
             delimiter: None,
+            infer_schema_max_records: None,
         };
         assert_eq!(
             format!("{csv_type:?}"),
-            "Csv { batch_size: 100, has_header: true, delimiter: None }"
+            "Csv { batch_size: 100, has_header: true, delimiter: None, infer_schema_max_records: None }"
         );
 
         let avro_type = ContentType::Avro;
@@ -89,6 +94,7 @@ mod tests {
             batch_size: 50,
             has_header: false,
             delimiter: Some(b';'),
+            infer_schema_max_records: None,
         };
         let cloned = csv_type.clone();
 
@@ -97,10 +103,12 @@ mod tests {
                 batch_size,
                 has_header,
                 delimiter,
+                infer_schema_max_records,
             } => {
                 assert_eq!(batch_size, 50);
                 assert!(!has_header);
                 assert_eq!(delimiter, Some(b';'));
+                assert_eq!(infer_schema_max_records, None);
             }
             _ => panic!("Clone should preserve variant"),
         }

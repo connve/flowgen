@@ -339,6 +339,10 @@ pub struct Job {
     /// Whether to automatically infer schema (create operation only).
     #[serde(default)]
     pub autodetect: Option<bool>,
+    /// Explicit table schema (create operation only).
+    /// When provided, overrides autodetect for precise schema control.
+    #[serde(default)]
+    pub schema: Option<Vec<TableField>>,
     /// Optional maximum number of bad records (create operation only).
     #[serde(default)]
     pub max_bad_records: Option<i32>,
@@ -403,6 +407,104 @@ impl SourceFormat {
             SourceFormat::Csv => "CSV",
             SourceFormat::NewlineDelimitedJson => "NEWLINE_DELIMITED_JSON",
             SourceFormat::Avro => "AVRO",
+        }
+    }
+}
+
+/// BigQuery field type for schema definitions.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    String,
+    Bytes,
+    Integer,
+    Int64,
+    Float,
+    Float64,
+    Numeric,
+    Bignumeric,
+    Boolean,
+    Bool,
+    Timestamp,
+    Date,
+    Time,
+    Datetime,
+    Geography,
+    Json,
+    Record,
+}
+
+impl From<FieldType> for google_cloud_bigquery::http::table::TableFieldType {
+    fn from(ft: FieldType) -> Self {
+        match ft {
+            FieldType::String => Self::String,
+            FieldType::Bytes => Self::Bytes,
+            FieldType::Integer | FieldType::Int64 => Self::Integer,
+            FieldType::Float | FieldType::Float64 => Self::Float,
+            FieldType::Numeric | FieldType::Bignumeric => Self::Numeric,
+            FieldType::Boolean | FieldType::Bool => Self::Boolean,
+            FieldType::Timestamp => Self::Timestamp,
+            FieldType::Date => Self::Date,
+            FieldType::Time => Self::Time,
+            FieldType::Datetime => Self::Datetime,
+            FieldType::Geography => Self::Json,
+            FieldType::Json => Self::Json,
+            FieldType::Record => Self::Record,
+        }
+    }
+}
+
+/// BigQuery field mode for schema definitions.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldMode {
+    #[default]
+    Nullable,
+    Required,
+    Repeated,
+}
+
+impl From<FieldMode> for google_cloud_bigquery::http::table::TableFieldMode {
+    fn from(fm: FieldMode) -> Self {
+        match fm {
+            FieldMode::Nullable => Self::Nullable,
+            FieldMode::Required => Self::Required,
+            FieldMode::Repeated => Self::Repeated,
+        }
+    }
+}
+
+/// Table field schema definition.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct TableField {
+    /// Field name.
+    pub name: String,
+    /// Field data type.
+    #[serde(rename = "type")]
+    pub field_type: FieldType,
+    /// Field mode (nullable, required, repeated).
+    #[serde(default)]
+    pub mode: FieldMode,
+    /// Optional field description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl From<TableField> for google_cloud_bigquery::http::table::TableFieldSchema {
+    fn from(tf: TableField) -> Self {
+        Self {
+            name: tf.name,
+            data_type: tf.field_type.into(),
+            mode: Some(tf.mode.into()),
+            description: tf.description,
+            fields: None,
+            policy_tags: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            collation: None,
+            default_value_expression: None,
+            rounding_mode: None,
         }
     }
 }

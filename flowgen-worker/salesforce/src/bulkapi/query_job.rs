@@ -352,6 +352,7 @@ impl EventHandler {
             batch_size: config.batch_size,
             has_header: config.has_header,
             delimiter: None,
+            infer_schema_max_records: None,
         };
 
         let mut events = EventData::from_reader(cursor, content_type)?;

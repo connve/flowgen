@@ -163,6 +163,7 @@ impl EventHandler {
                         batch_size,
                         has_header,
                         delimiter,
+                        infer_schema_max_records: None,
                     }
                 }
                 DEFAULT_AVRO_EXTENSION => ContentType::Avro,
