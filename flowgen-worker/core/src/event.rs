@@ -414,13 +414,17 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                 batch_size,
                 has_header,
                 delimiter,
+                infer_schema_max_records,
             } => {
                 let delimiter_byte = delimiter.unwrap_or(b',');
 
+                // Infer schema from rows. None scans all rows for accurate type detection.
+                // Sampling limited rows can infer incorrect types when early rows contain
+                // atypical or empty values, but scanning all rows has higher memory cost.
                 let (schema, _) = Format::default()
                     .with_header(has_header)
                     .with_delimiter(delimiter_byte)
-                    .infer_schema(&mut reader, Some(100))
+                    .infer_schema(&mut reader, infer_schema_max_records)
                     .map_err(|e| Error::Arrow { source: e })?;
                 reader.rewind().map_err(|e| Error::IO { source: e })?;
 

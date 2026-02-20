@@ -16,7 +16,7 @@ use google_cloud_bigquery::http::job::{
     WriteDisposition as BqWriteDisposition,
 };
 use google_cloud_bigquery::http::table::{
-    SourceFormat as BqSourceFormat, TableReference as BqTableReference,
+    SourceFormat as BqSourceFormat, TableReference as BqTableReference, TableSchema,
 };
 use google_cloud_bigquery::http::types::ErrorProto;
 use serde::{Deserialize, Serialize};
@@ -261,12 +261,18 @@ impl EventHandler {
             Some(super::config::WriteDisposition::WriteEmpty) => BqWriteDisposition::WriteEmpty,
         };
 
+        // Convert schema configuration to TableSchema if provided.
+        let schema = config.schema.as_ref().map(|fields| TableSchema {
+            fields: fields.iter().map(|f| f.clone().into()).collect(),
+        });
+
         let load_config = JobConfigurationLoad {
             source_uris: source_uris.clone(),
             destination_table: table_ref,
             source_format: Some(source_fmt),
             write_disposition: Some(write_disp),
             autodetect: Some(config.autodetect.unwrap_or(false)),
+            schema,
             max_bad_records: config.max_bad_records.map(|v| v as i64),
             ..Default::default()
         };
@@ -693,6 +699,7 @@ mod tests {
             poll_interval: std::time::Duration::from_secs(5),
             max_poll_duration: std::time::Duration::from_secs(600),
             retry: None,
+            schema: None,
         });
 
         let builder = ProcessorBuilder::new().config(config.clone());
@@ -771,6 +778,7 @@ mod tests {
             poll_interval: std::time::Duration::from_secs(5),
             max_poll_duration: std::time::Duration::from_secs(600),
             retry: None,
+            schema: None,
         });
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
