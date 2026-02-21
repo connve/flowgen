@@ -1,4 +1,5 @@
 {{- $worker := index .Values "flowgen-worker" -}}
+{{- $root := . -}}
 {{- if $worker.enabled }}
 apiVersion: apps/v1
 kind: Deployment
@@ -65,7 +66,48 @@ spec:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:
         {{- range $key, $volume := $worker.volumes }}
-        {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
+        {{- if and (hasKey $volume "enabled") $volume.enabled }}
+        {{- if eq $key "flows" }}
+        {{- if and $worker.flows.existingConfigMaps (gt (len $worker.flows.existingConfigMaps) 0) }}
+        {{- range $idx, $cmName := $worker.flows.existingConfigMaps }}
+        - name: {{ $key | kebabcase }}-{{ $idx }}
+          mountPath: {{ $volume.mountPath }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- else }}
+        - name: {{ $key | kebabcase }}
+          mountPath: {{ $volume.mountPath }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- else if eq $key "resources" }}
+        {{- if and $worker.resources.existingConfigMaps (gt (len $worker.resources.existingConfigMaps) 0) }}
+        {{- range $idx, $cmName := $worker.resources.existingConfigMaps }}
+        - name: {{ $key | kebabcase }}-{{ $idx }}
+          mountPath: {{ $volume.mountPath }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- else }}
+        - name: {{ $key | kebabcase }}
+          mountPath: {{ $volume.mountPath }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
+        {{- else }}
         - name: {{ $key | kebabcase }}
           mountPath: {{ $volume.mountPath }}
           {{- if hasKey $volume "readOnly" }}
@@ -75,17 +117,43 @@ spec:
           {{- end }}
         {{- end }}
         {{- end }}
+        {{- end }}
       volumes:
       {{- range $key, $volume := $worker.volumes }}
-      {{- if and (hasKey $volume "enabled") $volume.enabled (or (hasKey $volume "secretName") (hasKey $volume "configMapName")) (or $volume.secretName $volume.configMapName) }}
+      {{- if and (hasKey $volume "enabled") $volume.enabled }}
+      {{- if $volume.secretName }}
       - name: {{ $key | kebabcase }}
-        {{- if $volume.secretName }}
         secret:
           secretName: {{ $volume.secretName }}
-        {{- else if $volume.configMapName }}
+      {{- else if eq $key "flows" }}
+      {{- if and $worker.flows.existingConfigMaps (gt (len $worker.flows.existingConfigMaps) 0) }}
+      {{- range $idx, $cmName := $worker.flows.existingConfigMaps }}
+      - name: {{ $key | kebabcase }}-{{ $idx }}
+        configMap:
+          name: {{ $cmName }}
+      {{- end }}
+      {{- else }}
+      - name: {{ $key | kebabcase }}
+        configMap:
+          name: {{ printf "%s-flows" (include "flowgen-worker.fullname" $root) }}
+      {{- end }}
+      {{- else if eq $key "resources" }}
+      {{- if and $worker.resources.existingConfigMaps (gt (len $worker.resources.existingConfigMaps) 0) }}
+      {{- range $idx, $cmName := $worker.resources.existingConfigMaps }}
+      - name: {{ $key | kebabcase }}-{{ $idx }}
+        configMap:
+          name: {{ $cmName }}
+      {{- end }}
+      {{- else }}
+      - name: {{ $key | kebabcase }}
+        configMap:
+          name: {{ printf "%s-resources" (include "flowgen-worker.fullname" $root) }}
+      {{- end }}
+      {{- else if $volume.configMapName }}
+      - name: {{ $key | kebabcase }}
         configMap:
           name: {{ $volume.configMapName }}
-        {{- end }}
+      {{- end }}
       {{- end }}
       {{- end }}
       {{- with $worker.nodeSelector }}
