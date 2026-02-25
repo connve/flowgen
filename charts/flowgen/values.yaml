@@ -97,6 +97,56 @@ flowgen-worker:
   #   value: "info,async_nats=warn"
   env: []
 
+  # Flow and resource configuration management.
+  # Supports three deployment methods for managing flow and resource files.
+  # Method 1: External ConfigMaps created via kustomize, kubectl, or GitOps tools (recommended for production).
+  # Method 2: Inline values embedded directly in values.yaml (suitable for testing or small configurations).
+  # Method 3: GitOps auto-generation where ArgoCD or Flux generates ConfigMaps from git directories.
+  flows:
+    # Reference existing ConfigMaps created externally via kustomize, kubectl, or GitOps tools.
+    # All ConfigMaps in this array will be mounted to the same flows directory.
+    # When set, this takes precedence over inline values and prevents auto-generation of ConfigMaps.
+    # Each ConfigMap should contain flow YAML files as keys with their complete content as values.
+    # Example:
+    #   existingConfigMaps:
+    #     - flows-salesforce
+    #     - flows-cloudflare
+    #     - flows-gcp
+    existingConfigMaps: []
+
+    # Inline flow definitions for pure Helm deployments without external ConfigMap management.
+    # These values are only used when existingConfigMaps is empty.
+    # Keys should represent the flow file path, and values should contain the complete YAML content.
+    # Example:
+    #   inline:
+    #     category/flow1.yaml: |
+    #       flow:
+    #         name: flow1
+    #         tasks:
+    #           - generate:
+    #               name: trigger
+    inline: {}
+
+  resources:
+    # Reference existing ConfigMaps for resource files such as SQL queries or scripts.
+    # All ConfigMaps in this array will be mounted to the same resources directory.
+    # When set, this takes precedence over inline values and prevents auto-generation of ConfigMaps.
+    # Each ConfigMap should contain resource files as keys with their complete content as values.
+    # Example:
+    #   existingConfigMaps:
+    #     - resources-sql
+    #     - resources-scripts
+    existingConfigMaps: []
+
+    # Inline resource definitions for pure Helm deployments without external ConfigMap management.
+    # These values are only used when existingConfigMaps is empty.
+    # Keys should represent the resource filename, and values should contain the complete file content.
+    # Example:
+    #   inline:
+    #     query1.sql: |
+    #       SELECT * FROM table1
+    inline: {}
+
   volumes:
     config:
       enabled: true
@@ -104,9 +154,11 @@ flowgen-worker:
       mountPath: /etc/app
     flows:
       enabled: true
-      configMapName: flows
       mountPath: /etc/app/flows
-    # Secrets - user must configure these as needed
+    resources:
+      enabled: true
+      mountPath: /etc/app/resources
+    # Secrets - user must configure these as needed.
     # Example:
     # natsCredentials:
     #   enabled: true
