@@ -413,7 +413,7 @@ pub struct Subscriber {
     /// Task identifier for event tracking
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -479,16 +479,16 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             tx: self.tx.clone(),
             pubsub,
             task_type: self.task_type,
-            task_context: Arc::clone(&self._task_context),
+            task_context: Arc::clone(&self.task_context),
         })
     }
 
     /// Runs the subscriber by initializing and spawning the event handler task.
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
         // Merge app-level and task-level retry config.
         let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         // Spawn event handler task.
         tokio::spawn(
@@ -590,7 +590,7 @@ impl SubscriberBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             tx: self.tx,
             task_id: self.task_id,
-            _task_context: self
+            task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self

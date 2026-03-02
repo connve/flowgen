@@ -87,9 +87,9 @@ spec:
           readOnly: true
           {{- end }}
         {{- end }}
-        {{- else if eq $key "resources" }}
-        {{- if and $worker.resources.existingConfigMaps (gt (len $worker.resources.existingConfigMaps) 0) }}
-        {{- range $idx, $cmName := $worker.resources.existingConfigMaps }}
+        {{- else if eq $key "flowResources" }}
+        {{- if and $worker.flowResources.existingConfigMaps (gt (len $worker.flowResources.existingConfigMaps) 0) }}
+        {{- range $idx, $cmName := $worker.flowResources.existingConfigMaps }}
         - name: {{ $key | kebabcase }}-{{ $idx }}
           mountPath: {{ $volume.mountPath }}
           {{- if hasKey $volume "readOnly" }}
@@ -137,9 +137,9 @@ spec:
         configMap:
           name: {{ printf "%s-flows" (include "flowgen-worker.fullname" $root) }}
       {{- end }}
-      {{- else if eq $key "resources" }}
-      {{- if and $worker.resources.existingConfigMaps (gt (len $worker.resources.existingConfigMaps) 0) }}
-      {{- range $idx, $cmName := $worker.resources.existingConfigMaps }}
+      {{- else if eq $key "flowResources" }}
+      {{- if and $worker.flowResources.existingConfigMaps (gt (len $worker.flowResources.existingConfigMaps) 0) }}
+      {{- range $idx, $cmName := $worker.flowResources.existingConfigMaps }}
       - name: {{ $key | kebabcase }}-{{ $idx }}
         configMap:
           name: {{ $cmName }}

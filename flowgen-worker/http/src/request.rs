@@ -98,7 +98,8 @@ pub struct EventHandler {
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    #[allow(dead_code)]
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -235,7 +236,7 @@ pub struct Processor {
     /// Current task identifier.
     task_id: usize,
     /// Task execution context providing metadata and runtime configuration.
-    _task_context: Arc<flowgen_core::task::context::TaskContext>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
 }
@@ -259,16 +260,16 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             client,
             task_type: self.task_type,
-            _task_context: Arc::clone(&self._task_context),
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self._task_context.retry, &self.config.retry);
+            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
             match self.init().await {
@@ -393,7 +394,7 @@ impl ProcessorBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
             task_id: self.task_id,
-            _task_context: self
+            task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
             task_type: self

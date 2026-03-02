@@ -127,7 +127,7 @@ flowgen-worker:
     #               name: trigger
     inline: {}
 
-  resources:
+  flowResources:
     # Reference existing ConfigMaps for resource files such as SQL queries or scripts.
     # All ConfigMaps in this array will be mounted to the same resources directory.
     # When set, this takes precedence over inline values and prevents auto-generation of ConfigMaps.
@@ -155,7 +155,7 @@ flowgen-worker:
     flows:
       enabled: true
       mountPath: /etc/app/flows
-    resources:
+    flowResources:
       enabled: true
       mountPath: /etc/app/resources
     # Secrets - user must configure these as needed.
