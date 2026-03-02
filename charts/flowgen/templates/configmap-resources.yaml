@@ -1,5 +1,5 @@
 {{- $worker := index .Values "flowgen-worker" -}}
-{{- if and (or (not $worker.resources.existingConfigMaps) (eq (len $worker.resources.existingConfigMaps) 0)) $worker.resources.inline }}
+{{- if and (or (not $worker.flowResources.existingConfigMaps) (eq (len $worker.flowResources.existingConfigMaps) 0)) $worker.flowResources.inline }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,7 +7,7 @@ metadata:
   labels:
     {{- include "flowgen-worker.labels" . | nindent 4 }}
 data:
-{{- range $filename, $content := $worker.resources.inline }}
+{{- range $filename, $content := $worker.flowResources.inline }}
   {{ $filename }}: |
 {{ $content | indent 4 }}
 {{- end }}

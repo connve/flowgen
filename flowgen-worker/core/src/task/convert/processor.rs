@@ -100,7 +100,8 @@ pub struct EventHandler {
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task context (unused but kept for consistency).
-    _task_context: Arc<crate::task::context::TaskContext>,
+    #[allow(dead_code)]
+    task_context: Arc<crate::task::context::TaskContext>,
 }
 
 /// Avro serialization configuration with schema and thread-safe serializer.
@@ -268,13 +269,13 @@ impl crate::task::runner::Runner for Processor {
             task_id: self.task_id,
             serializer,
             task_type: self.task_type,
-            _task_context: Arc::clone(&self.task_context),
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
@@ -513,7 +514,7 @@ mod tests {
             task_id: 1,
             serializer: None,
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         let input_event = Event {
@@ -559,7 +560,7 @@ mod tests {
             task_id: 1,
             serializer: None,
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         // Create a simple Avro schema and serialize test data
@@ -617,7 +618,7 @@ mod tests {
             task_id: 1,
             serializer: None,
             task_type: "test",
-            _task_context: create_mock_task_context(),
+            task_context: create_mock_task_context(),
         };
 
         let schema_str = r#"{"type": "string"}"#;
