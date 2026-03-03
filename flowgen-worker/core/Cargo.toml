@@ -38,6 +38,11 @@ tokio-retry = { workspace = true }
 croner = { workspace = true }
 humantime-serde = { workspace = true }
 dashmap = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

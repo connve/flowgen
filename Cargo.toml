@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.62.0"
+version = "0.63.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -62,3 +62,8 @@ croner = { version = "3.0.1" }
 dashmap = { version = "6.1" }
 # Pinned to avoid 0.2.17 which has a non-exhaustive match compile error on recent Rust toolchains.
 native-tls = { version = "=0.2.16" }
+# OpenTelemetry for metrics and distributed tracing
+opentelemetry = { version = "0.27" }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
+tracing-opentelemetry = { version = "0.28" }
