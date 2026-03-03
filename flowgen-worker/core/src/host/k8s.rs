@@ -89,6 +89,8 @@ const DEFAULT_LEASE_DURATION_SECS: i32 = 60;
 pub struct K8sHost {
     /// Kubernetes client.
     client: Option<Arc<Client>>,
+    /// Cached API client for Lease resources to avoid recreating on every call.
+    lease_api: Option<Arc<Api<Lease>>>,
     /// Namespace for Kubernetes resources (auto-detected from service account).
     namespace: String,
     /// Lease duration in seconds.
@@ -101,6 +103,7 @@ impl std::fmt::Debug for K8sHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("K8sHost")
             .field("client", &self.client.as_ref().map(|_| "Client"))
+            .field("lease_api", &self.lease_api.as_ref().map(|_| "Api<Lease>"))
             .field("namespace", &self.namespace)
             .field("lease_duration_secs", &self.lease_duration_secs)
             .field("holder_identity", &self.holder_identity)
@@ -131,8 +134,12 @@ impl FlowgenClient for K8sHost {
                 .trim()
                 .to_string();
 
+        // Create and cache the Lease API client to avoid recreating on every call
+        let lease_api = Api::namespaced(client.clone(), &namespace);
+
         self.namespace = namespace.clone();
         self.client = Some(Arc::new(client));
+        self.lease_api = Some(Arc::new(lease_api));
         info!(
             namespace = %namespace,
             holder = %self.holder_identity,
@@ -148,12 +155,10 @@ impl Host for K8sHost {
     #[tracing::instrument(skip(self), name = "k8s.create_lease", fields(lease_name = %name))]
     async fn create_lease(&self, name: &str) -> Result<(), crate::host::Error> {
         let namespace = &self.namespace;
-        let client = self
-            .client
+        let api = self
+            .lease_api
             .as_ref()
             .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
-
-        let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
 
         let now = MicroTime(chrono::Utc::now());
         let lease = Lease {
@@ -282,12 +287,24 @@ impl Host for K8sHost {
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), crate::host::Error> {
-        let namespace = namespace.unwrap_or(&self.namespace);
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
-        let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
+        // If a custom namespace is provided, we need to create a new API client for that namespace
+        // Otherwise, use the cached API client for the default namespace
+        let api = if let Some(custom_ns) = namespace {
+            if custom_ns != self.namespace {
+                let client = self.client.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?;
+                Arc::new(Api::namespaced((**client).clone(), custom_ns))
+            } else {
+                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?)
+            }
+        } else {
+            Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+            })?)
+        };
 
         api.delete(name, &DeleteParams::default())
             .await
@@ -303,12 +320,24 @@ impl Host for K8sHost {
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), crate::host::Error> {
-        let namespace = namespace.unwrap_or(&self.namespace);
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| Box::new(Error::KubernetesClientNotConnected) as crate::host::Error)?;
-        let api: Api<Lease> = Api::namespaced((**client).clone(), namespace);
+        // If a custom namespace is provided, we need to create a new API client for that namespace
+        // Otherwise, use the cached API client for the default namespace
+        let api = if let Some(custom_ns) = namespace {
+            if custom_ns != self.namespace {
+                let client = self.client.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?;
+                Arc::new(Api::namespaced((**client).clone(), custom_ns))
+            } else {
+                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?)
+            }
+        } else {
+            Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+            })?)
+        };
 
         let patch = serde_json::json!({
             "spec": {
@@ -380,6 +409,7 @@ impl K8sHostBuilder {
 
         Ok(K8sHost {
             client: None,
+            lease_api: None,          // Will be set during connect()
             namespace: String::new(), // Will be set during connect()
             lease_duration_secs: self.lease_duration_secs,
             holder_identity,
@@ -395,6 +425,7 @@ mod tests {
     fn create_test_host(holder: &str) -> K8sHost {
         K8sHost {
             client: None,
+            lease_api: None,
             namespace: "test-namespace".to_string(),
             lease_duration_secs: DEFAULT_LEASE_DURATION_SECS,
             holder_identity: holder.to_string(),
