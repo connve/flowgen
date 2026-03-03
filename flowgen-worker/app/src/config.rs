@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
@@ -130,9 +131,11 @@ pub struct AppConfig {
     /// Flow discovery options (shared across components).
     pub flows: FlowOptions,
     /// Optional resource loading configuration (shared across components).
-    pub resources: Option<ResourceOptions>,
+    pub flow_resources: Option<ResourceOptions>,
     /// Optional worker component configuration.
     pub worker: Option<WorkerConfig>,
+    /// Optional OpenTelemetry configuration for metrics and tracing.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 /// Worker component configuration.
@@ -213,6 +216,35 @@ pub struct HostOptions {
     pub enabled: bool,
     /// Optional namespace for Kubernetes resources.
     pub namespace: Option<String>,
+}
+
+/// OpenTelemetry configuration options for metrics and distributed tracing.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct TelemetryOptions {
+    /// Whether OpenTelemetry is enabled.
+    pub enabled: bool,
+    /// OTLP endpoint for exporting metrics and traces (defaults to "http://localhost:4317").
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    /// Service name for resource identification (defaults to "flowgen-worker").
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+    /// Metrics export interval (defaults to "60s").
+    /// Accepts human-readable durations: "30s", "1m", "5m".
+    #[serde(default = "default_metrics_interval", with = "humantime_serde")]
+    pub metrics_export_interval: Duration,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_service_name() -> String {
+    "flowgen-worker".to_string()
+}
+
+fn default_metrics_interval() -> Duration {
+    Duration::from_secs(60)
 }
 
 #[cfg(test)]
@@ -348,7 +380,8 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/test/flows/*")),
             },
-            resources: None,
+            flow_resources: None,
+            telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
                 host: None,
@@ -360,6 +393,7 @@ mod tests {
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.path.is_some());
+        assert!(app_config.telemetry.is_none());
         assert!(app_config.worker.as_ref().unwrap().http_server.is_none());
         assert!(app_config.worker.as_ref().unwrap().host.is_none());
         assert!(app_config.worker.as_ref().unwrap().retry.is_none());
@@ -369,7 +403,7 @@ mod tests {
             .unwrap()
             .event_buffer_size
             .is_none());
-        assert!(app_config.resources.is_none());
+        assert!(app_config.flow_resources.is_none());
     }
 
     #[test]
@@ -379,7 +413,8 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/flows/*")),
             },
-            resources: None,
+            flow_resources: None,
+            telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
                 host: None,
@@ -405,7 +440,8 @@ mod tests {
             flows: FlowOptions {
                 path: Some(PathBuf::from("/serialize/flows/*")),
             },
-            resources: None,
+            flow_resources: None,
+            telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
                 host: None,
@@ -430,7 +466,8 @@ mod tests {
                 db_name: None,
             }),
             flows: FlowOptions { path: None },
-            resources: None,
+            flow_resources: None,
+            telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
                 host: None,
@@ -583,7 +620,8 @@ mod tests {
         let app_config = AppConfig {
             cache: None,
             flows: FlowOptions { path: None },
-            resources: None,
+            flow_resources: None,
+            telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: Some(HttpServerOptions {
                     enabled: true,
@@ -607,5 +645,80 @@ mod tests {
         assert!(http_server.enabled);
         assert_eq!(http_server.port, Some(8080));
         assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_options_creation() {
+        let telemetry_options = TelemetryOptions {
+            enabled: true,
+            otlp_endpoint: "http://otel-collector:4317".to_string(),
+            service_name: "flowgen-worker".to_string(),
+            metrics_export_interval: Duration::from_secs(30),
+        };
+
+        assert!(telemetry_options.enabled);
+        assert_eq!(
+            telemetry_options.otlp_endpoint,
+            "http://otel-collector:4317"
+        );
+        assert_eq!(telemetry_options.service_name, "flowgen-worker");
+        assert_eq!(
+            telemetry_options.metrics_export_interval,
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn test_telemetry_options_default_values() {
+        let telemetry_options = TelemetryOptions {
+            enabled: false,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: default_service_name(),
+            metrics_export_interval: default_metrics_interval(),
+        };
+
+        assert!(!telemetry_options.enabled);
+        assert_eq!(telemetry_options.service_name, "flowgen-worker");
+        assert_eq!(
+            telemetry_options.metrics_export_interval,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn test_telemetry_options_serialization() {
+        let telemetry_options = TelemetryOptions {
+            enabled: true,
+            otlp_endpoint: "http://grafana:4317".to_string(),
+            service_name: "flowgen-prod".to_string(),
+            metrics_export_interval: Duration::from_secs(120),
+        };
+
+        let serialized = serde_json::to_string(&telemetry_options).unwrap();
+        let deserialized: TelemetryOptions = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(telemetry_options, deserialized);
+    }
+
+    #[test]
+    fn test_app_config_with_telemetry() {
+        let app_config = AppConfig {
+            cache: None,
+            flows: FlowOptions { path: None },
+            flow_resources: None,
+            telemetry: Some(TelemetryOptions {
+                enabled: true,
+                otlp_endpoint: "http://otel-collector:4317".to_string(),
+                service_name: "flowgen-worker".to_string(),
+                metrics_export_interval: Duration::from_secs(60),
+            }),
+            worker: None,
+        };
+
+        assert!(app_config.telemetry.is_some());
+        let telemetry = app_config.telemetry.as_ref().unwrap();
+        assert!(telemetry.enabled);
+        assert_eq!(telemetry.otlp_endpoint, "http://otel-collector:4317");
+        assert_eq!(telemetry.service_name, "flowgen-worker");
+        assert_eq!(telemetry.metrics_export_interval, Duration::from_secs(60));
     }
 }

@@ -15,8 +15,19 @@ flows:
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
-resources:
+flow_resources:
   path: "path_to_resources_folder"
+
+# OpenTelemetry configuration for metrics and distributed tracing (optional).
+# Exports metrics and traces to an OTLP endpoint (e.g., OpenTelemetry Collector, Grafana Cloud, Honeycomb).
+telemetry:
+  enabled: false
+  # Optional: OTLP endpoint (defaults to "http://localhost:4317").
+  # otlp_endpoint: "http://localhost:4317"
+  # Optional: service name (defaults to "flowgen-worker").
+  # service_name: "flowgen-worker"
+  # Optional: metrics export interval using human-readable format (defaults to "60s").
+  # metrics_export_interval: "60s"
 
 # Worker component configuration.
 worker:

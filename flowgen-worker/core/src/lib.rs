@@ -25,6 +25,8 @@ pub mod retry;
 pub mod serde;
 /// Service discovery and connection management.
 pub mod service;
+/// OpenTelemetry integration for metrics and distributed tracing.
+pub mod telemetry;
 /// Task execution framework with runner trait, context, and manager.
 pub mod task {
     /// Task execution context providing metadata and runtime configuration.

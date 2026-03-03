@@ -131,6 +131,34 @@ impl App {
     pub async fn start(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
+        // Initialize OpenTelemetry if configured
+        let _telemetry_guard = if let Some(telemetry_config) = &app_config.telemetry {
+            if telemetry_config.enabled {
+                let config = flowgen_core::telemetry::TelemetryConfig {
+                    otlp_endpoint: telemetry_config.otlp_endpoint.clone(),
+                    service_name: telemetry_config.service_name.clone(),
+                    service_version: env!("CARGO_PKG_VERSION").to_string(),
+                    metrics_export_interval_secs: telemetry_config
+                        .metrics_export_interval
+                        .as_secs(),
+                };
+                match flowgen_core::telemetry::init_telemetry(config) {
+                    Ok(guard) => {
+                        info!("OpenTelemetry initialized successfully");
+                        Some(guard)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to initialize OpenTelemetry, continuing without metrics");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let flows_path = app_config
             .flows
             .path
@@ -333,7 +361,7 @@ impl App {
         }
 
         // Create resource loader from app config if configured.
-        let resource_loader = app_config.resources.as_ref().map(|resource_options| {
+        let resource_loader = app_config.flow_resources.as_ref().map(|resource_options| {
             flowgen_core::resource::ResourceLoader::new(Some(resource_options.path.clone()))
         });
 
