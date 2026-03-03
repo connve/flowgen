@@ -22,7 +22,7 @@ pub enum Error {
     Host(#[source] crate::host::Error),
 }
 
-/// Spawns a task to continuously renew a Kubernetes lease.
+/// Spawns a task to continuously renew a Kubernetes lease with retry logic.
 fn spawn_renewal_task(
     task_id: String,
     lease_name: String,
@@ -31,10 +31,33 @@ fn spawn_renewal_task(
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(Duration::from_secs(DEFAULT_LEASE_RENEWAL_INTERVAL_SECS));
+
+        // Create retry strategy: 3 attempts with exponential backoff starting at 100ms
+        let retry_config = crate::retry::RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_millis(100),
+        };
+
         loop {
             interval.tick().await;
-            if let Err(e) = host.renew_lease(&lease_name, None).await {
-                error!(error = %e, task_id = %task_id, "Failed to renew lease");
+
+            let lease_name_clone = lease_name.clone();
+            let host_clone = Arc::clone(&host);
+
+            match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+                host_clone
+                    .renew_lease(&lease_name_clone, None)
+                    .await
+                    .map_err(tokio_retry::RetryError::transient)
+            })
+            .await
+            {
+                Ok(_) => {
+                    debug!(task_id = %task_id, "Successfully renewed lease");
+                }
+                Err(e) => {
+                    error!(error = %e, task_id = %task_id, "Failed to renew lease after all retry attempts");
+                }
             }
         }
     })
