@@ -149,6 +149,16 @@ spec:
         configMap:
           name: {{ printf "%s-resources" (include "flowgen-worker.fullname" $root) }}
       {{- end }}
+      {{- else if eq $key "config" }}
+      - name: {{ $key | kebabcase }}
+        configMap:
+          {{- if $worker.config.existingConfigMap }}
+          name: {{ $worker.config.existingConfigMap }}
+          {{- else if $worker.config.inline }}
+          name: {{ printf "%s-config" (include "flowgen-worker.fullname" $root) }}
+          {{- else if $volume.configMapName }}
+          name: {{ $volume.configMapName }}
+          {{- end }}
       {{- else if $volume.configMapName }}
       - name: {{ $key | kebabcase }}
         configMap:

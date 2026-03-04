@@ -89,6 +89,19 @@ flowgen-worker:
 
   config:
     path: /etc/app/config.yaml
+    # Reference existing ConfigMap created externally.
+    # When set, this takes precedence over inline values.
+    # Example: existingConfigMap: my-config
+    existingConfigMap: ""
+    # Inline config for pure Helm deployments without external ConfigMap management.
+    # This value is only used when existingConfigMap is empty.
+    # Example:
+    #   inline: |
+    #     flows:
+    #       path: "/etc/app/flows"
+    #     flow_resources:
+    #       path: "/etc/app/resources"
+    inline: ""
 
   # Environment variables passed to the container.
   # Also accessible in flow configs via {{env.VAR_NAME}}.
