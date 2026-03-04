@@ -28,6 +28,6 @@ flow:
           name: salesforce
           description: "Salesforce messaging stream for platform events, query results etc."
           subjects: ["pubsub.>",]
-          max_age_secs: 86400
+          max_age: "24h"
           retention: limits
           discard_policy: old

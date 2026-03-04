@@ -84,8 +84,6 @@ pub enum Error {
     MissingClient,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Publish acknowledgment timed out after {timeout:?}")]
-    PublishAckTimeout { timeout: std::time::Duration },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -130,15 +128,8 @@ impl EventHandler {
                 .await
                 .map_err(|e| Error::Publish { source: e })?;
 
-            // Apply timeout if configured, otherwise use default async-nats timeout.
-            let ack = if let Some(timeout) = config.ack_timeout {
-                match tokio::time::timeout(timeout, ack_future).await {
-                    Ok(result) => result.map_err(|e| Error::Publish { source: e })?,
-                    Err(_) => return Err(Error::PublishAckTimeout { timeout }),
-                }
-            } else {
-                ack_future.await.map_err(|e| Error::Publish { source: e })?
-            };
+            // Timeout is now set on the JetStream context itself in init().
+            let ack = ack_future.await.map_err(|e| Error::Publish { source: e })?;
             let ack: PublishAck = ack.into();
             let ack_json =
                 serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
@@ -203,8 +194,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await
             .map_err(|source| Error::ClientAuth { source })?;
 
-        if let Some(jetstream) = client.jetstream {
+        if let Some(mut jetstream) = client.jetstream {
             let stream_opts = self.config.stream.as_ref().ok_or_else(|| Error::NoStream)?;
+
+            // Set timeout on JetStream context if configured.
+            if let Some(timeout) = init_config.ack_timeout {
+                jetstream.set_timeout(timeout);
+            }
 
             let jetstream = match stream_opts.create_or_update {
                 true => super::stream::create_or_update_stream(jetstream, stream_opts)
@@ -404,7 +400,7 @@ mod tests {
                 name: "test_stream".to_string(),
                 description: Some("Test stream".to_string()),
                 subjects: vec!["test.subject".to_string()],
-                max_age_secs: Some(3600),
+                max_age: Some(std::time::Duration::from_secs(3600)),
                 max_messages_per_subject: Some(1),
                 create_or_update: true,
                 retention: Some(super::super::config::RetentionPolicy::Limits),

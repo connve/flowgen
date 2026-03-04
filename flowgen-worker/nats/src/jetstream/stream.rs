@@ -1,5 +1,4 @@
 use async_nats::jetstream::{self, stream::Config};
-use std::time::Duration;
 
 /// Errors that can occur during stream operations.
 #[derive(thiserror::Error, Debug)]
@@ -83,10 +82,7 @@ pub async fn create_or_update_stream(
                 })
                 .unwrap_or(existing_config.discard);
 
-            let max_age = stream_opts
-                .max_age_secs
-                .map(Duration::from_secs)
-                .unwrap_or(existing_config.max_age);
+            let max_age = stream_opts.max_age.unwrap_or(existing_config.max_age);
 
             let max_messages_per_subject = stream_opts
                 .max_messages_per_subject
@@ -112,8 +108,7 @@ pub async fn create_or_update_stream(
                 .unwrap_or(existing_config.max_consumers);
 
             let duplicate_window = stream_opts
-                .duplicate_window_secs
-                .map(Duration::from_secs)
+                .duplicate_window
                 .unwrap_or(existing_config.duplicate_window);
 
             let deny_delete = stream_opts
@@ -199,8 +194,8 @@ pub async fn create_or_update_stream(
                 };
             }
 
-            if let Some(max_age_secs) = stream_opts.max_age_secs {
-                stream_config.max_age = Duration::from_secs(max_age_secs);
+            if let Some(max_age) = stream_opts.max_age {
+                stream_config.max_age = max_age;
             }
 
             if let Some(max_msgs_per_subject) = stream_opts.max_messages_per_subject {
@@ -223,8 +218,8 @@ pub async fn create_or_update_stream(
                 stream_config.max_consumers = max_cons;
             }
 
-            if let Some(dup_window_secs) = stream_opts.duplicate_window_secs {
-                stream_config.duplicate_window = Duration::from_secs(dup_window_secs);
+            if let Some(duplicate_window) = stream_opts.duplicate_window {
+                stream_config.duplicate_window = duplicate_window;
             }
 
             if let Some(deny_del) = stream_opts.deny_delete {

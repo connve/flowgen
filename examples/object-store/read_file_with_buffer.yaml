@@ -57,6 +57,6 @@ flow:
           name: file
           description: "All general file drops"
           subjects: ["rows.>"]
-          max_age_secs: 86400
+          max_age: "24h"
           retention: limits
           discard: old

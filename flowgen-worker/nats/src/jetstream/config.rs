@@ -64,8 +64,9 @@ pub struct StreamOptions {
     /// Subject patterns for the stream (can include wildcards).
     /// Required for publishers when creating a stream.
     pub subjects: Vec<String>,
-    /// Maximum age of messages in seconds.
-    pub max_age_secs: Option<u64>,
+    /// Maximum age of messages (e.g., "30d", "24h", "7200s").
+    #[serde(default, with = "humantime_serde")]
+    pub max_age: Option<Duration>,
     /// Maximum number of messages per subject.
     pub max_messages_per_subject: Option<i64>,
     /// Maximum number of messages in the stream.
@@ -84,9 +85,10 @@ pub struct StreamOptions {
     /// Discard policy for when stream limits are reached.
     /// If None during update, keeps the existing value.
     pub discard: Option<DiscardPolicy>,
-    /// Duplicate window in seconds.
+    /// Duplicate window (e.g., "120s", "2m", "1h").
     /// Prevents duplicate messages within this time window.
-    pub duplicate_window_secs: Option<u64>,
+    #[serde(default, with = "humantime_serde")]
+    pub duplicate_window: Option<Duration>,
     /// Allows publishing multiple messages in a single batch operation.
     pub allow_batch_publish: Option<bool>,
     /// Allows direct access to retrieve messages without using the consumer API.
@@ -240,7 +242,7 @@ mod tests {
             name: "pub_stream".to_string(),
             description: Some("Test publisher stream".to_string()),
             subjects: vec!["pub.subject.1".to_string(), "pub.subject.2".to_string()],
-            max_age_secs: Some(3600),
+            max_age: Some(Duration::from_secs(3600)),
             max_messages_per_subject: Some(100),
             create_or_update: true,
             retention: Some(RetentionPolicy::Limits),
@@ -269,7 +271,7 @@ mod tests {
         if let Some(stream) = publisher.stream {
             assert_eq!(stream.name, "pub_stream");
             assert_eq!(stream.subjects, vec!["pub.subject.1", "pub.subject.2"]);
-            assert_eq!(stream.max_age_secs, Some(3600));
+            assert_eq!(stream.max_age, Some(Duration::from_secs(3600)));
             assert_eq!(stream.max_messages_per_subject, Some(100));
         }
     }
@@ -284,7 +286,7 @@ mod tests {
                 name: "serialization_stream".to_string(),
                 description: Some("Serialization test".to_string()),
                 subjects: vec!["test.serialize".to_string()],
-                max_age_secs: Some(7200),
+                max_age: Some(Duration::from_secs(7200)),
                 create_or_update: true,
                 retention: Some(RetentionPolicy::Limits),
                 discard: Some(DiscardPolicy::Old),
@@ -310,7 +312,7 @@ mod tests {
             stream: Some(StreamOptions {
                 name: "clone_stream".to_string(),
                 subjects: vec!["clone.subject".to_string()],
-                max_age_secs: Some(1800),
+                max_age: Some(Duration::from_secs(1800)),
                 max_messages_per_subject: Some(1),
                 create_or_update: true,
                 retention: Some(RetentionPolicy::WorkQueue),
@@ -353,7 +355,7 @@ mod tests {
                 "subject.2".to_string(),
                 "subject.3".to_string(),
             ],
-            max_age_secs: Some(86400),
+            max_age: Some(Duration::from_secs(86400)),
             create_or_update: true,
             retention: Some(RetentionPolicy::Interest),
             discard: Some(DiscardPolicy::Old),
