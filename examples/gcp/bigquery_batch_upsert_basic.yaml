@@ -20,7 +20,7 @@ flow:
           name: bigquery_upsert
           description: "BigQuery upsert batches with rate limiting"
           subjects: ["bigquery.upsert.>"]
-          max_age_secs: 86400
+          max_age: "24h"
           retention: limits
           discard: old
         # Durable consumer name for resumable processing

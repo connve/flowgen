@@ -72,6 +72,6 @@ flow:
           name: salesforce_accounts
           description: "Salesforce account query job results"
           subjects: ["salesforce.accounts.>"]
-          max_age_secs: 86400
+          max_age: "24h"
           retention: limits
           discard: old

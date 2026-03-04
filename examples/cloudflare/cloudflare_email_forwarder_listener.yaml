@@ -26,6 +26,6 @@ flow:
           name: cloudflare
           description: "Cloudflare events stream"
           subjects: ["email.>"]
-          max_age_secs: 86400
+          max_age: "24h"
           retention: limits
           discard_policy: old

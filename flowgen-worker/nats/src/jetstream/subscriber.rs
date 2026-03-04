@@ -210,12 +210,17 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .await
             .map_err(|source| Error::Client { source })?;
 
-        if let Some(jetstream) = client.jetstream {
+        if let Some(mut jetstream) = client.jetstream {
             let stream_opts = self
                 .config
                 .stream
                 .as_ref()
                 .ok_or_else(|| Error::MissingStreamConfig)?;
+
+            // Set timeout on JetStream context if configured.
+            if let Some(timeout) = init_config.ack_timeout {
+                jetstream.set_timeout(timeout);
+            }
 
             let jetstream = match stream_opts.create_or_update {
                 true => super::stream::create_or_update_stream(jetstream, stream_opts)

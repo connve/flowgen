@@ -3,14 +3,11 @@
 //! Provides OTLP exporter configuration and integration with the existing tracing infrastructure.
 //! Metrics are automatically collected from tracing spans and exported to an OTLP endpoint.
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::Resource;
 use std::time::Duration;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// Errors that can occur during telemetry initialization.
 #[derive(thiserror::Error, Debug)]
@@ -25,11 +22,6 @@ pub enum Error {
     TracerInit {
         #[source]
         source: opentelemetry::trace::TraceError,
-    },
-    #[error("Failed to set global tracing subscriber: {source}")]
-    SetGlobalSubscriber {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -109,20 +101,6 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Error> 
 
     // Set global tracer provider
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
-
-    // Create tracing-opentelemetry layer
-    let telemetry_layer =
-        tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("flowgen"));
-
-    // Integrate with existing tracing subscriber
-    // This assumes tracing_subscriber is already initialized elsewhere
-    // We only add the OpenTelemetry layer on top
-    tracing_subscriber::registry()
-        .with(telemetry_layer)
-        .try_init()
-        .map_err(|e| Error::SetGlobalSubscriber {
-            source: Box::new(e),
-        })?;
 
     Ok(TelemetryGuard {
         meter_provider,
