@@ -121,6 +121,10 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let completion_tx = event.completion_tx.take();
+
         // Run handler with event context for automatic meta preservation
         let event = Arc::new(event);
 
@@ -131,12 +135,21 @@ impl EventHandler {
             // Execute operation based on type.
             match config.operation {
                 super::config::QueryJobOperation::Create => {
-                    self.create_job(&config, &event_value).await?
+                    self.create_job(&config, &event_value, completion_tx)
+                        .await?
                 }
-                super::config::QueryJobOperation::Get => self.get_job(&config).await?,
-                super::config::QueryJobOperation::Delete => self.delete_job(&config).await?,
-                super::config::QueryJobOperation::Abort => self.abort_job(&config).await?,
-                super::config::QueryJobOperation::GetResults => self.get_results(&config).await?,
+                super::config::QueryJobOperation::Get => {
+                    self.get_job(&config, completion_tx).await?
+                }
+                super::config::QueryJobOperation::Delete => {
+                    self.delete_job(&config, completion_tx).await?
+                }
+                super::config::QueryJobOperation::Abort => {
+                    self.abort_job(&config, completion_tx).await?
+                }
+                super::config::QueryJobOperation::GetResults => {
+                    self.get_results(&config, completion_tx).await?
+                }
             }
 
             Ok(())
@@ -149,6 +162,9 @@ impl EventHandler {
         &self,
         config: &super::config::QueryJob,
         event_value: &serde_json::Value,
+        mut completion_tx: Option<
+            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        >,
     ) -> Result<(), Error> {
         // Resolve query from inline or resource source.
         let query_string = match &config.query {
@@ -201,13 +217,25 @@ impl EventHandler {
         })?;
 
         // Emit event with job response.
-        let e = EventBuilder::new()
+        let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
+
+        // Handle completion
+        match self.tx {
+            Some(_) => {
+                e.completion_tx = completion_tx.take();
+            }
+            None => {
+                if let Some(tx) = completion_tx.take() {
+                    tx.send(Ok(())).ok();
+                }
+            }
+        }
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -217,7 +245,13 @@ impl EventHandler {
     }
 
     /// Gets a Salesforce bulk query job status and metadata using the SDK.
-    async fn get_job(&self, config: &super::config::QueryJob) -> Result<(), Error> {
+    async fn get_job(
+        &self,
+        config: &super::config::QueryJob,
+        mut completion_tx: Option<
+            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        >,
+    ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
         // Get job info using SDK.
@@ -235,13 +269,27 @@ impl EventHandler {
         })?;
 
         // Emit event with job response.
-        let e = EventBuilder::new()
+        let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
+
+        // Signal completion or pass through to next task.
+        match self.tx {
+            None => {
+                // Final task, signal completion.
+                if let Some(tx) = completion_tx.take() {
+                    tx.send(Ok(())).ok();
+                }
+            }
+            Some(_) => {
+                // Pass through completion_tx to next task.
+                e.completion_tx = completion_tx.take();
+            }
+        }
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -251,7 +299,13 @@ impl EventHandler {
     }
 
     /// Deletes a Salesforce bulk query job using the SDK.
-    async fn delete_job(&self, config: &super::config::QueryJob) -> Result<(), Error> {
+    async fn delete_job(
+        &self,
+        config: &super::config::QueryJob,
+        mut completion_tx: Option<
+            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        >,
+    ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
         // Delete job using SDK.
@@ -274,13 +328,25 @@ impl EventHandler {
             source: flowgen_core::serde::Error::Serde { source: e },
         })?;
 
-        let e = EventBuilder::new()
+        let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(response.job_id)
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
+
+        // Handle completion
+        match self.tx {
+            Some(_) => {
+                e.completion_tx = completion_tx.take();
+            }
+            None => {
+                if let Some(tx) = completion_tx.take() {
+                    tx.send(Ok(())).ok();
+                }
+            }
+        }
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -290,7 +356,13 @@ impl EventHandler {
     }
 
     /// Aborts a running Salesforce bulk query job using the SDK.
-    async fn abort_job(&self, config: &super::config::QueryJob) -> Result<(), Error> {
+    async fn abort_job(
+        &self,
+        config: &super::config::QueryJob,
+        mut completion_tx: Option<
+            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        >,
+    ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
         // Abort job using SDK.
@@ -309,13 +381,25 @@ impl EventHandler {
         })?;
 
         // Emit event with job response.
-        let e = EventBuilder::new()
+        let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
+
+        // Handle completion
+        match self.tx {
+            Some(_) => {
+                e.completion_tx = completion_tx.take();
+            }
+            None => {
+                if let Some(tx) = completion_tx.take() {
+                    tx.send(Ok(())).ok();
+                }
+            }
+        }
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -325,7 +409,13 @@ impl EventHandler {
     }
 
     /// Retrieves Salesforce bulk query job results using the SDK.
-    async fn get_results(&self, config: &super::config::QueryJob) -> Result<(), Error> {
+    async fn get_results(
+        &self,
+        config: &super::config::QueryJob,
+        mut completion_tx: Option<
+            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        >,
+    ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
         // Get results using SDK.
@@ -383,13 +473,27 @@ impl EventHandler {
                 _ => 0,
             };
 
-            let e = EventBuilder::new()
+            let mut e = EventBuilder::new()
                 .data(event_data)
                 .subject(config.name.to_owned())
                 .id(event_id)
                 .task_id(self.current_task_id)
                 .task_type(self.task_type)
                 .build()?;
+
+            // Attach completion_tx to last event only (like iterate task)
+            if batch_index == num_events - 1 {
+                match self.tx {
+                    Some(_) => {
+                        e.completion_tx = completion_tx.take();
+                    }
+                    None => {
+                        if let Some(tx) = completion_tx.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
+                }
+            }
 
             e.send_with_logging(self.tx.as_ref())
                 .context("num_records", num_records)

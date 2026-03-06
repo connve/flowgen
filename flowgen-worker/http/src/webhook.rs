@@ -195,7 +195,9 @@ impl EventHandler {
             DEFAULT_PAYLOAD_KEY: json_body
         });
 
-        let e = EventBuilder::new()
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+        let mut e = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(self.config.name.to_owned())
             .task_id(self.task_id)
@@ -203,10 +205,26 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
+        e.completion_tx = Some(completion_tx);
+
         e.send_with_logging(self.tx.as_ref())
             .await
             .map_err(|source| Error::SendMessage { source })?;
-        Ok(StatusCode::OK)
+
+        // Wait for pipeline completion before responding to HTTP request.
+        match self.config.ack_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
+                Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
+                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
+            },
+            None => {
+                // No timeout configured, wait indefinitely.
+                match completion_rx.await {
+                    Ok(Ok(())) => Ok(StatusCode::OK),
+                    Ok(Err(_)) | Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
+                }
+            }
+        }
     }
 }
 
@@ -449,6 +467,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
         let (tx, _rx) = mpsc::channel(100);
@@ -511,6 +530,7 @@ mod tests {
             payload: None,
             headers: Some(configured_headers),
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
 
@@ -541,6 +561,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
 

@@ -58,6 +58,9 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let json_data = match &event.data {
@@ -94,15 +97,33 @@ impl EventHandler {
                 },
             };
 
-            for element in array.iter() {
+            let array_len = array.len();
+            for (idx, element) in array.iter().enumerate() {
                 // EventBuilder::new() automatically preserves meta from the current event context
-                let e = EventBuilder::new()
+                let mut e = EventBuilder::new()
                     .data(EventData::Json(element.clone()))
                     .subject(self.config.name.to_owned())
                     .task_id(self.task_id)
                     .task_type(self.task_type)
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
+
+                // Only attach completion_tx to the last element.
+                // This ensures the source waits for ALL iterated events to complete.
+                if idx == array_len - 1 {
+                    match self.tx {
+                        None => {
+                            // Final task, signal completion after last element.
+                            if let Some(tx) = completion_tx.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                        Some(_) => {
+                            // Pass through completion_tx to last element.
+                            e.completion_tx = completion_tx.take();
+                        }
+                    }
+                }
 
                 e.send_with_logging(self.tx.as_ref())
                     .await
@@ -365,6 +386,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -417,6 +439,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -466,6 +489,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -499,6 +523,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;

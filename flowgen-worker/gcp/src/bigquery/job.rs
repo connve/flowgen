@@ -141,6 +141,9 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
@@ -205,9 +208,23 @@ impl EventHandler {
                 event_builder = event_builder.id(id);
             }
 
-            let result_event = event_builder
+            let mut result_event = event_builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(tx) = completion_tx.take() {
+                        tx.send(Ok(())).ok();
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    result_event.completion_tx = completion_tx.take();
+                }
+            }
 
             result_event
                 .send_with_logging(self.tx.as_ref())

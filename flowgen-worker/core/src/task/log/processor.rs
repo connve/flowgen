@@ -71,12 +71,20 @@ impl EventHandler {
         }
 
         // Pass the event through to the next task with updated task_id (if there is a next task)
-        if let Some(ref tx) = self.tx {
-            let mut event = event;
-            event.task_id = self.task_id;
-            tx.send(event).await.map_err(|_| Error::SendMessage {
-                source: crate::event::Error::SendMessage,
-            })?;
+        match self.tx {
+            Some(ref tx) => {
+                let mut event = event;
+                event.task_id = self.task_id;
+                tx.send(event).await.map_err(|_| Error::SendMessage {
+                    source: crate::event::Error::SendMessage,
+                })?;
+            }
+            None => {
+                // Final task, signal completion if present
+                if let Some(tx) = event.completion_tx {
+                    tx.send(Ok(())).ok();
+                }
+            }
         }
 
         Ok(())

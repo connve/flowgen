@@ -114,6 +114,9 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let original_event = Arc::clone(&event);
@@ -190,20 +193,61 @@ impl EventHandler {
 
             // Process the script result based on its type.
             match result_json {
-                Value::Null => Ok(()),
+                Value::Null => {
+                    // No events to emit, signal completion if final task.
+                    if self.tx.is_none() {
+                        if let Some(tx) = completion_tx.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
+                    Ok(())
+                }
                 Value::Array(arr) => {
-                    // Emit multiple events, one per array element.
-                    for value in arr {
-                        let new_event =
+                    // Emit multiple events, attach completion_tx to last one.
+                    let arr_len = arr.len();
+                    for (idx, value) in arr.into_iter().enumerate() {
+                        let mut new_event =
                             self.generate_script_event(value, &original_event, meta_json.as_ref())?;
+
+                        // Attach completion_tx to last event only.
+                        if idx == arr_len - 1 {
+                            match self.tx {
+                                None => {
+                                    // Final task, signal completion after last element.
+                                    if let Some(tx) = completion_tx.take() {
+                                        tx.send(Ok(())).ok();
+                                    }
+                                }
+                                Some(_) => {
+                                    // Pass through completion_tx to last element.
+                                    new_event.completion_tx = completion_tx.take();
+                                }
+                            }
+                        }
+
                         self.emit_event(new_event).await?;
                     }
                     Ok(())
                 }
                 value => {
-                    // Emit a single event.
-                    let new_event =
+                    // Emit a single event with completion_tx attached.
+                    let mut new_event =
                         self.generate_script_event(value, &original_event, meta_json.as_ref())?;
+
+                    // Signal completion or pass through to single event.
+                    match self.tx {
+                        None => {
+                            // Final task, signal completion.
+                            if let Some(tx) = completion_tx.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                        Some(_) => {
+                            // Pass through completion_tx to event.
+                            new_event.completion_tx = completion_tx.take();
+                        }
+                    }
+
                     self.emit_event(new_event).await
                 }
             }
@@ -813,6 +857,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         // Drop the original tx so recv can complete
@@ -850,6 +895,7 @@ mod tests {
             subject: "input.subject".to_string(),
             task_type: "test",
             meta: None,
+            completion_tx: None,
             task_id: 0,
             id: None,
             timestamp: 123456789,
@@ -886,6 +932,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -944,6 +991,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;

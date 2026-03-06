@@ -119,6 +119,9 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let data = match &event.data {
@@ -178,13 +181,27 @@ impl EventHandler {
             };
 
             // Build and send event.
-            let e = EventBuilder::new()
+            let mut e = EventBuilder::new()
                 .data(data)
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(tx) = completion_tx.take() {
+                        tx.send(Ok(())).ok();
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    e.completion_tx = completion_tx.take();
+                }
+            }
 
             e.send_with_logging(self.tx.as_ref())
                 .await
@@ -525,6 +542,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -583,6 +601,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -635,6 +654,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {

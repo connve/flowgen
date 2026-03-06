@@ -141,6 +141,8 @@ impl EventHandler {
 
         for ce in events {
             if let Some(event) = ce.event {
+                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
                 // Setup event data payload.
                 let data = AvroData {
                     schema: schema_info.schema_json.clone(),
@@ -154,8 +156,11 @@ impl EventHandler {
                     .unwrap_or(topic_name)
                     .to_lowercase();
 
+                // Store event_id for logging before moving it.
+                let event_id = event.id.clone();
+
                 // Build and send event.
-                let e = EventBuilder::new()
+                let mut e = EventBuilder::new()
                     .data(EventData::Avro(data))
                     .subject(subject)
                     .id(event.id)
@@ -164,23 +169,45 @@ impl EventHandler {
                     .build()
                     .map_err(|e| Error::Event { source: e })?;
 
+                e.completion_tx = Some(completion_tx);
+
                 e.send_with_logging(self.tx.as_ref())
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
 
-                // Cache replay ID after successful event processing for non-managed durable consumers.
-                if self
-                    .config
-                    .topic
-                    .durable_consumer_options
-                    .as_ref()
-                    .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
-                {
-                    let sanitized_topic = sanitize_topic_name(topic_name);
-                    let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                    if let Err(e) = cache.put(&cache_key, ce.replay_id.into(), None).await {
-                        error!(
-                            "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
+                // Wait for pipeline completion before caching replay ID.
+                let success = match self.config.ack_timeout {
+                    Some(timeout) => matches!(
+                        tokio::time::timeout(timeout, completion_rx).await,
+                        Ok(Ok(Ok(())))
+                    ),
+                    None => matches!(completion_rx.await, Ok(Ok(()))),
+                };
+
+                match success {
+                    true => {
+                        // Cache replay ID after successful pipeline completion for non-managed durable consumers.
+                        if self
+                            .config
+                            .topic
+                            .durable_consumer_options
+                            .as_ref()
+                            .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
+                        {
+                            let sanitized_topic = sanitize_topic_name(topic_name);
+                            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                            if let Err(e) = cache.put(&cache_key, ce.replay_id.into(), None).await {
+                                error!(
+                                    "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
+                                );
+                            }
+                        }
+                    }
+                    false => {
+                        // Pipeline failed or timed out, do not cache replay_id to allow replay.
+                        warn!(
+                            event_id = ?event_id,
+                            "Pipeline failed or timed out, replay_id not cached"
                         );
                     }
                 }
@@ -661,6 +688,7 @@ mod tests {
                 num_requested: Some(10),
             },
             endpoint: None,
+            ack_timeout: None,
             retry: None,
         });
         let (tx, _) = mpsc::channel::<Event>(10);

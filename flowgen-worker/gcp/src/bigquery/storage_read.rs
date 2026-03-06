@@ -128,6 +128,9 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
@@ -143,14 +146,31 @@ impl EventHandler {
             let record_batches = read_table(&self.client, &config).await?;
 
             // Send each record batch as a separate event.
-            for record_batch in record_batches {
-                let result_event = EventBuilder::new()
+            let batch_len = record_batches.len();
+            for (idx, record_batch) in record_batches.into_iter().enumerate() {
+                let mut result_event = EventBuilder::new()
                     .data(EventData::ArrowRecordBatch(record_batch))
                     .subject(format!("{}.{}", event.subject, config.name))
                     .task_id(self.task_id)
                     .task_type(self.task_type)
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
+
+                // Only attach completion_tx to the last batch.
+                if idx == batch_len - 1 {
+                    match self.tx {
+                        None => {
+                            // Final task, signal completion after last batch.
+                            if let Some(tx) = completion_tx.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                        Some(_) => {
+                            // Pass through completion_tx to last batch.
+                            result_event.completion_tx = completion_tx.take();
+                        }
+                    }
+                }
 
                 result_event
                     .send_with_logging(self.tx.as_ref())

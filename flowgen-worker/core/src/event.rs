@@ -191,7 +191,7 @@ pub enum Error {
 }
 
 /// Core event structure containing data and metadata for workflow processing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Event {
     /// Event payload in one of the supported data formats.
     pub data: EventData,
@@ -209,6 +209,28 @@ pub struct Event {
     /// Metadata can be set by script tasks and accessed in templates using event.meta syntax.
     /// Useful for adding context that should travel with the event but is separate from the payload.
     pub meta: Option<Map<String, Value>>,
+    /// Completion notifier for end-to-end pipeline acknowledgment.
+    /// Present only for events from replayable sources (NATS, Kafka, Pub/Sub).
+    /// Intermediate tasks pass this through unchanged, final tasks signal completion.
+    pub completion_tx:
+        Option<tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+}
+
+impl Clone for Event {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            subject: self.subject.clone(),
+            id: self.id.clone(),
+            timestamp: self.timestamp,
+            task_id: self.task_id,
+            task_type: self.task_type,
+            meta: self.meta.clone(),
+            // Drop completion_tx when cloning (cannot be cloned, only moved).
+            // This is correct because retry logic should not signal completion.
+            completion_tx: None,
+        }
+    }
 }
 
 impl TryFrom<&Event> for Value {
@@ -331,6 +353,9 @@ pub struct EventBuilder {
     pub task_type: Option<&'static str>,
     /// Optional metadata for contextual information.
     pub meta: Option<Map<String, Value>>,
+    /// Completion notifier for end-to-end acknowledgment.
+    pub completion_tx:
+        Option<tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
 }
 
 impl EventBuilder {
@@ -377,6 +402,16 @@ impl EventBuilder {
         self
     }
 
+    pub fn completion_tx(
+        mut self,
+        completion_tx: tokio::sync::oneshot::Sender<
+            Result<(), Box<dyn std::error::Error + Send + Sync>>,
+        >,
+    ) -> Self {
+        self.completion_tx = Some(completion_tx);
+        self
+    }
+
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
             data: self
@@ -396,6 +431,7 @@ impl EventBuilder {
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
+            completion_tx: self.completion_tx,
         })
     }
 }

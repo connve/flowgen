@@ -23,6 +23,10 @@ pub struct Processor {
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
     pub credentials_path: Option<PathBuf>,
+    /// Timeout for waiting on pipeline completion before responding to webhook (webhook only).
+    /// If not specified, waits indefinitely for pipeline completion.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<std::time::Duration>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -136,6 +140,7 @@ mod tests {
             payload: Some(payload),
             headers: Some(headers.clone()),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
+            ack_timeout: None,
             retry: None,
         };
 
@@ -159,6 +164,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
+            ack_timeout: None,
             retry: None,
         };
 
@@ -176,6 +182,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         };
 
@@ -329,6 +336,7 @@ mod tests {
             payload: Some(payload),
             headers: Some(headers),
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
+            ack_timeout: None,
             retry: None,
         };
 

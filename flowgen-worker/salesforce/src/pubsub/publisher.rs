@@ -106,6 +106,9 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        // Extract completion_tx before wrapping event in Arc.
+        let mut event = event;
+        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
@@ -166,13 +169,27 @@ impl EventHandler {
             let resp_json =
                 serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 
-            let e = flowgen_core::event::EventBuilder::new()
+            let mut e = flowgen_core::event::EventBuilder::new()
                 .data(EventData::Json(resp_json))
                 .subject(subject)
                 .id(resp.rpc_id)
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(tx) = completion_tx.take() {
+                        tx.send(Ok(())).ok();
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    e.completion_tx = completion_tx.take();
+                }
+            }
 
             e.send_with_logging(self.tx.as_ref())
                 .await
