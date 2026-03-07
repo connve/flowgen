@@ -115,7 +115,9 @@ impl EventHandler {
                     .to_event(self.task_type, self.task_id)
                     .map_err(|source| Error::MessageConversion { source })?;
 
-                e.completion_tx = Some(completion_tx);
+                e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                    completion_tx,
+                ))));
 
                 e.send_with_logging(self.tx.as_ref())
                     .await

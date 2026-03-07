@@ -72,6 +72,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
+    #[error("Pipeline completion failed or timed out for webhook request")]
+    PipelineCompletionFailed,
 }
 
 impl IntoResponse for Error {
@@ -205,7 +207,9 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
-        e.completion_tx = Some(completion_tx);
+        e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            completion_tx,
+        ))));
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -215,13 +219,19 @@ impl EventHandler {
         match self.config.ack_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
                 Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
-                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
+                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                    error!("{}", Error::PipelineCompletionFailed);
+                    Ok(StatusCode::INTERNAL_SERVER_ERROR)
+                }
             },
             None => {
                 // No timeout configured, wait indefinitely.
                 match completion_rx.await {
                     Ok(Ok(())) => Ok(StatusCode::OK),
-                    Ok(Err(_)) | Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR),
+                    Ok(Err(_)) | Err(_) => {
+                        error!("{}", Error::PipelineCompletionFailed);
+                        Ok(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
                 }
             }
         }

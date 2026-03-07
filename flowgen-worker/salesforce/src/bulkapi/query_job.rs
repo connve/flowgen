@@ -121,12 +121,9 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        // Extract completion_tx before wrapping event in Arc.
-        let mut event = event;
-        let completion_tx = event.completion_tx.take();
-
         // Run handler with event context for automatic meta preservation
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
@@ -135,20 +132,20 @@ impl EventHandler {
             // Execute operation based on type.
             match config.operation {
                 super::config::QueryJobOperation::Create => {
-                    self.create_job(&config, &event_value, completion_tx)
+                    self.create_job(&config, &event_value, completion_tx_arc)
                         .await?
                 }
                 super::config::QueryJobOperation::Get => {
-                    self.get_job(&config, completion_tx).await?
+                    self.get_job(&config, completion_tx_arc).await?
                 }
                 super::config::QueryJobOperation::Delete => {
-                    self.delete_job(&config, completion_tx).await?
+                    self.delete_job(&config, completion_tx_arc).await?
                 }
                 super::config::QueryJobOperation::Abort => {
-                    self.abort_job(&config, completion_tx).await?
+                    self.abort_job(&config, completion_tx_arc).await?
                 }
                 super::config::QueryJobOperation::GetResults => {
-                    self.get_results(&config, completion_tx).await?
+                    self.get_results(&config, completion_tx_arc).await?
                 }
             }
 
@@ -162,9 +159,7 @@ impl EventHandler {
         &self,
         config: &super::config::QueryJob,
         event_value: &serde_json::Value,
-        mut completion_tx: Option<
-            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        >,
+        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         // Resolve query from inline or resource source.
         let query_string = match &config.query {
@@ -228,11 +223,15 @@ impl EventHandler {
         // Handle completion
         match self.tx {
             Some(_) => {
-                e.completion_tx = completion_tx.take();
+                e.completion_tx = completion_tx_arc.clone();
             }
             None => {
-                if let Some(tx) = completion_tx.take() {
-                    tx.send(Ok(())).ok();
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
                 }
             }
         }
@@ -248,9 +247,7 @@ impl EventHandler {
     async fn get_job(
         &self,
         config: &super::config::QueryJob,
-        mut completion_tx: Option<
-            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        >,
+        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
@@ -281,13 +278,17 @@ impl EventHandler {
         match self.tx {
             None => {
                 // Final task, signal completion.
-                if let Some(tx) = completion_tx.take() {
-                    tx.send(Ok(())).ok();
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
                 }
             }
             Some(_) => {
                 // Pass through completion_tx to next task.
-                e.completion_tx = completion_tx.take();
+                e.completion_tx = completion_tx_arc.clone();
             }
         }
 
@@ -302,9 +303,7 @@ impl EventHandler {
     async fn delete_job(
         &self,
         config: &super::config::QueryJob,
-        mut completion_tx: Option<
-            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        >,
+        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
@@ -339,11 +338,15 @@ impl EventHandler {
         // Handle completion
         match self.tx {
             Some(_) => {
-                e.completion_tx = completion_tx.take();
+                e.completion_tx = completion_tx_arc.clone();
             }
             None => {
-                if let Some(tx) = completion_tx.take() {
-                    tx.send(Ok(())).ok();
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
                 }
             }
         }
@@ -359,9 +362,7 @@ impl EventHandler {
     async fn abort_job(
         &self,
         config: &super::config::QueryJob,
-        mut completion_tx: Option<
-            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        >,
+        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
@@ -392,11 +393,15 @@ impl EventHandler {
         // Handle completion
         match self.tx {
             Some(_) => {
-                e.completion_tx = completion_tx.take();
+                e.completion_tx = completion_tx_arc.clone();
             }
             None => {
-                if let Some(tx) = completion_tx.take() {
-                    tx.send(Ok(())).ok();
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
                 }
             }
         }
@@ -412,9 +417,7 @@ impl EventHandler {
     async fn get_results(
         &self,
         config: &super::config::QueryJob,
-        mut completion_tx: Option<
-            tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        >,
+        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
 
@@ -485,11 +488,15 @@ impl EventHandler {
             if batch_index == num_events - 1 {
                 match self.tx {
                     Some(_) => {
-                        e.completion_tx = completion_tx.take();
+                        e.completion_tx = completion_tx_arc.clone();
                     }
                     None => {
-                        if let Some(tx) = completion_tx.take() {
-                            tx.send(Ok(())).ok();
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
+                            }
                         }
                     }
                 }

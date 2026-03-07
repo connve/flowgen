@@ -122,14 +122,8 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
-        // Extract completion_tx before wrapping event in Arc.
-        let mut event = event;
-        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let mut client_guard = self.client.lock().await;
             let context = client_guard
@@ -208,8 +202,15 @@ impl EventHandler {
             let mut writer = Vec::new();
             match (&event.data, &format) {
                 (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
-                    // Skip writing empty batches.
+                    // Skip writing empty batches but signal completion.
                     if batch.num_rows() == 0 {
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
+                            }
+                        }
                         return Ok(());
                     }
 
@@ -274,13 +275,17 @@ impl EventHandler {
             match self.tx {
                 None => {
                     // Final task, signal completion.
-                    if let Some(tx) = completion_tx.take() {
-                        tx.send(Ok(())).ok();
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
                     }
                 }
                 Some(_) => {
                     // Pass through completion_tx to next task.
-                    e.completion_tx = completion_tx.take();
+                    e.completion_tx = completion_tx_arc.clone();
                 }
             }
 

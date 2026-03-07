@@ -5,7 +5,7 @@
 //! such as file writes, API calls, or columnar format conversions.
 
 use crate::config::ConfigExt;
-use crate::event::{Event, EventBuilder, EventData, EventExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -14,10 +14,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Instant};
 use tracing::error;
-
-/// Type alias for completion channel sender.
-type CompletionTx =
-    tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
 
 /// Errors that can occur during buffer processing operations.
 #[derive(thiserror::Error, Debug)]
@@ -125,7 +121,7 @@ impl Processor {
         reason: FlushReason,
         partition_key: Option<String>,
         meta: Option<Map<String, Value>>,
-        completion_tx: Option<CompletionTx>,
+        completion_tx: Option<SharedCompletionTx>,
     ) {
         if buffer.is_empty() {
             return;
@@ -181,8 +177,12 @@ impl Processor {
                 }
                 None => {
                     // Final task, signal completion
-                    if let Some(tx) = completion_tx {
-                        tx.send(Ok(())).ok();
+                    if let Some(arc) = completion_tx.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
                     }
                 }
             }
@@ -217,7 +217,7 @@ impl Processor {
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
         let mut buffer_meta: Option<Map<String, Value>> = None;
-        let mut buffer_completion_tx: Option<CompletionTx> = None;
+        let mut buffer_completion_tx: Option<SharedCompletionTx> = None;
         let mut last_flush = Instant::now();
 
         loop {
@@ -230,7 +230,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Some(mut event) => {
+                        Some(event) => {
                             // Capture meta from first event in buffer.
                             if buffer.is_empty() {
                                 buffer_meta = event.meta.clone();
@@ -250,7 +250,7 @@ impl Processor {
                             buffer.push(json_data);
 
                             // Always capture completion_tx from latest event (last one wins)
-                            buffer_completion_tx = event.completion_tx.take();
+                            buffer_completion_tx = event.completion_tx.clone();
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
@@ -288,7 +288,8 @@ impl Processor {
         // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
         let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
         let mut buffer_metas: HashMap<String, Map<String, Value>> = HashMap::with_capacity(16);
-        let mut buffer_completions: HashMap<String, CompletionTx> = HashMap::with_capacity(16);
+        let mut buffer_completions: HashMap<String, SharedCompletionTx> =
+            HashMap::with_capacity(16);
         let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {

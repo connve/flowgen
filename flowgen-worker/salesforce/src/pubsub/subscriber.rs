@@ -82,6 +82,8 @@ pub enum Error {
     },
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
+    #[error("Pipeline completion failed or timed out for event")]
+    PipelineCompletionFailed,
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -130,24 +132,29 @@ fn is_auth_error(error: &PubSubError) -> bool {
 
 impl EventHandler {
     /// Processes a batch of events from Salesforce Pub/Sub.
+    /// Events are processed concurrently, but replay_id is only cached after ALL events succeed.
     async fn process_events(
         &self,
         events: Vec<ConsumerEvent>,
         schema_info: &SchemaInfo,
         topic_name: &str,
     ) -> Result<(), Error> {
-        let cache = &self.task_context.cache;
-        let flow_name = &self.task_context.flow.name;
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let cache = Arc::clone(&self.task_context.cache);
+        let flow_name = self.task_context.flow.name.clone();
+        let mut handles = Vec::new();
+        let last_replay_id = events.last().map(|ce| ce.replay_id.clone());
 
         for ce in events {
             if let Some(event) = ce.event {
-                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-
-                // Setup event data payload.
-                let data = AvroData {
-                    schema: schema_info.schema_json.clone(),
-                    raw_bytes: event.payload[..].to_vec(),
-                };
+                let tx = self.tx.clone();
+                let task_id = self.task_id;
+                let task_type = self.task_type;
+                let schema = schema_info.schema_json.clone();
+                let event_id = event.id.clone();
 
                 // Normalize topic name by removing data/ or event/ prefix.
                 let subject = topic_name
@@ -156,62 +163,97 @@ impl EventHandler {
                     .unwrap_or(topic_name)
                     .to_lowercase();
 
-                // Store event_id for logging before moving it.
-                let event_id = event.id.clone();
+                let config = Arc::clone(&self.config);
 
-                // Build and send event.
-                let mut e = EventBuilder::new()
-                    .data(EventData::Avro(data))
-                    .subject(subject)
-                    .id(event.id)
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|e| Error::Event { source: e })?;
+                // Spawn a task for each event to process them concurrently.
+                let handle = tokio::spawn(async move {
+                    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
-                e.completion_tx = Some(completion_tx);
+                    // Setup event data payload.
+                    let data = AvroData {
+                        schema,
+                        raw_bytes: event.payload[..].to_vec(),
+                    };
 
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
+                    // Build and send event.
+                    let mut e = EventBuilder::new()
+                        .data(EventData::Avro(data))
+                        .subject(subject)
+                        .id(event.id)
+                        .task_id(task_id)
+                        .task_type(task_type)
+                        .build()
+                        .map_err(|e| Error::Event { source: e })?;
 
-                // Wait for pipeline completion before caching replay ID.
-                let success = match self.config.ack_timeout {
-                    Some(timeout) => matches!(
-                        tokio::time::timeout(timeout, completion_rx).await,
-                        Ok(Ok(Ok(())))
-                    ),
-                    None => matches!(completion_rx.await, Ok(Ok(()))),
-                };
+                    e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                        completion_tx,
+                    ))));
 
-                match success {
-                    true => {
-                        // Cache replay ID after successful pipeline completion for non-managed durable consumers.
-                        if self
-                            .config
-                            .topic
-                            .durable_consumer_options
-                            .as_ref()
-                            .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
-                        {
-                            let sanitized_topic = sanitize_topic_name(topic_name);
-                            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                            if let Err(e) = cache.put(&cache_key, ce.replay_id.into(), None).await {
-                                error!(
-                                    "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
-                                );
-                            }
-                        }
-                    }
-                    false => {
-                        // Pipeline failed or timed out, do not cache replay_id to allow replay.
+                    e.send_with_logging(tx.as_ref())
+                        .await
+                        .map_err(|source| Error::SendMessage { source })?;
+
+                    // Wait for pipeline completion.
+                    let success = match config.ack_timeout {
+                        Some(timeout) => matches!(
+                            tokio::time::timeout(timeout, completion_rx).await,
+                            Ok(Ok(Ok(())))
+                        ),
+                        None => matches!(completion_rx.await, Ok(Ok(()))),
+                    };
+
+                    if !success {
                         warn!(
                             event_id = ?event_id,
-                            "Pipeline failed or timed out, replay_id not cached"
+                            "Pipeline failed or timed out"
+                        );
+                        return Err(Error::PipelineCompletionFailed);
+                    }
+
+                    Ok::<(), Error>(())
+                });
+
+                handles.push(handle);
+            }
+        }
+
+        // Wait for all events in the batch to complete.
+        let mut all_succeeded = true;
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(())) => {} // Event succeeded
+                Ok(Err(e)) => {
+                    error!("Event processing failed: {}", e);
+                    all_succeeded = false;
+                }
+                Err(e) => {
+                    error!("Event processing task panicked: {}", e);
+                    all_succeeded = false;
+                }
+            }
+        }
+
+        // Only cache replay_id if ALL events in the batch succeeded.
+        if all_succeeded {
+            if let Some(replay_id) = last_replay_id {
+                if self
+                    .config
+                    .topic
+                    .durable_consumer_options
+                    .as_ref()
+                    .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
+                {
+                    let sanitized_topic = sanitize_topic_name(topic_name);
+                    let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                    if let Err(e) = cache.put(&cache_key, replay_id.into(), None).await {
+                        error!(
+                            "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
                         );
                     }
                 }
             }
+        } else {
+            warn!("Not all events succeeded in batch, replay_id not advanced");
         }
 
         Ok(())

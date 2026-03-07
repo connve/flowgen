@@ -46,10 +46,6 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by logging its data and passing it through.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         if self.config.structured {
             // Structured logging mode for Grafana/Loki
             match self.config.level {
@@ -81,8 +77,12 @@ impl EventHandler {
             }
             None => {
                 // Final task, signal completion if present
-                if let Some(tx) = event.completion_tx {
-                    tx.send(Ok(())).ok();
+                if let Some(arc) = event.completion_tx.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
                 }
             }
         }

@@ -110,14 +110,8 @@ struct CacheHandle {
 impl EventHandler {
     /// Processes an event by executing the script on its data.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
-        // Extract completion_tx before wrapping event in Arc.
-        let mut event = event;
-        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let original_event = Arc::clone(&event);
 
@@ -194,10 +188,14 @@ impl EventHandler {
             // Process the script result based on its type.
             match result_json {
                 Value::Null => {
-                    // No events to emit, signal completion if final task.
-                    if self.tx.is_none() {
-                        if let Some(tx) = completion_tx.take() {
-                            tx.send(Ok(())).ok();
+                    // No events to emit, always signal completion.
+                    // When a script filters out an event (returns null), the pipeline
+                    // ends for that event, so we must signal completion to prevent timeout.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                let _ = tx.send(Ok(()));
+                            }
                         }
                     }
                     Ok(())
@@ -214,13 +212,17 @@ impl EventHandler {
                             match self.tx {
                                 None => {
                                     // Final task, signal completion after last element.
-                                    if let Some(tx) = completion_tx.take() {
-                                        tx.send(Ok(())).ok();
+                                    if let Some(arc) = completion_tx_arc.as_ref() {
+                                        if let Ok(mut guard) = arc.lock() {
+                                            if let Some(tx) = guard.take() {
+                                                tx.send(Ok(())).ok();
+                                            }
+                                        }
                                     }
                                 }
                                 Some(_) => {
                                     // Pass through completion_tx to last element.
-                                    new_event.completion_tx = completion_tx.take();
+                                    new_event.completion_tx = completion_tx_arc.clone();
                                 }
                             }
                         }
@@ -238,13 +240,17 @@ impl EventHandler {
                     match self.tx {
                         None => {
                             // Final task, signal completion.
-                            if let Some(tx) = completion_tx.take() {
-                                tx.send(Ok(())).ok();
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                if let Ok(mut guard) = arc.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        tx.send(Ok(())).ok();
+                                    }
+                                }
                             }
                         }
                         Some(_) => {
                             // Pass through completion_tx to event.
-                            new_event.completion_tx = completion_tx.take();
+                            new_event.completion_tx = completion_tx_arc.clone();
                         }
                     }
 
@@ -688,6 +694,17 @@ impl crate::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Script execution failed after all retry attempts");
+                                if let Some(arc) = event.completion_tx.as_ref() {
+                                    if let Ok(mut guard) = arc.lock() {
+                                        if let Some(tx) = guard.take() {
+                                            let boxed_error: Box<dyn std::error::Error + Send + Sync> =
+                                                Box::new(Error::RetryExhausted {
+                                                    source: Box::new(err),
+                                                });
+                                            tx.send(Err(boxed_error)).ok();
+                                        }
+                                    }
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -115,14 +115,8 @@ struct AvroSerializerOptions {
 impl EventHandler {
     /// Processes an event and converts to selected target format.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
-        // Extract completion_tx before wrapping event in Arc.
-        let mut event = event;
-        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let data = match &event.data {
                 EventData::Json(data) => match self.config.target_format {
@@ -193,13 +187,17 @@ impl EventHandler {
             match self.tx {
                 None => {
                     // Final task, signal completion.
-                    if let Some(tx) = completion_tx.take() {
-                        tx.send(Ok(())).ok();
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
                     }
                 }
                 Some(_) => {
                     // Pass through completion_tx to next task.
-                    e.completion_tx = completion_tx.take();
+                    e.completion_tx = completion_tx_arc.clone();
                 }
             }
 

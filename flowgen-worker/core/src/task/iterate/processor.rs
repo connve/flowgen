@@ -58,10 +58,8 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        // Extract completion_tx before wrapping event in Arc.
-        let mut event = event;
-        let mut completion_tx = event.completion_tx.take();
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let json_data = match &event.data {
                 EventData::Json(data) => data,
@@ -98,6 +96,19 @@ impl EventHandler {
             };
 
             let array_len = array.len();
+
+            // Handle empty arrays by signaling completion immediately.
+            if array_len == 0 {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
             for (idx, element) in array.iter().enumerate() {
                 // EventBuilder::new() automatically preserves meta from the current event context
                 let mut e = EventBuilder::new()
@@ -114,13 +125,17 @@ impl EventHandler {
                     match self.tx {
                         None => {
                             // Final task, signal completion after last element.
-                            if let Some(tx) = completion_tx.take() {
-                                tx.send(Ok(())).ok();
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                if let Ok(mut guard) = arc.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        tx.send(Ok(())).ok();
+                                    }
+                                }
                             }
                         }
                         Some(_) => {
                             // Pass through completion_tx to last element.
-                            e.completion_tx = completion_tx.take();
+                            e.completion_tx = completion_tx_arc.clone();
                         }
                     }
                 }

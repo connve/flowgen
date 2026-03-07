@@ -14,6 +14,13 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
+/// Type alias for completion channel sender.
+pub type CompletionTx =
+    tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+/// Type alias for shared completion channel sender (used in Event struct for cloning support).
+pub type SharedCompletionTx = Arc<std::sync::Mutex<Option<CompletionTx>>>;
+
 tokio::task_local! {
     /// Task-local storage for the current event context.
     /// Used by EventBuilder::new() to automatically preserve meta fields from the incoming event.
@@ -212,8 +219,8 @@ pub struct Event {
     /// Completion notifier for end-to-end pipeline acknowledgment.
     /// Present only for events from replayable sources (NATS, Kafka, Pub/Sub).
     /// Intermediate tasks pass this through unchanged, final tasks signal completion.
-    pub completion_tx:
-        Option<tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+    /// Wrapped in Arc<Mutex> to allow sharing across event clones during retries.
+    pub completion_tx: Option<SharedCompletionTx>,
 }
 
 impl Clone for Event {
@@ -226,9 +233,7 @@ impl Clone for Event {
             task_id: self.task_id,
             task_type: self.task_type,
             meta: self.meta.clone(),
-            // Drop completion_tx when cloning (cannot be cloned, only moved).
-            // This is correct because retry logic should not signal completion.
-            completion_tx: None,
+            completion_tx: self.completion_tx.clone(),
         }
     }
 }
@@ -354,8 +359,7 @@ pub struct EventBuilder {
     /// Optional metadata for contextual information.
     pub meta: Option<Map<String, Value>>,
     /// Completion notifier for end-to-end acknowledgment.
-    pub completion_tx:
-        Option<tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+    pub completion_tx: Option<CompletionTx>,
 }
 
 impl EventBuilder {
@@ -431,7 +435,9 @@ impl EventBuilder {
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
-            completion_tx: self.completion_tx,
+            completion_tx: self
+                .completion_tx
+                .map(|tx| std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
         })
     }
 }
