@@ -308,8 +308,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Convert processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

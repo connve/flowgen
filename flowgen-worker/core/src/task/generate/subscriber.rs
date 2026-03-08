@@ -270,8 +270,7 @@ impl crate::task::runner::Runner for Subscriber {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(error = %e, "Generate subscriber failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

@@ -248,8 +248,18 @@ impl flowgen_core::task::runner::Runner for Publisher {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!(error = %e, "Failed to initialize publisher");
-                    Err(tokio_retry::RetryError::transient(e))
+                    let is_retriable = !matches!(
+                        &e,
+                        Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
+                    );
+
+                    if is_retriable {
+                        error!(error = %e, "Failed to initialize publisher");
+                        Err(tokio_retry::RetryError::transient(e))
+                    } else {
+                        error!(error = %e, "Non-retriable error");
+                        Err(tokio_retry::RetryError::permanent(e))
+                    }
                 }
             }
         })
@@ -257,8 +267,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Publisher failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

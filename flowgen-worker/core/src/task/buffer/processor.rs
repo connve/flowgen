@@ -450,8 +450,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(_) => {}
             Err(e) => {
-                error!(error = %e, "Buffer processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

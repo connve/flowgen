@@ -133,6 +133,9 @@ pub enum Error {
     /// Failed to retrieve background task handles for monitoring.
     #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
+    /// Flow cannot be initialized because HTTP server is not enabled.
+    #[error("Flow cannot be initialized as http_server is not enabled")]
+    HttpServerNotEnabled,
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -317,6 +320,18 @@ impl Flow {
     pub async fn init(&mut self) -> Result<(), Error> {
         if self.task_manager.is_some() {
             return Ok(()); // Already initialized
+        }
+
+        // Validate: Flow with http_webhook tasks requires HTTP server to be configured.
+        let has_webhook_tasks = self
+            .config
+            .flow
+            .tasks
+            .iter()
+            .any(|task| matches!(task, TaskType::http_webhook(_)));
+
+        if has_webhook_tasks && self.http_server.is_none() {
+            return Err(Error::HttpServerNotEnabled);
         }
 
         let mut task_manager_builder = flowgen_core::task::manager::TaskManagerBuilder::new();

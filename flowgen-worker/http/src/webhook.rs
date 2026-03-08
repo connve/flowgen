@@ -82,7 +82,6 @@ impl IntoResponse for Error {
             Error::SerdeJson { .. } | Error::Axum { .. } => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        error!("webhook error: {}", self);
         status.into_response()
     }
 }
@@ -175,7 +174,10 @@ impl EventHandler {
 
         let json_body = match body.is_empty() {
             true => Value::Null,
-            false => serde_json::from_slice(&body).map_err(|e| Error::SerdeJson { source: e })?,
+            false => serde_json::from_slice(&body).map_err(|e| {
+                error!("Failed to parse webhook request body as JSON: {}", e);
+                Error::SerdeJson { source: e }
+            })?,
         };
 
         // Only store headers that are specified in the configuration.
@@ -305,8 +307,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(error = %e, "Webhook processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

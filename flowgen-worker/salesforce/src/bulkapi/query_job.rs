@@ -570,8 +570,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Bulk query job processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

@@ -336,8 +336,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Reader failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

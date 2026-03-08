@@ -552,40 +552,32 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         })
     }
 
-    /// Runs the subscriber by initializing and spawning the event handler task.
     #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
-        // Merge app-level and task-level retry config.
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        // Spawn event handler task.
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!(error = %e, "Failed to initialize subscriber");
+                    Err(tokio_retry::RetryError::transient(e))
+                }
+            }
+        })
+        .await
+        {
+            Ok(handler) => handler,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
         tokio::spawn(
             async move {
-                // Retry loop with exponential backoff.
-                let result = tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-                    // Initialize task.
-                    let event_handler = match self.init().await {
-                        Ok(handler) => handler,
-                        Err(e) => {
-                            error!(error = %e, "Failed to initialize subscriber");
-                            return Err(tokio_retry::RetryError::transient(e));
-                        }
-                    };
-
-                    // Run event handler.
-                    match event_handler.handle().await {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            error!(error = %e, "Failed to process messages");
-                            Err(tokio_retry::RetryError::transient(e))
-                        }
-                    }
-                })
-                .await;
-
-                if let Err(e) = result {
-                    error!(error = %e, "Subscriber failed after all retry attempts");
+                if let Err(e) = event_handler.handle().await {
+                    error!(error = %e, "Failed to process events");
                 }
             }
             .instrument(tracing::Span::current()),

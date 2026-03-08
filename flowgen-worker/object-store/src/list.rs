@@ -287,8 +287,7 @@ impl Runner for ListProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Lister failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

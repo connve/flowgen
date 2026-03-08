@@ -2,7 +2,7 @@ use crate::config::{AppConfig, FlowConfig};
 use config::Config;
 use flowgen_core::client::Client;
 use std::sync::Arc;
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Errors that can occur during application execution.
 #[derive(thiserror::Error, Debug)]
@@ -144,7 +144,7 @@ impl App {
                 };
                 match flowgen_core::telemetry::init_telemetry(config) {
                     Ok(guard) => {
-                        info!("OpenTelemetry initialized successfully");
+                        debug!("OpenTelemetry initialized successfully");
                         Some(guard)
                     }
                     Err(e) => {

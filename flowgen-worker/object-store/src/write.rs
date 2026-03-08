@@ -396,8 +396,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Writer failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

@@ -287,8 +287,7 @@ impl Runner for MoveProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Mover failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

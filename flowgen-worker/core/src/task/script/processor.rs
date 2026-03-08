@@ -669,8 +669,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Script processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 
@@ -685,22 +684,34 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!(error = %e, "Failed to execute script");
-                                        Err(tokio_retry::RetryError::transient(e))
+                                        // Check if error is non-retriable (syntax errors, type errors, etc.)
+                                        let is_retriable = !matches!(
+                                            &e,
+                                            Error::ScriptExecution { .. }
+                                                | Error::InvalidReturnType(_)
+                                                | Error::ResourceLoad { .. }
+                                        );
+
+                                        if is_retriable {
+                                            Err(tokio_retry::RetryError::transient(e))
+                                        } else {
+                                            error!(error = %e, "Non-retriable error");
+                                            Err(tokio_retry::RetryError::permanent(e))
+                                        }
                                     }
                                 }
                             })
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Script execution failed after all retry attempts");
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
                                         if let Some(tx) = guard.take() {
-                                            let boxed_error: Box<dyn std::error::Error + Send + Sync> =
-                                                Box::new(Error::RetryExhausted {
-                                                    source: Box::new(err),
-                                                });
+                                            let boxed_error: Box<
+                                                dyn std::error::Error + Send + Sync,
+                                            > = Box::new(Error::RetryExhausted {
+                                                source: Box::new(err),
+                                            });
                                             tx.send(Err(boxed_error)).ok();
                                         }
                                     }
