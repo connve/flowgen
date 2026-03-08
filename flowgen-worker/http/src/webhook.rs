@@ -329,7 +329,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         };
 
         if let Some(http_server) = &self.task_context.http_server {
-            // Downcast the trait object to the concrete HttpServer type
+            // Downcast the trait object to the concrete HttpServer type.
             if let Some(server) = http_server
                 .as_any()
                 .downcast_ref::<super::server::HttpServer>()

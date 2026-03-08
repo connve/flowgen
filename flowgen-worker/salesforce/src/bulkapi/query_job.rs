@@ -121,7 +121,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        // Run handler with event context for automatic meta preservation
+        // Run handler with event context for automatic meta preservation.
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -220,7 +220,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion
+        // Handle completion signal for the operation.
         match self.tx {
             Some(_) => {
                 e.completion_tx = completion_tx_arc.clone();
@@ -335,7 +335,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion
+        // Handle completion signal for the operation.
         match self.tx {
             Some(_) => {
                 e.completion_tx = completion_tx_arc.clone();
@@ -390,7 +390,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion
+        // Handle completion signal for the operation.
         match self.tx {
             Some(_) => {
                 e.completion_tx = completion_tx_arc.clone();
@@ -464,10 +464,10 @@ impl EventHandler {
         let num_events = events.len();
         for (batch_index, event_data) in events.into_iter().enumerate() {
             let event_id = if num_events == 1 {
-                // Single batch: use job_id directly
+                // Single batch: use job_id directly.
                 job_id.clone()
             } else {
-                // Multiple batches: append batch index
+                // Multiple batches: append batch index.
                 format!("{job_id}-{batch_index}")
             };
 
@@ -484,7 +484,7 @@ impl EventHandler {
                 .task_type(self.task_type)
                 .build()?;
 
-            // Attach completion_tx to last event only (like iterate task)
+            // Attach completion_tx to last event only (like iterate task).
             if batch_index == num_events - 1 {
                 match self.tx {
                     Some(_) => {

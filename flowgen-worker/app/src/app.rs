@@ -131,7 +131,7 @@ impl App {
     pub async fn start(self) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
-        // Initialize OpenTelemetry if configured
+        // Initialize OpenTelemetry if configured.
         let _telemetry_guard = if let Some(telemetry_config) = &app_config.telemetry {
             if telemetry_config.enabled {
                 let config = flowgen_core::telemetry::TelemetryConfig {
@@ -321,7 +321,7 @@ impl App {
                     as Arc<dyn flowgen_core::cache::Cache>
             };
 
-        // Helper to check if running in Kubernetes
+        // Helper to check if running in Kubernetes.
         let is_in_k8s =
             || std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
 
@@ -453,7 +453,7 @@ impl App {
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
                 async move {
-                    // Downcast to concrete HttpServer type to access start_server method
+                    // Downcast to concrete HttpServer type to access start_server method.
                     if let Some(server) = http_server
                         .as_any()
                         .downcast_ref::<flowgen_http::server::HttpServer>()

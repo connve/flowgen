@@ -561,7 +561,7 @@ fn response_to_record_batch(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Create RecordBatch
+    // Create RecordBatch from query results.
     arrow::array::RecordBatch::try_new(arrow_schema, columns)
         .map_err(|source| Error::Arrow { source })
 }
@@ -675,8 +675,8 @@ fn build_column(
                 match &row.f[col_idx].v {
                     Value::Null => builder.append_null(),
                     Value::String(s) => {
-                        // BigQuery returns dates as "YYYY-MM-DD"
-                        // Date32 is days since Unix epoch (1970-01-01)
+                        // BigQuery returns dates as "YYYY-MM-DD".
+                        // Date32 is days since Unix epoch (1970-01-01).
                         match parse_date_to_days(s) {
                             Ok(days) => builder.append_value(days),
                             Err(_) => builder.append_null(),
@@ -693,8 +693,8 @@ fn build_column(
                 match &row.f[col_idx].v {
                     Value::Null => builder.append_null(),
                     Value::String(s) => {
-                        // BigQuery returns time as "HH:MM:SS[.ffffff]"
-                        // Time64 is microseconds since midnight
+                        // BigQuery returns time as "HH:MM:SS[.ffffff]".
+                        // Time64 is microseconds since midnight.
                         match parse_time_to_micros(s) {
                             Ok(micros) => builder.append_value(micros),
                             Err(_) => builder.append_null(),
@@ -766,7 +766,7 @@ fn build_column(
             Arc::new(builder.finish()) as ArrayRef
         }
         _ => {
-            // Fallback to string for unknown types
+            // Fallback to string for unknown types.
             let mut builder = StringBuilder::new();
             for row in rows {
                 match &row.f[col_idx].v {
@@ -882,7 +882,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
                 ..Default::default()
             },
         ),
-        // Arrays and Objects are passed as JSON type to avoid PARSE_JSON() in SQL
+        // Arrays and Objects are passed as JSON type to avoid PARSE_JSON() in SQL.
         JsonValue::Array(_) | JsonValue::Object(_) => (
             QueryParameterType {
                 parameter_type: PARAM_TYPE_JSON.to_string(),

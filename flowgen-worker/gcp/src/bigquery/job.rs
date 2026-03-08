@@ -249,14 +249,14 @@ impl EventHandler {
             .as_ref()
             .ok_or(Error::MissingSourceFormat)?;
 
-        // Build table reference
+        // Build table reference from configuration.
         let table_ref = BqTableReference {
             project_id: destination_table.project_id.clone(),
             dataset_id: destination_table.dataset_id.clone(),
             table_id: destination_table.table_id.clone(),
         };
 
-        // Map config enums to BigQuery library enums
+        // Map config enums to BigQuery library enums.
         let source_fmt = match source_format {
             super::config::SourceFormat::Parquet => BqSourceFormat::Parquet,
             super::config::SourceFormat::Csv => BqSourceFormat::Csv,
@@ -323,14 +323,14 @@ impl EventHandler {
         let start_time = Instant::now();
 
         loop {
-            // Check if we've exceeded max poll duration
+            // Check if we've exceeded max poll duration.
             if start_time.elapsed() > config.max_poll_duration {
                 return Err(Error::PollTimeout {
                     duration: config.max_poll_duration,
                 });
             }
 
-            // Get job status
+            // Get job status from BigQuery API.
             let request = GetJobRequest {
                 location: config.location.clone(),
             };
@@ -343,7 +343,7 @@ impl EventHandler {
                 .map_err(|source| Error::JobOperation { source })?;
 
             if matches!(response.status.state, JobState::Done) {
-                // Check if job failed
+                // Check if job failed and return error details.
                 if let Some(error) = response.status.error_result {
                     return Err(Error::JobFailed {
                         error: JobErrorWrapper(error),
@@ -353,7 +353,7 @@ impl EventHandler {
                 return Ok(response);
             }
 
-            // Wait before next poll
+            // Wait before next poll attempt.
             tokio::time::sleep(config.poll_interval).await;
         }
     }

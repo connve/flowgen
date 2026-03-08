@@ -155,7 +155,7 @@ impl EventHandler {
     /// Processes messages from the NATS JetStream consumer.
     async fn handle(self) -> Result<(), Error> {
         loop {
-            // Apply delay between batches if configured
+            // Apply delay between batches if configured.
             if let Some(delay) = self.config.delay {
                 time::sleep(delay).await
             }

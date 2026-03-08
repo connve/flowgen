@@ -47,7 +47,7 @@ impl EventHandler {
     /// Processes an event by logging its data and passing it through.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.config.structured {
-            // Structured logging mode for Grafana/Loki
+            // Structured logging mode for Grafana/Loki.
             match self.config.level {
                 super::config::LogLevel::Trace => trace!(event = ?event),
                 super::config::LogLevel::Debug => debug!(event = ?event),
@@ -56,7 +56,7 @@ impl EventHandler {
                 super::config::LogLevel::Error => error!(event = ?event),
             }
         } else {
-            // Pretty-printed mode for console readability
+            // Pretty-printed mode for console readability.
             match self.config.level {
                 super::config::LogLevel::Trace => trace!("{}", event),
                 super::config::LogLevel::Debug => debug!("{}", event),
@@ -66,7 +66,7 @@ impl EventHandler {
             }
         }
 
-        // Pass the event through to the next task with updated task_id (if there is a next task)
+        // Pass the event through to the next task with updated task_id (if there is a next task).
         match self.tx {
             Some(ref tx) => {
                 let mut event = event;
@@ -76,7 +76,7 @@ impl EventHandler {
                 })?;
             }
             None => {
-                // Final task, signal completion if present
+                // Final task, signal completion if present.
                 if let Some(arc) = event.completion_tx.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {

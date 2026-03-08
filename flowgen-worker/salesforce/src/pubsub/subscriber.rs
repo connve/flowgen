@@ -221,7 +221,7 @@ impl EventHandler {
         let mut all_succeeded = true;
         for handle in handles {
             match handle.await {
-                Ok(Ok(())) => {} // Event succeeded
+                Ok(Ok(())) => {} // Event succeeded.
                 Ok(Err(e)) => {
                     error!("Event processing failed: {}", e);
                     all_succeeded = false;

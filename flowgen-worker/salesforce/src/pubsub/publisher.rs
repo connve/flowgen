@@ -110,7 +110,7 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
             let config = self.config.render(&event_value)?;
             let mut publish_payload = config.payload;
@@ -121,13 +121,13 @@ impl EventHandler {
                 serde_json::Value::Number(serde_json::Number::from(now)),
             );
 
-            // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait
+            // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait.
             let json_value = serde_json::Value::Object(publish_payload);
             let record = AvroValue::from(json_value)
                 .resolve(self.schema.as_ref())
                 .map_err(|e| Error::Avro { source: e })?;
 
-            // Serialize the record directly without schema wrapper (Salesforce expects just the data)
+            // Serialize the record directly without schema wrapper (Salesforce expects just the data).
             let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
                 .map_err(|e| Error::Avro { source: e })?;
 

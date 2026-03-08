@@ -109,7 +109,7 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let config = self

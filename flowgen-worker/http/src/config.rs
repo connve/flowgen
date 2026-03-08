@@ -277,7 +277,7 @@ mod tests {
             Method::Head,
         ];
 
-        // Test that all methods are unique
+        // Test that all methods are unique.
         for (i, method1) in methods.iter().enumerate() {
             for (j, method2) in methods.iter().enumerate() {
                 if i != j {

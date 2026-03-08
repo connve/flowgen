@@ -154,13 +154,13 @@ impl EventHandler {
                 },
                 EventData::Avro(avro_data) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Json => {
-                        // Parse the schema
+                        // Parse the schema from the source.
                         let schema: serde_avro_fast::Schema = avro_data
                             .schema
                             .parse()
                             .map_err(|source| Error::SerdeSchema { source })?;
 
-                        // Deserialize Avro bytes to JSON value
+                        // Deserialize Avro bytes to JSON value.
                         let json_value: Value =
                             serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
                                 .map_err(|source| Error::SerdeAvroDe { source })?;
@@ -168,7 +168,7 @@ impl EventHandler {
                         EventData::Json(json_value)
                     }
                     crate::task::convert::config::TargetFormat::Avro => {
-                        // Avro to Avro passthrough
+                        // Avro to Avro passthrough without conversion.
                         EventData::Avro(avro_data.clone())
                     }
                 },

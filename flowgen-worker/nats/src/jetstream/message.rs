@@ -161,7 +161,7 @@ mod tests {
         assert!(result.is_ok());
 
         // We can't easily verify the contents without accessing private fields,
-        // but we can verify the conversion succeeds
+        // but we can verify the conversion succeeds.
     }
 
     #[test]
@@ -315,5 +315,5 @@ mod tests {
 
     // Note: Arrow RecordBatch tests would require more complex setup
     // with actual Arrow schemas and data, but the basic trait functionality
-    // is covered by the tests above
+    // is covered by the tests above.
 }

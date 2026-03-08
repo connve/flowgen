@@ -110,7 +110,7 @@ impl EventHandler {
             }
 
             for (idx, element) in array.iter().enumerate() {
-                // EventBuilder::new() automatically preserves meta from the current event context
+                // EventBuilder::new() automatically preserves meta from the current event context.
                 let mut e = EventBuilder::new()
                     .data(EventData::Json(element.clone()))
                     .subject(self.config.name.to_owned())

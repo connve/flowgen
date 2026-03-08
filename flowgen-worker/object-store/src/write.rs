@@ -131,7 +131,7 @@ impl EventHandler {
                 .as_mut()
                 .ok_or_else(|| Error::NoObjectStoreContext)?;
 
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let config = self
@@ -139,7 +139,7 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
+            // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
             let config_path_str = config.path.to_string_lossy();
             let url =
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
@@ -152,7 +152,7 @@ impl EventHandler {
                         match partition_key {
                             crate::config::HiveParitionKeys::EventDate => {
                                 let date_partition = self.format_date_partition(&cd);
-                                // Split the date partition by '/' and add each part as a child
+                                // Split the date partition by '/' and add each part as a child.
                                 for part in date_partition.split('/') {
                                     path = path.child(part);
                                 }

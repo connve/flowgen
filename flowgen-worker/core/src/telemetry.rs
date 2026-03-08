@@ -58,20 +58,20 @@ impl Default for TelemetryConfig {
 ///
 /// Metrics are automatically collected from tracing spans with the `otel.` prefix.
 pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Error> {
-    // Create resource with service identification
+    // Create resource with service identification.
     let resource = Resource::new(vec![
         KeyValue::new("service.name", config.service_name.clone()),
         KeyValue::new("service.version", config.service_version.clone()),
     ]);
 
-    // Initialize metrics exporter with OTLP
+    // Initialize metrics exporter with OTLP.
     let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
         .with_endpoint(&config.otlp_endpoint)
         .build()
         .map_err(|source| Error::MetricsInit { source })?;
 
-    // Create meter provider with periodic export
+    // Create meter provider with periodic export.
     let meter_provider = SdkMeterProvider::builder()
         .with_resource(resource.clone())
         .with_reader(
@@ -84,10 +84,10 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Error> 
         )
         .build();
 
-    // Set global meter provider
+    // Set global meter provider.
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    // Initialize tracer provider with OTLP
+    // Initialize tracer provider with OTLP.
     let tracer = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&config.otlp_endpoint)
@@ -99,7 +99,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<TelemetryGuard, Error> 
         .with_resource(resource)
         .build();
 
-    // Set global tracer provider
+    // Set global tracer provider.
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
     Ok(TelemetryGuard {
@@ -119,24 +119,24 @@ pub struct TelemetryGuard {
 impl TelemetryGuard {
     /// Explicitly shuts down telemetry, flushing all pending data.
     pub fn shutdown(self) -> Result<(), Error> {
-        // Shutdown happens automatically on drop
+        // Shutdown happens automatically on drop.
         Ok(())
     }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        // Flush metrics
+        // Flush metrics before shutdown.
         if let Err(e) = self.meter_provider.shutdown() {
             tracing::warn!(error = %e, "Failed to shutdown meter provider");
         }
 
-        // Flush traces
+        // Flush traces before shutdown.
         if let Err(e) = self.tracer_provider.shutdown() {
             tracing::warn!(error = %e, "Failed to shutdown tracer provider");
         }
 
-        // Shutdown global providers
+        // Shutdown global providers.
         opentelemetry::global::shutdown_tracer_provider();
     }
 }

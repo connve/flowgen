@@ -169,14 +169,14 @@ impl Processor {
                 }
             };
 
-            // Attach completion_tx from the last event in the buffer
+            // Attach completion_tx from the last event in the buffer.
             match tx {
                 Some(_) => {
-                    // Pass through to next task
+                    // Pass through to next task.
                     event.completion_tx = completion_tx;
                 }
                 None => {
-                    // Final task, signal completion
+                    // Final task, signal completion.
                     if let Some(arc) = completion_tx.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
@@ -205,7 +205,7 @@ impl Processor {
     async fn process_events(&mut self) -> Result<(), Error> {
         let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
 
-        // If partition_key is configured, use HashMap for keyed buffers
+        // If partition_key is configured, use HashMap for keyed buffers.
         if self.config.partition_key.is_some() {
             self.process_events_keyed(timeout_duration).await
         } else {
@@ -249,7 +249,7 @@ impl Processor {
 
                             buffer.push(json_data);
 
-                            // Always capture completion_tx from latest event (last one wins)
+                            // Always capture completion_tx from latest event (last one wins).
                             buffer_completion_tx = event.completion_tx.clone();
 
                             // Flush if buffer reached size limit.
@@ -330,7 +330,7 @@ impl Processor {
                                 }
                             };
 
-                            // Capture completion_tx from event (last one wins per key)
+                            // Capture completion_tx from event (last one wins per key).
                             let completion_tx = event.completion_tx.take();
 
                             // Get or create buffer for this key with pre-allocated capacity.
@@ -346,20 +346,20 @@ impl Processor {
                                     if let Some(meta) = event.meta {
                                         buffer_metas.insert(key.clone(), meta);
                                     }
-                                    // Store completion_tx for this key
+                                    // Store completion_tx for this key.
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), tx);
                                     }
                                     last_flush_times.insert(key, Instant::now());
                                 }
                                 Entry::Occupied(mut occupied) => {
-                                    // Get key before any mutable borrows
+                                    // Get key before any mutable borrows.
                                     let key = occupied.key().clone();
 
                                     let buffer = occupied.get_mut();
                                     buffer.push(json_data);
 
-                                    // Update completion_tx for this key (last one wins)
+                                    // Update completion_tx for this key (last one wins).
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), tx);
                                     }

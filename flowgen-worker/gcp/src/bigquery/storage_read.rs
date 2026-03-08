@@ -453,10 +453,10 @@ async fn read_table(
 
     // Build ordered list of field names based on the actual table schema order.
     // The Storage Read API always returns columns in table schema order, regardless of
-    // the order specified in selected_fields. If selected_fields is specified, we need
+    // the order specified in selected_fields. If selected_fields is specified, we need to filter appropriately.
     // to filter the table schema to only include those fields, but preserve schema order.
     let field_names: Vec<String> = if let Some(ref selected) = config.selected_fields {
-        // Filter table schema fields to only include selected fields, preserving schema order
+        // Filter table schema fields to only include selected fields, preserving schema order.
         table_schema
             .fields
             .iter()
@@ -469,13 +469,13 @@ async fn read_table(
             })
             .collect()
     } else {
-        // Use all fields in table schema order
+        // Use all fields in table schema order.
         table_schema.fields.iter().map(|f| f.name.clone()).collect()
     };
 
     // Read table using Row iterator.
     // The gcloud-bigquery library internally deserializes Arrow RecordBatches into individual rows.
-    // Since we want to work with RecordBatches (not individual rows), we need to collect rows
+    // Since we want to work with RecordBatches (not individual rows), we need to collect rows.
     // and reconstruct the RecordBatches. This is a limitation of the current library API.
     //
     // Note: Each Row contains references to the Arrow arrays (columns) and a row index.

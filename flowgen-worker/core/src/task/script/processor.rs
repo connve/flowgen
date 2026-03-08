@@ -131,8 +131,8 @@ impl EventHandler {
                 .into();
 
             // Create context object for script access to runtime capabilities.
-            // The ctx object exposes cache operations via ctx.cache.get/put/delete
-            // and event metadata via ctx.meta, allowing scripts to manage state
+            // The ctx object exposes cache operations via ctx.cache.get/put/delete.
+            // and event metadata via ctx.meta, allowing scripts to manage state.
             // and persist metadata changes through the event chain.
             let mut ctx_map = rhai::Map::new();
 
@@ -172,7 +172,7 @@ impl EventHandler {
             let ctx_dynamic = scope.get_value::<Dynamic>("ctx");
 
             // Extract ctx.meta from the ctx map to capture any modifications made by the script.
-            // Scripts can modify metadata (e.g., ctx.meta.processed = true) and those changes
+            // Scripts can modify metadata (e.g., ctx.meta.processed = true) and those changes are preserved.
             // will be preserved in the output event, maintaining state through the event chain.
             let meta_from_ctx = ctx_dynamic.and_then(|ctx| {
                 ctx.try_cast::<rhai::Map>()
@@ -189,7 +189,7 @@ impl EventHandler {
             match result_json {
                 Value::Null => {
                     // No events to emit, always signal completion.
-                    // When a script filters out an event (returns null), the pipeline
+                    // When a script filters out an event (returns null), the pipeline stops processing it.
                     // ends for that event, so we must signal completion to prevent timeout.
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
@@ -583,12 +583,12 @@ impl crate::task::runner::Runner for Processor {
         });
 
         // Register cache methods on CacheHandle type to enable distributed caching from Rhai scripts.
-        // These methods bridge Rhai's synchronous execution model with Rust's async cache operations
+        // These methods bridge Rhai's synchronous execution model with Rust's async cache operations.
         // by using block_on within each spawned script task.
         engine.register_type_with_name::<CacheHandle>("CacheHandle");
 
         // Register ctx.cache.get(key) -> Option<String>.
-        // Retrieves a value from the distributed cache. Returns None if the key does not exist
+        // Retrieves a value from the distributed cache. Returns None if the key does not exist.
         // or if the cached value is not valid UTF-8.
         // Keys are automatically namespaced by flow name.
         engine.register_fn("get", |handle: &mut CacheHandle, key: &str| -> String {
@@ -684,7 +684,7 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        // Check if error is non-retriable (syntax errors, type errors, etc.)
+                                        // Check if error is non-retriable (syntax errors, type errors, etc.).
                                         let is_retriable = !matches!(
                                             &e,
                                             Error::ScriptExecution { .. }

@@ -80,7 +80,7 @@ impl<'a> EventLogger<'a> {
     }
 }
 
-// Implement IntoFuture to make EventLogger awaitable
+// Implement IntoFuture to make EventLogger awaitable.
 impl<'a> std::future::IntoFuture for EventLogger<'a> {
     type Output = Result<(), Error>;
     type IntoFuture =
@@ -98,14 +98,14 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
             }
 
-            // Build structured log with context fields
+            // Build structured log with context fields.
             if self.fields.is_empty() {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
                 );
             } else {
-                // Create log record with dynamic fields
+                // Create log record with dynamic fields.
                 let field_str = self
                     .fields
                     .iter()
@@ -461,7 +461,7 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                 let delimiter_byte = delimiter.unwrap_or(b',');
 
                 // Infer schema from rows. None scans all rows for accurate type detection.
-                // Sampling limited rows can infer incorrect types when early rows contain
+                // Sampling limited rows can infer incorrect types when early rows contain nulls.
                 // atypical or empty values, but scanning all rows has higher memory cost.
                 let (schema, _) = Format::default()
                     .with_header(has_header)
