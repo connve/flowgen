@@ -109,15 +109,43 @@ impl EventHandler {
     ) -> Result<(), Error> {
         match message_result {
             Ok(message) => {
-                let e = message
+                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+                let mut e = message
                     .to_event(self.task_type, self.task_id)
                     .map_err(|source| Error::MessageConversion { source })?;
 
-                message.ack().await.ok();
+                e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                    completion_tx,
+                ))));
 
                 e.send_with_logging(self.tx.as_ref())
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
+
+                // Wait for pipeline completion with configured ack_timeout.
+                match self.config.ack_timeout {
+                    Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
+                        Ok(Ok(Ok(()))) => {
+                            message.ack().await.ok();
+                        }
+                        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                            // JetStream will automatically redeliver if not ack'd within ack_wait.
+                        }
+                    },
+                    None => {
+                        // No timeout configured, wait indefinitely.
+                        match completion_rx.await {
+                            Ok(Ok(())) => {
+                                message.ack().await.ok();
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                // JetStream will automatically redeliver if not ack'd within ack_wait.
+                            }
+                        }
+                    }
+                }
+
                 Ok(())
             }
             Err(err) => Err(Error::Other(err)),
@@ -127,7 +155,7 @@ impl EventHandler {
     /// Processes messages from the NATS JetStream consumer.
     async fn handle(self) -> Result<(), Error> {
         loop {
-            // Apply delay between batches if configured
+            // Apply delay between batches if configured.
             if let Some(delay) = self.config.delay {
                 time::sleep(delay).await
             }
@@ -288,29 +316,34 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    let is_retriable = !matches!(&e, Error::ConsumerFilterMismatch { .. });
+
+                    if is_retriable {
+                        error!(error = %e, "Failed to initialize subscriber");
+                        Err(tokio_retry::RetryError::transient(e))
+                    } else {
+                        error!(error = %e, "Non-retriable error");
+                        Err(tokio_retry::RetryError::permanent(e))
+                    }
+                }
+            }
+        })
+        .await
+        {
+            Ok(handler) => handler,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
         tokio::spawn(
             async move {
-                let result = tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-                    let event_handler = match self.init().await {
-                        Ok(handler) => handler,
-                        Err(e) => {
-                            error!(error = %e, "Failed to initialize subscriber");
-                            return Err(tokio_retry::RetryError::transient(e));
-                        }
-                    };
-
-                    match event_handler.handle().await {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            error!(error = %e, "Failed to process messages");
-                            Err(tokio_retry::RetryError::transient(e))
-                        }
-                    }
-                })
-                .await;
-
-                if let Err(e) = result {
-                    error!(error = %e, "Subscriber failed after all retry attempts");
+                if let Err(e) = event_handler.handle().await {
+                    error!(error = %e, "Failed to process events");
                 }
             }
             .instrument(tracing::Span::current()),

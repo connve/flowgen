@@ -133,6 +133,9 @@ pub enum Error {
     /// Failed to retrieve background task handles for monitoring.
     #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
+    /// Flow cannot be initialized because HTTP server is not enabled.
+    #[error("Flow cannot be initialized as http_server is not enabled")]
+    HttpServerNotEnabled,
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -319,6 +322,18 @@ impl Flow {
             return Ok(()); // Already initialized
         }
 
+        // Validate: Flow with http_webhook tasks requires HTTP server to be configured.
+        let has_webhook_tasks = self
+            .config
+            .flow
+            .tasks
+            .iter()
+            .any(|task| matches!(task, TaskType::http_webhook(_)));
+
+        if has_webhook_tasks && self.http_server.is_none() {
+            return Err(Error::HttpServerNotEnabled);
+        }
+
         let mut task_manager_builder = flowgen_core::task::manager::TaskManagerBuilder::new();
         if let Some(ref host) = self.host {
             task_manager_builder = task_manager_builder.host(host.clone());
@@ -476,7 +491,7 @@ impl Flow {
 
         let mut tasks_spawned = false;
 
-        // Wait for initial leadership state
+        // Wait for initial leadership state.
         loop {
             match leadership_rx.recv().await {
                 Some(flowgen_core::task::manager::LeaderElectionResult::Leader) => {
@@ -484,7 +499,7 @@ impl Flow {
                         info!("Acquired leadership, spawning tasks");
                         tasks_spawned = true;
 
-                        // Drain duplicate Leader messages
+                        // Drain duplicate Leader messages.
                         while let Ok(flowgen_core::task::manager::LeaderElectionResult::Leader) =
                             leadership_rx.try_recv()
                         {
@@ -518,7 +533,7 @@ impl Flow {
         }
 
         let mut background_tasks = if !is_leader_elected {
-            // Retrieve already-spawned background tasks
+            // Retrieve already-spawned background tasks.
             let mut lock = self
                 .background_handles
                 .lock()
@@ -527,7 +542,7 @@ impl Flow {
             lock.take()
                 .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?
         } else {
-            // Spawn tasks for this leadership tenure
+            // Spawn tasks for this leadership tenure.
             let handles = self.spawn_all_tasks().await?;
             handles
                 .blocking_handles
@@ -542,7 +557,7 @@ impl Flow {
         }
 
         if is_leader_elected {
-            // Monitor leadership and tasks
+            // Monitor leadership and tasks.
             loop {
                 let all_completed = loop {
                     tokio::select! {
@@ -582,7 +597,7 @@ impl Flow {
                     break;
                 }
 
-                // Lost leadership - wait to re-acquire
+                // Lost leadership - wait to re-acquire.
                 background_tasks.clear();
                 tasks_spawned = false;
 
@@ -593,7 +608,7 @@ impl Flow {
                                 info!("Re-acquired leadership, spawning tasks");
                                 tasks_spawned = true;
 
-                                // Drain duplicate Leader messages
+                                // Drain duplicate Leader messages.
                                 while let Ok(
                                     flowgen_core::task::manager::LeaderElectionResult::Leader,
                                 ) = leadership_rx.try_recv()
@@ -620,7 +635,7 @@ impl Flow {
                     }
                 }
 
-                // Re-spawn tasks
+                // Re-spawn tasks after re-acquiring leadership.
                 let handles = self.spawn_all_tasks().await?;
                 background_tasks = handles
                     .blocking_handles
@@ -629,7 +644,7 @@ impl Flow {
                     .collect();
             }
         } else {
-            // Wait for all tasks to complete
+            // Wait for all tasks to complete.
             let results = futures::future::join_all(background_tasks).await;
 
             for (idx, result) in results.iter().enumerate() {

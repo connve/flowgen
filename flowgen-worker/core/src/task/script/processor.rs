@@ -110,11 +110,8 @@ struct CacheHandle {
 impl EventHandler {
     /// Processes an event by executing the script on its data.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let original_event = Arc::clone(&event);
 
@@ -134,8 +131,8 @@ impl EventHandler {
                 .into();
 
             // Create context object for script access to runtime capabilities.
-            // The ctx object exposes cache operations via ctx.cache.get/put/delete
-            // and event metadata via ctx.meta, allowing scripts to manage state
+            // The ctx object exposes cache operations via ctx.cache.get/put/delete.
+            // and event metadata via ctx.meta, allowing scripts to manage state.
             // and persist metadata changes through the event chain.
             let mut ctx_map = rhai::Map::new();
 
@@ -175,7 +172,7 @@ impl EventHandler {
             let ctx_dynamic = scope.get_value::<Dynamic>("ctx");
 
             // Extract ctx.meta from the ctx map to capture any modifications made by the script.
-            // Scripts can modify metadata (e.g., ctx.meta.processed = true) and those changes
+            // Scripts can modify metadata (e.g., ctx.meta.processed = true) and those changes are preserved.
             // will be preserved in the output event, maintaining state through the event chain.
             let meta_from_ctx = ctx_dynamic.and_then(|ctx| {
                 ctx.try_cast::<rhai::Map>()
@@ -190,20 +187,73 @@ impl EventHandler {
 
             // Process the script result based on its type.
             match result_json {
-                Value::Null => Ok(()),
+                Value::Null => {
+                    // No events to emit, always signal completion.
+                    // When a script filters out an event (returns null), the pipeline stops processing it.
+                    // ends for that event, so we must signal completion to prevent timeout.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                let _ = tx.send(Ok(()));
+                            }
+                        }
+                    }
+                    Ok(())
+                }
                 Value::Array(arr) => {
-                    // Emit multiple events, one per array element.
-                    for value in arr {
-                        let new_event =
+                    // Emit multiple events, attach completion_tx to last one.
+                    let arr_len = arr.len();
+                    for (idx, value) in arr.into_iter().enumerate() {
+                        let mut new_event =
                             self.generate_script_event(value, &original_event, meta_json.as_ref())?;
+
+                        // Attach completion_tx to last event only.
+                        if idx == arr_len - 1 {
+                            match self.tx {
+                                None => {
+                                    // Final task, signal completion after last element.
+                                    if let Some(arc) = completion_tx_arc.as_ref() {
+                                        if let Ok(mut guard) = arc.lock() {
+                                            if let Some(tx) = guard.take() {
+                                                tx.send(Ok(())).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(_) => {
+                                    // Pass through completion_tx to last element.
+                                    new_event.completion_tx = completion_tx_arc.clone();
+                                }
+                            }
+                        }
+
                         self.emit_event(new_event).await?;
                     }
                     Ok(())
                 }
                 value => {
-                    // Emit a single event.
-                    let new_event =
+                    // Emit a single event with completion_tx attached.
+                    let mut new_event =
                         self.generate_script_event(value, &original_event, meta_json.as_ref())?;
+
+                    // Signal completion or pass through to single event.
+                    match self.tx {
+                        None => {
+                            // Final task, signal completion.
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                if let Ok(mut guard) = arc.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        tx.send(Ok(())).ok();
+                                    }
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            // Pass through completion_tx to event.
+                            new_event.completion_tx = completion_tx_arc.clone();
+                        }
+                    }
+
                     self.emit_event(new_event).await
                 }
             }
@@ -533,12 +583,12 @@ impl crate::task::runner::Runner for Processor {
         });
 
         // Register cache methods on CacheHandle type to enable distributed caching from Rhai scripts.
-        // These methods bridge Rhai's synchronous execution model with Rust's async cache operations
+        // These methods bridge Rhai's synchronous execution model with Rust's async cache operations.
         // by using block_on within each spawned script task.
         engine.register_type_with_name::<CacheHandle>("CacheHandle");
 
         // Register ctx.cache.get(key) -> Option<String>.
-        // Retrieves a value from the distributed cache. Returns None if the key does not exist
+        // Retrieves a value from the distributed cache. Returns None if the key does not exist.
         // or if the cached value is not valid UTF-8.
         // Keys are automatically namespaced by flow name.
         engine.register_fn("get", |handle: &mut CacheHandle, key: &str| -> String {
@@ -619,8 +669,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Script processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 
@@ -635,15 +684,38 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!(error = %e, "Failed to execute script");
-                                        Err(tokio_retry::RetryError::transient(e))
+                                        // Check if error is non-retriable (syntax errors, type errors, etc.).
+                                        let is_retriable = !matches!(
+                                            &e,
+                                            Error::ScriptExecution { .. }
+                                                | Error::InvalidReturnType(_)
+                                                | Error::ResourceLoad { .. }
+                                        );
+
+                                        if is_retriable {
+                                            Err(tokio_retry::RetryError::transient(e))
+                                        } else {
+                                            error!(error = %e, "Non-retriable error");
+                                            Err(tokio_retry::RetryError::permanent(e))
+                                        }
                                     }
                                 }
                             })
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Script execution failed after all retry attempts");
+                                if let Some(arc) = event.completion_tx.as_ref() {
+                                    if let Ok(mut guard) = arc.lock() {
+                                        if let Some(tx) = guard.take() {
+                                            let boxed_error: Box<
+                                                dyn std::error::Error + Send + Sync,
+                                            > = Box::new(Error::RetryExhausted {
+                                                source: Box::new(err),
+                                            });
+                                            tx.send(Err(boxed_error)).ok();
+                                        }
+                                    }
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -813,6 +885,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         // Drop the original tx so recv can complete
@@ -850,6 +923,7 @@ mod tests {
             subject: "input.subject".to_string(),
             task_type: "test",
             meta: None,
+            completion_tx: None,
             task_id: 0,
             id: None,
             timestamp: 123456789,
@@ -886,6 +960,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -944,6 +1019,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;

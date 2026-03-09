@@ -117,7 +117,7 @@ impl EventHandler {
     /// Generates events at scheduled intervals.
     async fn handle(&self) -> Result<(), Error> {
         // Note: This generator creates events from scratch (no incoming events),
-        // so we don't use with_event_context() here. EventBuilder::new() will
+        // so we don't use with_event_context() here. EventBuilder::new() will create fresh events.
         // create events with meta: None, which is correct for a pipeline starter.
         let mut counter = 0;
 
@@ -159,7 +159,7 @@ impl EventHandler {
                 .map_err(|e| Error::SystemTime { source: e })?
                 .as_secs();
 
-            // Update cache with current execution time before sending the event to ensure
+            // Update cache with current execution time before sending the event to ensure replay protection.
             // we don't lose track of execution times if the process crashes.
             if let Err(cache_err) = cache
                 .put(&cache_key, current_time.to_string().into(), None)
@@ -169,7 +169,7 @@ impl EventHandler {
                 warn!("Failed to update cache: {:?}", cache_err);
             }
 
-            // Determine if there will be a next run
+            // Determine if there will be a next run.
             let next_run_time_val = match self.config.count {
                 Some(count) if count == counter + 1 => None,
                 _ => Some(self.calculate_next_run(current_time, Some(current_time))?),
@@ -270,8 +270,7 @@ impl crate::task::runner::Runner for Subscriber {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(error = %e, "Generate subscriber failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

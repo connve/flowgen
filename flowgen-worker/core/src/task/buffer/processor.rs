@@ -5,7 +5,7 @@
 //! such as file writes, API calls, or columnar format conversions.
 
 use crate::config::ConfigExt;
-use crate::event::{Event, EventBuilder, EventData, EventExt};
+use crate::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -114,12 +114,14 @@ impl Processor {
     /// * `reason` - The reason this flush was triggered.
     /// * `partition_key` - Optional key that was used to group these events.
     /// * `meta` - Optional meta from the first event in the buffer to preserve.
+    /// * `completion_tx` - Optional completion channel from the last event in buffer.
     fn flush_buffer(
         &self,
         buffer: Vec<Value>,
         reason: FlushReason,
         partition_key: Option<String>,
         meta: Option<Map<String, Value>>,
+        completion_tx: Option<SharedCompletionTx>,
     ) {
         if buffer.is_empty() {
             return;
@@ -159,13 +161,31 @@ impl Processor {
                 event_builder = event_builder.meta(meta);
             }
 
-            let event = match event_builder.build() {
+            let mut event = match event_builder.build() {
                 Ok(e) => e,
                 Err(e) => {
                     error!(error = %e, "Failed to build flush event");
                     return;
                 }
             };
+
+            // Attach completion_tx from the last event in the buffer.
+            match tx {
+                Some(_) => {
+                    // Pass through to next task.
+                    event.completion_tx = completion_tx;
+                }
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Err(e) = event.send_with_logging(tx.as_ref()).await {
                 error!(error = %e, "Failed to send flush event");
@@ -185,7 +205,7 @@ impl Processor {
     async fn process_events(&mut self) -> Result<(), Error> {
         let timeout_duration = self.config.timeout.unwrap_or(Duration::from_secs(30));
 
-        // If partition_key is configured, use HashMap for keyed buffers
+        // If partition_key is configured, use HashMap for keyed buffers.
         if self.config.partition_key.is_some() {
             self.process_events_keyed(timeout_duration).await
         } else {
@@ -197,6 +217,7 @@ impl Processor {
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
         let mut buffer_meta: Option<Map<String, Value>> = None;
+        let mut buffer_completion_tx: Option<SharedCompletionTx> = None;
         let mut last_flush = Instant::now();
 
         loop {
@@ -228,18 +249,22 @@ impl Processor {
 
                             buffer.push(json_data);
 
+                            // Always capture completion_tx from latest event (last one wins).
+                            buffer_completion_tx = event.completion_tx.clone();
+
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                                 let flush_meta = buffer_meta.take();
-                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta);
+                                let flush_completion = buffer_completion_tx.take();
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta, flush_completion);
                                 last_flush = Instant::now();
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta);
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta, buffer_completion_tx);
                             }
                             return Ok(());
                         }
@@ -250,7 +275,8 @@ impl Processor {
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                     let flush_meta = buffer_meta.take();
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta);
+                    let flush_completion = buffer_completion_tx.take();
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta, flush_completion);
                     last_flush = Instant::now();
                 }
             }
@@ -262,6 +288,8 @@ impl Processor {
         // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
         let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
         let mut buffer_metas: HashMap<String, Map<String, Value>> = HashMap::with_capacity(16);
+        let mut buffer_completions: HashMap<String, SharedCompletionTx> =
+            HashMap::with_capacity(16);
         let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {
@@ -281,7 +309,7 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Some(event) => {
+                        Some(mut event) => {
                             // Render the config with event data to get the rendered buffer key.
                             let event_value = serde_json::value::Value::try_from(&event)
                                 .map_err(|source| Error::EventBuilder { source })?;
@@ -302,6 +330,9 @@ impl Processor {
                                 }
                             };
 
+                            // Capture completion_tx from event (last one wins per key).
+                            let completion_tx = event.completion_tx.take();
+
                             // Get or create buffer for this key with pre-allocated capacity.
                             use std::collections::hash_map::Entry;
                             let buffer_size = self.config.size;
@@ -315,18 +346,30 @@ impl Processor {
                                     if let Some(meta) = event.meta {
                                         buffer_metas.insert(key.clone(), meta);
                                     }
+                                    // Store completion_tx for this key.
+                                    if let Some(tx) = completion_tx {
+                                        buffer_completions.insert(key.clone(), tx);
+                                    }
                                     last_flush_times.insert(key, Instant::now());
                                 }
                                 Entry::Occupied(mut occupied) => {
+                                    // Get key before any mutable borrows.
+                                    let key = occupied.key().clone();
+
                                     let buffer = occupied.get_mut();
                                     buffer.push(json_data);
 
+                                    // Update completion_tx for this key (last one wins).
+                                    if let Some(tx) = completion_tx {
+                                        buffer_completions.insert(key.clone(), tx);
+                                    }
+
                                     // Flush if this key's buffer reached size limit.
                                     if buffer.len() >= buffer_size {
-                                        let key = occupied.key().clone();
                                         let buffer_to_flush = occupied.remove();
                                         let buffer_meta = buffer_metas.remove(&key);
-                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta);
+                                        let buffer_completion = buffer_completions.remove(&key);
+                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta, buffer_completion);
                                         last_flush_times.insert(key, Instant::now());
                                     }
                                 }
@@ -337,7 +380,8 @@ impl Processor {
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
                                     let buffer_meta = buffer_metas.remove(&key);
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_meta);
+                                    let buffer_completion = buffer_completions.remove(&key);
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_meta, buffer_completion);
                                 }
                             }
                             return Ok(());
@@ -362,7 +406,8 @@ impl Processor {
                         if let Some(buffer) = buffers.remove(&key) {
                             if !buffer.is_empty() {
                                 let buffer_meta = buffer_metas.remove(&key);
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta);
+                                let buffer_completion = buffer_completions.remove(&key);
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta, buffer_completion);
                             }
                         }
                         last_flush_times.insert(key, now);
@@ -405,8 +450,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(_) => {}
             Err(e) => {
-                error!(error = %e, "Buffer processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

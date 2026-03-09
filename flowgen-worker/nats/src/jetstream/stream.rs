@@ -39,7 +39,7 @@ pub async fn create_or_update_stream(
 
     match existing_stream {
         Ok(mut stream) => {
-            // Stream exists, update it by merging with existing config
+            // Stream exists, update it by merging with existing config.
             let existing_config = stream
                 .info()
                 .await
@@ -47,8 +47,8 @@ pub async fn create_or_update_stream(
                 .config
                 .clone();
 
-            // Merge subjects - additive update: new subjects are added to existing ones
-            // If stream_opts.subjects is empty, existing subjects are preserved
+            // Merge subjects - additive update: new subjects are added to existing ones.
+            // If stream_opts.subjects is empty, existing subjects are preserved.
             let mut subjects = existing_config.subjects.clone();
             if !stream_opts.subjects.is_empty() {
                 subjects.extend(stream_opts.subjects.clone());
@@ -56,7 +56,7 @@ pub async fn create_or_update_stream(
                 subjects.dedup();
             }
 
-            // Use new values if provided, otherwise keep existing
+            // Use new values if provided, otherwise keep existing.
             let retention = stream_opts
                 .retention
                 .as_ref()
@@ -151,24 +151,24 @@ pub async fn create_or_update_stream(
                 .map_err(|e| Error::CreateStream { source: e })?;
         }
         Err(_) => {
-            // Stream doesn't exist, create it
-            // Only set values if they're explicitly configured, otherwise let NATS use its defaults
+            // Stream doesn't exist, create it.
+            // Only set values if they're explicitly configured, otherwise let NATS use its defaults.
 
-            // Default to wildcard if no subjects specified
+            // Default to wildcard if no subjects specified.
             let subjects = if stream_opts.subjects.is_empty() {
                 vec![">".to_string()]
             } else {
                 stream_opts.subjects.clone()
             };
 
-            // Start with default config
+            // Start with default config.
             let mut stream_config = Config {
                 name: stream_opts.name.clone(),
                 subjects,
                 ..Default::default()
             };
 
-            // Only set values if explicitly configured
+            // Only set values if explicitly configured.
             if let Some(desc) = &stream_opts.description {
                 stream_config.description = Some(desc.clone());
             }

@@ -32,7 +32,7 @@ fn spawn_renewal_task(
         let mut interval =
             tokio::time::interval(Duration::from_secs(DEFAULT_LEASE_RENEWAL_INTERVAL_SECS));
 
-        // Create retry strategy: 3 attempts with exponential backoff starting at 100ms
+        // Create retry strategy: 3 attempts with exponential backoff starting at 100ms.
         let retry_config = crate::retry::RetryConfig {
             max_attempts: Some(3),
             initial_backoff: Duration::from_millis(100),

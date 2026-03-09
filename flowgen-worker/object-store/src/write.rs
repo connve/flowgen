@@ -122,11 +122,8 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let mut client_guard = self.client.lock().await;
             let context = client_guard
@@ -134,7 +131,7 @@ impl EventHandler {
                 .as_mut()
                 .ok_or_else(|| Error::NoObjectStoreContext)?;
 
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let config = self
@@ -142,7 +139,7 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Parse the rendered path to extract just the path part (not the URL scheme/bucket)
+            // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
             let config_path_str = config.path.to_string_lossy();
             let url =
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
@@ -155,7 +152,7 @@ impl EventHandler {
                         match partition_key {
                             crate::config::HiveParitionKeys::EventDate => {
                                 let date_partition = self.format_date_partition(&cd);
-                                // Split the date partition by '/' and add each part as a child
+                                // Split the date partition by '/' and add each part as a child.
                                 for part in date_partition.split('/') {
                                     path = path.child(part);
                                 }
@@ -205,8 +202,15 @@ impl EventHandler {
             let mut writer = Vec::new();
             match (&event.data, &format) {
                 (flowgen_core::event::EventData::ArrowRecordBatch(batch), WriteFormat::Parquet) => {
-                    // Skip writing empty batches.
+                    // Skip writing empty batches but signal completion.
                     if batch.num_rows() == 0 {
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
+                            }
+                        }
                         return Ok(());
                     }
 
@@ -265,7 +269,25 @@ impl EventHandler {
                 e = e.id(e_tag);
             };
 
-            let e = e.build().map_err(|source| Error::EventBuilder { source })?;
+            let mut e = e.build().map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    e.completion_tx = completion_tx_arc.clone();
+                }
+            }
 
             let send = e.send_with_logging(self.tx.as_ref());
             let send = match num_records {
@@ -374,8 +396,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Writer failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

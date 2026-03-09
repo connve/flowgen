@@ -107,9 +107,10 @@ impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
             let config = self.config.render(&event_value)?;
             let mut publish_payload = config.payload;
@@ -120,13 +121,13 @@ impl EventHandler {
                 serde_json::Value::Number(serde_json::Number::from(now)),
             );
 
-            // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait
+            // Convert serde_json::Map to Avro Record using From<serde_json::Value> trait.
             let json_value = serde_json::Value::Object(publish_payload);
             let record = AvroValue::from(json_value)
                 .resolve(self.schema.as_ref())
                 .map_err(|e| Error::Avro { source: e })?;
 
-            // Serialize the record directly without schema wrapper (Salesforce expects just the data)
+            // Serialize the record directly without schema wrapper (Salesforce expects just the data).
             let serialized_payload = apache_avro::to_avro_datum(self.schema.as_ref(), record)
                 .map_err(|e| Error::Avro { source: e })?;
 
@@ -166,13 +167,31 @@ impl EventHandler {
             let resp_json =
                 serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 
-            let e = flowgen_core::event::EventBuilder::new()
+            let mut e = flowgen_core::event::EventBuilder::new()
                 .data(EventData::Json(resp_json))
                 .subject(subject)
                 .id(resp.rpc_id)
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    e.completion_tx = completion_tx_arc.clone();
+                }
+            }
 
             e.send_with_logging(self.tx.as_ref())
                 .await
@@ -299,8 +318,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Publisher failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

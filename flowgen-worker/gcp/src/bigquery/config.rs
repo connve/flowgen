@@ -320,7 +320,7 @@ pub struct Job {
     #[serde(default)]
     pub location: Option<String>,
 
-    // Fields for create operation
+    // Fields for create operation.
     /// Job type for create operation (load, query, extract, copy). Default: load.
     #[serde(default = "default_job_type")]
     pub job_type: String,
@@ -350,12 +350,12 @@ pub struct Job {
     #[serde(default)]
     pub labels: Option<HashMap<String, String>>,
 
-    // Fields for get/cancel/delete operations
+    // Fields for get/cancel/delete operations.
     /// Job ID (get, cancel, delete operations).
     #[serde(default)]
     pub job_id: Option<String>,
 
-    // Fields for get operation
+    // Fields for get operation.
     /// Polling interval between status checks (get operation only).
     #[serde(default = "default_poll_interval", with = "humantime_serde")]
     pub poll_interval: Duration,

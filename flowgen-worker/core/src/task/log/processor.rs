@@ -46,12 +46,8 @@ pub struct EventHandler {
 impl EventHandler {
     /// Processes an event by logging its data and passing it through.
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         if self.config.structured {
-            // Structured logging mode for Grafana/Loki
+            // Structured logging mode for Grafana/Loki.
             match self.config.level {
                 super::config::LogLevel::Trace => trace!(event = ?event),
                 super::config::LogLevel::Debug => debug!(event = ?event),
@@ -60,7 +56,7 @@ impl EventHandler {
                 super::config::LogLevel::Error => error!(event = ?event),
             }
         } else {
-            // Pretty-printed mode for console readability
+            // Pretty-printed mode for console readability.
             match self.config.level {
                 super::config::LogLevel::Trace => trace!("{}", event),
                 super::config::LogLevel::Debug => debug!("{}", event),
@@ -70,13 +66,25 @@ impl EventHandler {
             }
         }
 
-        // Pass the event through to the next task with updated task_id (if there is a next task)
-        if let Some(ref tx) = self.tx {
-            let mut event = event;
-            event.task_id = self.task_id;
-            tx.send(event).await.map_err(|_| Error::SendMessage {
-                source: crate::event::Error::SendMessage,
-            })?;
+        // Pass the event through to the next task with updated task_id (if there is a next task).
+        match self.tx {
+            Some(ref tx) => {
+                let mut event = event;
+                event.task_id = self.task_id;
+                tx.send(event).await.map_err(|_| Error::SendMessage {
+                    source: crate::event::Error::SendMessage,
+                })?;
+            }
+            None => {
+                // Final task, signal completion if present.
+                if let Some(arc) = event.completion_tx.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -136,8 +144,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Log processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

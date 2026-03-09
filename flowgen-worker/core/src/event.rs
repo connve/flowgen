@@ -14,6 +14,13 @@ use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 use tracing::info;
 
+/// Type alias for completion channel sender.
+pub type CompletionTx =
+    tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+/// Type alias for shared completion channel sender (used in Event struct for cloning support).
+pub type SharedCompletionTx = Arc<std::sync::Mutex<Option<CompletionTx>>>;
+
 tokio::task_local! {
     /// Task-local storage for the current event context.
     /// Used by EventBuilder::new() to automatically preserve meta fields from the incoming event.
@@ -73,7 +80,7 @@ impl<'a> EventLogger<'a> {
     }
 }
 
-// Implement IntoFuture to make EventLogger awaitable
+// Implement IntoFuture to make EventLogger awaitable.
 impl<'a> std::future::IntoFuture for EventLogger<'a> {
     type Output = Result<(), Error>;
     type IntoFuture =
@@ -91,14 +98,14 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
             }
 
-            // Build structured log with context fields
+            // Build structured log with context fields.
             if self.fields.is_empty() {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
                 );
             } else {
-                // Create log record with dynamic fields
+                // Create log record with dynamic fields.
                 let field_str = self
                     .fields
                     .iter()
@@ -191,7 +198,7 @@ pub enum Error {
 }
 
 /// Core event structure containing data and metadata for workflow processing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Event {
     /// Event payload in one of the supported data formats.
     pub data: EventData,
@@ -209,6 +216,26 @@ pub struct Event {
     /// Metadata can be set by script tasks and accessed in templates using event.meta syntax.
     /// Useful for adding context that should travel with the event but is separate from the payload.
     pub meta: Option<Map<String, Value>>,
+    /// Completion notifier for end-to-end pipeline acknowledgment.
+    /// Present only for events from replayable sources (NATS, Kafka, Pub/Sub).
+    /// Intermediate tasks pass this through unchanged, final tasks signal completion.
+    /// Wrapped in Arc<Mutex> to allow sharing across event clones during retries.
+    pub completion_tx: Option<SharedCompletionTx>,
+}
+
+impl Clone for Event {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            subject: self.subject.clone(),
+            id: self.id.clone(),
+            timestamp: self.timestamp,
+            task_id: self.task_id,
+            task_type: self.task_type,
+            meta: self.meta.clone(),
+            completion_tx: self.completion_tx.clone(),
+        }
+    }
 }
 
 impl TryFrom<&Event> for Value {
@@ -331,6 +358,8 @@ pub struct EventBuilder {
     pub task_type: Option<&'static str>,
     /// Optional metadata for contextual information.
     pub meta: Option<Map<String, Value>>,
+    /// Completion notifier for end-to-end acknowledgment.
+    pub completion_tx: Option<CompletionTx>,
 }
 
 impl EventBuilder {
@@ -377,6 +406,16 @@ impl EventBuilder {
         self
     }
 
+    pub fn completion_tx(
+        mut self,
+        completion_tx: tokio::sync::oneshot::Sender<
+            Result<(), Box<dyn std::error::Error + Send + Sync>>,
+        >,
+    ) -> Self {
+        self.completion_tx = Some(completion_tx);
+        self
+    }
+
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
             data: self
@@ -396,6 +435,9 @@ impl EventBuilder {
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
+            completion_tx: self
+                .completion_tx
+                .map(|tx| std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
         })
     }
 }
@@ -419,7 +461,7 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                 let delimiter_byte = delimiter.unwrap_or(b',');
 
                 // Infer schema from rows. None scans all rows for accurate type detection.
-                // Sampling limited rows can infer incorrect types when early rows contain
+                // Sampling limited rows can infer incorrect types when early rows contain nulls.
                 // atypical or empty values, but scanning all rows has higher memory cost.
                 let (schema, _) = Format::default()
                     .with_header(has_header)

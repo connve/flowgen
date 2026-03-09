@@ -105,7 +105,7 @@ impl HttpServer {
             api_router = api_router.route(path, method_router.clone());
         }
 
-        // Apply routes prefix (use default if not configured)
+        // Apply routes prefix (use default if not configured).
         let base_path = self
             .routes_prefix
             .clone()

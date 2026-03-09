@@ -137,11 +137,8 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
@@ -205,9 +202,27 @@ impl EventHandler {
                 event_builder = event_builder.id(id);
             }
 
-            let result_event = event_builder
+            let mut result_event = event_builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    result_event.completion_tx = completion_tx_arc.clone();
+                }
+            }
 
             result_event
                 .send_with_logging(self.tx.as_ref())
@@ -234,14 +249,14 @@ impl EventHandler {
             .as_ref()
             .ok_or(Error::MissingSourceFormat)?;
 
-        // Build table reference
+        // Build table reference from configuration.
         let table_ref = BqTableReference {
             project_id: destination_table.project_id.clone(),
             dataset_id: destination_table.dataset_id.clone(),
             table_id: destination_table.table_id.clone(),
         };
 
-        // Map config enums to BigQuery library enums
+        // Map config enums to BigQuery library enums.
         let source_fmt = match source_format {
             super::config::SourceFormat::Parquet => BqSourceFormat::Parquet,
             super::config::SourceFormat::Csv => BqSourceFormat::Csv,
@@ -308,14 +323,14 @@ impl EventHandler {
         let start_time = Instant::now();
 
         loop {
-            // Check if we've exceeded max poll duration
+            // Check if we've exceeded max poll duration.
             if start_time.elapsed() > config.max_poll_duration {
                 return Err(Error::PollTimeout {
                     duration: config.max_poll_duration,
                 });
             }
 
-            // Get job status
+            // Get job status from BigQuery API.
             let request = GetJobRequest {
                 location: config.location.clone(),
             };
@@ -328,7 +343,7 @@ impl EventHandler {
                 .map_err(|source| Error::JobOperation { source })?;
 
             if matches!(response.status.state, JobState::Done) {
-                // Check if job failed
+                // Check if job failed and return error details.
                 if let Some(error) = response.status.error_result {
                     return Err(Error::JobFailed {
                         error: JobErrorWrapper(error),
@@ -338,7 +353,7 @@ impl EventHandler {
                 return Ok(response);
             }
 
-            // Wait before next poll
+            // Wait before next poll attempt.
             tokio::time::sleep(config.poll_interval).await;
         }
     }
@@ -453,8 +468,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Job processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

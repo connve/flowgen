@@ -116,7 +116,7 @@ impl FlowgenClient for K8sHost {
 
     #[tracing::instrument(skip(self), name = "k8s.connect")]
     async fn connect(mut self) -> Result<Self, Self::Error> {
-        // Check if running in Kubernetes by detecting service account token
+        // Check if running in Kubernetes by detecting service account token.
         let sa_token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token";
         if !tokio::fs::try_exists(sa_token_path).await.unwrap_or(false) {
             return Err(Error::NotInKubernetesCluster);
@@ -134,7 +134,7 @@ impl FlowgenClient for K8sHost {
                 .trim()
                 .to_string();
 
-        // Create and cache the Lease API client to avoid recreating on every call
+        // Create and cache the Lease API client to avoid recreating on every call.
         let lease_api = Api::namespaced(client.clone(), &namespace);
 
         self.namespace = namespace.clone();
@@ -287,8 +287,8 @@ impl Host for K8sHost {
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), crate::host::Error> {
-        // If a custom namespace is provided, we need to create a new API client for that namespace
-        // Otherwise, use the cached API client for the default namespace
+        // If a custom namespace is provided, we need to create a new API client for that namespace.
+        // Otherwise, use the cached API client for the default namespace.
         let api = if let Some(custom_ns) = namespace {
             if custom_ns != self.namespace {
                 let client = self.client.as_ref().ok_or_else(|| {
@@ -320,8 +320,8 @@ impl Host for K8sHost {
         name: &str,
         namespace: Option<&str>,
     ) -> Result<(), crate::host::Error> {
-        // If a custom namespace is provided, we need to create a new API client for that namespace
-        // Otherwise, use the cached API client for the default namespace
+        // If a custom namespace is provided, we need to create a new API client for that namespace.
+        // Otherwise, use the cached API client for the default namespace.
         let api = if let Some(custom_ns) = namespace {
             if custom_ns != self.namespace {
                 let client = self.client.as_ref().ok_or_else(|| {
@@ -391,11 +391,11 @@ impl K8sHostBuilder {
     /// Namespace will be auto-detected from service account during connect().
     /// Holder identity will be auto-detected from POD_NAME or HOSTNAME environment variables.
     pub fn build(self) -> Result<K8sHost, Error> {
-        // Auto-detect holder_identity if not provided
+        // Auto-detect holder_identity if not provided.
         let holder_identity = match self.holder_identity {
             Some(id) => id,
             None => {
-                // Try POD_NAME (K8s standard), then HOSTNAME
+                // Try POD_NAME (K8s standard), then HOSTNAME.
                 std::env::var("POD_NAME")
                     .or_else(|_| std::env::var("HOSTNAME"))
                     .map_err(|_| Error::MissingPodIdentity)?

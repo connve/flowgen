@@ -113,11 +113,8 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
@@ -143,9 +140,27 @@ impl EventHandler {
                 event_builder = event_builder.id(id);
             }
 
-            let result_event = event_builder
+            let mut result_event = event_builder
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    result_event.completion_tx = completion_tx_arc.clone();
+                }
+            }
 
             result_event
                 .send_with_logging(self.tx.as_ref())
@@ -237,8 +252,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Query processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 
@@ -547,7 +561,7 @@ fn response_to_record_batch(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Create RecordBatch
+    // Create RecordBatch from query results.
     arrow::array::RecordBatch::try_new(arrow_schema, columns)
         .map_err(|source| Error::Arrow { source })
 }
@@ -661,8 +675,8 @@ fn build_column(
                 match &row.f[col_idx].v {
                     Value::Null => builder.append_null(),
                     Value::String(s) => {
-                        // BigQuery returns dates as "YYYY-MM-DD"
-                        // Date32 is days since Unix epoch (1970-01-01)
+                        // BigQuery returns dates as "YYYY-MM-DD".
+                        // Date32 is days since Unix epoch (1970-01-01).
                         match parse_date_to_days(s) {
                             Ok(days) => builder.append_value(days),
                             Err(_) => builder.append_null(),
@@ -679,8 +693,8 @@ fn build_column(
                 match &row.f[col_idx].v {
                     Value::Null => builder.append_null(),
                     Value::String(s) => {
-                        // BigQuery returns time as "HH:MM:SS[.ffffff]"
-                        // Time64 is microseconds since midnight
+                        // BigQuery returns time as "HH:MM:SS[.ffffff]".
+                        // Time64 is microseconds since midnight.
                         match parse_time_to_micros(s) {
                             Ok(micros) => builder.append_value(micros),
                             Err(_) => builder.append_null(),
@@ -752,7 +766,7 @@ fn build_column(
             Arc::new(builder.finish()) as ArrayRef
         }
         _ => {
-            // Fallback to string for unknown types
+            // Fallback to string for unknown types.
             let mut builder = StringBuilder::new();
             for row in rows {
                 match &row.f[col_idx].v {
@@ -868,7 +882,7 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
                 ..Default::default()
             },
         ),
-        // Arrays and Objects are passed as JSON type to avoid PARSE_JSON() in SQL
+        // Arrays and Objects are passed as JSON type to avoid PARSE_JSON() in SQL.
         JsonValue::Array(_) | JsonValue::Object(_) => (
             QueryParameterType {
                 parameter_type: PARAM_TYPE_JSON.to_string(),

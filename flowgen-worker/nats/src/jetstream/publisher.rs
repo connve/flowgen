@@ -101,14 +101,11 @@ pub struct EventHandler {
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.task_id.checked_sub(1) {
-            return Ok(());
-        }
-
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Render config with to support templates inside configuration.
+            // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let config = self
@@ -134,13 +131,31 @@ impl EventHandler {
             let ack_json =
                 serde_json::to_value(&ack).map_err(|e| Error::SerdeJson { source: e })?;
 
-            let e = EventBuilder::new()
+            let mut e = EventBuilder::new()
                 .subject(self.config.name.clone())
                 .data(EventData::Json(ack_json))
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+
+            // Signal completion or pass through to next task.
+            match self.tx {
+                None => {
+                    // Final task, signal completion.
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Pass through completion_tx to next task.
+                    e.completion_tx = completion_tx_arc.clone();
+                }
+            }
 
             e.send_with_logging(self.tx.as_ref())
                 .await
@@ -233,8 +248,18 @@ impl flowgen_core::task::runner::Runner for Publisher {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!(error = %e, "Failed to initialize publisher");
-                    Err(tokio_retry::RetryError::transient(e))
+                    let is_retriable = !matches!(
+                        &e,
+                        Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
+                    );
+
+                    if is_retriable {
+                        error!(error = %e, "Failed to initialize publisher");
+                        Err(tokio_retry::RetryError::transient(e))
+                    } else {
+                        error!(error = %e, "Non-retriable error");
+                        Err(tokio_retry::RetryError::permanent(e))
+                    }
                 }
             }
         })
@@ -242,8 +267,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Publisher failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 

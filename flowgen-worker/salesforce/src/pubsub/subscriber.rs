@@ -82,6 +82,8 @@ pub enum Error {
     },
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
+    #[error("Pipeline completion failed or timed out for event")]
+    PipelineCompletionFailed,
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -130,22 +132,29 @@ fn is_auth_error(error: &PubSubError) -> bool {
 
 impl EventHandler {
     /// Processes a batch of events from Salesforce Pub/Sub.
+    /// Events are processed concurrently, but replay_id is only cached after ALL events succeed.
     async fn process_events(
         &self,
         events: Vec<ConsumerEvent>,
         schema_info: &SchemaInfo,
         topic_name: &str,
     ) -> Result<(), Error> {
-        let cache = &self.task_context.cache;
-        let flow_name = &self.task_context.flow.name;
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let cache = Arc::clone(&self.task_context.cache);
+        let flow_name = self.task_context.flow.name.clone();
+        let mut handles = Vec::new();
+        let last_replay_id = events.last().map(|ce| ce.replay_id.clone());
 
         for ce in events {
             if let Some(event) = ce.event {
-                // Setup event data payload.
-                let data = AvroData {
-                    schema: schema_info.schema_json.clone(),
-                    raw_bytes: event.payload[..].to_vec(),
-                };
+                let tx = self.tx.clone();
+                let task_id = self.task_id;
+                let task_type = self.task_type;
+                let schema = schema_info.schema_json.clone();
+                let event_id = event.id.clone();
 
                 // Normalize topic name by removing data/ or event/ prefix.
                 let subject = topic_name
@@ -154,21 +163,79 @@ impl EventHandler {
                     .unwrap_or(topic_name)
                     .to_lowercase();
 
-                // Build and send event.
-                let e = EventBuilder::new()
-                    .data(EventData::Avro(data))
-                    .subject(subject)
-                    .id(event.id)
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|e| Error::Event { source: e })?;
+                let config = Arc::clone(&self.config);
 
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
+                // Spawn a task for each event to process them concurrently.
+                let handle = tokio::spawn(async move {
+                    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
-                // Cache replay ID after successful event processing for non-managed durable consumers.
+                    // Setup event data payload.
+                    let data = AvroData {
+                        schema,
+                        raw_bytes: event.payload[..].to_vec(),
+                    };
+
+                    // Build and send event.
+                    let mut e = EventBuilder::new()
+                        .data(EventData::Avro(data))
+                        .subject(subject)
+                        .id(event.id)
+                        .task_id(task_id)
+                        .task_type(task_type)
+                        .build()
+                        .map_err(|e| Error::Event { source: e })?;
+
+                    e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                        completion_tx,
+                    ))));
+
+                    e.send_with_logging(tx.as_ref())
+                        .await
+                        .map_err(|source| Error::SendMessage { source })?;
+
+                    // Wait for pipeline completion.
+                    let success = match config.ack_timeout {
+                        Some(timeout) => matches!(
+                            tokio::time::timeout(timeout, completion_rx).await,
+                            Ok(Ok(Ok(())))
+                        ),
+                        None => matches!(completion_rx.await, Ok(Ok(()))),
+                    };
+
+                    if !success {
+                        warn!(
+                            event_id = ?event_id,
+                            "Pipeline failed or timed out"
+                        );
+                        return Err(Error::PipelineCompletionFailed);
+                    }
+
+                    Ok::<(), Error>(())
+                });
+
+                handles.push(handle);
+            }
+        }
+
+        // Wait for all events in the batch to complete.
+        let mut all_succeeded = true;
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(())) => {} // Event succeeded.
+                Ok(Err(e)) => {
+                    error!("Event processing failed: {}", e);
+                    all_succeeded = false;
+                }
+                Err(e) => {
+                    error!("Event processing task panicked: {}", e);
+                    all_succeeded = false;
+                }
+            }
+        }
+
+        // Only cache replay_id if ALL events in the batch succeeded.
+        if all_succeeded {
+            if let Some(replay_id) = last_replay_id {
                 if self
                     .config
                     .topic
@@ -178,13 +245,15 @@ impl EventHandler {
                 {
                     let sanitized_topic = sanitize_topic_name(topic_name);
                     let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
-                    if let Err(e) = cache.put(&cache_key, ce.replay_id.into(), None).await {
+                    if let Err(e) = cache.put(&cache_key, replay_id.into(), None).await {
                         error!(
                             "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
                         );
                     }
                 }
             }
+        } else {
+            warn!("Not all events succeeded in batch, replay_id not advanced");
         }
 
         Ok(())
@@ -483,40 +552,32 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         })
     }
 
-    /// Runs the subscriber by initializing and spawning the event handler task.
     #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(self) -> Result<(), Error> {
-        // Merge app-level and task-level retry config.
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        // Spawn event handler task.
+        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+            match self.init().await {
+                Ok(handler) => Ok(handler),
+                Err(e) => {
+                    error!(error = %e, "Failed to initialize subscriber");
+                    Err(tokio_retry::RetryError::transient(e))
+                }
+            }
+        })
+        .await
+        {
+            Ok(handler) => handler,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
         tokio::spawn(
             async move {
-                // Retry loop with exponential backoff.
-                let result = tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-                    // Initialize task.
-                    let event_handler = match self.init().await {
-                        Ok(handler) => handler,
-                        Err(e) => {
-                            error!(error = %e, "Failed to initialize subscriber");
-                            return Err(tokio_retry::RetryError::transient(e));
-                        }
-                    };
-
-                    // Run event handler.
-                    match event_handler.handle().await {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            error!(error = %e, "Failed to process messages");
-                            Err(tokio_retry::RetryError::transient(e))
-                        }
-                    }
-                })
-                .await;
-
-                if let Err(e) = result {
-                    error!(error = %e, "Subscriber failed after all retry attempts");
+                if let Err(e) = event_handler.handle().await {
+                    error!(error = %e, "Failed to process events");
                 }
             }
             .instrument(tracing::Span::current()),
@@ -661,6 +722,7 @@ mod tests {
                 num_requested: Some(10),
             },
             endpoint: None,
+            ack_timeout: None,
             retry: None,
         });
         let (tx, _) = mpsc::channel::<Event>(10);

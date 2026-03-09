@@ -73,7 +73,7 @@ pub struct QueryJob {
     /// Path to Salesforce authentication credentials.
     pub credentials_path: PathBuf,
 
-    // Fields for create operation
+    // Fields for create operation.
     /// SOQL query string (create only).
     #[serde(default)]
     pub query: Option<flowgen_core::resource::Source>,
@@ -90,12 +90,12 @@ pub struct QueryJob {
     #[serde(default)]
     pub line_ending: Option<LineEnding>,
 
-    // Fields for get, delete, abort, get_results operations
+    // Fields for get, delete, abort, get_results operations.
     /// Job ID for get/delete/abort/get_results operations.
     #[serde(default)]
     pub job_id: Option<String>,
 
-    // Fields for get_results operation
+    // Fields for get_results operation.
     /// Number of rows per Arrow RecordBatch when parsing CSV results (get_results only).
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
@@ -394,7 +394,7 @@ mod tests {
             ColumnDelimiter::Backquote,
         ];
 
-        // Each delimiter should serialize to a different string
+        // Each delimiter should serialize to a different string.
         let serialized: Vec<String> = delimiters
             .iter()
             .map(|d| serde_json::to_string(d).unwrap())

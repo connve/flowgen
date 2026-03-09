@@ -9,12 +9,16 @@ use tokio_retry::strategy::{jitter, ExponentialBackoff};
 /// Default initial backoff delay (1 second).
 pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Default maximum retry attempts (10 attempts = ~15 minutes total with exponential backoff).
+pub const DEFAULT_MAX_ATTEMPTS: usize = 10;
+
 /// Retry configuration with exponential backoff and jitter.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts (default: None = infinite retries).
-    /// Set to Some(n) to limit retries to n attempts.
-    #[serde(default)]
+    /// Maximum number of retry attempts (default: 10 = ~15 minutes total).
+    /// With 1s initial backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s.
+    /// Set to None for infinite retries (not recommended).
+    #[serde(default = "default_max_attempts")]
     pub max_attempts: Option<usize>,
 
     /// Initial backoff delay (default: "1s").
@@ -27,7 +31,7 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: None,
+            max_attempts: Some(DEFAULT_MAX_ATTEMPTS),
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
         }
     }
@@ -36,8 +40,8 @@ impl Default for RetryConfig {
 impl RetryConfig {
     /// Creates a tokio-retry strategy with exponential backoff and jitter.
     ///
-    /// Backoff grows unbounded with jitter to spread thundering herd across retrying tasks.
-    /// Use max_attempts to control when to stop retrying.
+    /// Backoff grows exponentially with jitter to spread thundering herd across retrying tasks.
+    /// Default max_attempts is 10 (~15 minutes total) to act as a circuit breaker.
     ///
     /// Example sequence with default 1s initial backoff (jitter adds approximately plus or minus 50%):
     /// - Attempt 1: ~1s
@@ -48,7 +52,9 @@ impl RetryConfig {
     /// - Attempt 6: ~32s
     /// - Attempt 7: ~64s (~1 minute)
     /// - Attempt 8: ~128s (~2 minutes)
-    /// - ...grows indefinitely unless max_attempts is set
+    /// - Attempt 9: ~256s (~4 minutes)
+    /// - Attempt 10: ~512s (~8.5 minutes)
+    /// - Total: ~15 minutes before circuit breaker trips
     pub fn strategy(&self) -> Box<dyn Iterator<Item = Duration> + Send> {
         let initial_ms = self.initial_backoff.as_millis() as u64;
 
@@ -83,6 +89,10 @@ fn default_initial_backoff() -> Duration {
     DEFAULT_INITIAL_BACKOFF
 }
 
+fn default_max_attempts() -> Option<usize> {
+    Some(DEFAULT_MAX_ATTEMPTS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,7 +100,7 @@ mod tests {
     #[test]
     fn test_default_retry_config() {
         let config = RetryConfig::default();
-        assert_eq!(config.max_attempts, None);
+        assert_eq!(config.max_attempts, Some(DEFAULT_MAX_ATTEMPTS));
         assert_eq!(config.initial_backoff, DEFAULT_INITIAL_BACKOFF);
     }
 

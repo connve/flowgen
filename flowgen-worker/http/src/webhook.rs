@@ -72,6 +72,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
+    #[error("Pipeline completion failed or timed out for webhook request")]
+    PipelineCompletionFailed,
 }
 
 impl IntoResponse for Error {
@@ -80,7 +82,6 @@ impl IntoResponse for Error {
             Error::SerdeJson { .. } | Error::Axum { .. } => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        error!("webhook error: {}", self);
         status.into_response()
     }
 }
@@ -173,7 +174,10 @@ impl EventHandler {
 
         let json_body = match body.is_empty() {
             true => Value::Null,
-            false => serde_json::from_slice(&body).map_err(|e| Error::SerdeJson { source: e })?,
+            false => serde_json::from_slice(&body).map_err(|e| {
+                error!("Failed to parse webhook request body as JSON: {}", e);
+                Error::SerdeJson { source: e }
+            })?,
         };
 
         // Only store headers that are specified in the configuration.
@@ -195,7 +199,9 @@ impl EventHandler {
             DEFAULT_PAYLOAD_KEY: json_body
         });
 
-        let e = EventBuilder::new()
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+        let mut e = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(self.config.name.to_owned())
             .task_id(self.task_id)
@@ -203,10 +209,34 @@ impl EventHandler {
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
+        e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            completion_tx,
+        ))));
+
         e.send_with_logging(self.tx.as_ref())
             .await
             .map_err(|source| Error::SendMessage { source })?;
-        Ok(StatusCode::OK)
+
+        // Wait for pipeline completion before responding to HTTP request.
+        match self.config.ack_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
+                Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
+                Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                    error!("{}", Error::PipelineCompletionFailed);
+                    Ok(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            },
+            None => {
+                // No timeout configured, wait indefinitely.
+                match completion_rx.await {
+                    Ok(Ok(())) => Ok(StatusCode::OK),
+                    Ok(Err(_)) | Err(_) => {
+                        error!("{}", Error::PipelineCompletionFailed);
+                        Ok(StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -277,8 +307,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         {
             Ok(handler) => handler,
             Err(e) => {
-                error!(error = %e, "Webhook processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 
@@ -300,7 +329,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         };
 
         if let Some(http_server) = &self.task_context.http_server {
-            // Downcast the trait object to the concrete HttpServer type
+            // Downcast the trait object to the concrete HttpServer type.
             if let Some(server) = http_server
                 .as_any()
                 .downcast_ref::<super::server::HttpServer>()
@@ -449,6 +478,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
         let (tx, _rx) = mpsc::channel(100);
@@ -511,6 +541,7 @@ mod tests {
             payload: None,
             headers: Some(configured_headers),
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
 
@@ -541,6 +572,7 @@ mod tests {
             payload: None,
             headers: None,
             credentials_path: None,
+            ack_timeout: None,
             retry: None,
         });
 

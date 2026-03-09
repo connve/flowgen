@@ -59,6 +59,7 @@ impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let json_data = match &event.data {
                 EventData::Json(data) => data,
@@ -94,15 +95,50 @@ impl EventHandler {
                 },
             };
 
-            for element in array.iter() {
-                // EventBuilder::new() automatically preserves meta from the current event context
-                let e = EventBuilder::new()
+            let array_len = array.len();
+
+            // Handle empty arrays by signaling completion immediately.
+            if array_len == 0 {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    if let Ok(mut guard) = arc.lock() {
+                        if let Some(tx) = guard.take() {
+                            tx.send(Ok(())).ok();
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            for (idx, element) in array.iter().enumerate() {
+                // EventBuilder::new() automatically preserves meta from the current event context.
+                let mut e = EventBuilder::new()
                     .data(EventData::Json(element.clone()))
                     .subject(self.config.name.to_owned())
                     .task_id(self.task_id)
                     .task_type(self.task_type)
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
+
+                // Only attach completion_tx to the last element.
+                // This ensures the source waits for ALL iterated events to complete.
+                if idx == array_len - 1 {
+                    match self.tx {
+                        None => {
+                            // Final task, signal completion after last element.
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                if let Ok(mut guard) = arc.lock() {
+                                    if let Some(tx) = guard.take() {
+                                        tx.send(Ok(())).ok();
+                                    }
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            // Pass through completion_tx to last element.
+                            e.completion_tx = completion_tx_arc.clone();
+                        }
+                    }
+                }
 
                 e.send_with_logging(self.tx.as_ref())
                     .await
@@ -168,8 +204,7 @@ impl crate::task::runner::Runner for Processor {
         {
             Ok(handler) => Arc::new(handler),
             Err(e) => {
-                error!(error = %e, "Iterate processor failed after all retry attempts");
-                return Ok(());
+                return Err(e);
             }
         };
 
@@ -365,6 +400,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -417,6 +453,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         tokio::spawn(async move {
@@ -466,6 +503,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -499,6 +537,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            completion_tx: None,
         };
 
         let result = event_handler.handle(input_event).await;

@@ -28,10 +28,10 @@ pub enum Error {
 /// Returns None if the template is complex (contains helpers, multiple expressions, etc.).
 fn extract_simple_path(template: &str) -> Option<String> {
     let trimmed = template.trim();
-    // Check if it's a simple {{path}} template
+    // Check if it's a simple {{path}} template.
     if trimmed.starts_with("{{") && trimmed.ends_with("}}") && trimmed.matches("{{").count() == 1 {
         let inner = &trimmed[2..trimmed.len() - 2].trim();
-        // Make sure it doesn't contain any helper syntax or complex expressions
+        // Make sure it doesn't contain any helper syntax or complex expressions.
         if !inner.contains(' ') && !inner.contains('(') && !inner.contains(')') {
             return Some(inner.to_string());
         }
@@ -57,6 +57,11 @@ fn get_value_by_path<'a>(data: &'a serde_json::Value, path: &str) -> Option<&'a 
 }
 
 /// Recursively renders all string values in a JSON value tree that contain Handlebars templates.
+///
+/// This function traverses the entire JSON structure to ensure nested templates are properly resolved.
+/// For simple path templates like "{{event.data}}", it preserves the original type by directly accessing
+/// the value instead of rendering it as a string. This prevents unwanted string conversion of objects,
+/// arrays, booleans, and numbers.
 fn render_json_value(
     value: &mut serde_json::Value,
     handlebars: &Handlebars,
@@ -64,10 +69,11 @@ fn render_json_value(
 ) -> Result<(), handlebars::RenderError> {
     match value {
         serde_json::Value::String(s) => {
-            // Only render if the string contains template syntax
+            // Only render if the string contains template syntax.
             if s.contains("{{") {
-                // Check if this is a template that references a path in the data
+                // Check if this is a template that references a path in the data.
                 // If so, try to directly access and use that value instead of rendering as string.
+                // This preserves type information for objects, arrays, and primitives.
                 if let Some(path) = extract_simple_path(s) {
                     if let Some(direct_value) = get_value_by_path(data, &path) {
                         *value = direct_value.clone();
@@ -77,10 +83,10 @@ fn render_json_value(
 
                 let rendered = handlebars.render_template(s, data)?;
 
-                // Try to parse the rendered string as JSON to preserve type information
+                // Try to parse the rendered string as JSON to preserve type information.
                 // This allows boolean/number values from templates to be correctly typed.
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&rendered) {
-                    // Only use the parsed value if it's a non-string type (bool, number, etc.)
+                    // Only use the parsed value if it's a non-string type (bool, number, etc.).
                     // For string types, keep as rendered string to avoid double-quoting.
                     if !matches!(parsed, serde_json::Value::String(_)) {
                         *value = parsed;
@@ -121,7 +127,7 @@ where
 {
     let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
     let mut handlebars = Handlebars::new();
-    // Disable HTML escaping since we're rendering data, not HTML
+    // Disable HTML escaping since we're rendering data, not HTML.
     handlebars.register_escape_fn(handlebars::no_escape);
     handlebars
         .render_template(template, &data_value)
@@ -160,7 +166,7 @@ pub trait ConfigExt {
         }
 
         let mut handlebars = Handlebars::new();
-        // Disable HTML escaping since we're rendering JSON, not HTML
+        // Disable HTML escaping since we're rendering JSON, not HTML.
         handlebars.register_escape_fn(handlebars::no_escape);
 
         render_json_value(&mut config_value, &handlebars, &data_value)
