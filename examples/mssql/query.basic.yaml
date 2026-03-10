@@ -1,0 +1,40 @@
+# Basic MSSQL query example
+#
+# This example demonstrates a simple SQL Server query that fetches recent customers.
+# The flow is triggered every 5 minutes and results are logged to console.
+
+flow:
+  name: fetch_customers
+  require_leader_election: true
+  tasks:
+    # Trigger the flow every 5 minutes.
+    - generate:
+        name: trigger
+        interval: 300s
+
+    # Execute MSSQL query to fetch customers.
+    - mssql_query:
+        name: fetch_customers
+        credentials_path: /var/secrets/mssql/credentials.json
+        query: |
+          SELECT TOP 100
+            customer_id,
+            name,
+            email,
+            created_at
+          FROM customers
+          ORDER BY created_at DESC
+        batch_size: 1000
+        max_connections: 10
+        connection_timeout: "30s"
+
+    # Convert Arrow RecordBatch to JSON for logging.
+    - convert:
+        name: to_json
+        target_format: json
+
+    # Log the results.
+    - log:
+        name: log_results
+        level: info
+        structured: false

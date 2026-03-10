@@ -1,0 +1,52 @@
+# Parameterized MSSQL query example
+#
+# This example demonstrates using parameterized queries with static parameters
+# for SQL injection protection. Parameters are passed as @p1, @p2, etc.
+
+flow:
+  name: fetch_completed_orders
+  require_leader_election: true
+  tasks:
+    # Trigger the flow every 10 minutes.
+    - generate:
+        name: trigger
+        interval: 600s
+
+    # Execute parameterized MSSQL query.
+    # Parameters prevent SQL injection attacks.
+    - mssql_query:
+        name: fetch_orders
+        credentials_path: /var/secrets/mssql/credentials.json
+        query: |
+          SELECT
+            order_id,
+            customer_id,
+            order_date,
+            total_amount,
+            status
+          FROM orders
+          WHERE order_date >= @p1
+            AND status = @p2
+          ORDER BY order_date DESC
+        # Static parameters (can also use template substitution from event data).
+        parameters:
+          - "2024-01-01"
+          - "completed"
+        batch_size: 5000
+        max_connections: 10
+        connection_timeout: "30s"
+
+    # Convert Arrow RecordBatch to JSON.
+    - convert:
+        name: to_json
+        target_format: json
+
+    # Iterate to process each order individually.
+    - iterate:
+        name: split_orders
+
+    # Log each order.
+    - log:
+        name: log_order
+        level: info
+        structured: true

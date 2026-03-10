@@ -1,0 +1,40 @@
+# MSSQL query using external SQL file
+#
+# This example demonstrates loading SQL queries from external resource files.
+# This approach is useful for complex queries and better organization.
+
+flow:
+  name: analytics_report
+  require_leader_election: true
+  tasks:
+    # Trigger once daily at midnight.
+    - generate:
+        name: trigger
+        interval: 86400s
+
+    # Execute MSSQL query loaded from external file.
+    - mssql_query:
+        name: monthly_sales_report
+        credentials_path: /var/secrets/mssql/credentials.json
+        # Load query from external SQL file.
+        # Path is relative to the resource directory configured in config.yaml.
+        query:
+          resource: "mssql/queries/monthly_sales_report.sql"
+        batch_size: 10000
+        max_connections: 5
+        connection_timeout: "60s"
+        # Custom retry configuration for long-running queries.
+        retry:
+          max_attempts: 5
+          initial_backoff: "2s"
+
+    # Convert results to JSON.
+    - convert:
+        name: to_json
+        target_format: json
+
+    # Log the report summary.
+    - log:
+        name: log_report
+        level: info
+        structured: false
