@@ -8,7 +8,7 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventExt};
 use flowgen_core::{client::Client, event::EventData};
 use futures::StreamExt;
-use object_store::GetResultPayload;
+use object_store::{GetResultPayload, ObjectStoreExt};
 use std::io::{BufReader, Cursor};
 use std::sync::Arc;
 use tokio::sync::{
@@ -105,20 +105,20 @@ pub struct EventHandler {
     task_id: usize,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let mut client_guard = self.client.lock().await;
-            let context = client_guard
-                .context
-                .as_mut()
-                .ok_or_else(|| Error::NoObjectStoreContext)?;
-
             // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
@@ -133,11 +133,33 @@ impl EventHandler {
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
             let path = object_store::path::Path::from(url.path());
 
-            let result = context
-                .object_store
-                .get(&path)
-                .await
-                .map_err(|e| Error::ObjectStore { source: e })?;
+            // Automatically reconnects on auth failure to refresh expired credentials.
+            let mut client_guard = self.client.lock().await;
+            let mut result = {
+                let context = client_guard
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| Error::NoObjectStoreContext)?;
+                context.object_store.get(&path).await
+            };
+
+            // Retries once on authentication failure after reconnecting.
+            if let Err(ref e) = result {
+                if super::client::Client::is_auth_error(e) {
+                    client_guard
+                        .reconnect()
+                        .await
+                        .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                    let context = client_guard
+                        .context
+                        .as_ref()
+                        .ok_or_else(|| Error::NoObjectStoreContext)?;
+                    result = context.object_store.get(&path).await;
+                }
+            }
+
+            let result = result.map_err(|e| Error::ObjectStore { source: e })?;
 
             let extension = result
                 .meta
@@ -243,12 +265,32 @@ impl EventHandler {
 
             // Delete file from object store if configured.
             if self.config.delete_after_read.unwrap_or(false) {
-                context
-                    .object_store
-                    .delete(&context.path)
-                    .await
-                    .map_err(|e| Error::ObjectStore { source: e })?;
-                info!("Successfully deleted file: {}", context.path.as_ref());
+                let mut delete_result = {
+                    let context = client_guard
+                        .context
+                        .as_ref()
+                        .ok_or_else(|| Error::NoObjectStoreContext)?;
+                    context.object_store.delete(&path).await
+                };
+
+                // Retries once on authentication failure after reconnecting.
+                if let Err(ref e) = delete_result {
+                    if super::client::Client::is_auth_error(e) {
+                        client_guard
+                            .reconnect()
+                            .await
+                            .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                        let context = client_guard
+                            .context
+                            .as_ref()
+                            .ok_or_else(|| Error::NoObjectStoreContext)?;
+                        delete_result = context.object_store.delete(&path).await;
+                    }
+                }
+
+                delete_result.map_err(|e| Error::ObjectStore { source: e })?;
+                info!("Successfully deleted file: {}", path.as_ref());
             }
 
             Ok(())
@@ -313,6 +355,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)

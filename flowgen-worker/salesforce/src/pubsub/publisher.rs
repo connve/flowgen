@@ -325,6 +325,11 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let mut handlers = Vec::new();
 
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                future::join_all(handlers).await;
+                return Ok(());
+            }
+
             match self.rx.recv().await {
                 Some(event) => {
                     if Some(event.task_id) == event_handler.task_id.checked_sub(1) {

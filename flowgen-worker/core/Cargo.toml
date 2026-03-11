@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 arrow = { workspace = true }
+arrow-schema = { workspace = true }
 apache-avro = { workspace = true }
 parquet = { workspace = true }
 tonic = { workspace = true }
@@ -25,6 +26,7 @@ serde_json = { workspace = true }
 handlebars = { workspace = true }
 arrow-json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }

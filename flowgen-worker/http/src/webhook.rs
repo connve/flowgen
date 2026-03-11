@@ -100,7 +100,6 @@ pub struct EventHandler {
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
-    #[allow(dead_code)]
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
@@ -158,11 +157,10 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
-        // Note: This webhook handler creates events from scratch (from HTTP requests),
-        // so we don't use with_event_context() here. EventBuilder::new() will
-        // create events with meta: None, which is correct for a pipeline starter.
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(StatusCode::SERVICE_UNAVAILABLE);
+        }
 
-        // Validate the authentication and return error if request is not authorized.
         if let Err(auth_error) = self.validate_authentication(&headers) {
             error!("Webhook authentication failed for: {}", auth_error);
             return Ok(StatusCode::UNAUTHORIZED);

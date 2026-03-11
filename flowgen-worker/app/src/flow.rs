@@ -169,6 +169,8 @@ pub struct TaskHandles {
     pub blocking_handles: Vec<TaskHandle>,
     /// Handles for long-running background tasks.
     pub background_handles: Vec<TaskHandle>,
+    /// Task context containing the cancellation token for this tenure.
+    pub task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl TaskRegistry {
@@ -276,8 +278,6 @@ pub struct Flow {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
-    /// The shared context for all tasks in this flow. Initialized by `init()`.
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
     /// Background task handles spawned by run_http_handlers for run_background_tasks to monitor.
     background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
 }
@@ -286,6 +286,11 @@ impl Flow {
     /// Returns the name of the flow.
     pub fn name(&self) -> &str {
         &self.config.flow.name
+    }
+
+    /// Returns a reference to the task manager if initialized.
+    pub fn task_manager(&self) -> Option<Arc<flowgen_core::task::manager::TaskManager>> {
+        self.task_manager.as_ref().map(Arc::clone)
     }
 
     /// Determines if the flow should run with leader election.
@@ -314,7 +319,7 @@ impl Flow {
         self.config.flow.require_leader_election.unwrap_or(false)
     }
 
-    /// Initializes shared resources for the flow, such as the TaskManager and TaskContext.
+    /// Initializes shared resources for the flow, such as the TaskManager.
     /// This must be called before any other run methods.
     #[tracing::instrument(skip(self), name = "flow.init", fields(flow = %self.config.flow.name))]
     pub async fn init(&mut self) -> Result<(), Error> {
@@ -340,28 +345,39 @@ impl Flow {
         }
         let task_manager = Arc::new(task_manager_builder.build().start().await);
 
+        self.task_manager = Some(task_manager);
+
+        Ok(())
+    }
+
+    /// Creates a fresh TaskContext with a new cancellation token.
+    /// This is called each time tasks are spawned (e.g., on leadership acquisition).
+    fn create_task_context(&self) -> Result<Arc<flowgen_core::task::context::TaskContext>, Error> {
+        let task_manager = self
+            .task_manager
+            .as_ref()
+            .ok_or_else(|| Error::TaskManagerNotInitialized)?
+            .clone();
+
+        // Create a fresh cancellation token for this task tenure.
+        let cancellation_token = tokio_util::sync::CancellationToken::new();
+
         let mut task_context_builder = flowgen_core::task::context::TaskContextBuilder::new()
             .flow_name(self.config.flow.name.clone())
             .flow_labels(self.config.flow.labels.clone())
-            .task_manager(Arc::clone(&task_manager))
+            .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
             .http_server(self.http_server.clone())
-            .resource_loader(self.resource_loader.clone());
+            .resource_loader(self.resource_loader.clone())
+            .cancellation_token(cancellation_token);
 
         if let Some(retry_config) = &self.retry {
             task_context_builder = task_context_builder.retry(retry_config.clone());
         }
 
-        let task_context = Arc::new(
-            task_context_builder
-                .build()
-                .map_err(|e| Error::MissingBuilderAttribute(e.to_string()))?,
-        );
-
-        self.task_manager = Some(task_manager);
-        self.task_context = Some(task_context);
-
-        Ok(())
+        Ok(Arc::new(task_context_builder.build().map_err(|e| {
+            Error::MissingBuilderAttribute(e.to_string())
+        })?))
     }
 
     /// Spawns all tasks and returns handles separated by type.
@@ -396,11 +412,8 @@ impl Flow {
     /// The caller should await `blocking_handles` before starting the HTTP server,
     /// but `background_handles` are already running and connected.
     pub async fn spawn_all_tasks(&self) -> Result<TaskHandles, Error> {
-        let task_context = self
-            .task_context
-            .as_ref()
-            .ok_or_else(|| Error::TaskContextNotInitialized)?
-            .clone();
+        // Create a fresh task context with a new cancellation token for this tenure.
+        let task_context = self.create_task_context()?;
 
         // Build task registry with all tasks properly wired.
         let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
@@ -426,6 +439,7 @@ impl Flow {
         Ok(TaskHandles {
             blocking_handles,
             background_handles,
+            task_context,
         })
     }
 
@@ -532,24 +546,34 @@ impl Flow {
             }
         }
 
-        let mut background_tasks = if !is_leader_elected {
+        let mut current_task_handles = if !is_leader_elected {
             // Retrieve already-spawned background tasks.
             let mut lock = self
                 .background_handles
                 .lock()
                 .map_err(|_| Error::BackgroundHandlesRetrieveFailed)?;
 
-            lock.take()
-                .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?
+            // For non-leader-elected flows, we just need the raw handles
+            let handles = lock
+                .take()
+                .ok_or_else(|| Error::BackgroundHandlesRetrieveFailed)?;
+
+            // Create a dummy TaskHandles since non-leader flows don't use cancellation
+            TaskHandles {
+                blocking_handles: Vec::new(),
+                background_handles: handles,
+                task_context: self.create_task_context()?, // Won't be used but needed for the type
+            }
         } else {
             // Spawn tasks for this leadership tenure.
-            let handles = self.spawn_all_tasks().await?;
-            handles
-                .blocking_handles
-                .into_iter()
-                .chain(handles.background_handles)
-                .collect()
+            self.spawn_all_tasks().await?
         };
+
+        let mut background_tasks: Vec<TaskHandle> = current_task_handles
+            .blocking_handles
+            .into_iter()
+            .chain(current_task_handles.background_handles)
+            .collect();
 
         if background_tasks.is_empty() {
             info!("No tasks to monitor");
@@ -565,7 +589,12 @@ impl Flow {
                         Some(status) = leadership_rx.recv() => {
                             match status {
                                 flowgen_core::task::manager::LeaderElectionResult::NotLeader => {
-                                    warn!("Lost leadership, aborting all tasks");
+                                    debug!("Lost leadership, signaling cancellation and aborting tasks");
+
+                                    // Signal all tasks to stop via cancellation token
+                                    current_task_handles.task_context.cancellation_token.cancel();
+
+                                    // Also abort tasks immediately
                                     for task in &background_tasks {
                                         task.abort();
                                     }
@@ -636,11 +665,10 @@ impl Flow {
                 }
 
                 // Re-spawn tasks after re-acquiring leadership.
-                let handles = self.spawn_all_tasks().await?;
-                background_tasks = handles
-                    .blocking_handles
+                current_task_handles = self.spawn_all_tasks().await?;
+                background_tasks = std::mem::take(&mut current_task_handles.blocking_handles)
                     .into_iter()
-                    .chain(handles.background_handles)
+                    .chain(std::mem::take(&mut current_task_handles.background_handles))
                     .collect();
             }
         } else {
@@ -1181,7 +1209,6 @@ impl FlowBuilder {
             retry: self.retry,
             resource_loader: self.resource_loader,
             task_manager: None,
-            task_context: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -1283,7 +1310,6 @@ mod tests {
         let flow = result.unwrap();
         assert_eq!(flow.config, flow_config);
         assert!(flow.task_manager.is_none());
-        assert!(flow.task_context.is_none());
     }
 
     #[test]

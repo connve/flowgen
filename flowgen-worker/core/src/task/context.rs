@@ -37,6 +37,8 @@ pub struct TaskContext {
     pub resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<crate::retry::RetryConfig>,
+    /// Cancellation token for graceful shutdown coordination.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -51,6 +53,7 @@ impl std::fmt::Debug for TaskContext {
             )
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
+            .field("cancellation_token", &"<CancellationToken>")
             .finish()
     }
 }
@@ -72,6 +75,8 @@ pub struct TaskContextBuilder {
     resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration.
     retry: Option<crate::retry::RetryConfig>,
+    /// Cancellation token for graceful shutdown coordination.
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl TaskContextBuilder {
@@ -152,6 +157,18 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the cancellation token for graceful shutdown.
+    ///
+    /// # Arguments
+    /// * `cancellation_token` - Cancellation token for coordinating graceful shutdown
+    pub fn cancellation_token(
+        mut self,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -173,6 +190,7 @@ impl TaskContextBuilder {
             http_server: self.http_server,
             resource_loader: self.resource_loader,
             retry: self.retry,
+            cancellation_token: self.cancellation_token.unwrap_or_default(),
         })
     }
 }

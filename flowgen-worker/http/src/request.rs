@@ -98,13 +98,16 @@ pub struct EventHandler {
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
-    #[allow(dead_code)]
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event by making an HTTP request.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 

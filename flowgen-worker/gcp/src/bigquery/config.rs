@@ -336,6 +336,9 @@ pub struct Job {
     /// How to handle existing data (create operation only).
     #[serde(default)]
     pub write_disposition: Option<WriteDisposition>,
+    /// Whether to create table if it doesn't exist (create operation only).
+    #[serde(default)]
+    pub create_disposition: Option<CreateDisposition>,
     /// Whether to automatically infer schema (create operation only).
     #[serde(default)]
     pub autodetect: Option<bool>,
@@ -531,6 +534,28 @@ impl WriteDisposition {
             WriteDisposition::WriteAppend => "WRITE_APPEND",
             WriteDisposition::WriteTruncate => "WRITE_TRUNCATE",
             WriteDisposition::WriteEmpty => "WRITE_EMPTY",
+        }
+    }
+}
+
+/// Create disposition for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CreateDisposition {
+    /// Create table if it doesn't exist (default).
+    #[serde(rename = "create_if_needed")]
+    #[default]
+    CreateIfNeeded,
+    /// Never create table. Fail if table doesn't exist.
+    #[serde(rename = "create_never")]
+    CreateNever,
+}
+
+impl CreateDisposition {
+    pub fn as_str(&self) -> &str {
+        match self {
+            CreateDisposition::CreateIfNeeded => "CREATE_IF_NEEDED",
+            CreateDisposition::CreateNever => "CREATE_NEVER",
         }
     }
 }

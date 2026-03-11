@@ -12,8 +12,8 @@ use google_cloud_bigquery::client::{Client, ClientConfig};
 use google_cloud_bigquery::http::job::cancel::CancelJobRequest;
 use google_cloud_bigquery::http::job::get::GetJobRequest;
 use google_cloud_bigquery::http::job::{
-    Job as BqJob, JobConfiguration, JobConfigurationLoad, JobReference, JobState, JobType,
-    WriteDisposition as BqWriteDisposition,
+    CreateDisposition as BqCreateDisposition, Job as BqJob, JobConfiguration, JobConfigurationLoad,
+    JobReference, JobState, JobType, WriteDisposition as BqWriteDisposition,
 };
 use google_cloud_bigquery::http::table::{
     SourceFormat as BqSourceFormat, TableReference as BqTableReference, TableSchema,
@@ -133,10 +133,15 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     config: Arc<super::config::Job>,
     task_type: &'static str,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -276,6 +281,13 @@ impl EventHandler {
             Some(super::config::WriteDisposition::WriteEmpty) => BqWriteDisposition::WriteEmpty,
         };
 
+        let create_disp = match config.create_disposition.as_ref() {
+            Some(super::config::CreateDisposition::CreateIfNeeded) | None => {
+                BqCreateDisposition::CreateIfNeeded
+            }
+            Some(super::config::CreateDisposition::CreateNever) => BqCreateDisposition::CreateNever,
+        };
+
         // Convert schema configuration to TableSchema if provided.
         let schema = config.schema.as_ref().map(|fields| TableSchema {
             fields: fields.iter().map(|f| f.clone().into()).collect(),
@@ -286,6 +298,7 @@ impl EventHandler {
             destination_table: table_ref,
             source_format: Some(source_fmt),
             write_disposition: Some(write_disp),
+            create_disposition: Some(create_disp),
             autodetect: Some(config.autodetect.unwrap_or(false)),
             schema,
             max_bad_records: config.max_bad_records.map(|v| v as i64),
@@ -445,6 +458,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             config: Arc::clone(&self.config),
             task_type: self.task_type,
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)
@@ -706,6 +720,7 @@ mod tests {
             }),
             source_format: Some(super::super::config::SourceFormat::Parquet),
             write_disposition: None,
+            create_disposition: None,
             autodetect: None,
             max_bad_records: None,
             labels: None,
@@ -749,6 +764,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()
@@ -785,6 +801,7 @@ mod tests {
             }),
             source_format: Some(super::super::config::SourceFormat::Parquet),
             write_disposition: None,
+            create_disposition: None,
             autodetect: None,
             max_bad_records: None,
             labels: None,
@@ -807,6 +824,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()

@@ -9,7 +9,7 @@ use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use futures_util::future;
-use object_store::PutPayload;
+use object_store::{ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc::Receiver, Mutex};
@@ -117,20 +117,20 @@ pub struct EventHandler {
     tx: Option<tokio::sync::mpsc::Sender<Event>>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let mut client_guard = self.client.lock().await;
-            let context = client_guard
-                .context
-                .as_mut()
-                .ok_or_else(|| Error::NoObjectStoreContext)?;
-
             // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
@@ -244,12 +244,40 @@ impl EventHandler {
             let object_path = path.child(format!("{filename}.{extension}"));
 
             // Upload processed data to object store.
+            // Automatically reconnects on auth failure to refresh expired credentials.
             let payload = PutPayload::from_bytes(Bytes::from(writer));
-            let put_result = context
-                .object_store
-                .put(&object_path, payload)
-                .await
-                .map_err(|e| Error::ObjectStore { source: e })?;
+            let mut client_guard = self.client.lock().await;
+            let mut put_result = {
+                let context = client_guard
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| Error::NoObjectStoreContext)?;
+                context
+                    .object_store
+                    .put(&object_path, payload.clone())
+                    .await
+            };
+
+            // Retries once on authentication failure after reconnecting.
+            if let Err(ref e) = put_result {
+                if super::client::Client::is_auth_error(e) {
+                    client_guard
+                        .reconnect()
+                        .await
+                        .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                    let context = client_guard
+                        .context
+                        .as_ref()
+                        .ok_or_else(|| Error::NoObjectStoreContext)?;
+                    put_result = context
+                        .object_store
+                        .put(&object_path, payload.clone())
+                        .await;
+                }
+            }
+
+            let put_result = put_result.map_err(|e| Error::ObjectStore { source: e })?;
 
             let result = WriteResult {
                 status: WriteStatus::Success,
@@ -373,6 +401,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)

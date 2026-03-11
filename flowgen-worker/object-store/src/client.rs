@@ -18,6 +18,8 @@ pub enum Error {
     EmptyPath,
     #[error("Missing required builder attribute: {0}")]
     MissingBuilderAttribute(String),
+    #[error("No context available")]
+    NoContext,
 }
 
 /// Object store context containing the store instance and base path.
@@ -42,10 +44,10 @@ pub struct Client {
     pub context: Option<Context>,
 }
 
-impl flowgen_core::client::Client for Client {
-    type Error = Error;
-
-    async fn connect(mut self) -> Result<Client, Error> {
+impl Client {
+    /// Internal method to establish connection to the object store.
+    /// Used by both initial connect() and reconnect() to avoid code duplication.
+    fn create_context(&self) -> Result<Context, Error> {
         // Parse URL and prepare connection options.
         let path = self.path.to_str().ok_or_else(|| Error::EmptyPath)?;
         let url = Url::parse(path).map_err(|source| Error::ParseUrl { source })?;
@@ -65,8 +67,30 @@ impl flowgen_core::client::Client for Client {
         // Initialize object store from URL and options.
         let (object_store, path) =
             parse_url_opts(&url, parse_opts).map_err(|e| Error::ObjectStore { source: e })?;
-        let context = Context { object_store, path };
-        self.context = Some(context);
+        Ok(Context { object_store, path })
+    }
+
+    /// Reconnects to the object store, refreshing credentials.
+    ///
+    /// This creates a new connection with fresh credentials, which is necessary
+    /// because GCS OAuth tokens expire after approximately one hour. Without
+    /// reconnecting, operations will fail with 401 Unauthenticated errors.
+    pub async fn reconnect(&mut self) -> Result<(), Error> {
+        self.context = Some(self.create_context()?);
+        Ok(())
+    }
+
+    /// Checks if an error is an authentication error that should trigger a reconnect.
+    pub fn is_auth_error(err: &object_store::Error) -> bool {
+        matches!(err, object_store::Error::Unauthenticated { .. })
+    }
+}
+
+impl flowgen_core::client::Client for Client {
+    type Error = Error;
+
+    async fn connect(mut self) -> Result<Client, Error> {
+        self.context = Some(self.create_context()?);
         Ok(self)
     }
 }

@@ -29,4 +29,6 @@ pub enum TargetFormat {
     Avro,
     /// Convert to JSON format.
     Json,
+    /// Convert to Apache Arrow RecordBatch with optional schema casting.
+    Arrow,
 }

@@ -117,10 +117,15 @@ pub struct EventHandler {
     sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
     task_type: &'static str,
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         // Run handler with event context for automatic meta preservation.
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -548,6 +553,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             sfdc_client: Arc::new(tokio::sync::Mutex::new(sfdc_client)),
             task_type: self.task_type,
             resource_loader: self.task_context.resource_loader.clone(),
+            task_context: Arc::clone(&self.task_context),
         };
         Ok(event_handler)
     }
@@ -834,6 +840,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()
@@ -883,6 +890,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()

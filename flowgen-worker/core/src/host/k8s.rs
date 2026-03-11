@@ -281,7 +281,7 @@ impl Host for K8sHost {
         }
     }
 
-    #[tracing::instrument(skip(self), name = "k8s.delete_lease", fields(lease_name = %name, namespace = ?namespace))]
+    #[tracing::instrument(skip(self), name = "k8s.delete_lease", fields(lease_name = %name, namespace))]
     async fn delete_lease(
         &self,
         name: &str,
@@ -289,22 +289,34 @@ impl Host for K8sHost {
     ) -> Result<(), crate::host::Error> {
         // If a custom namespace is provided, we need to create a new API client for that namespace.
         // Otherwise, use the cached API client for the default namespace.
-        let api = if let Some(custom_ns) = namespace {
+        let (api, actual_namespace) = if let Some(custom_ns) = namespace {
             if custom_ns != self.namespace {
                 let client = self.client.as_ref().ok_or_else(|| {
                     Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
                 })?;
-                Arc::new(Api::namespaced((**client).clone(), custom_ns))
+                (
+                    Arc::new(Api::namespaced((**client).clone(), custom_ns)),
+                    custom_ns,
+                )
             } else {
-                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
-                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
-                })?)
+                (
+                    Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                        Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                    })?),
+                    self.namespace.as_str(),
+                )
             }
         } else {
-            Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
-                Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
-            })?)
+            (
+                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?),
+                self.namespace.as_str(),
+            )
         };
+
+        // Record the actual namespace in the span
+        tracing::Span::current().record("namespace", actual_namespace);
 
         api.delete(name, &DeleteParams::default())
             .await
@@ -339,18 +351,77 @@ impl Host for K8sHost {
             })?)
         };
 
-        let patch = serde_json::json!({
-            "spec": {
-                "renewTime": MicroTime(chrono::Utc::now()),
-            }
-        });
-
-        api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        // Fetch the current lease to verify ownership and get the resourceVersion
+        // for optimistic concurrency control.
+        let mut existing_lease = api
+            .get(name)
             .await
-            .map_err(|source| Box::new(Error::PatchLease { source }) as crate::host::Error)?;
+            .map_err(|source| Box::new(Error::GetLease { source }) as crate::host::Error)?;
 
-        debug!("Pod {} renewed lease {}", self.holder_identity, name);
-        Ok(())
+        // Verify we still own the lease before attempting renewal.
+        let spec = existing_lease
+            .spec
+            .as_mut()
+            .ok_or_else(|| Box::new(Error::MissingLeaseSpec) as crate::host::Error)?;
+
+        let current_holder = spec
+            .holder_identity
+            .as_ref()
+            .ok_or_else(|| Box::new(Error::MissingHolderIdentity) as crate::host::Error)?;
+
+        // If another pod has taken over the lease, return an error so the renewal
+        // task can detect ownership loss and notify the flow to stop processing.
+        if current_holder != &self.holder_identity {
+            return Err(Box::new(Error::LeaseHeldByOther {
+                name: name.to_string(),
+                holder: current_holder.clone(),
+            }) as crate::host::Error);
+        }
+
+        // Update the renew time in the lease spec.
+        spec.renew_time = Some(MicroTime(chrono::Utc::now()));
+
+        // Use replace instead of patch to ensure atomic update with resourceVersion.
+        // This will fail with 409 Conflict if another pod modified the lease
+        // between our get and replace operations, preventing split-brain scenarios.
+        match api
+            .replace(name, &PostParams::default(), &existing_lease)
+            .await
+        {
+            Ok(_) => {
+                debug!("Pod {} renewed lease {}", self.holder_identity, name);
+                Ok(())
+            }
+            Err(kube::Error::Api(api_err)) if api_err.code == 409 => {
+                // Another pod modified the lease between our get and replace.
+                // This likely means we lost ownership. Fetch the latest state to confirm.
+                match api.get(name).await {
+                    Ok(updated_lease) => {
+                        if let Some(updated_spec) = updated_lease.spec {
+                            if let Some(holder) = updated_spec.holder_identity {
+                                if holder != self.holder_identity {
+                                    // We lost ownership to another pod.
+                                    return Err(Box::new(Error::LeaseHeldByOther {
+                                        name: name.to_string(),
+                                        holder,
+                                    })
+                                        as crate::host::Error);
+                                }
+                            }
+                        }
+                        // Still our lease but someone else renewed it. This is unusual but not fatal.
+                        Err(Box::new(Error::RenewLease {
+                            source: kube::Error::Api(api_err),
+                        }) as crate::host::Error)
+                    }
+                    Err(source) => {
+                        // Could not verify ownership. Treat as renewal failure.
+                        Err(Box::new(Error::RenewLease { source }) as crate::host::Error)
+                    }
+                }
+            }
+            Err(source) => Err(Box::new(Error::RenewLease { source }) as crate::host::Error),
+        }
     }
 }
 

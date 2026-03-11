@@ -127,8 +127,10 @@ impl App {
     /// This method discovers flow configuration files using the glob pattern specified in the app config,
     /// parses each configuration file, builds flow instances, registers HTTP routes, starts the HTTP server,
     /// and finally runs all flow tasks concurrently along with the server.
-    #[tracing::instrument(skip(self), name = "app")]
-    pub async fn start(self) -> Result<(), Error> {
+    ///
+    /// The shutdown_rx parameter allows graceful shutdown by releasing all leases when a shutdown signal is received.
+    #[tracing::instrument(skip(self, shutdown_rx), name = "app")]
+    pub async fn start(self, shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 
         // Initialize OpenTelemetry if configured.
@@ -471,20 +473,43 @@ impl App {
             background_handles.push(server_handle);
         }
 
+        // Collect task managers for shutdown cleanup.
+        let task_managers: Vec<Arc<flowgen_core::task::manager::TaskManager>> =
+            flows.iter().filter_map(|f| f.task_manager()).collect();
+
         // Start all background flow tasks.
         for flow in flows {
             background_handles.push(flow.run());
         }
 
-        // Wait for all background flows and the server to complete.
-        let results = futures_util::future::join_all(background_handles).await;
-        for result in results {
-            if let Err(source) = result {
-                let err = Error::BackgroundTaskPanic { source };
-                error!("{}", err);
+        // Wait for shutdown signal. In production, flows run indefinitely until shutdown.
+        shutdown_rx.await.ok();
+
+        info!("Shutdown signal received, stopping all flows...");
+
+        // Signal all flow tasks to stop by marking them for cancellation.
+        // Each task will be cancelled at its next await point, which happens frequently
+        // since flows continuously process events from async channels and streams.
+        for handle in &background_handles {
+            handle.abort();
+        }
+
+        // Wait for all flow tasks to complete their shutdown.
+        // This blocks until every task has been fully cancelled or completed. We must wait
+        // for all flows to stop before deleting leases to prevent duplicate event processing.
+        // If we delete leases while flows are still running, new pods will immediately acquire
+        // the leases while old pods continue processing events, causing duplicate work.
+        let _ = futures::future::join_all(background_handles).await;
+
+        // All flows have now fully stopped. Clean up leases to allow new pods to acquire leadership.
+        // At this point it is safe to delete leases because no flows are processing events.
+        for task_manager in task_managers {
+            if let Err(e) = task_manager.shutdown().await {
+                warn!("Failed to shutdown task manager: {}", e);
             }
         }
 
+        info!("Shutdown complete, all flows stopped and leases released");
         Ok(())
     }
 }

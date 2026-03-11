@@ -143,6 +143,10 @@ impl EventHandler {
             return Ok(());
         }
 
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let cache = Arc::clone(&self.task_context.cache);
         let flow_name = self.task_context.flow.name.clone();
         let mut handles = Vec::new();
@@ -164,54 +168,68 @@ impl EventHandler {
                     .to_lowercase();
 
                 let config = Arc::clone(&self.config);
+                let cancellation_token = self.task_context.cancellation_token.clone();
 
                 // Spawn a task for each event to process them concurrently.
-                let handle = tokio::spawn(async move {
-                    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(
+                    async move {
+                        // Check cancellation before processing.
+                        if cancellation_token.is_cancelled() {
+                            return Ok(());
+                        }
 
-                    // Setup event data payload.
-                    let data = AvroData {
-                        schema,
-                        raw_bytes: event.payload[..].to_vec(),
-                    };
+                        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
-                    // Build and send event.
-                    let mut e = EventBuilder::new()
-                        .data(EventData::Avro(data))
-                        .subject(subject)
-                        .id(event.id)
-                        .task_id(task_id)
-                        .task_type(task_type)
-                        .build()
-                        .map_err(|e| Error::Event { source: e })?;
+                        // Setup event data payload.
+                        let data = AvroData {
+                            schema,
+                            raw_bytes: event.payload[..].to_vec(),
+                        };
 
-                    e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-                        completion_tx,
-                    ))));
+                        // Build and send event.
+                        let mut e = EventBuilder::new()
+                            .data(EventData::Avro(data))
+                            .subject(subject)
+                            .id(event.id)
+                            .task_id(task_id)
+                            .task_type(task_type)
+                            .build()
+                            .map_err(|e| Error::Event { source: e })?;
 
-                    e.send_with_logging(tx.as_ref())
-                        .await
-                        .map_err(|source| Error::SendMessage { source })?;
+                        e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+                            completion_tx,
+                        ))));
 
-                    // Wait for pipeline completion.
-                    let success = match config.ack_timeout {
-                        Some(timeout) => matches!(
-                            tokio::time::timeout(timeout, completion_rx).await,
-                            Ok(Ok(Ok(())))
-                        ),
-                        None => matches!(completion_rx.await, Ok(Ok(()))),
-                    };
+                        // Check cancellation before sending to prevent "receiver dropped" errors.
+                        if cancellation_token.is_cancelled() {
+                            return Ok(());
+                        }
 
-                    if !success {
-                        warn!(
-                            event_id = ?event_id,
-                            "Pipeline failed or timed out"
-                        );
-                        return Err(Error::PipelineCompletionFailed);
+                        e.send_with_logging(tx.as_ref())
+                            .await
+                            .map_err(|source| Error::SendMessage { source })?;
+
+                        // Wait for pipeline completion.
+                        let success = match config.ack_timeout {
+                            Some(timeout) => matches!(
+                                tokio::time::timeout(timeout, completion_rx).await,
+                                Ok(Ok(Ok(())))
+                            ),
+                            None => matches!(completion_rx.await, Ok(Ok(()))),
+                        };
+
+                        if !success {
+                            warn!(
+                                event_id = ?event_id,
+                                "Pipeline failed or timed out"
+                            );
+                            return Err(Error::PipelineCompletionFailed);
+                        }
+
+                        Ok::<(), Error>(())
                     }
-
-                    Ok::<(), Error>(())
-                });
+                    .instrument(tracing::Span::current()),
+                );
 
                 handles.push(handle);
             }
@@ -335,6 +353,10 @@ impl EventHandler {
 
             // Process managed subscription events.
             while let Some(event) = stream.next().await {
+                if self.task_context.cancellation_token.is_cancelled() {
+                    return Ok(());
+                }
+
                 let events = match event {
                     Ok(fr) => fr.events,
                     Err(e) => {
@@ -452,6 +474,10 @@ impl EventHandler {
         };
 
         while let Some(event) = stream.next().await {
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             let events = match event {
                 Ok(fr) => fr.events,
                 Err(e) => {
