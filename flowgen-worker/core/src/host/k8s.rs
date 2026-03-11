@@ -281,7 +281,7 @@ impl Host for K8sHost {
         }
     }
 
-    #[tracing::instrument(skip(self), name = "k8s.delete_lease", fields(lease_name = %name, namespace = ?namespace))]
+    #[tracing::instrument(skip(self), name = "k8s.delete_lease", fields(lease_name = %name, namespace))]
     async fn delete_lease(
         &self,
         name: &str,
@@ -315,11 +315,14 @@ impl Host for K8sHost {
             )
         };
 
+        // Record the actual namespace in the span
+        tracing::Span::current().record("namespace", actual_namespace);
+
         api.delete(name, &DeleteParams::default())
             .await
             .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
-        info!(holder = %self.holder_identity, namespace = actual_namespace, "Deleted lease");
+        info!(holder = %self.holder_identity, "Deleted lease");
         Ok(())
     }
 
