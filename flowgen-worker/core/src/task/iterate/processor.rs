@@ -50,14 +50,17 @@ pub struct EventHandler {
     task_id: usize,
     /// Task type for event categorization and logging.
     task_type: &'static str,
-    /// Task context (unused but kept for consistency).
-    #[allow(dead_code)]
+    /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
@@ -110,7 +113,10 @@ impl EventHandler {
             }
 
             for (idx, element) in array.iter().enumerate() {
-                // EventBuilder::new() automatically preserves meta from the current event context.
+                if self.task_context.cancellation_token.is_cancelled() {
+                    return Ok(());
+                }
+
                 let mut e = EventBuilder::new()
                     .data(EventData::Json(element.clone()))
                     .subject(self.config.name.to_owned())

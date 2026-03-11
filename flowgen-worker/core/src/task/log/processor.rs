@@ -38,14 +38,17 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     /// Task type identifier (unused but kept for consistency).
     _task_type: &'static str,
-    /// Task context (unused but kept for consistency).
-    #[allow(dead_code)]
+    /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event by logging its data and passing it through.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         if self.config.structured {
             // Structured logging mode for Grafana/Loki.
             match self.config.level {

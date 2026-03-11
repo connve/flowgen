@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.65.0"
+version = "0.66.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -17,10 +17,11 @@ gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-googleapis = { git = "https://github.com/connve/google-cloud-rust" }
 google-cloud-gax = { version = "0.21" }
-object_store = { version = "0.12", features = ["gcp", "fs"] }
+object_store = { version = "0.13.1", features = ["gcp", "fs"] }
 bytes = { version = "1.11.1" }
 handlebars = { version = "6.3" }
 arrow = { version = "56.1" }
+arrow-schema = { version = "56.1", features = ["serde"] }
 arrow-json = { version = "56.1" }
 parquet = { version = "56.1" }
 chrono = { version = "0.4" }
@@ -31,6 +32,7 @@ serde_json = { version = "1.0" }
 serde_yaml = { version = "0.9" }
 tokio = { version = "1.48", features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1" }
+tokio-util = { version = "0.7" }
 thiserror = { version = "1.0" }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }

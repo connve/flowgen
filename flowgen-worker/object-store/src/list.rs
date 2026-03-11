@@ -94,20 +94,20 @@ pub struct EventHandler {
     task_id: usize,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     /// Processes an event and lists files from the configured object store.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let mut client_guard = self.client.lock().await;
-            let context = client_guard
-                .context
-                .as_mut()
-                .ok_or_else(|| Error::NoObjectStoreContext)?;
-
             // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
@@ -136,11 +136,33 @@ impl EventHandler {
             let path = object_store::path::Path::from(prefix);
 
             // Use list_with_delimiter to avoid recursing into subdirectories.
-            let list_result = context
-                .object_store
-                .list_with_delimiter(Some(&path))
-                .await
-                .map_err(|source| Error::ObjectStore { source })?;
+            // Automatically reconnects on auth failure to refresh expired credentials.
+            let mut client_guard = self.client.lock().await;
+            let mut list_result = {
+                let context = client_guard
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| Error::NoObjectStoreContext)?;
+                context.object_store.list_with_delimiter(Some(&path)).await
+            };
+
+            // Retries once on authentication failure after reconnecting.
+            if let Err(ref e) = list_result {
+                if super::client::Client::is_auth_error(e) {
+                    client_guard
+                        .reconnect()
+                        .await
+                        .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                    let context = client_guard
+                        .context
+                        .as_ref()
+                        .ok_or_else(|| Error::NoObjectStoreContext)?;
+                    list_result = context.object_store.list_with_delimiter(Some(&path)).await;
+                }
+            }
+
+            let list_result = list_result.map_err(|source| Error::ObjectStore { source })?;
 
             let files: Vec<FileInfo> = list_result
                 .objects
@@ -264,6 +286,7 @@ impl Runner for ListProcessor {
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)

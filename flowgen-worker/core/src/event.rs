@@ -462,7 +462,6 @@ impl<R: Read + Seek> FromReader<R> for EventData {
 
                 // Infer schema from rows. None scans all rows for accurate type detection.
                 // Sampling limited rows can infer incorrect types when early rows contain nulls.
-                // atypical or empty values, but scanning all rows has higher memory cost.
                 let (schema, _) = Format::default()
                     .with_header(has_header)
                     .with_delimiter(delimiter_byte)

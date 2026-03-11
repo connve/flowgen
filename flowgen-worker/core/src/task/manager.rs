@@ -23,44 +23,92 @@ pub enum Error {
 }
 
 /// Spawns a task to continuously renew a Kubernetes lease with retry logic.
+///
+/// This function spawns a background task that attempts to renew the lease every 10 seconds.
+/// If renewal fails critically (lease deleted or ownership lost), the task notifies the flow
+/// by sending a NotLeader message and terminates.
 fn spawn_renewal_task(
     task_id: String,
     lease_name: String,
     host: Arc<dyn crate::host::Host>,
+    response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(DEFAULT_LEASE_RENEWAL_INTERVAL_SECS));
+    tokio::spawn(
+        async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(DEFAULT_LEASE_RENEWAL_INTERVAL_SECS));
 
-        // Create retry strategy: 3 attempts with exponential backoff starting at 100ms.
-        let retry_config = crate::retry::RetryConfig {
-            max_attempts: Some(3),
-            initial_backoff: Duration::from_millis(100),
-        };
+            // Create retry strategy: 3 attempts with exponential backoff starting at 100ms.
+            let retry_config = crate::retry::RetryConfig {
+                max_attempts: Some(3),
+                initial_backoff: Duration::from_millis(100),
+            };
 
-        loop {
-            interval.tick().await;
+            loop {
+                interval.tick().await;
 
-            let lease_name_clone = lease_name.clone();
-            let host_clone = Arc::clone(&host);
+                let lease_name_clone = lease_name.clone();
+                let host_clone = Arc::clone(&host);
 
-            match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-                host_clone
-                    .renew_lease(&lease_name_clone, None)
-                    .await
-                    .map_err(tokio_retry::RetryError::transient)
-            })
-            .await
-            {
-                Ok(_) => {
-                    debug!(task_id = %task_id, "Successfully renewed lease");
-                }
-                Err(e) => {
-                    error!(error = %e, task_id = %task_id, "Failed to renew lease after all retry attempts");
+                match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+                    host_clone
+                        .renew_lease(&lease_name_clone, None)
+                        .await
+                        .map_err(tokio_retry::RetryError::transient)
+                })
+                .await
+                {
+                    Ok(_) => {
+                        debug!(task_id = %task_id, "Successfully renewed lease");
+                    }
+                    Err(e) => {
+                        // Check if the error indicates we lost ownership of the lease.
+                        // This can happen when:
+                        // 1. Lease was deleted (404 Not Found)
+                        // 2. Lost takeover race (409 Conflict)
+                        // 3. Another pod took over an expired lease (LeaseHeldByOther)
+                        // In all cases, this pod no longer owns the lease and must stop processing
+                        // to prevent duplicate work across multiple pods.
+                        let should_stop = if let Some(k8s_err) = e.downcast_ref::<crate::host::k8s::Error>() {
+                            match k8s_err {
+                                // LeaseHeldByOther is returned when another pod owns the lease.
+                                crate::host::k8s::Error::LeaseHeldByOther { .. } => true,
+                                // RenewLease with 404 means lease was deleted.
+                                crate::host::k8s::Error::RenewLease { source } => {
+                                    matches!(source, kube::Error::Api(api_err) if api_err.code == 404)
+                                }
+                                // GetLease with 404 also means lease was deleted.
+                                crate::host::k8s::Error::GetLease { source } => {
+                                    matches!(source, kube::Error::Api(api_err) if api_err.code == 404)
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if should_stop {
+                            debug!(
+                                error = %e,
+                                task_id = %task_id,
+                                "Lost lease ownership, notifying flow to stop processing"
+                            );
+
+                            // Notify the flow that it lost leadership so it can abort tasks and stop processing.
+                            // This prevents multiple pods from processing the same events during rollout restarts.
+                            if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
+                                debug!("Flow already terminated, leadership channel closed");
+                            }
+                            break;
+                        }
+
+                        error!(error = %e, task_id = %task_id, "Failed to renew lease after all retry attempts");
+                    }
                 }
             }
         }
-    })
+        .instrument(tracing::Span::current()),
+    )
 }
 
 /// Leader election options for tasks requiring coordination.
@@ -90,6 +138,12 @@ pub struct TaskRegistration {
     response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
 }
 
+/// Active lease tracking data.
+struct ActiveLease {
+    /// Background task handle for renewal or retry operations.
+    handle: JoinHandle<()>,
+}
+
 /// Centralized task lifecycle manager.
 /// Handles task registration, coordination, and resource management.
 pub struct TaskManager {
@@ -98,7 +152,7 @@ pub struct TaskManager {
     /// Optional K8s host for leader election.
     host: Option<Arc<dyn crate::host::Host>>,
     /// Active lease renewal tasks indexed by task ID.
-    active_leases: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
 }
 
 impl TaskManager {
@@ -130,13 +184,16 @@ impl TaskManager {
                                     registration.task_id.clone(),
                                     lease_name.clone(),
                                     host_client.clone(),
+                                    registration.response_tx.clone(),
                                 );
 
                                 // Store the renewal handle.
                                 active_leases
                                     .lock()
                                     .await
-                                    .insert(registration.task_id.clone(), renewal_handle);
+                                    .insert(registration.task_id.clone(), ActiveLease {
+                                        handle: renewal_handle,
+                                    });
 
                                 LeaderElectionResult::Leader
                             }
@@ -153,60 +210,68 @@ impl TaskManager {
                                 let response_tx = registration.response_tx.clone();
                                 let active_leases_clone = active_leases.clone();
 
-                                let retry_handle = tokio::spawn(async move {
-                                    let mut interval = tokio::time::interval(Duration::from_secs(
-                                        DEFAULT_LEASE_RETRY_INTERVAL_SECS,
-                                    ));
-                                    loop {
-                                        interval.tick().await;
-                                        match host.create_lease(&lease_name_clone).await {
-                                            Ok(_) => {
-                                                // Successfully acquired the lease from K8s API (authoritative source).
-                                                debug!(
-                                                    "Acquired lease for task: {} after retry",
-                                                    task_id
-                                                );
-
-                                                // Spawn renewal task.
-                                                let renewal_handle = spawn_renewal_task(
-                                                    task_id.clone(),
-                                                    lease_name_clone.clone(),
-                                                    host.clone(),
-                                                );
-
-                                                // Store the renewal handle, replacing the retry handle.
-                                                active_leases_clone
-                                                    .lock()
-                                                    .await
-                                                    .insert(task_id.clone(), renewal_handle);
-
-                                                // Notify the task.
-                                                if response_tx
-                                                    .send(LeaderElectionResult::Leader)
-                                                    .is_err()
-                                                {
+                                let retry_handle = tokio::spawn(
+                                    async move {
+                                        let mut interval = tokio::time::interval(Duration::from_secs(
+                                            DEFAULT_LEASE_RETRY_INTERVAL_SECS,
+                                        ));
+                                        loop {
+                                            interval.tick().await;
+                                            match host.create_lease(&lease_name_clone).await {
+                                                Ok(_) => {
+                                                    // Successfully acquired the lease from K8s API (authoritative source).
                                                     debug!(
-                                                        "Failed to notify task: {} of leadership acquisition",
+                                                        "Acquired lease for task: {} after retry",
                                                         task_id
                                                     );
+
+                                                    // Spawn renewal task.
+                                                    let renewal_handle = spawn_renewal_task(
+                                                        task_id.clone(),
+                                                        lease_name_clone.clone(),
+                                                        host.clone(),
+                                                        response_tx.clone(),
+                                                    );
+
+                                                    // Store the renewal handle, replacing the retry handle.
+                                                    active_leases_clone
+                                                        .lock()
+                                                        .await
+                                                        .insert(task_id.clone(), ActiveLease {
+                                                            handle: renewal_handle,
+                                                        });
+
+                                                    // Notify the task.
+                                                    if response_tx
+                                                        .send(LeaderElectionResult::Leader)
+                                                        .is_err()
+                                                    {
+                                                        debug!(
+                                                            "Failed to notify task: {} of leadership acquisition",
+                                                            task_id
+                                                        );
+                                                    }
+                                                    break;
                                                 }
-                                                break;
-                                            }
-                                            Err(e) => {
-                                                debug!(
-                                                    "Retry failed to acquire lease for task: {}, {}",
-                                                    task_id, e
-                                                );
+                                                Err(e) => {
+                                                    debug!(
+                                                        "Retry failed to acquire lease for task: {}, {}",
+                                                        task_id, e
+                                                    );
+                                                }
                                             }
                                         }
                                     }
-                                });
+                                    .instrument(tracing::Span::current()),
+                                );
 
                                 // Store the retry handle.
                                 active_leases
                                     .lock()
                                     .await
-                                    .insert(registration.task_id.clone(), retry_handle);
+                                    .insert(registration.task_id.clone(), ActiveLease {
+                                        handle: retry_handle,
+                                    });
 
                                 // Don't send any result now - the retry task will send Leader when it succeeds.
                                 // This prevents duplicate task spawning.
@@ -271,14 +336,49 @@ impl TaskManager {
     }
 
     /// Cleanup all owned leases on shutdown.
-    /// Deletes all leases that this instance currently holds.
+    ///
+    /// This method performs a two-phase shutdown to prevent race conditions during pod termination.
+    /// First, all background renewal and retry tasks are aborted to ensure no new lease acquisitions
+    /// can occur while we are shutting down. Second, all owned leases are deleted from Kubernetes.
+    ///
+    /// This ordering is critical: aborting tasks before deleting leases prevents a scenario where
+    /// a retry task acquires a lease immediately after we delete it, causing duplicate leadership
+    /// during rollout restarts.
     #[tracing::instrument(skip(self), name = "task_manager.shutdown")]
     pub async fn shutdown(&self) -> Result<(), Error> {
-        let task_ids: Vec<String> = self.active_leases.lock().await.keys().cloned().collect();
+        // Abort all background tasks first to prevent race conditions during shutdown.
+        // Renewal tasks continuously update leases every 10 seconds, and retry tasks attempt
+        // to acquire leases every 5 seconds. If we delete leases before aborting these tasks,
+        // they may immediately re-acquire the leases, causing multiple pods to become leaders
+        // simultaneously during a rollout restart.
+        let mut handles_lock = self.active_leases.lock().await;
 
+        for (task_id, active_lease) in handles_lock.iter() {
+            debug!("Aborting background task for: {}", task_id);
+            active_lease.handle.abort();
+        }
+
+        // Collect task identifiers before clearing the map. We need these to construct
+        // the lease names for deletion from Kubernetes.
+        let task_ids: Vec<String> = handles_lock.keys().cloned().collect();
+
+        // Clear the handles map to prevent any future access to the aborted tasks.
+        // This ensures the tasks are properly cleaned up and resources are freed.
+        handles_lock.clear();
+
+        // Release the mutex lock before making network calls to Kubernetes.
+        // Holding locks during network operations can cause deadlocks if other
+        // operations need to acquire the same lock while waiting for network responses.
+        drop(handles_lock);
+
+        // Delete all leases from Kubernetes after tasks are safely aborted.
+        // At this point, no background tasks are running that could race to re-acquire
+        // the leases we are about to delete.
         if let Some(ref host) = self.host {
             for task_id in task_ids {
-                // Convert task_id to lease name (same sanitization as in register).
+                // Convert task identifier to lease name using the same sanitization
+                // applied during registration. Kubernetes lease names must be DNS-safe,
+                // so we replace underscores with hyphens and convert to lowercase.
                 let lease_name = task_id.replace('_', "-").to_lowercase();
 
                 if let Err(e) = host.delete_lease(&lease_name, None).await {

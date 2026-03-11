@@ -4,6 +4,10 @@
 //! such as JSON to Avro with schema validation and key normalization.
 
 use crate::event::{AvroData, Event, EventBuilder, EventData, EventExt};
+use arrow::array::ArrayRef;
+use arrow::compute;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::Schema;
 use serde_avro_fast::ser;
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -51,6 +55,16 @@ pub enum Error {
         "ArrowRecordBatch to Avro conversion is not supported. Please convert data to JSON first."
     )]
     ArrowToAvroNotSupported,
+    #[error("Arrow schema casting error: {source}")]
+    ArrowCast {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
+    #[error("Arrow schema parsing error: {source}")]
+    ArrowSchema {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
     #[error("Schema is required for Avro target format")]
@@ -95,12 +109,11 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     /// Task identifier for event tracking.
     task_id: usize,
-    /// Optional Avro serialization configuration.
-    serializer: Option<Arc<AvroSerializerOptions>>,
+    /// Schema configuration for target format.
+    schema_config: SchemaConfig,
     /// Task type for event categorization and logging.
     task_type: &'static str,
-    /// Task context (unused but kept for consistency).
-    #[allow(dead_code)]
+    /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
@@ -112,16 +125,30 @@ struct AvroSerializerOptions {
     serializer_config: Mutex<ser::SerializerConfig<'static>>,
 }
 
+/// Schema configuration for different target formats.
+enum SchemaConfig {
+    /// Avro serialization configuration.
+    Avro(Arc<AvroSerializerOptions>),
+    /// Arrow schema for RecordBatch casting.
+    Arrow(Arc<Schema>),
+    /// No schema configuration.
+    None,
+}
+
 impl EventHandler {
     /// Processes an event and converts to selected target format.
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
             let data = match &event.data {
                 EventData::Json(data) => match self.config.target_format {
-                    crate::task::convert::config::TargetFormat::Avro => match &self.serializer {
-                        Some(serializer_opts) => {
+                    crate::task::convert::config::TargetFormat::Avro => match &self.schema_config {
+                        SchemaConfig::Avro(serializer_opts) => {
                             let mut data = data.clone();
                             transform_keys(&mut data);
 
@@ -136,13 +163,16 @@ impl EventHandler {
                                 raw_bytes,
                             })
                         }
-                        None => EventData::Json(data.clone()),
+                        _ => EventData::Json(data.clone()),
                     },
                     crate::task::convert::config::TargetFormat::Json => {
                         EventData::Json(data.clone())
                     }
+                    crate::task::convert::config::TargetFormat::Arrow => {
+                        EventData::Json(data.clone())
+                    }
                 },
-                EventData::ArrowRecordBatch(ref _batch) => match self.config.target_format {
+                EventData::ArrowRecordBatch(ref batch) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Json => {
                         let value = serde_json::Value::try_from(&event.data)
                             .map_err(|source| Error::ArrowToJson { source })?;
@@ -151,16 +181,37 @@ impl EventHandler {
                     crate::task::convert::config::TargetFormat::Avro => {
                         return Err(Error::ArrowToAvroNotSupported)
                     }
+                    crate::task::convert::config::TargetFormat::Arrow => {
+                        match &self.schema_config {
+                            SchemaConfig::Arrow(target_schema) => {
+                                let casted_columns: Result<Vec<ArrayRef>, _> = batch
+                                    .columns()
+                                    .iter()
+                                    .zip(target_schema.fields().iter())
+                                    .map(|(column, target_field)| {
+                                        compute::cast(column, target_field.data_type())
+                                    })
+                                    .collect();
+
+                                let casted_batch = RecordBatch::try_new(
+                                    Arc::clone(target_schema),
+                                    casted_columns.map_err(|source| Error::ArrowCast { source })?,
+                                )
+                                .map_err(|source| Error::ArrowCast { source })?;
+
+                                EventData::ArrowRecordBatch(casted_batch)
+                            }
+                            _ => EventData::ArrowRecordBatch(batch.clone()),
+                        }
+                    }
                 },
                 EventData::Avro(avro_data) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Json => {
-                        // Parse the schema from the source.
                         let schema: serde_avro_fast::Schema = avro_data
                             .schema
                             .parse()
                             .map_err(|source| Error::SerdeSchema { source })?;
 
-                        // Deserialize Avro bytes to JSON value.
                         let json_value: Value =
                             serde_avro_fast::from_datum_slice(&avro_data.raw_bytes, &schema)
                                 .map_err(|source| Error::SerdeAvroDe { source })?;
@@ -168,13 +219,14 @@ impl EventHandler {
                         EventData::Json(json_value)
                     }
                     crate::task::convert::config::TargetFormat::Avro => {
-                        // Avro to Avro passthrough without conversion.
+                        EventData::Avro(avro_data.clone())
+                    }
+                    crate::task::convert::config::TargetFormat::Arrow => {
                         EventData::Avro(avro_data.clone())
                     }
                 },
             };
 
-            // Build and send event.
             let mut e = EventBuilder::new()
                 .data(data)
                 .subject(self.config.name.to_owned())
@@ -186,7 +238,6 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
-                    // Final task, signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
@@ -196,7 +247,6 @@ impl EventHandler {
                     }
                 }
                 Some(_) => {
-                    // Pass through completion_tx to next task.
                     e.completion_tx = completion_tx_arc.clone();
                 }
             }
@@ -232,14 +282,14 @@ impl crate::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor by parsing and configuring the serializer.
+    /// Initializes the processor by parsing and configuring the schema.
     ///
     /// This method performs all setup operations that can fail, including:
     /// - Parsing Avro schema if converting to Avro format
+    /// - Parsing Arrow schema if converting to Arrow format with schema casting
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
-        let serializer = match self.config.target_format {
+        let schema_config = match self.config.target_format {
             crate::task::convert::config::TargetFormat::Avro => {
-                // Resolve schema from inline or resource source.
                 let schema_string = match &self.config.schema {
                     Some(crate::resource::Source::Inline(schema)) => schema.clone(),
                     Some(crate::resource::Source::Resource { resource }) => {
@@ -270,19 +320,48 @@ impl crate::task::runner::Runner for Processor {
 
                 let serializer_config = ser::SerializerConfig::new(leaked_schema);
 
-                Some(Arc::new(AvroSerializerOptions {
+                SchemaConfig::Avro(Arc::new(AvroSerializerOptions {
                     schema_string,
                     serializer_config: Mutex::new(serializer_config),
                 }))
             }
-            _ => None,
+            crate::task::convert::config::TargetFormat::Arrow => {
+                match &self.config.schema {
+                    Some(crate::resource::Source::Inline(schema_json)) => {
+                        let schema: Schema =
+                            serde_json::from_str(schema_json).map_err(|e| Error::ArrowSchema {
+                                source: arrow::error::ArrowError::JsonError(e.to_string()),
+                            })?;
+                        SchemaConfig::Arrow(Arc::new(schema))
+                    }
+                    Some(crate::resource::Source::Resource { resource }) => {
+                        let loader =
+                            self.task_context.resource_loader.as_ref().ok_or_else(|| {
+                                Error::ResourceLoad {
+                                    source: crate::resource::Error::ResourcePathNotConfigured,
+                                }
+                            })?;
+                        let schema_json = loader
+                            .load(resource)
+                            .await
+                            .map_err(|source| Error::ResourceLoad { source })?;
+                        let schema: Schema =
+                            serde_json::from_str(&schema_json).map_err(|e| Error::ArrowSchema {
+                                source: arrow::error::ArrowError::JsonError(e.to_string()),
+                            })?;
+                        SchemaConfig::Arrow(Arc::new(schema))
+                    }
+                    None => SchemaConfig::None, // No schema means passthrough
+                }
+            }
+            _ => SchemaConfig::None,
         };
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
             task_id: self.task_id,
-            serializer,
+            schema_config,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
         };
@@ -526,7 +605,7 @@ mod tests {
             config,
             tx: Some(tx),
             task_id: 1,
-            serializer: None,
+            schema_config: SchemaConfig::None,
             task_type: "test",
             task_context: create_mock_task_context(),
         };
@@ -573,7 +652,7 @@ mod tests {
             config,
             tx: Some(tx),
             task_id: 1,
-            serializer: None,
+            schema_config: SchemaConfig::None,
             task_type: "test",
             task_context: create_mock_task_context(),
         };
@@ -632,7 +711,7 @@ mod tests {
             config,
             tx: Some(tx),
             task_id: 1,
-            serializer: None,
+            schema_config: SchemaConfig::None,
             task_type: "test",
             task_context: create_mock_task_context(),
         };

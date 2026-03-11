@@ -19,6 +19,7 @@ flowgen_object_store = { path = "../object-store" }
 flowgen_gcp = { path = "../gcp" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

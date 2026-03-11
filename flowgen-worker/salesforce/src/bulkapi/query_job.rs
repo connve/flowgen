@@ -834,6 +834,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()
@@ -883,6 +884,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
         let result = ProcessorBuilder::new()

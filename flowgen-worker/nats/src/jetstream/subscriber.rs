@@ -96,6 +96,7 @@ pub struct EventHandler {
     task_id: usize,
     config: Arc<super::config::Subscriber>,
     task_type: &'static str,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -155,7 +156,10 @@ impl EventHandler {
     /// Processes messages from the NATS JetStream consumer.
     async fn handle(self) -> Result<(), Error> {
         loop {
-            // Apply delay between batches if configured.
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             if let Some(delay) = self.config.delay {
                 time::sleep(delay).await
             }
@@ -183,12 +187,18 @@ impl EventHandler {
                     let throttled = messages.throttle(throttle_duration);
                     pin!(throttled);
                     while let Some(message_result) = throttled.next().await {
+                        if self.task_context.cancellation_token.is_cancelled() {
+                            return Ok(());
+                        }
                         self.process_message(message_result).await?;
                     }
                 }
                 None => {
                     let mut messages = messages;
                     while let Some(message_result) = messages.next().await {
+                        if self.task_context.cancellation_token.is_cancelled() {
+                            return Ok(());
+                        }
                         self.process_message(message_result).await?;
                     }
                 }
@@ -303,6 +313,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 task_id: self.task_id,
                 config: Arc::clone(&self.config),
                 task_type: self.task_type,
+                task_context: Arc::clone(&self.task_context),
             })
         } else {
             Err(Error::Other(
