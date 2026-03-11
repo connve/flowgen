@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Instant};
-use tracing::error;
+use tracing::{error, Instrument};
 
 /// Errors that can occur during buffer processing operations.
 #[derive(thiserror::Error, Debug)]
@@ -133,64 +133,67 @@ impl Processor {
         let task_type = self.task_type;
 
         // Spawn flush as background task to avoid blocking event receives.
-        tokio::spawn(async move {
-            let batch_size = buffer.len();
-            let flush_data = FlushData {
-                batch: buffer,
-                batch_size,
-                flush_reason: reason,
-                partition_key,
-            };
+        tokio::spawn(
+            async move {
+                let batch_size = buffer.len();
+                let flush_data = FlushData {
+                    batch: buffer,
+                    batch_size,
+                    flush_reason: reason,
+                    partition_key,
+                };
 
-            let flush_result = match serde_json::to_value(flush_data) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(error = %e, "Failed to serialize flush data");
-                    return;
+                let flush_result = match serde_json::to_value(flush_data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(error = %e, "Failed to serialize flush data");
+                        return;
+                    }
+                };
+
+                let mut event_builder = EventBuilder::new()
+                    .data(EventData::Json(flush_result))
+                    .subject(config_name)
+                    .task_id(task_id)
+                    .task_type(task_type);
+
+                // Preserve meta if it exists.
+                if let Some(meta) = meta {
+                    event_builder = event_builder.meta(meta);
                 }
-            };
 
-            let mut event_builder = EventBuilder::new()
-                .data(EventData::Json(flush_result))
-                .subject(config_name)
-                .task_id(task_id)
-                .task_type(task_type);
+                let mut event = match event_builder.build() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        error!(error = %e, "Failed to build flush event");
+                        return;
+                    }
+                };
 
-            // Preserve meta if it exists.
-            if let Some(meta) = meta {
-                event_builder = event_builder.meta(meta);
-            }
-
-            let mut event = match event_builder.build() {
-                Ok(e) => e,
-                Err(e) => {
-                    error!(error = %e, "Failed to build flush event");
-                    return;
-                }
-            };
-
-            // Attach completion_tx from the last event in the buffer.
-            match tx {
-                Some(_) => {
-                    // Pass through to next task.
-                    event.completion_tx = completion_tx;
-                }
-                None => {
-                    // Final task, signal completion.
-                    if let Some(arc) = completion_tx.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(())).ok();
+                // Attach completion_tx from the last event in the buffer.
+                match tx {
+                    Some(_) => {
+                        // Pass through to next task.
+                        event.completion_tx = completion_tx;
+                    }
+                    None => {
+                        // Final task, signal completion.
+                        if let Some(arc) = completion_tx.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            if let Err(e) = event.send_with_logging(tx.as_ref()).await {
-                error!(error = %e, "Failed to send flush event");
+                if let Err(e) = event.send_with_logging(tx.as_ref()).await {
+                    error!(error = %e, "Failed to send flush event");
+                }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
     }
 
     /// Processes the main event loop with buffer accumulation and flush triggers.
@@ -221,6 +224,10 @@ impl Processor {
         let mut last_flush = Instant::now();
 
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             // Calculate remaining time until next timeout flush.
             let time_until_flush = timeout_duration
                 .checked_sub(last_flush.elapsed())
@@ -293,6 +300,10 @@ impl Processor {
         let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             // Find the earliest timeout across all active keyed buffers.
             // Only calculated once per loop iteration, not on every event.
             let min_time_until_flush = if buffers.is_empty() {

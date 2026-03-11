@@ -289,28 +289,37 @@ impl Host for K8sHost {
     ) -> Result<(), crate::host::Error> {
         // If a custom namespace is provided, we need to create a new API client for that namespace.
         // Otherwise, use the cached API client for the default namespace.
-        let api = if let Some(custom_ns) = namespace {
+        let (api, actual_namespace) = if let Some(custom_ns) = namespace {
             if custom_ns != self.namespace {
                 let client = self.client.as_ref().ok_or_else(|| {
                     Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
                 })?;
-                Arc::new(Api::namespaced((**client).clone(), custom_ns))
+                (
+                    Arc::new(Api::namespaced((**client).clone(), custom_ns)),
+                    custom_ns,
+                )
             } else {
-                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
-                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
-                })?)
+                (
+                    Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                        Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                    })?),
+                    self.namespace.as_str(),
+                )
             }
         } else {
-            Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
-                Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
-            })?)
+            (
+                Arc::clone(self.lease_api.as_ref().ok_or_else(|| {
+                    Box::new(Error::KubernetesClientNotConnected) as crate::host::Error
+                })?),
+                self.namespace.as_str(),
+            )
         };
 
         api.delete(name, &DeleteParams::default())
             .await
             .map_err(|source| Box::new(Error::DeleteLease { source }) as crate::host::Error)?;
 
-        info!(holder = %self.holder_identity, "Deleted lease");
+        info!(holder = %self.holder_identity, namespace = actual_namespace, "Deleted lease");
         Ok(())
     }
 

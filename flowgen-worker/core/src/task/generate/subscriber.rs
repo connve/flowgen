@@ -130,6 +130,10 @@ impl EventHandler {
         let cache_key = format!("flow.{flow_name}.last_run.{task_name}");
 
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             // Calculate now timestamp.
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

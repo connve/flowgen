@@ -109,10 +109,15 @@ pub struct EventHandler {
     config: Arc<super::config::Query>,
     task_type: &'static str,
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -229,6 +234,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             config: Arc::clone(&self.config),
             task_type: self.task_type,
             resource_loader: self.task_context.resource_loader.clone(),
+            task_context: Arc::clone(&self.task_context),
         };
 
         Ok(event_handler)

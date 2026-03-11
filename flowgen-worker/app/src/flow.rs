@@ -469,7 +469,7 @@ impl Flow {
     ///
     /// This spawns a single master task that manages the flow's lifecycle,
     /// including leader election and running all background tasks.
-    #[tracing::instrument(skip(self), name = "flow.run")]
+    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.config.flow.name))]
     pub fn run(self) -> JoinHandle<()> {
         let flow_name = self.config.flow.name.clone();
         tokio::spawn(
