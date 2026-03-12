@@ -184,22 +184,54 @@ impl EventHandler {
                     crate::task::convert::config::TargetFormat::Arrow => {
                         match &self.schema_config {
                             SchemaConfig::Arrow(target_schema) => {
-                                let casted_columns: Result<Vec<ArrayRef>, _> = batch
-                                    .columns()
-                                    .iter()
-                                    .zip(target_schema.fields().iter())
-                                    .map(|(column, target_field)| {
-                                        compute::cast(column, target_field.data_type())
-                                    })
-                                    .collect();
+                                // Handle empty batches (e.g., API returns only headers with no data rows)
+                                // by creating an empty batch with the target schema.
+                                if batch.num_columns() == 0 || batch.num_rows() == 0 {
+                                    let empty_columns: Vec<ArrayRef> = target_schema
+                                        .fields()
+                                        .iter()
+                                        .map(|field| {
+                                            arrow::array::new_empty_array(field.data_type())
+                                        })
+                                        .collect();
 
-                                let casted_batch = RecordBatch::try_new(
-                                    Arc::clone(target_schema),
-                                    casted_columns.map_err(|source| Error::ArrowCast { source })?,
-                                )
-                                .map_err(|source| Error::ArrowCast { source })?;
+                                    let empty_batch = RecordBatch::try_new(
+                                        Arc::clone(target_schema),
+                                        empty_columns,
+                                    )
+                                    .map_err(|source| Error::ArrowCast { source })?;
 
-                                EventData::ArrowRecordBatch(casted_batch)
+                                    EventData::ArrowRecordBatch(empty_batch)
+                                } else {
+                                    let casted_columns: Result<Vec<ArrayRef>, _> = target_schema
+                                        .fields()
+                                        .iter()
+                                        .map(|target_field| {
+                                            match batch.schema().index_of(target_field.name()) {
+                                                Ok(index) => {
+                                                    let source_column = batch.column(index);
+                                                    compute::cast(
+                                                        source_column,
+                                                        target_field.data_type(),
+                                                    )
+                                                }
+                                                Err(_) => Ok(arrow::array::new_null_array(
+                                                    target_field.data_type(),
+                                                    batch.num_rows(),
+                                                )),
+                                            }
+                                        })
+                                        .collect();
+
+                                    let casted_batch = RecordBatch::try_new(
+                                        Arc::clone(target_schema),
+                                        casted_columns
+                                            .map_err(|source| Error::ArrowCast { source })?,
+                                    )
+                                    .map_err(|source| Error::ArrowCast { source })?;
+
+                                    EventData::ArrowRecordBatch(casted_batch)
+                                }
                             }
                             _ => EventData::ArrowRecordBatch(batch.clone()),
                         }
