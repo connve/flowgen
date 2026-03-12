@@ -325,8 +325,9 @@ pub struct Job {
     #[serde(default = "default_job_type")]
     pub job_type: String,
     /// GCS URIs of source files to load (create operation only).
+    /// Supports both literal arrays and template expressions that resolve to arrays at runtime.
     #[serde(default)]
-    pub source_uris: Option<Vec<String>>,
+    pub source_uris: Option<serde_json::Value>,
     /// Destination BigQuery table (create operation only).
     #[serde(default)]
     pub destination_table: Option<TableReference>,

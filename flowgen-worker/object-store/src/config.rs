@@ -61,8 +61,14 @@ pub struct ListProcessor {
 pub struct MoveProcessor {
     /// The unique name / identifier of the task.
     pub name: String,
-    /// Source path pattern (supports wildcards).
+    /// Source path pattern (supports wildcards). Ignored if source_files is provided.
+    #[serde(default)]
     pub source: PathBuf,
+    /// Optional explicit list of source file URIs to move.
+    /// When provided, this takes precedence over the source pattern.
+    /// Supports both literal arrays and template expressions that resolve to arrays at runtime.
+    #[serde(default)]
+    pub source_files: Option<serde_json::Value>,
     /// Destination path for moved files.
     pub destination: PathBuf,
     /// Optional path to credentials file.

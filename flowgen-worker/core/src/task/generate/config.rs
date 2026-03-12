@@ -38,6 +38,9 @@ pub struct Subscriber {
     /// Mutually exclusive with `interval`.
     pub cron: Option<String>,
     /// Optional maximum number of events to generate before stopping.
+    /// When specified without `interval` or `cron`, enables run-once mode
+    /// where the task executes immediately and stops after generating
+    /// the specified number of events.
     pub count: Option<u64>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
@@ -46,10 +49,16 @@ pub struct Subscriber {
 
 impl Subscriber {
     /// Validates that exactly one scheduling method is specified.
+    /// Allows neither interval nor cron when count is specified (run-once mode).
     pub fn validate(&self) -> Result<(), ConfigError> {
-        match (&self.interval, &self.cron) {
-            (None, None) => Err(ConfigError::MissingSchedule),
-            (Some(_), Some(_)) => Err(ConfigError::BothSchedulesSpecified),
+        match (&self.interval, &self.cron, &self.count) {
+            // Both interval and cron specified - error
+            (Some(_), Some(_), _) => Err(ConfigError::BothSchedulesSpecified),
+            // Neither interval nor cron, but count is specified - OK (run-once mode)
+            (None, None, Some(_)) => Ok(()),
+            // Neither interval nor cron, and no count - error
+            (None, None, None) => Err(ConfigError::MissingSchedule),
+            // One of interval or cron specified - OK
             _ => Ok(()),
         }
     }
@@ -123,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_neither_specified() {
+    fn test_validation_neither_specified_no_count() {
         let config = Subscriber {
             name: "test".to_string(),
             message: None,
@@ -137,6 +146,21 @@ mod tests {
             config.validate(),
             Err(ConfigError::MissingSchedule)
         ));
+    }
+
+    #[test]
+    fn test_validation_run_once_mode() {
+        let config = Subscriber {
+            name: "test".to_string(),
+            message: None,
+            interval: None,
+            cron: None,
+            count: Some(1),
+            retry: None,
+        };
+
+        // Should be valid - run-once mode
+        assert!(config.validate().is_ok());
     }
 
     #[test]

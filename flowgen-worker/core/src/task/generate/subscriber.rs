@@ -81,7 +81,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Calculate next run time based on interval or cron schedule.
+    /// Calculate next run time based on interval, cron schedule, or run-once mode.
     fn calculate_next_run(&self, now: u64, last_run: Option<u64>) -> Result<u64, Error> {
         match (&self.config.interval, &self.config.cron) {
             // Use interval if it's configured.
@@ -107,10 +107,9 @@ impl EventHandler {
 
                 Ok(next.timestamp() as u64)
             }
-            // If none configured, return error.
-            (None, None) => Err(Error::ConfigValidation {
-                source: crate::task::generate::config::ConfigError::MissingSchedule,
-            }),
+            // Neither interval nor cron - run immediately (run-once mode).
+            // This is allowed when count is specified.
+            (None, None) => Ok(now),
         }
     }
 

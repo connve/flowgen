@@ -114,6 +114,8 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Create operation requires source_uris")]
     MissingSourceUris,
+    #[error("Invalid source_uris format after template rendering: expected array, got {value}")]
+    InvalidSourceUrisFormat { value: String },
     #[error("Create operation requires destination_table")]
     MissingDestinationTable,
     #[error("Create operation requires source_format")]
@@ -241,10 +243,26 @@ impl EventHandler {
 
     /// Creates a BigQuery job and returns the complete job response.
     async fn create_job(&self, config: &super::config::Job) -> Result<BqJob, Error> {
-        let source_uris = config
+        let source_uris_value = config
             .source_uris
             .as_ref()
             .ok_or(Error::MissingSourceUris)?;
+
+        // Extract Vec<String> from Value after template rendering.
+        let source_uris: Vec<String> = match source_uris_value {
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+            serde_json::Value::String(s) => {
+                return Err(Error::InvalidSourceUrisFormat { value: s.clone() });
+            }
+            _ => {
+                return Err(Error::InvalidSourceUrisFormat {
+                    value: source_uris_value.to_string(),
+                });
+            }
+        };
         let destination_table = config
             .destination_table
             .as_ref()
@@ -712,7 +730,7 @@ mod tests {
             job_project_id: None,
             location: None,
             job_type: "load".to_string(),
-            source_uris: Some(vec!["gs://bucket/file.parquet".to_string()]),
+            source_uris: Some(serde_json::json!(["gs://bucket/file.parquet"])),
             destination_table: Some(super::super::config::TableReference {
                 project_id: "test-project".to_string(),
                 dataset_id: "test_dataset".to_string(),
@@ -793,7 +811,7 @@ mod tests {
             job_project_id: None,
             location: None,
             job_type: "load".to_string(),
-            source_uris: Some(vec!["gs://bucket/file.parquet".to_string()]),
+            source_uris: Some(serde_json::json!(["gs://bucket/file.parquet"])),
             destination_table: Some(super::super::config::TableReference {
                 project_id: "test-project".to_string(),
                 dataset_id: "test_dataset".to_string(),
