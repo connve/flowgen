@@ -13,27 +13,41 @@ flow:
         path: gs://my-bucket/incoming/*.parquet
         credentials_path: /etc/gcp/credentials.json
 
-    # Script checks if there are files to process and prepares metadata.
+    # Build explicit file URIs from object store list results.
+    # This ensures BigQuery and archive use the exact same file list,
+    # preventing data loss from GCS eventual consistency timing issues.
     - script:
-        name: check_files
+        name: build_file_list
         code: |
+          // Early return if no files to process.
           if event.data.files.len() == 0 {
             return ();
           }
 
-          ctx.meta.file_count = event.data.files.len();
-          ctx.meta.source_pattern = event.data.path;
+          // Extract bucket prefix from object_store_list path.
+          let path_parts = event.data.path.split("/");
+          let bucket = path_parts[0] + "//" + path_parts[2];
+
+          // Build full GCS URIs by combining bucket with relative file locations.
+          let source_uris = [];
+          for file in event.data.files {
+            source_uris.push(bucket + "/" + file.location);
+          }
+
+          // Store file list in context metadata for BigQuery and archive tasks.
+          ctx.meta.file_count = source_uris.len();
+          ctx.meta.source_uris = source_uris;
+
           event
 
-    # Load files to BigQuery staging table.
+    # Load files to BigQuery staging table using explicit file list.
     - gcp_bigquery_job:
         name: load_to_bigquery
         operation: create
         project_id: my-project
         credentials_path: /etc/gcp/credentials.json
         job_type: load
-        source_uris:
-          - "gs://my-bucket/incoming/*.parquet"
+        source_uris: "{{event.meta.source_uris}}"
         destination_table:
           project_id: my-project
           dataset_id: staging
@@ -43,11 +57,11 @@ flow:
         create_disposition: create_if_needed
         autodetect: true
 
-    # Object store move archives processed files to a different location.
-    # Files are copied to destination then deleted from source (atomic move).
+    # Object store move archives the exact files that were loaded to BigQuery.
+    # Using source_files ensures atomicity - the same files loaded are archived.
     - object_store_move:
         name: archive_processed_files
-        source: gs://my-bucket/incoming/*.parquet
+        source_files: "{{event.meta.source_uris}}"
         destination: gs://my-bucket/processed/
         credentials_path: /etc/gcp/credentials.json
 

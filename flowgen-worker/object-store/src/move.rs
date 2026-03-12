@@ -45,6 +45,8 @@ pub enum Error {
         #[source]
         source: url::ParseError,
     },
+    #[error("Invalid source_files format after template rendering: expected array, got {value}")]
+    InvalidSourceFiles { value: String },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
 }
@@ -94,70 +96,103 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Parse source and destination paths.
-            let source_str = config.source.to_string_lossy();
+            // Parse destination path.
             let destination_str = config.destination.to_string_lossy();
-
-            let source_url =
-                url::Url::parse(&source_str).map_err(|source| Error::ParseUrl { source })?;
             let destination_url =
                 url::Url::parse(&destination_str).map_err(|source| Error::ParseUrl { source })?;
-
-            // Strip wildcard patterns from source path.
-            let source_url_path = source_url.path();
-            let source_prefix = if source_url_path.contains('*') {
-                source_url_path
-                    .split('*')
-                    .next()
-                    .unwrap_or(source_url_path)
-                    .trim_end_matches('/')
-            } else {
-                source_url_path
-            };
-
-            let source_path = object_store::path::Path::from(source_prefix);
             let destination_base = object_store::path::Path::from(destination_url.path());
 
-            // Use list_with_delimiter to avoid recursing into subdirectories.
-            // Automatically reconnects on auth failure to refresh expired credentials.
             let mut client_guard = self.client.lock().await;
-            let mut list_result = {
-                let context = client_guard
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| Error::NoObjectStoreContext)?;
-                context
-                    .object_store
-                    .list_with_delimiter(Some(&source_path))
-                    .await
-            };
+            let mut files_moved = 0;
+            let using_explicit_files = config.source_files.is_some();
 
-            // Retries once on authentication failure after reconnecting.
-            if let Err(ref e) = list_result {
-                if super::client::Client::is_auth_error(e) {
-                    client_guard
-                        .reconnect()
-                        .await
-                        .map_err(|source| Error::ObjectStoreClient { source })?;
+            // Determine files to move from either explicit list or wildcard pattern.
+            let files_to_move: Vec<object_store::path::Path> = if let Some(ref source_files_value) =
+                config.source_files
+            {
+                // Extract Vec<String> from Value after template rendering.
+                let source_files: Vec<String> = match source_files_value {
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect(),
+                    _ => {
+                        return Err(Error::InvalidSourceFiles {
+                            value: source_files_value.to_string(),
+                        });
+                    }
+                };
 
+                // Parse explicit file URIs to extract object store paths.
+                source_files
+                    .iter()
+                    .filter_map(|uri| {
+                        url::Url::parse(uri)
+                            .ok()
+                            .map(|url| object_store::path::Path::from(url.path()))
+                    })
+                    .collect()
+            } else {
+                // List files matching wildcard source pattern.
+                let source_str = config.source.to_string_lossy();
+                let source_url =
+                    url::Url::parse(&source_str).map_err(|source| Error::ParseUrl { source })?;
+
+                // Strip wildcard patterns from source path.
+                let source_url_path = source_url.path();
+                let source_prefix = if source_url_path.contains('*') {
+                    source_url_path
+                        .split('*')
+                        .next()
+                        .unwrap_or(source_url_path)
+                        .trim_end_matches('/')
+                } else {
+                    source_url_path
+                };
+
+                let source_path = object_store::path::Path::from(source_prefix);
+
+                // Use list_with_delimiter to avoid recursing into subdirectories.
+                let mut list_result = {
                     let context = client_guard
                         .context
                         .as_ref()
                         .ok_or_else(|| Error::NoObjectStoreContext)?;
-                    list_result = context
+                    context
                         .object_store
                         .list_with_delimiter(Some(&source_path))
-                        .await;
+                        .await
+                };
+
+                // Retries once on authentication failure after reconnecting.
+                if let Err(ref e) = list_result {
+                    if super::client::Client::is_auth_error(e) {
+                        client_guard
+                            .reconnect()
+                            .await
+                            .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                        let context = client_guard
+                            .context
+                            .as_ref()
+                            .ok_or_else(|| Error::NoObjectStoreContext)?;
+                        list_result = context
+                            .object_store
+                            .list_with_delimiter(Some(&source_path))
+                            .await;
+                    }
                 }
-            }
 
-            let list_result = list_result.map_err(|source| Error::ObjectStore { source })?;
+                let list_result = list_result.map_err(|source| Error::ObjectStore { source })?;
+                list_result
+                    .objects
+                    .into_iter()
+                    .map(|meta| meta.location)
+                    .collect()
+            };
 
-            let mut files_moved = 0;
-
-            for meta in list_result.objects {
-                let source_location = meta.location.clone();
-
+            // Move each file.
+            for source_location in files_to_move {
                 let filename = source_location
                     .filename()
                     .unwrap_or_else(|| source_location.as_ref());
@@ -227,7 +262,11 @@ impl EventHandler {
             }
 
             let move_result = MoveResult {
-                source: source_str.to_string(),
+                source: if using_explicit_files {
+                    format!("[{files_moved} files]")
+                } else {
+                    config.source.to_string_lossy().to_string()
+                },
                 destination: destination_str.to_string(),
                 files_moved,
             };
@@ -304,10 +343,12 @@ impl Runner for MoveProcessor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        // Strip any glob pattern before building the client — the URL passed to
-        // parse_url_opts must be valid, and glob characters cause percent-encoding
-        // that breaks bucket/container name extraction in the object store backend.
-        let client_path = {
+        // Extract bucket/container path for client initialization.
+        // Glob characters cause invalid percent-encoding, so strip wildcards from source pattern.
+        // When using explicit source_files, derive bucket from destination since both must share the same container.
+        let client_path = if init_config.source_files.is_some() {
+            init_config.destination.clone()
+        } else {
             let path_str = init_config.source.to_string_lossy();
             let stripped = path_str
                 .split('*')
