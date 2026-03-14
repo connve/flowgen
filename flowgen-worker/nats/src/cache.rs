@@ -79,7 +79,8 @@ impl Cache {
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: bucket.to_string(),
                     history: 10,
-                    limit_markers: None, // Enable per-key TTL without maximum limit
+                    // Enables per-key TTL without maximum limit.
+                    limit_markers: None,
                     ..Default::default()
                 })
                 .await
@@ -103,41 +104,42 @@ impl flowgen_core::cache::Cache for Cache {
         let store = self
             .store
             .as_ref()
-            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
+        let jetstream = self
+            .jetstream
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        let subject = format!(
+            "{}{}",
+            store.put_prefix.as_ref().unwrap_or(&store.prefix),
+            key
+        );
+
+        let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
-            let jetstream = self.jetstream.as_ref().ok_or_else(|| {
-                Box::new(Error::MissingJetStreamContext) as flowgen_core::cache::Error
-            })?;
-
-            let mut headers = async_nats::HeaderMap::new();
             headers.insert(
                 async_nats::header::NATS_MESSAGE_TTL,
                 async_nats::HeaderValue::from(ttl),
             );
-
-            let subject = format!(
-                "{}{}",
-                store.put_prefix.as_ref().unwrap_or(&store.prefix),
-                key
-            );
-
-            jetstream
-                .publish_with_headers(subject, headers, value)
-                .await
-                .map_err(|source| {
-                    Box::new(Error::JetStreamPublish { source }) as flowgen_core::cache::Error
-                })?
-                .await
-                .map_err(|source| {
-                    Box::new(Error::JetStreamPublishAck { source }) as flowgen_core::cache::Error
-                })?;
-        } else {
-            store
-                .put(key, value)
-                .await
-                .map_err(|e| Box::new(Error::KVPut { source: e }) as flowgen_core::cache::Error)?;
         }
+
+        jetstream
+            .publish_with_headers(subject, headers, value)
+            .await
+            .map_err(|source| {
+                flowgen_core::cache::CacheError::PutFailed(Box::new(Error::JetStreamPublish {
+                    source,
+                }))
+            })?
+            .await
+            .map_err(|source| {
+                flowgen_core::cache::CacheError::PutFailed(Box::new(Error::JetStreamPublishAck {
+                    source,
+                }))
+            })?;
+
         Ok(())
     }
 
@@ -145,23 +147,160 @@ impl flowgen_core::cache::Cache for Cache {
         let store = self
             .store
             .as_ref()
-            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
-        store
-            .get(key)
-            .await
-            .map_err(|e| Box::new(Error::KVEntry { source: e }) as flowgen_core::cache::Error)
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+        store.get(key).await.map_err(|e| {
+            flowgen_core::cache::CacheError::GetFailed(Box::new(Error::KVEntry { source: e }))
+        })
     }
 
     async fn delete(&self, key: &str) -> Result<(), flowgen_core::cache::Error> {
         let store = self
             .store
             .as_ref()
-            .ok_or_else(|| Box::new(Error::MissingKVStore) as flowgen_core::cache::Error)?;
-        store
-            .delete(key)
-            .await
-            .map_err(|e| Box::new(Error::KVDelete { source: e }) as flowgen_core::cache::Error)?;
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+        store.delete(key).await.map_err(|e| {
+            flowgen_core::cache::CacheError::DeleteFailed(Box::new(Error::KVDelete { source: e }))
+        })?;
         Ok(())
+    }
+
+    async fn create(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        let jetstream = self
+            .jetstream
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        let subject = format!(
+            "{}{}",
+            store.put_prefix.as_ref().unwrap_or(&store.prefix),
+            key
+        );
+
+        let mut headers = async_nats::HeaderMap::new();
+        if let Some(ttl) = ttl_secs {
+            headers.insert(
+                async_nats::header::NATS_MESSAGE_TTL,
+                async_nats::HeaderValue::from(ttl),
+            );
+        }
+        headers.insert(
+            "Nats-Expected-Last-Subject-Sequence",
+            async_nats::HeaderValue::from(0u64),
+        );
+
+        let ack = jetstream
+            .publish_with_headers(subject, headers, value)
+            .await
+            .map_err(|source| {
+                flowgen_core::cache::CacheError::CreateFailed(Box::new(Error::JetStreamPublish {
+                    source,
+                }))
+            })?
+            .await
+            .map_err(|source| match &source.kind() {
+                async_nats::jetstream::context::PublishErrorKind::WrongLastSequence => {
+                    flowgen_core::cache::CacheError::AlreadyExists
+                }
+                _ => flowgen_core::cache::CacheError::CreateFailed(Box::new(
+                    Error::JetStreamPublishAck { source },
+                )),
+            })?;
+
+        Ok(ack.sequence)
+    }
+
+    async fn update(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        expected_revision: u64,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        let jetstream = self
+            .jetstream
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        let subject = format!(
+            "{}{}",
+            store.put_prefix.as_ref().unwrap_or(&store.prefix),
+            key
+        );
+
+        let mut headers = async_nats::HeaderMap::new();
+        if let Some(ttl) = ttl_secs {
+            headers.insert(
+                async_nats::header::NATS_MESSAGE_TTL,
+                async_nats::HeaderValue::from(ttl),
+            );
+        }
+        headers.insert(
+            "Nats-Expected-Last-Subject-Sequence",
+            async_nats::HeaderValue::from(expected_revision),
+        );
+
+        let ack = jetstream
+            .publish_with_headers(subject, headers, value)
+            .await
+            .map_err(|source| {
+                flowgen_core::cache::CacheError::UpdateFailed(Box::new(Error::JetStreamPublish {
+                    source,
+                }))
+            })?
+            .await
+            .map_err(|source| match &source.kind() {
+                async_nats::jetstream::context::PublishErrorKind::WrongLastSequence => {
+                    flowgen_core::cache::CacheError::RevisionMismatch {
+                        expected: expected_revision,
+                        actual: 0,
+                    }
+                }
+                async_nats::jetstream::context::PublishErrorKind::StreamNotFound => {
+                    flowgen_core::cache::CacheError::NotFound
+                }
+                _ => flowgen_core::cache::CacheError::UpdateFailed(Box::new(
+                    Error::JetStreamPublishAck { source },
+                )),
+            })?;
+
+        Ok(ack.sequence)
+    }
+
+    async fn get_with_revision(
+        &self,
+        key: &str,
+    ) -> Result<Option<(bytes::Bytes, u64)>, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        match store.entry(key).await {
+            Ok(Some(entry)) => {
+                let revision = entry.revision;
+                let value = entry.value;
+                Ok(Some((value, revision)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(flowgen_core::cache::CacheError::GetFailed(Box::new(
+                Error::KVEntry { source: e },
+            ))),
+        }
     }
 }
 

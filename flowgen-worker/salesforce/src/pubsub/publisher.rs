@@ -69,8 +69,6 @@ pub enum Error {
     EmptyObject(),
     #[error("Error parsing Schema JSON string to Schema type")]
     SchemaParse(),
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
     #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]

@@ -73,11 +73,6 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Stream configuration is missing")]
     NoStream,
     #[error("Client is missing or not initialized")]

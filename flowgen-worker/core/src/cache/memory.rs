@@ -4,6 +4,13 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
 
+/// Entry with value and revision number for optimistic concurrency control.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    value: Bytes,
+    revision: u64,
+}
+
 /// Thread-safe in-memory cache implementation.
 ///
 /// Uses DashMap for concurrent access without requiring external coordination.
@@ -11,7 +18,7 @@ use std::sync::Arc;
 /// caching is unavailable.
 #[derive(Debug, Clone)]
 pub struct MemoryCache {
-    data: Arc<DashMap<String, Bytes>>,
+    data: Arc<DashMap<String, CacheEntry>>,
 }
 
 impl Default for MemoryCache {
@@ -38,17 +45,73 @@ impl super::Cache for MemoryCache {
         value: Bytes,
         _ttl_secs: Option<u64>,
     ) -> Result<(), super::Error> {
-        self.data.insert(key.to_string(), value);
+        self.data
+            .entry(key.to_string())
+            .and_modify(|e| {
+                e.value = value.clone();
+                e.revision += 1;
+            })
+            .or_insert(CacheEntry { value, revision: 1 });
         Ok(())
     }
 
     async fn get(&self, key: &str) -> Result<Option<Bytes>, super::Error> {
-        Ok(self.data.get(key).map(|entry| entry.value().clone()))
+        Ok(self.data.get(key).map(|entry| entry.value.clone()))
     }
 
     async fn delete(&self, key: &str) -> Result<(), super::Error> {
         self.data.remove(key);
         Ok(())
+    }
+
+    async fn create(
+        &self,
+        key: &str,
+        value: Bytes,
+        _ttl_secs: Option<u64>,
+    ) -> Result<u64, super::Error> {
+        match self.data.entry(key.to_string()) {
+            dashmap::Entry::Occupied(_) => Err(super::CacheError::AlreadyExists),
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(CacheEntry { value, revision: 1 });
+                Ok(1)
+            }
+        }
+    }
+
+    async fn update(
+        &self,
+        key: &str,
+        value: Bytes,
+        expected_revision: u64,
+        _ttl_secs: Option<u64>,
+    ) -> Result<u64, super::Error> {
+        match self.data.entry(key.to_string()) {
+            dashmap::Entry::Occupied(mut entry) => {
+                let current_revision = entry.get().revision;
+                if current_revision != expected_revision {
+                    return Err(super::CacheError::RevisionMismatch {
+                        expected: expected_revision,
+                        actual: current_revision,
+                    });
+                }
+                let new_revision = current_revision + 1;
+                entry.get_mut().value = value;
+                entry.get_mut().revision = new_revision;
+                Ok(new_revision)
+            }
+            dashmap::Entry::Vacant(_) => Err(super::CacheError::NotFound),
+        }
+    }
+
+    async fn get_with_revision(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Bytes, u64)>, super::Error> {
+        Ok(self
+            .data
+            .get(key)
+            .map(|entry| (entry.value.clone(), entry.revision)))
     }
 }
 

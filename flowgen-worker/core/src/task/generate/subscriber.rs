@@ -367,27 +367,10 @@ impl SubscriberBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::Cache;
     use crate::task::runner::Runner;
     use serde_json::{Map, Value};
-    use std::collections::HashMap;
     use tokio::sync::mpsc;
-    use tokio::sync::Mutex;
-
-    /// Mock cache implementation for testing.
-    #[derive(Debug)]
-    struct MockCache {
-        data: Arc<Mutex<HashMap<String, bytes::Bytes>>>,
-        should_error: bool,
-    }
-
-    impl Default for MockCache {
-        fn default() -> Self {
-            MockCache {
-                data: Arc::new(Mutex::new(HashMap::new())),
-                should_error: false,
-            }
-        }
-    }
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
@@ -408,51 +391,6 @@ mod tests {
                 .build()
                 .unwrap(),
         )
-    }
-
-    #[derive(Debug)]
-    struct MockError;
-
-    impl std::fmt::Display for MockError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "Mock cache error")
-        }
-    }
-
-    impl std::error::Error for MockError {}
-
-    #[async_trait::async_trait]
-    impl crate::cache::Cache for MockCache {
-        async fn put(
-            &self,
-            key: &str,
-            value: bytes::Bytes,
-            _ttl_secs: Option<u64>,
-        ) -> Result<(), crate::cache::Error> {
-            if self.should_error {
-                Err(Box::new(MockError))
-            } else {
-                self.data.lock().await.insert(key.to_string(), value);
-                Ok(())
-            }
-        }
-
-        async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, crate::cache::Error> {
-            if self.should_error {
-                Err(Box::new(MockError))
-            } else {
-                Ok(self.data.lock().await.get(key).cloned())
-            }
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), crate::cache::Error> {
-            if self.should_error {
-                Err(Box::new(MockError))
-            } else {
-                self.data.lock().await.remove(key);
-                Ok(())
-            }
-        }
     }
 
     #[tokio::test]
@@ -574,29 +512,25 @@ mod tests {
             message: None,
             interval: Some(Duration::from_secs(1)),
             cron: None,
-            count: Some(1), // Only run once
+            count: Some(1),
             retry: None,
         });
 
         let (tx, mut _rx) = mpsc::channel(100);
-        let mock_cache = Arc::new(MockCache::default());
+        let cache = Arc::new(crate::cache::memory::MemoryCache::new());
 
-        // Create task context with cache
         let mut labels = Map::new();
         labels.insert(
             "description".to_string(),
             Value::String("Cache Test".to_string()),
         );
         let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
-        let cache =
-            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let task_context = Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())
                 .flow_labels(Some(labels))
                 .task_manager(task_manager)
-                .cache(cache)
-                .cache(mock_cache.clone() as Arc<dyn crate::cache::Cache>)
+                .cache(cache.clone() as Arc<dyn crate::cache::Cache>)
                 .build()
                 .unwrap(),
         );
@@ -609,14 +543,12 @@ mod tests {
             task_context,
         };
 
-        // Run subscriber to completion
         let _ = subscriber.run().await;
 
-        // Wait for the spawned task to complete (interval is 1s, so wait 1.5s to be safe).
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-        // Check that cache key was created with flow-scoped format.
-        let cache_data = mock_cache.data.lock().await;
-        assert!(cache_data.contains_key("flow.test-flow.last_run.test"));
+        // Verify that cache key was created with flow-scoped format.
+        let result = cache.get("flow.test-flow.last_run.test").await.unwrap();
+        assert!(result.is_some());
     }
 }

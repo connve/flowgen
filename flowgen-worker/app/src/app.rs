@@ -1,6 +1,5 @@
 use crate::config::{AppConfig, FlowConfig};
 use config::Config;
-use flowgen_core::client::Client;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn, Instrument};
 
@@ -36,15 +35,6 @@ pub enum Error {
     /// Flow path is missing or invalid.
     #[error("Flow path is not configured or invalid. Please set 'flows.path' in your configuration (e.g., flows.path: \"/etc/app/flows/*.yaml\")")]
     InvalidFlowsPath,
-    /// Kubernetes host creation error.
-    #[error("Error creating Kubernetes host: {source}")]
-    Kube {
-        #[source]
-        source: kube::Error,
-    },
-    /// Host coordination error.
-    #[error(transparent)]
-    Host(#[from] flowgen_core::host::Error),
     /// Flow build error.
     #[error("Flow build failed: {source}")]
     FlowBuild {
@@ -323,45 +313,6 @@ impl App {
                     as Arc<dyn flowgen_core::cache::Cache>
             };
 
-        // Helper to check if running in Kubernetes.
-        let is_in_k8s =
-            || std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token").exists();
-
-        let host_client = match app_config.worker.as_ref().and_then(|w| w.host.as_ref()) {
-            Some(host) if host.enabled => {
-                info!("K8s host coordination enabled in config");
-                create_k8s_host().await
-            }
-            Some(host) if !host.enabled => {
-                info!("K8s host coordination disabled in config");
-                None
-            }
-            None if is_in_k8s() => {
-                info!("Auto-detected Kubernetes environment, enabling K8s host coordination");
-                create_k8s_host().await
-            }
-            _ => None,
-        };
-
-        async fn create_k8s_host() -> Option<std::sync::Arc<dyn flowgen_core::host::Host>> {
-            let host_builder = flowgen_core::host::k8s::K8sHostBuilder::new();
-
-            match host_builder.build() {
-                Ok(host) => match host.connect().await {
-                    Ok(connected_host) => Some(std::sync::Arc::new(connected_host)
-                        as std::sync::Arc<dyn flowgen_core::host::Host>),
-                    Err(e) => {
-                        warn!("K8s host coordinator failed to connect: {}", e);
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!("Failed to build K8s host coordinator: {}", e);
-                    None
-                }
-            }
-        }
-
         // Create resource loader from app config if configured.
         let resource_loader = app_config.flow_resources.as_ref().map(|resource_options| {
             flowgen_core::resource::ResourceLoader::new(Some(resource_options.path.clone()))
@@ -371,11 +322,9 @@ impl App {
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
             let http_server = http_server.as_ref().map(Arc::clone);
-            let host = host_client.as_ref().map(Arc::clone);
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
-                .host(host)
                 .cache(Arc::clone(&cache));
 
             if let Some(server) = http_server {

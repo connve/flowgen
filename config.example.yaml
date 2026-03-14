@@ -1,6 +1,11 @@
 # Shared configuration across components.
 
 # Cache service configuration (optional, shared across worker and server).
+# The cache is used for:
+# - State persistence across workflow executions (e.g., replay identifiers)
+# - Distributed coordination and leader election via atomic operations
+# When enabled with NATS, provides distributed lease management across multiple instances.
+# When disabled, falls back to in-memory cache (suitable for single-instance deployments only).
 cache:
   enabled: true
   credentials_path: "path_to_credentials"
@@ -37,11 +42,6 @@ worker:
     port: 3000
     # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
     routes_prefix: "/api/flowgen/workers"
-
-  # K8s host coordination configuration (optional).
-  # Auto-detects when running in Kubernetes. Only specify to explicitly enable/disable.
-  # host:
-  #   enabled: true
 
   # Event channel buffer size (optional, defaults to 10M).
   # Controls memory allocation for broadcast channel between tasks.

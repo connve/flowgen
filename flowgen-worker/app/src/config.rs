@@ -143,8 +143,6 @@ pub struct AppConfig {
 pub struct WorkerConfig {
     /// Optional HTTP server configuration for webhooks, health checks, and metrics.
     pub http_server: Option<HttpServerOptions>,
-    /// Optional host coordination configuration.
-    pub host: Option<HostOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional event channel buffer size (defaults to 10M if not specified).
@@ -207,15 +205,6 @@ pub struct HttpServerOptions {
     pub port: Option<u16>,
     /// Optional path prefix for all routes (e.g., "/workers").
     pub routes_prefix: Option<String>,
-}
-
-/// Host coordination configuration options.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct HostOptions {
-    /// Whether host coordination is enabled.
-    pub enabled: bool,
-    /// Optional namespace for Kubernetes resources.
-    pub namespace: Option<String>,
 }
 
 /// OpenTelemetry configuration options for metrics and distributed tracing.
@@ -384,7 +373,6 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
-                host: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -395,7 +383,6 @@ mod tests {
         assert!(app_config.flows.path.is_some());
         assert!(app_config.telemetry.is_none());
         assert!(app_config.worker.as_ref().unwrap().http_server.is_none());
-        assert!(app_config.worker.as_ref().unwrap().host.is_none());
         assert!(app_config.worker.as_ref().unwrap().retry.is_none());
         assert!(app_config
             .worker
@@ -417,7 +404,6 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
-                host: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -444,7 +430,6 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
-                host: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -470,7 +455,6 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
-                host: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -628,7 +612,6 @@ mod tests {
                     port: Some(8080),
                     routes_prefix: Some("/workers".to_string()),
                 }),
-                host: None,
                 retry: None,
                 event_buffer_size: None,
             }),

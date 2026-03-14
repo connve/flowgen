@@ -13,8 +13,8 @@ pub mod client;
 pub mod config;
 /// Event system with data formats, subject generation, and logging.
 pub mod event;
-/// Host coordination and lease management.
-pub mod host;
+/// Executor for distributed coordination via cache-based leases.
+pub mod executor;
 /// HTTP server trait for task context integration.
 pub mod http_server;
 /// Resource loading system for external assets.

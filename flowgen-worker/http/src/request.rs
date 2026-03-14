@@ -64,11 +64,6 @@ pub enum Error {
         #[source]
         source: reqwest::header::InvalidHeaderValue,
     },
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Either payload json or payload input is required")]
     PayloadConfig,
     #[error("Event data was not found on the event payload")]

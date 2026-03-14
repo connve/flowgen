@@ -84,11 +84,6 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]

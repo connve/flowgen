@@ -74,11 +74,6 @@ pub enum Error {
     NoObjectStoreContext,
     #[error("Could not retrieve file extension")]
     NoFileExtension,
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]

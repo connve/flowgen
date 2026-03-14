@@ -9,8 +9,48 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
+/// Cache operation errors.
+#[derive(Debug, thiserror::Error)]
+pub enum CacheError {
+    /// Key already exists during create operation.
+    #[error("Key already exists")]
+    AlreadyExists,
+
+    /// Revision mismatch during update operation (optimistic concurrency control failure).
+    #[error("Revision mismatch: expected {expected}, got {actual}")]
+    RevisionMismatch { expected: u64, actual: u64 },
+
+    /// Key not found during update or get operation.
+    #[error("Key not found")]
+    NotFound,
+
+    /// Cache store not initialized.
+    #[error("Cache store not initialized")]
+    StoreNotInitialized,
+
+    /// Failed to create key in cache.
+    #[error("Failed to create key: {0}")]
+    CreateFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to update key in cache.
+    #[error("Failed to update key: {0}")]
+    UpdateFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to get key from cache.
+    #[error("Failed to get key: {0}")]
+    GetFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to delete key from cache.
+    #[error("Failed to delete key: {0}")]
+    DeleteFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to put key in cache.
+    #[error("Failed to put key: {0}")]
+    PutFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
 /// Type alias for cache errors.
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub type Error = CacheError;
 
 /// Configuration options for cache operations.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -55,6 +95,63 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Returns
     /// Ok if the key was deleted successfully, or an error if the operation failed
     async fn delete(&self, key: &str) -> Result<(), Error>;
+
+    /// Creates a key-value pair only if the key does not already exist (atomic).
+    ///
+    /// # Arguments
+    /// * `key` - The key to create
+    /// * `value` - The value to store
+    /// * `ttl_secs` - Optional time-to-live in seconds
+    ///
+    /// # Returns
+    /// * `Ok(revision)` - Key created successfully, returns revision number
+    /// * `Err(CacheError::AlreadyExists)` - Key already exists
+    /// * `Err(e)` - Operation failed
+    ///
+    /// # Use Case
+    /// Lease acquisition - only one worker can create the lease key.
+    async fn create(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, Error>;
+
+    /// Updates a key's value only if the current revision matches (atomic compare-and-swap).
+    ///
+    /// # Arguments
+    /// * `key` - The key to update
+    /// * `value` - The new value
+    /// * `expected_revision` - The revision that must match for update to succeed
+    /// * `ttl_secs` - Optional time-to-live in seconds
+    ///
+    /// # Returns
+    /// * `Ok(new_revision)` - Update successful, returns new revision
+    /// * `Err(CacheError::RevisionMismatch)` - Revision doesn't match (another process modified it)
+    /// * `Err(CacheError::NotFound)` - Key doesn't exist
+    /// * `Err(e)` - Operation failed
+    ///
+    /// # Use Case
+    /// Lease renewal - ensures this worker still owns the lease before renewing.
+    /// Prevents split-brain where two workers think they own the same lease.
+    async fn update(
+        &self,
+        key: &str,
+        value: bytes::Bytes,
+        expected_revision: u64,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, Error>;
+
+    /// Retrieves a value along with its revision number for optimistic concurrency.
+    ///
+    /// # Returns
+    /// * `Ok(Some((value, revision)))` - Key exists with data and revision
+    /// * `Ok(None)` - Key not found
+    /// * `Err(e)` - Operation failed
+    ///
+    /// # Use Case
+    /// Lease takeover - get current lease holder and revision to check if expired.
+    async fn get_with_revision(&self, key: &str) -> Result<Option<(bytes::Bytes, u64)>, Error>;
 }
 
 #[cfg(test)]
@@ -89,7 +186,7 @@ mod tests {
             _ttl_secs: Option<u64>,
         ) -> Result<(), Error> {
             if self.should_error {
-                Err(Box::new(MockError))
+                Err(CacheError::PutFailed(Box::new(MockError)))
             } else {
                 Ok(())
             }
@@ -97,7 +194,7 @@ mod tests {
 
         async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, Error> {
             if self.should_error {
-                Err(Box::new(MockError))
+                Err(CacheError::GetFailed(Box::new(MockError)))
             } else {
                 Ok(self.data.get(key).cloned())
             }
@@ -105,9 +202,47 @@ mod tests {
 
         async fn delete(&self, _key: &str) -> Result<(), Error> {
             if self.should_error {
-                Err(Box::new(MockError))
+                Err(CacheError::DeleteFailed(Box::new(MockError)))
             } else {
                 Ok(())
+            }
+        }
+
+        async fn create(
+            &self,
+            _key: &str,
+            _value: bytes::Bytes,
+            _ttl_secs: Option<u64>,
+        ) -> Result<u64, Error> {
+            if self.should_error {
+                Err(CacheError::CreateFailed(Box::new(MockError)))
+            } else {
+                Ok(1)
+            }
+        }
+
+        async fn update(
+            &self,
+            _key: &str,
+            _value: bytes::Bytes,
+            _expected_revision: u64,
+            _ttl_secs: Option<u64>,
+        ) -> Result<u64, Error> {
+            if self.should_error {
+                Err(CacheError::UpdateFailed(Box::new(MockError)))
+            } else {
+                Ok(2)
+            }
+        }
+
+        async fn get_with_revision(
+            &self,
+            key: &str,
+        ) -> Result<Option<(bytes::Bytes, u64)>, Error> {
+            if self.should_error {
+                Err(CacheError::GetFailed(Box::new(MockError)))
+            } else {
+                Ok(self.data.get(key).cloned().map(|v| (v, 1)))
             }
         }
     }
