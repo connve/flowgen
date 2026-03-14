@@ -94,9 +94,7 @@ impl Executor {
     ) -> Result<LeaseResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| {
-                crate::cache::CacheError::CreateFailed(Box::new(e))
-            })?
+            .map_err(|e| crate::cache::CacheError::CreateFailed(Box::new(e)))?
             .as_secs();
 
         let metadata = LeaseMetadata {
@@ -153,13 +151,12 @@ impl Executor {
                 holder = %self.config.holder_identity,
                 "Already own this lease, renewing"
             );
-            return self
-                .renew_lease(lease_name, current_revision)
-                .await
-                .map(|result| match result {
+            return self.renew_lease(lease_name, current_revision).await.map(
+                |result| match result {
                     RenewalResult::Renewed { revision } => LeaseResult::Acquired { revision },
                     RenewalResult::LostOwnership { holder } => LeaseResult::HeldByOther { holder },
-                });
+                },
+            );
         }
 
         // Check if lease is expired.
@@ -246,9 +243,7 @@ impl Executor {
     ) -> Result<RenewalResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| {
-                crate::cache::CacheError::UpdateFailed(Box::new(e))
-            })?
+            .map_err(|e| crate::cache::CacheError::UpdateFailed(Box::new(e)))?
             .as_secs();
 
         let metadata = LeaseMetadata {

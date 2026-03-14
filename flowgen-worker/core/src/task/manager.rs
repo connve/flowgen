@@ -186,78 +186,75 @@ impl TaskManager {
         tokio::spawn(
             async move {
                 while let Some(registration) = rx.recv().await {
-                debug!("Received task registration: {:?}", registration.task_id);
-                let result = if registration.leader_election_options.is_some() {
-                    // Sanitize task_id to be DNS-safe (RFC 1123): replace underscores with hyphens.
-                    let lease_name = registration.task_id.replace('_', "-").to_lowercase();
-                    match executor.acquire_lease(&lease_name).await {
-                        Ok(crate::executor::LeaseResult::Acquired { revision })
-                        | Ok(crate::executor::LeaseResult::TakenOver { revision }) => {
-                            // Successfully acquired the lease.
-                            let current_revision = Arc::new(Mutex::new(revision));
-                            let renewal_handle = spawn_renewal_task(
-                                registration.task_id.clone(),
-                                lease_name.clone(),
-                                executor.clone(),
-                                current_revision,
-                                registration.response_tx.clone(),
-                            );
+                    debug!("Received task registration: {:?}", registration.task_id);
+                    let result = if registration.leader_election_options.is_some() {
+                        // Sanitize task_id to be DNS-safe (RFC 1123): replace underscores with hyphens.
+                        let lease_name = registration.task_id.replace('_', "-").to_lowercase();
+                        match executor.acquire_lease(&lease_name).await {
+                            Ok(crate::executor::LeaseResult::Acquired { revision })
+                            | Ok(crate::executor::LeaseResult::TakenOver { revision }) => {
+                                // Successfully acquired the lease.
+                                let current_revision = Arc::new(Mutex::new(revision));
+                                let renewal_handle = spawn_renewal_task(
+                                    registration.task_id.clone(),
+                                    lease_name.clone(),
+                                    executor.clone(),
+                                    current_revision,
+                                    registration.response_tx.clone(),
+                                );
 
-                            // Store the renewal handle.
-                            active_leases
-                                .lock()
-                                .await
-                                .insert(registration.task_id.clone(), ActiveLease {
-                                    handle: renewal_handle,
-                                });
+                                // Store the renewal handle.
+                                active_leases.lock().await.insert(
+                                    registration.task_id.clone(),
+                                    ActiveLease {
+                                        handle: renewal_handle,
+                                    },
+                                );
 
-                            LeaderElectionResult::Leader
+                                LeaderElectionResult::Leader
+                            }
+                            Ok(crate::executor::LeaseResult::HeldByOther { .. }) | Err(_) => {
+                                // Failed to acquire lease, spawn retry task.
+                                debug!("Did not acquire lease for task: {}", registration.task_id);
+
+                                let current_revision = Arc::new(Mutex::new(0));
+                                let retry_handle = spawn_acquisition_retry_task(
+                                    registration.task_id.clone(),
+                                    lease_name.clone(),
+                                    executor.clone(),
+                                    current_revision,
+                                    registration.response_tx.clone(),
+                                );
+
+                                // Store the retry handle.
+                                active_leases.lock().await.insert(
+                                    registration.task_id.clone(),
+                                    ActiveLease {
+                                        handle: retry_handle,
+                                    },
+                                );
+
+                                // Don't send any result now - the retry task will send Leader when it succeeds.
+                                // This prevents duplicate task spawning.
+                                continue;
+                            }
                         }
-                        Ok(crate::executor::LeaseResult::HeldByOther { .. }) | Err(_) => {
-                            // Failed to acquire lease, spawn retry task.
-                            debug!(
-                                "Did not acquire lease for task: {}",
-                                registration.task_id
+                    } else {
+                        // No leader election required.
+                        LeaderElectionResult::NoElection
+                    };
+
+                    // Send the result back to the caller.
+                    registration
+                        .response_tx
+                        .send(result)
+                        .map_err(|e| {
+                            error!(
+                                task_id = %registration.task_id,
+                                "Failed to send leader election result: {:?}", e
                             );
-
-                            let current_revision = Arc::new(Mutex::new(0));
-                            let retry_handle = spawn_acquisition_retry_task(
-                                registration.task_id.clone(),
-                                lease_name.clone(),
-                                executor.clone(),
-                                current_revision,
-                                registration.response_tx.clone(),
-                            );
-
-                            // Store the retry handle.
-                            active_leases
-                                .lock()
-                                .await
-                                .insert(registration.task_id.clone(), ActiveLease {
-                                    handle: retry_handle,
-                                });
-
-                            // Don't send any result now - the retry task will send Leader when it succeeds.
-                            // This prevents duplicate task spawning.
-                            continue;
-                        }
-                    }
-                } else {
-                    // No leader election required.
-                    LeaderElectionResult::NoElection
-                };
-
-                // Send the result back to the caller.
-                registration
-                    .response_tx
-                    .send(result)
-                    .map_err(|e| {
-                        error!(
-                            task_id = %registration.task_id,
-                            "Failed to send leader election result: {:?}", e
-                        );
-                    })
-                    .ok();
+                        })
+                        .ok();
                 }
             }
             .instrument(span),
@@ -367,8 +364,8 @@ impl TaskManagerBuilder {
     pub fn build(self) -> TaskManager {
         let executor = self.executor.unwrap_or_else(|| {
             // Default to in-memory cache for single-instance deployments.
-            let cache = Arc::new(crate::cache::memory::MemoryCache::new())
-                as Arc<dyn crate::cache::Cache>;
+            let cache =
+                Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
             let config = crate::executor::LeaseConfig::default();
             Arc::new(crate::executor::Executor::new(cache, config))
         });

@@ -104,10 +104,7 @@ impl super::Cache for MemoryCache {
         }
     }
 
-    async fn get_with_revision(
-        &self,
-        key: &str,
-    ) -> Result<Option<(Bytes, u64)>, super::Error> {
+    async fn get_with_revision(&self, key: &str) -> Result<Option<(Bytes, u64)>, super::Error> {
         Ok(self
             .data
             .get(key)

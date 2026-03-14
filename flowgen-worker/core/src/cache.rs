@@ -235,10 +235,7 @@ mod tests {
             }
         }
 
-        async fn get_with_revision(
-            &self,
-            key: &str,
-        ) -> Result<Option<(bytes::Bytes, u64)>, Error> {
+        async fn get_with_revision(&self, key: &str) -> Result<Option<(bytes::Bytes, u64)>, Error> {
             if self.should_error {
                 Err(CacheError::GetFailed(Box::new(MockError)))
             } else {
