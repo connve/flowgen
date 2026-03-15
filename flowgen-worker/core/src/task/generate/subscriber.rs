@@ -379,7 +379,11 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         Arc::new(
@@ -524,7 +528,11 @@ mod tests {
             "description".to_string(),
             Value::String("Cache Test".to_string()),
         );
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let task_context = Arc::new(
             crate::task::context::TaskContextBuilder::new()
                 .flow_name("test-flow".to_string())

@@ -213,7 +213,11 @@ mod tests {
         labels.insert("name".to_string(), Value::String("Test Flow".to_string()));
         labels.insert("environment".to_string(), Value::String("test".to_string()));
 
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
@@ -244,7 +248,11 @@ mod tests {
 
     #[test]
     fn test_task_context_builder_defaults() {
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
@@ -267,7 +275,11 @@ mod tests {
         );
         labels.insert("type".to_string(), Value::String("test".to_string()));
 
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()
@@ -290,7 +302,11 @@ mod tests {
             Value::String("Clone Test".to_string()),
         );
 
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         let context = TaskContextBuilder::new()

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -14,6 +15,12 @@ pub enum Error {
     /// Executor coordination error.
     #[error("Executor coordination error: {0}")]
     Executor(#[source] crate::cache::Error),
+    /// Invalid lease configuration.
+    #[error("Invalid lease configuration: {0}")]
+    InvalidConfig(#[from] crate::executor::LeaseConfigError),
+    /// Shutdown operation timed out after 30 seconds.
+    #[error("Shutdown timed out after 30 seconds - some leases may not have been released")]
+    ShutdownTimeout,
 }
 
 /// Spawns a task to continuously renew a lease with retry logic.
@@ -56,6 +63,17 @@ fn spawn_renewal_task(
                         }
                         break;
                     }
+                    Ok(crate::executor::RenewalResult::LeaseDeleted) => {
+                        warn!(
+                            task_id = %task_id,
+                            "Lease was deleted, notifying flow"
+                        );
+
+                        if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
+                            debug!("Flow already terminated");
+                        }
+                        break;
+                    }
                     Err(e) => {
                         // Transient errors - retry on next interval.
                         warn!(error = %e, "Failed to renew lease, will retry");
@@ -67,7 +85,7 @@ fn spawn_renewal_task(
     )
 }
 
-/// Spawns a task to retry lease acquisition until successful.
+/// Spawns a task to retry lease acquisition with exponential backoff.
 fn spawn_acquisition_retry_task(
     task_id: String,
     lease_name: String,
@@ -77,10 +95,12 @@ fn spawn_acquisition_retry_task(
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
-            let mut interval = tokio::time::interval(executor.config.retry_interval);
+            let mut retry_strategy = executor.config.retry_config.strategy();
+            let mut attempt = 0;
 
+            // First attempt without delay.
             loop {
-                interval.tick().await;
+                attempt += 1;
 
                 match executor.acquire_lease(&lease_name).await {
                     Ok(crate::executor::LeaseResult::Acquired { revision })
@@ -90,6 +110,7 @@ fn spawn_acquisition_retry_task(
                         debug!(
                             task_id = %task_id,
                             revision = %revision,
+                            attempt = %attempt,
                             "Acquired lease, transitioning to leader"
                         );
 
@@ -112,12 +133,38 @@ fn spawn_acquisition_retry_task(
                         debug!(
                             task_id = %task_id,
                             holder = %holder,
+                            attempt = %attempt,
                             "Lease held by other, will retry"
                         );
                     }
                     Err(e) => {
-                        warn!(error = %e, "Failed to acquire lease, will retry");
+                        warn!(
+                            error = %e,
+                            attempt = %attempt,
+                            "Failed to acquire lease, will retry"
+                        );
                     }
+                }
+
+                // Get next delay from retry strategy.
+                if let Some(delay) = retry_strategy.next() {
+                    debug!(
+                        task_id = %task_id,
+                        delay_ms = %delay.as_millis(),
+                        attempt = %attempt,
+                        "Waiting before next lease acquisition attempt"
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    // No more retries allowed by the strategy.
+                    error!(
+                        task_id = %task_id,
+                        attempts = %attempt,
+                        "Exceeded maximum retry attempts for lease acquisition, giving up"
+                    );
+                    // Notify that we're not the leader and won't retry anymore.
+                    let _ = response_tx.send(LeaderElectionResult::NotLeader);
+                    break;
                 }
             }
         }
@@ -292,13 +339,23 @@ impl TaskManager {
     ///
     /// This method performs a two-phase shutdown to prevent race conditions during pod termination.
     /// First, all background renewal and retry tasks are aborted to ensure no new lease acquisitions
-    /// can occur while we are shutting down. Second, all owned leases are deleted from Kubernetes.
+    /// can occur while we are shutting down. Second, all owned leases are deleted from the cache.
     ///
     /// This ordering is critical: aborting tasks before deleting leases prevents a scenario where
     /// a retry task acquires a lease immediately after we delete it, causing duplicate leadership
     /// during rollout restarts.
+    ///
+    /// The entire shutdown operation has a 30-second timeout to prevent indefinite hangs.
     #[tracing::instrument(skip(self), name = "task_manager.shutdown")]
     pub async fn shutdown(&self) -> Result<(), Error> {
+        // Wrap the entire shutdown in a timeout to prevent indefinite hangs.
+        tokio::time::timeout(Duration::from_secs(30), self.shutdown_internal())
+            .await
+            .map_err(|_| Error::ShutdownTimeout)?
+    }
+
+    /// Internal shutdown implementation without timeout wrapper.
+    async fn shutdown_internal(&self) -> Result<(), Error> {
         // Abort all background tasks first to prevent race conditions during shutdown.
         // Renewal tasks continuously update leases every 10 seconds, and retry tasks attempt
         // to acquire leases every 5 seconds. If we delete leases before aborting these tasks,
@@ -361,19 +418,25 @@ impl TaskManagerBuilder {
     /// Builds the TaskManager configuration.
     ///
     /// If no executor is provided, creates one with in-memory cache.
-    pub fn build(self) -> TaskManager {
-        let executor = self.executor.unwrap_or_else(|| {
-            // Default to in-memory cache for single-instance deployments.
-            let cache =
-                Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
-            let config = crate::executor::LeaseConfig::default();
-            Arc::new(crate::executor::Executor::new(cache, config))
-        });
+    ///
+    /// # Errors
+    /// Returns error if the default executor configuration is invalid.
+    pub fn build(self) -> Result<TaskManager, Error> {
+        let executor = match self.executor {
+            Some(executor) => executor,
+            None => {
+                // Default to in-memory cache for single-instance deployments.
+                let cache = Arc::new(crate::cache::memory::MemoryCache::new())
+                    as Arc<dyn crate::cache::Cache>;
+                let config = crate::executor::LeaseConfig::default();
+                Arc::new(crate::executor::Executor::new(cache, config)?)
+            }
+        };
 
-        TaskManager {
+        Ok(TaskManager {
             tx: Arc::new(Mutex::new(None)),
             executor,
             active_leases: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 }

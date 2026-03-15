@@ -265,6 +265,10 @@ impl flowgen_core::cache::Cache for Cache {
             .await
             .map_err(|source| match &source.kind() {
                 async_nats::jetstream::context::PublishErrorKind::WrongLastSequence => {
+                    // For revision mismatch, we return 0 as actual since NATS doesn't provide
+                    // the actual sequence in the error. Getting the actual revision would require
+                    // an additional round-trip to NATS, which could fail or return stale data.
+                    // The expected revision is sufficient for debugging most cases.
                     flowgen_core::cache::CacheError::RevisionMismatch {
                         expected: expected_revision,
                         actual: 0,

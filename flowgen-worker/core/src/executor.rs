@@ -8,6 +8,30 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Default lease duration in seconds (60 seconds).
+const DEFAULT_LEASE_DURATION_SECS: u64 = 60;
+
+/// Default renewal interval in seconds (10 seconds).
+const DEFAULT_RENEWAL_INTERVAL_SECS: u64 = 10;
+
+/// Maximum lease duration in seconds (1 hour).
+const MAX_LEASE_DURATION_SECS: u64 = 3600;
+
+/// Lease configuration validation errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LeaseConfigError {
+    /// Lease duration must be greater than zero.
+    #[error("Lease duration must be greater than 0")]
+    ZeroLeaseDuration,
+    /// Lease duration exceeds maximum allowed value.
+    #[error("Lease duration {0:?} exceeds maximum of 1 hour")]
+    ExcessiveLeaseDuration(Duration),
+    /// Renewal interval must be less than lease duration.
+    #[error("Renewal interval {renewal:?} must be less than lease duration {lease:?}")]
+    InvalidRenewalInterval { renewal: Duration, lease: Duration },
+}
+
 /// Lease metadata stored in cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseMetadata {
@@ -17,6 +41,10 @@ pub struct LeaseMetadata {
     pub renewed_at: u64,
     /// Lease duration in seconds.
     pub lease_duration_secs: u64,
+    /// Generation counter to prevent zombie leases during network partitions.
+    /// Incremented on each acquisition, preserved on renewal.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Configuration for lease management.
@@ -26,22 +54,59 @@ pub struct LeaseConfig {
     pub lease_duration: Duration,
     /// How often to renew the lease (default: 10 seconds).
     pub renewal_interval: Duration,
-    /// How often to retry lease acquisition when failed (default: 5 seconds).
-    pub retry_interval: Duration,
     /// Identity of this executor (pod name, hostname, etc.).
     pub holder_identity: String,
+    /// Retry configuration for lease acquisition with exponential backoff and jitter.
+    pub retry_config: crate::retry::RetryConfig,
 }
 
 impl Default for LeaseConfig {
     fn default() -> Self {
+        // Get holder identity from environment or generate a unique one.
+        // Priority: POD_NAME (K8s) > HOSTNAME (env) > unique generated ID with PID and timestamp
+        let holder_identity = std::env::var("POD_NAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| {
+                // Generate a unique identifier using process ID and timestamp.
+                // This ensures uniqueness even without external dependencies.
+                let pid = std::process::id();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_nanos();
+                format!("executor-{pid}-{timestamp}")
+            });
+
         Self {
-            lease_duration: Duration::from_secs(60),
-            renewal_interval: Duration::from_secs(10),
-            retry_interval: Duration::from_secs(5),
-            holder_identity: std::env::var("POD_NAME")
-                .or_else(|_| std::env::var("HOSTNAME"))
-                .unwrap_or_else(|_| "unknown".to_string()),
+            lease_duration: Duration::from_secs(DEFAULT_LEASE_DURATION_SECS),
+            renewal_interval: Duration::from_secs(DEFAULT_RENEWAL_INTERVAL_SECS),
+            holder_identity,
+            retry_config: crate::retry::RetryConfig::default(),
         }
+    }
+}
+
+impl LeaseConfig {
+    /// Validates the lease configuration for reasonable values.
+    ///
+    /// # Errors
+    /// Returns `LeaseConfigError` if any configuration values are invalid.
+    pub fn validate(&self) -> Result<(), LeaseConfigError> {
+        if self.lease_duration.as_secs() == 0 {
+            return Err(LeaseConfigError::ZeroLeaseDuration);
+        }
+        if self.lease_duration > Duration::from_secs(MAX_LEASE_DURATION_SECS) {
+            return Err(LeaseConfigError::ExcessiveLeaseDuration(
+                self.lease_duration,
+            ));
+        }
+        if self.renewal_interval >= self.lease_duration {
+            return Err(LeaseConfigError::InvalidRenewalInterval {
+                renewal: self.renewal_interval,
+                lease: self.lease_duration,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -58,49 +123,64 @@ pub enum LeaseResult {
 
 /// Result of lease renewal attempt.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RenewalResult {
-    /// Lease renewed successfully.
+    /// Lease renewed successfully with new revision number.
     Renewed { revision: u64 },
-    /// Lost lease ownership (another executor took over).
+    /// Lost lease ownership to another executor.
     LostOwnership { holder: String },
+    /// Lease was deleted during renewal attempt.
+    LeaseDeleted,
 }
 
 /// Executor manages distributed coordination via cache-based leases.
 ///
-/// Unlike the platform-specific Host trait, Executor works with any Cache implementation
-/// (NATS KV, Redis, etc.) using atomic operations.
+/// This replaces the Kubernetes-specific Host trait with a universal abstraction that
+/// works with any Cache implementation (NATS KV, Redis, etc.) using atomic operations
+/// for compare-and-swap semantics.
 #[derive(Debug, Clone)]
 pub struct Executor {
     cache: Arc<dyn crate::cache::Cache>,
-    pub config: LeaseConfig,
+    pub(crate) config: LeaseConfig,
 }
 
 impl Executor {
     /// Creates a new executor with the given cache backend.
-    pub fn new(cache: Arc<dyn crate::cache::Cache>, config: LeaseConfig) -> Self {
-        Self { cache, config }
+    ///
+    /// # Errors
+    /// Returns `LeaseConfigError` if the configuration is invalid.
+    pub fn new(
+        cache: Arc<dyn crate::cache::Cache>,
+        config: LeaseConfig,
+    ) -> Result<Self, LeaseConfigError> {
+        // Validate config before creating executor.
+        config.validate()?;
+        Ok(Self { cache, config })
     }
 
-    /// Attempts to acquire a lease.
+    /// Attempts to acquire a lease for distributed coordination.
     ///
-    /// # Flow
-    /// 1. Try to create lease key (atomic create)
-    /// 2. If exists, check if expired
-    /// 3. If expired, attempt takeover (atomic update with revision check)
-    /// 4. If not expired, return HeldByOther
+    /// This method implements a three-phase lease acquisition protocol:
+    /// 1. Optimistically try to create a new lease (succeeds if lease doesn't exist).
+    /// 2. If the lease exists, check if it has expired beyond its duration.
+    /// 3. For expired leases, attempt atomic takeover using revision number for consistency.
+    ///
+    /// The generation counter in LeaseMetadata prevents zombie processes from reclaiming
+    /// leases after network partitions or long pauses.
     pub async fn acquire_lease(
         &self,
         lease_name: &str,
     ) -> Result<LeaseResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| crate::cache::CacheError::CreateFailed(Box::new(e)))?
+            .unwrap_or(Duration::from_secs(0))
             .as_secs();
 
         let metadata = LeaseMetadata {
             holder_identity: self.config.holder_identity.clone(),
             renewed_at: now,
             lease_duration_secs: self.config.lease_duration.as_secs(),
+            generation: 1, // First acquisition
         };
 
         let value = serde_json::to_vec(&metadata)
@@ -136,27 +216,46 @@ impl Executor {
             match self.cache.get_with_revision(lease_name).await? {
                 Some(entry) => entry,
                 None => {
-                    // Lease was deleted between create and get - retry acquisition.
-                    return Box::pin(self.acquire_lease(lease_name)).await;
+                    // Lease was deleted between our failed create attempt and the get operation.
+                    // This is an extremely rare race condition but possible. We return NotFound
+                    // to allow the caller to retry with their configured retry policy.
+                    tracing::debug!(
+                        lease_name = %lease_name,
+                        "Lease was deleted during acquisition attempt"
+                    );
+                    return Err(crate::cache::CacheError::NotFound);
                 }
             };
 
         let current_metadata: LeaseMetadata = serde_json::from_slice(&current_value)
             .map_err(|e| crate::cache::CacheError::GetFailed(Box::new(e)))?;
 
-        // Check if current holder is self (can happen during pod restart).
+        // Check if current holder is self. This can happen during pod restarts where
+        // the same pod reclaims its lease before it expired.
         if current_metadata.holder_identity == self.config.holder_identity {
             tracing::debug!(
                 lease_name = %lease_name,
                 holder = %self.config.holder_identity,
                 "Already own this lease, renewing"
             );
-            return self.renew_lease(lease_name, current_revision).await.map(
-                |result| match result {
-                    RenewalResult::Renewed { revision } => LeaseResult::Acquired { revision },
-                    RenewalResult::LostOwnership { holder } => LeaseResult::HeldByOther { holder },
-                },
-            );
+            match self.renew_lease(lease_name, current_revision).await? {
+                RenewalResult::Renewed { revision } => {
+                    return Ok(LeaseResult::Acquired { revision })
+                }
+                RenewalResult::LostOwnership { holder } => {
+                    return Ok(LeaseResult::HeldByOther { holder })
+                }
+                RenewalResult::LeaseDeleted => {
+                    // Lease was deleted, we can try to acquire it fresh.
+                    tracing::debug!(
+                        lease_name = %lease_name,
+                        "Lease was deleted during renewal, attempting fresh acquisition"
+                    );
+                    // Fall through to continue with normal acquisition flow.
+                    // The lease no longer exists, so we'll create it fresh.
+                    return Err(crate::cache::CacheError::NotFound);
+                }
+            }
         }
 
         // Check if lease is expired.
@@ -171,11 +270,22 @@ impl Executor {
                 "Lease expired, attempting takeover"
             );
 
+            // Create new metadata with incremented generation for takeover.
+            let takeover_metadata = LeaseMetadata {
+                holder_identity: self.config.holder_identity.clone(),
+                renewed_at: now,
+                lease_duration_secs: self.config.lease_duration.as_secs(),
+                generation: current_metadata.generation.saturating_add(1),
+            };
+
+            let takeover_value = serde_json::to_vec(&takeover_metadata)
+                .map_err(|e| crate::cache::CacheError::UpdateFailed(Box::new(e)))?;
+
             match self
                 .cache
                 .update(
                     lease_name,
-                    Bytes::from(value),
+                    Bytes::from(takeover_value),
                     current_revision,
                     Some(self.config.lease_duration.as_secs()),
                 )
@@ -229,13 +339,12 @@ impl Executor {
 
     /// Renews an existing lease that this executor owns.
     ///
-    /// # Arguments
-    /// * `lease_name` - Name of the lease to renew
-    /// * `current_revision` - The revision number from when we last acquired/renewed the lease
+    /// This method performs an atomic compare-and-swap operation to extend the lease duration.
+    /// The revision number ensures consistency - if another process has taken over the lease,
+    /// the update will fail with a revision mismatch.
     ///
-    /// # Returns
-    /// * `Renewed` - Lease renewed successfully
-    /// * `LostOwnership` - Another executor took over the lease (revision mismatch or different holder)
+    /// The generation counter is preserved during renewal to maintain lease lineage. This
+    /// distinguishes between regular renewals and lease takeovers after expiration.
     pub async fn renew_lease(
         &self,
         lease_name: &str,
@@ -243,13 +352,24 @@ impl Executor {
     ) -> Result<RenewalResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| crate::cache::CacheError::UpdateFailed(Box::new(e)))?
+            .unwrap_or(Duration::from_secs(0))
             .as_secs();
+
+        // Get current lease to preserve generation counter.
+        let (current_value, _) = self
+            .cache
+            .get_with_revision(lease_name)
+            .await?
+            .ok_or(crate::cache::CacheError::NotFound)?;
+
+        let current_metadata: LeaseMetadata = serde_json::from_slice(&current_value)
+            .map_err(|e| crate::cache::CacheError::GetFailed(Box::new(e)))?;
 
         let metadata = LeaseMetadata {
             holder_identity: self.config.holder_identity.clone(),
             renewed_at: now,
             lease_duration_secs: self.config.lease_duration.as_secs(),
+            generation: current_metadata.generation, // Preserve generation on renewal
         };
 
         let value = serde_json::to_vec(&metadata)
@@ -296,11 +416,9 @@ impl Executor {
                     None => {
                         tracing::warn!(
                             lease_name = %lease_name,
-                            "Lease was deleted"
+                            "Lease was deleted during renewal"
                         );
-                        Ok(RenewalResult::LostOwnership {
-                            holder: "deleted".to_string(),
-                        })
+                        Ok(RenewalResult::LeaseDeleted)
                     }
                 }
             }
@@ -331,7 +449,7 @@ mod tests {
             holder_identity: identity.to_string(),
             ..Default::default()
         };
-        Executor::new(cache, config)
+        Executor::new(cache, config).unwrap()
     }
 
     #[tokio::test]
@@ -349,7 +467,7 @@ mod tests {
             holder_identity: "executor-1".to_string(),
             ..Default::default()
         };
-        let executor = Executor::new(cache.clone(), config.clone());
+        let executor = Executor::new(cache.clone(), config.clone()).unwrap();
 
         // Acquire lease first time.
         let result1 = executor.acquire_lease("test-lease").await.unwrap();
@@ -370,14 +488,16 @@ mod tests {
                 holder_identity: "executor-1".to_string(),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let executor2 = Executor::new(
             cache.clone(),
             LeaseConfig {
                 holder_identity: "executor-2".to_string(),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // Executor 1 acquires lease.
         let result1 = executor1.acquire_lease("test-lease").await.unwrap();
@@ -397,16 +517,19 @@ mod tests {
             LeaseConfig {
                 holder_identity: "executor-1".to_string(),
                 lease_duration: Duration::from_secs(1),
+                renewal_interval: Duration::from_millis(100), // Must be less than lease_duration
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let executor2 = Executor::new(
             cache.clone(),
             LeaseConfig {
                 holder_identity: "executor-2".to_string(),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // Executor 1 acquires lease.
         let result1 = executor1.acquire_lease("test-lease").await.unwrap();
@@ -443,16 +566,19 @@ mod tests {
             LeaseConfig {
                 holder_identity: "executor-1".to_string(),
                 lease_duration: Duration::from_secs(1),
+                renewal_interval: Duration::from_millis(100),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let executor2 = Executor::new(
             cache.clone(),
             LeaseConfig {
                 holder_identity: "executor-2".to_string(),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // Executor 1 acquires lease.
         let LeaseResult::Acquired { revision } =

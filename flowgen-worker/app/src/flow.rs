@@ -109,6 +109,12 @@ pub enum Error {
     /// Task manager not initialized (init must be called first).
     #[error("Task manager not initialized: init() must be called first")]
     TaskManagerNotInitialized,
+    /// Invalid lease configuration.
+    #[error("Invalid lease configuration: {0}")]
+    LeaseConfig(#[from] flowgen_core::executor::LeaseConfigError),
+    /// Task manager error.
+    #[error("Task manager error: {0}")]
+    TaskManager(#[from] flowgen_core::task::manager::Error),
     /// Failed to register flow for leader election.
     #[error("Error registering flow for leader election: {0}")]
     LeaderElectionRegistrationFailed(String),
@@ -339,18 +345,13 @@ impl Flow {
 
         // Create an Executor with the cache for lease management.
         let lease_config = flowgen_core::executor::LeaseConfig::default();
-        let executor = Arc::new(flowgen_core::executor::Executor::new(
-            self.cache.clone(),
-            lease_config,
-        ));
+        let executor = flowgen_core::executor::Executor::new(self.cache.clone(), lease_config)?;
+        let executor = Arc::new(executor);
 
-        let task_manager = Arc::new(
-            flowgen_core::task::manager::TaskManagerBuilder::new()
-                .executor(executor)
-                .build()
-                .start()
-                .await,
-        );
+        let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
+            .executor(executor)
+            .build()?;
+        let task_manager = Arc::new(task_manager.start().await);
 
         self.task_manager = Some(task_manager);
 
