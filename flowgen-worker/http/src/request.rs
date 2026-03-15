@@ -64,11 +64,6 @@ pub enum Error {
         #[source]
         source: reqwest::header::InvalidHeaderValue,
     },
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Either payload json or payload input is required")]
     PayloadConfig,
     #[error("Event data was not found on the event payload")]
@@ -435,7 +430,11 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
-        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
         Arc::new(

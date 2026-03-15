@@ -84,11 +84,6 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Host coordination error: {source}")]
-    Host {
-        #[source]
-        source: flowgen_core::host::Error,
-    },
     #[error("Invalid URL format: {source}")]
     ParseUrl {
         #[source]
@@ -564,7 +559,11 @@ mod tests {
             "description".to_string(),
             Value::String("Clone Test".to_string()),
         );
-        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
         Arc::new(

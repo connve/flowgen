@@ -109,6 +109,12 @@ pub enum Error {
     /// Task manager not initialized (init must be called first).
     #[error("Task manager not initialized: init() must be called first")]
     TaskManagerNotInitialized,
+    /// Invalid lease configuration.
+    #[error("Invalid lease configuration: {0}")]
+    LeaseConfig(#[from] flowgen_core::executor::LeaseConfigError),
+    /// Task manager error.
+    #[error("Task manager error: {0}")]
+    TaskManager(#[from] flowgen_core::task::manager::Error),
     /// Failed to register flow for leader election.
     #[error("Error registering flow for leader election: {0}")]
     LeaderElectionRegistrationFailed(String),
@@ -266,8 +272,6 @@ pub struct Flow {
     pub config: Arc<FlowConfig>,
     /// An optional shared HTTP server instance, passed in from the main application.
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// An optional client for host-level coordination (e.g., Kubernetes), passed in from the main application.
-    host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Shared cache, passed in from the main application.
     cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
@@ -339,11 +343,15 @@ impl Flow {
             return Err(Error::HttpServerNotEnabled);
         }
 
-        let mut task_manager_builder = flowgen_core::task::manager::TaskManagerBuilder::new();
-        if let Some(ref host) = self.host {
-            task_manager_builder = task_manager_builder.host(host.clone());
-        }
-        let task_manager = Arc::new(task_manager_builder.build().start().await);
+        // Create an Executor with the cache for lease management.
+        let lease_config = flowgen_core::executor::LeaseConfig::default();
+        let executor = flowgen_core::executor::Executor::new(self.cache.clone(), lease_config)?;
+        let executor = Arc::new(executor);
+
+        let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
+            .executor(executor)
+            .build()?;
+        let task_manager = Arc::new(task_manager.start().await);
 
         self.task_manager = Some(task_manager);
 
@@ -1128,8 +1136,6 @@ pub struct FlowBuilder {
     config: Option<Arc<FlowConfig>>,
     /// Optional shared HTTP server instance.
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// Optional host client for coordination.
-    host: Option<Arc<dyn flowgen_core::host::Host>>,
     /// Shared cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
@@ -1155,12 +1161,6 @@ impl FlowBuilder {
     /// Sets the shared HTTP server instance.
     pub fn http_server(mut self, server: Arc<dyn flowgen_core::http_server::HttpServer>) -> Self {
         self.http_server = Some(server);
-        self
-    }
-
-    /// Sets the host client for coordination.
-    pub fn host(mut self, client: Option<Arc<dyn flowgen_core::host::Host>>) -> Self {
-        self.host = client;
         self
     }
 
@@ -1201,7 +1201,6 @@ impl FlowBuilder {
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
-            host: self.host,
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,

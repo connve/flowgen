@@ -331,7 +331,11 @@ mod tests {
             "description".to_string(),
             Value::String("Loop Test".to_string()),
         );
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         Arc::new(

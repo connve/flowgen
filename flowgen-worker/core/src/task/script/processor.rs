@@ -818,7 +818,11 @@ mod tests {
             "description".to_string(),
             Value::String("Script Test".to_string()),
         );
-        let task_manager = Arc::new(crate::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let cache =
             Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
         Arc::new(
@@ -938,9 +942,11 @@ mod tests {
         });
 
         // Should not receive any event (filtered out)
-        tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect_err("Should timeout, no event emitted");
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "Expected no event to be sent (filtered out by null)"
+        );
     }
 
     #[tokio::test]

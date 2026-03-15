@@ -770,7 +770,11 @@ mod tests {
     async fn test_processor_builder_missing_config() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let (_task_tx, rx) = tokio::sync::mpsc::channel(1);
-        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let task_context = Arc::new(flowgen_core::task::context::TaskContext {
             flow: flowgen_core::task::context::FlowOptions {
                 name: "test".to_string(),
@@ -830,7 +834,11 @@ mod tests {
             schema: None,
         });
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let task_manager = Arc::new(flowgen_core::task::manager::TaskManagerBuilder::new().build());
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
         let task_context = Arc::new(flowgen_core::task::context::TaskContext {
             flow: flowgen_core::task::context::FlowOptions {
                 name: "test".to_string(),
