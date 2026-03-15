@@ -111,11 +111,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!(
-            "{}{}",
-            store.put_prefix.as_ref().unwrap_or(&store.prefix),
-            key
-        );
+        let subject = format!("{}{}", &store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
@@ -180,11 +176,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!(
-            "{}{}",
-            store.put_prefix.as_ref().unwrap_or(&store.prefix),
-            key
-        );
+        let subject = format!("{}{}", &store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
@@ -236,11 +228,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!(
-            "{}{}",
-            store.put_prefix.as_ref().unwrap_or(&store.prefix),
-            key
-        );
+        let subject = format!("{}{}", &store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
@@ -295,11 +283,46 @@ impl flowgen_core::cache::Cache for Cache {
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
         match store.entry(key).await {
-            Ok(Some(entry)) => {
+            Ok(Some(entry)) if !entry.value.is_empty() => {
                 let revision = entry.revision;
                 let value = entry.value;
                 Ok(Some((value, revision)))
             }
+            Ok(Some(_)) | Ok(None) => Ok(None),
+            Err(e) => Err(flowgen_core::cache::CacheError::GetFailed(Box::new(
+                Error::KVEntry { source: e },
+            ))),
+        }
+    }
+
+    async fn delete_with_revision(
+        &self,
+        key: &str,
+        expected_revision: u64,
+    ) -> Result<(), flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        store
+            .delete_expect_revision(key, Some(expected_revision))
+            .await
+            .map_err(|e| {
+                flowgen_core::cache::CacheError::DeleteFailed(Box::new(Error::KVDelete {
+                    source: e,
+                }))
+            })
+    }
+
+    async fn get_revision(&self, key: &str) -> Result<Option<u64>, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        match store.entry(key).await {
+            Ok(Some(entry)) => Ok(Some(entry.revision)),
             Ok(None) => Ok(None),
             Err(e) => Err(flowgen_core::cache::CacheError::GetFailed(Box::new(
                 Error::KVEntry { source: e },

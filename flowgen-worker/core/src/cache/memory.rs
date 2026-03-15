@@ -110,6 +110,31 @@ impl super::Cache for MemoryCache {
             .get(key)
             .map(|entry| (entry.value.clone(), entry.revision)))
     }
+
+    async fn delete_with_revision(
+        &self,
+        key: &str,
+        expected_revision: u64,
+    ) -> Result<(), super::Error> {
+        match self.data.entry(key.to_string()) {
+            dashmap::Entry::Occupied(entry) => {
+                let current_revision = entry.get().revision;
+                if current_revision != expected_revision {
+                    return Err(super::CacheError::RevisionMismatch {
+                        expected: expected_revision,
+                        actual: current_revision,
+                    });
+                }
+                entry.remove();
+                Ok(())
+            }
+            dashmap::Entry::Vacant(_) => Err(super::CacheError::NotFound),
+        }
+    }
+
+    async fn get_revision(&self, key: &str) -> Result<Option<u64>, super::Error> {
+        Ok(self.data.get(key).map(|entry| entry.revision))
+    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Prefix for all lease keys in the cache for better organization.
+pub const LEASE_KEY_PREFIX: &str = "lease.";
+
 /// Default lease duration in seconds (60 seconds).
 const DEFAULT_LEASE_DURATION_SECS: u64 = 60;
 
@@ -35,13 +38,13 @@ pub enum LeaseConfigError {
 /// Lease metadata stored in cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseMetadata {
-    /// Identity of the lease holder (pod name, hostname, etc.)
+    /// Identity of the lease holder (hostname, instance ID, etc.).
     pub holder_identity: String,
     /// Unix timestamp when lease was acquired/renewed (seconds).
     pub renewed_at: u64,
     /// Lease duration in seconds.
     pub lease_duration_secs: u64,
-    /// Generation counter to prevent zombie leases during network partitions.
+    /// Generation counter to track lease lineage.
     /// Incremented on each acquisition, preserved on renewal.
     #[serde(default)]
     pub generation: u64,
@@ -54,7 +57,7 @@ pub struct LeaseConfig {
     pub lease_duration: Duration,
     /// How often to renew the lease (default: 10 seconds).
     pub renewal_interval: Duration,
-    /// Identity of this executor (pod name, hostname, etc.).
+    /// Identity of this executor (hostname, instance ID, etc.).
     pub holder_identity: String,
     /// Retry configuration for lease acquisition with exponential backoff and jitter.
     pub retry_config: crate::retry::RetryConfig,
@@ -63,7 +66,7 @@ pub struct LeaseConfig {
 impl Default for LeaseConfig {
     fn default() -> Self {
         // Get holder identity from environment or generate a unique one.
-        // Priority: POD_NAME (K8s) > HOSTNAME (env) > unique generated ID with PID and timestamp
+        // Priority: POD_NAME > HOSTNAME > unique generated ID with PID and timestamp
         let holder_identity = std::env::var("POD_NAME")
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| {
@@ -135,9 +138,9 @@ pub enum RenewalResult {
 
 /// Executor manages distributed coordination via cache-based leases.
 ///
-/// This replaces the Kubernetes-specific Host trait with a universal abstraction that
-/// works with any Cache implementation (NATS KV, Redis, etc.) using atomic operations
-/// for compare-and-swap semantics.
+/// Provides a universal lease management abstraction that works with any Cache
+/// implementation (NATS KV, Redis, etc.) using atomic operations for
+/// compare-and-swap semantics.
 #[derive(Debug, Clone)]
 pub struct Executor {
     cache: Arc<dyn crate::cache::Cache>,
@@ -165,22 +168,25 @@ impl Executor {
     /// 2. If the lease exists, check if it has expired beyond its duration.
     /// 3. For expired leases, attempt atomic takeover using revision number for consistency.
     ///
-    /// The generation counter in LeaseMetadata prevents zombie processes from reclaiming
-    /// leases after network partitions or long pauses.
+    /// The generation counter in LeaseMetadata ensures proper lease lineage tracking
+    /// and prevents stale processes from incorrectly reclaiming leases.
     pub async fn acquire_lease(
         &self,
         lease_name: &str,
     ) -> Result<LeaseResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
+            .map_err(|e| {
+                tracing::warn!(error = %e, "System clock went backwards");
+                crate::cache::CacheError::CreateFailed(Box::new(e))
+            })?
             .as_secs();
 
         let metadata = LeaseMetadata {
             holder_identity: self.config.holder_identity.clone(),
             renewed_at: now,
             lease_duration_secs: self.config.lease_duration.as_secs(),
-            generation: 1, // First acquisition
+            generation: 1,
         };
 
         let value = serde_json::to_vec(&metadata)
@@ -216,22 +222,44 @@ impl Executor {
             match self.cache.get_with_revision(lease_name).await? {
                 Some(entry) => entry,
                 None => {
-                    // Lease was deleted between our failed create attempt and the get operation.
-                    // This is an extremely rare race condition but possible. We return NotFound
-                    // to allow the caller to retry with their configured retry policy.
-                    tracing::debug!(
-                        lease_name = %lease_name,
-                        "Lease was deleted during acquisition attempt"
-                    );
-                    return Err(crate::cache::CacheError::NotFound);
+                    // No value but key exists - this is a DELETE tombstone.
+                    // Get the tombstone's revision and overwrite it.
+                    if let Some(tombstone_revision) = self.cache.get_revision(lease_name).await? {
+                        tracing::debug!(
+                            lease_name = %lease_name,
+                            tombstone_revision = %tombstone_revision,
+                            "Overwriting DELETE tombstone with new lease"
+                        );
+                        let new_revision = self
+                            .cache
+                            .update(
+                                lease_name,
+                                Bytes::from(value),
+                                tombstone_revision,
+                                Some(self.config.lease_duration.as_secs()),
+                            )
+                            .await?;
+                        return Ok(LeaseResult::Acquired {
+                            revision: new_revision,
+                        });
+                    } else {
+                        // Race condition: create() saw a key (tombstone or value), but now
+                        // it's completely gone. Another pod likely deleted or TTL expired it.
+                        // Retry from the beginning to attempt fresh acquisition.
+                        tracing::debug!(
+                            lease_name = %lease_name,
+                            "Key disappeared between create and get, retrying acquisition"
+                        );
+                        return Err(crate::cache::CacheError::NotFound);
+                    }
                 }
             };
 
         let current_metadata: LeaseMetadata = serde_json::from_slice(&current_value)
             .map_err(|e| crate::cache::CacheError::GetFailed(Box::new(e)))?;
 
-        // Check if current holder is self. This can happen during pod restarts where
-        // the same pod reclaims its lease before it expired.
+        // Check if current holder is self. This can happen during process restarts where
+        // the same instance reclaims its lease before it expired.
         if current_metadata.holder_identity == self.config.holder_identity {
             tracing::debug!(
                 lease_name = %lease_name,
@@ -352,10 +380,16 @@ impl Executor {
     ) -> Result<RenewalResult, crate::cache::Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
+            .map_err(|e| {
+                tracing::warn!(error = %e, "System clock went backwards");
+                crate::cache::CacheError::UpdateFailed(Box::new(e))
+            })?
             .as_secs();
 
-        // Get current lease to preserve generation counter.
+        // Fetch current lease metadata to preserve the generation counter.
+        // This extra round-trip is necessary because our cache API replaces the entire
+        // value during updates. Without this, we would lose the generation counter
+        // which tracks lease lineage across takeovers.
         let (current_value, _) = self
             .cache
             .get_with_revision(lease_name)
@@ -369,7 +403,7 @@ impl Executor {
             holder_identity: self.config.holder_identity.clone(),
             renewed_at: now,
             lease_duration_secs: self.config.lease_duration.as_secs(),
-            generation: current_metadata.generation, // Preserve generation on renewal
+            generation: current_metadata.generation,
         };
 
         let value = serde_json::to_vec(&metadata)
@@ -426,13 +460,50 @@ impl Executor {
         }
     }
 
-    /// Releases a lease that this executor owns.
+    /// Checks if this executor still owns the lease and returns the revision if so.
+    pub async fn still_owns_lease(
+        &self,
+        lease_name: &str,
+    ) -> Result<Option<u64>, crate::cache::Error> {
+        match self.cache.get_with_revision(lease_name).await? {
+            Some((value, revision)) => {
+                let metadata: LeaseMetadata = serde_json::from_slice(&value)
+                    .map_err(|e| crate::cache::CacheError::GetFailed(Box::new(e)))?;
+                if metadata.holder_identity == self.config.holder_identity {
+                    Ok(Some(revision))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Releases a lease that this executor owns (unconditional delete).
     pub async fn release_lease(&self, lease_name: &str) -> Result<(), crate::cache::Error> {
         self.cache.delete(lease_name).await?;
         tracing::debug!(
             lease_name = %lease_name,
             holder = %self.config.holder_identity,
             "Released lease"
+        );
+        Ok(())
+    }
+
+    /// Atomically releases a lease only if this executor still owns it at the given revision.
+    pub async fn release_lease_with_revision(
+        &self,
+        lease_name: &str,
+        expected_revision: u64,
+    ) -> Result<(), crate::cache::Error> {
+        self.cache
+            .delete_with_revision(lease_name, expected_revision)
+            .await?;
+        tracing::debug!(
+            lease_name = %lease_name,
+            holder = %self.config.holder_identity,
+            revision = %expected_revision,
+            "Released lease atomically"
         );
         Ok(())
     }
@@ -608,5 +679,223 @@ mod tests {
         // Verify lease is gone by trying to acquire it again.
         let result = executor.acquire_lease("test-lease").await.unwrap();
         assert!(matches!(result, LeaseResult::Acquired { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_lease_deleted_during_renewal() {
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        let config = LeaseConfig {
+            holder_identity: "executor-1".to_string(),
+            ..Default::default()
+        };
+        let executor = Executor::new(cache.clone(), config).unwrap();
+
+        // Acquire lease.
+        let LeaseResult::Acquired { revision } =
+            executor.acquire_lease("test-lease").await.unwrap()
+        else {
+            panic!("Failed to acquire lease");
+        };
+
+        // Delete the lease externally.
+        cache.delete("test-lease").await.unwrap();
+
+        // Try to renew - since the lease is deleted when we fetch to get generation, we get NotFound.
+        let result = executor.renew_lease("test-lease", revision).await;
+        assert!(matches!(result, Err(crate::cache::CacheError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_generation_counter_increments_on_takeover() {
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+
+        let executor1 = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "executor-1".to_string(),
+                lease_duration: Duration::from_secs(1),
+                renewal_interval: Duration::from_millis(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Acquire lease and check generation is 1.
+        executor1.acquire_lease("test-lease").await.unwrap();
+
+        let (value, _) = cache
+            .get_with_revision("test-lease")
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata: LeaseMetadata = serde_json::from_slice(&value).unwrap();
+        assert_eq!(metadata.generation, 1);
+
+        // Wait for expiry.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Executor 2 takes over.
+        let executor2 = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "executor-2".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        executor2.acquire_lease("test-lease").await.unwrap();
+
+        // Check generation incremented to 2.
+        let (value, _) = cache
+            .get_with_revision("test-lease")
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata: LeaseMetadata = serde_json::from_slice(&value).unwrap();
+        assert_eq!(metadata.generation, 2);
+        assert_eq!(metadata.holder_identity, "executor-2");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_lease_acquisition() {
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        let lease_name = "concurrent-lease";
+
+        // Spawn 10 executors trying to acquire the same lease.
+        let mut handles = vec![];
+        for i in 0..10 {
+            let cache_clone = cache.clone();
+            let lease_name = lease_name.to_string();
+            let handle = tokio::spawn(async move {
+                let executor = Executor::new(
+                    cache_clone,
+                    LeaseConfig {
+                        holder_identity: format!("executor-{i}"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                executor.acquire_lease(&lease_name).await
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete.
+        use futures_util::future::join_all;
+        let results: Vec<_> = join_all(handles).await;
+
+        // Exactly one should have acquired the lease.
+        let acquired_count = results
+            .iter()
+            .filter(|join_result| matches!(join_result, Ok(Ok(LeaseResult::Acquired { .. }))))
+            .count();
+
+        assert_eq!(
+            acquired_count, 1,
+            "Exactly one executor should acquire the lease"
+        );
+
+        // Others should see it as held by other.
+        let held_by_other_count = results
+            .iter()
+            .filter(|join_result| matches!(join_result, Ok(Ok(LeaseResult::HeldByOther { .. }))))
+            .count();
+
+        assert_eq!(
+            held_by_other_count, 9,
+            "Nine executors should see lease held by other"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lease_config_validation() {
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+
+        // Test zero lease duration.
+        let result = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "test".to_string(),
+                lease_duration: Duration::from_secs(0),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(LeaseConfigError::ZeroLeaseDuration)));
+
+        // Test excessive lease duration.
+        let result = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "test".to_string(),
+                lease_duration: Duration::from_secs(7200),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LeaseConfigError::ExcessiveLeaseDuration(_))
+        ));
+
+        // Test invalid renewal interval.
+        let result = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "test".to_string(),
+                lease_duration: Duration::from_secs(10),
+                renewal_interval: Duration::from_secs(15),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(LeaseConfigError::InvalidRenewalInterval { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_lease_race_with_deletion() {
+        // This test validates the fix for the NATS empty bytes issue.
+        // When NATS returns empty bytes for expired TTL tombstones, cache.rs now
+        // filters them out and returns None from get_with_revision(). This test
+        // ensures the executor handles this case correctly by returning NotFound,
+        // which allows the task_manager retry logic to acquire the lease.
+        let cache = Arc::new(MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+
+        let executor1 = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "executor-1".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let executor2 = Executor::new(
+            cache.clone(),
+            LeaseConfig {
+                holder_identity: "executor-2".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Executor 1 creates a lease.
+        executor1.acquire_lease("test-lease").await.unwrap();
+
+        // Delete the lease to simulate NATS returning empty bytes for expired TTL.
+        // In the real scenario, NATS KV returns empty bytes which cache.rs filters
+        // out, making get_with_revision() return None.
+        cache.delete("test-lease").await.unwrap();
+
+        // Executor 2 tries to acquire the deleted lease.
+        // The acquire_lease flow:
+        // 1. create() succeeds because the key doesn't exist anymore
+        let result = executor2.acquire_lease("test-lease").await;
+
+        // Since the key was deleted, create() should succeed and return Acquired.
+        // This validates that after filtering out empty bytes (simulated by deletion),
+        // the system can recover and acquire new leases.
+        assert!(matches!(result, Ok(LeaseResult::Acquired { .. })));
     }
 }

@@ -236,7 +236,12 @@ impl TaskManager {
                     debug!("Received task registration: {:?}", registration.task_id);
                     let result = if registration.leader_election_options.is_some() {
                         // Sanitize task_id to be DNS-safe (RFC 1123): replace underscores with hyphens.
-                        let lease_name = registration.task_id.replace('_', "-").to_lowercase();
+                        // Add lease prefix for better organization in the cache namespace.
+                        let lease_name = format!(
+                            "{}{}",
+                            crate::executor::LEASE_KEY_PREFIX,
+                            registration.task_id.replace('_', "-").to_lowercase()
+                        );
                         match executor.acquire_lease(&lease_name).await {
                             Ok(crate::executor::LeaseResult::Acquired { revision })
                             | Ok(crate::executor::LeaseResult::TakenOver { revision }) => {
@@ -356,11 +361,6 @@ impl TaskManager {
 
     /// Internal shutdown implementation without timeout wrapper.
     async fn shutdown_internal(&self) -> Result<(), Error> {
-        // Abort all background tasks first to prevent race conditions during shutdown.
-        // Renewal tasks continuously update leases every 10 seconds, and retry tasks attempt
-        // to acquire leases every 5 seconds. If we delete leases before aborting these tasks,
-        // they may immediately re-acquire the leases, causing multiple pods to become leaders
-        // simultaneously during a rollout restart.
         let mut handles_lock = self.active_leases.lock().await;
 
         for (task_id, active_lease) in handles_lock.iter() {
@@ -368,29 +368,33 @@ impl TaskManager {
             active_lease.handle.abort();
         }
 
-        // Collect task identifiers before clearing the map. We need these to construct
-        // the lease names for deletion from Kubernetes.
         let task_ids: Vec<String> = handles_lock.keys().cloned().collect();
-
-        // Clear the handles map to prevent any future access to the aborted tasks.
-        // This ensures the tasks are properly cleaned up and resources are freed.
         handles_lock.clear();
-
-        // Release the mutex lock before making network calls to Kubernetes.
-        // Holding locks during network operations can cause deadlocks if other
-        // operations need to acquire the same lock while waiting for network responses.
         drop(handles_lock);
 
-        // Delete all leases after tasks are safely aborted.
-        // At this point, no background tasks are running that could race to re-acquire
-        // the leases we are about to delete.
         for task_id in task_ids {
-            // Convert task identifier to lease name using the same sanitization
-            // applied during registration (DNS-safe: replace underscores with hyphens).
-            let lease_name = task_id.replace('_', "-").to_lowercase();
+            let lease_name = format!(
+                "{}{}",
+                crate::executor::LEASE_KEY_PREFIX,
+                task_id.replace('_', "-").to_lowercase()
+            );
 
-            if let Err(e) = self.executor.release_lease(&lease_name).await {
-                warn!("Failed to delete lease {} on shutdown: {}", lease_name, e);
+            match self.executor.still_owns_lease(&lease_name).await {
+                Ok(Some(revision)) => {
+                    if let Err(e) = self
+                        .executor
+                        .release_lease_with_revision(&lease_name, revision)
+                        .await
+                    {
+                        warn!("Failed to release lease {}: {}", lease_name, e);
+                    }
+                }
+                Ok(None) => {
+                    debug!("Lease {} no longer owned, skipping deletion", lease_name);
+                }
+                Err(e) => {
+                    warn!("Failed to check lease ownership for {}: {}", lease_name, e);
+                }
             }
         }
         Ok(())

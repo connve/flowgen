@@ -152,140 +152,38 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Use Case
     /// Lease takeover - get current lease holder and revision to check if expired.
     async fn get_with_revision(&self, key: &str) -> Result<Option<(bytes::Bytes, u64)>, Error>;
+
+    /// Deletes a key only if the current revision matches (atomic compare-and-swap delete).
+    ///
+    /// # Arguments
+    /// * `key` - The key to delete
+    /// * `expected_revision` - The revision that must match for deletion to succeed
+    ///
+    /// # Returns
+    /// * `Ok(())` - Delete successful
+    /// * `Err(CacheError::RevisionMismatch)` - Revision doesn't match (another process modified it)
+    /// * `Err(CacheError::NotFound)` - Key doesn't exist
+    /// * `Err(e)` - Operation failed
+    ///
+    /// # Use Case
+    /// Lease release on shutdown - ensures we only delete if we still own the lease.
+    async fn delete_with_revision(&self, key: &str, expected_revision: u64) -> Result<(), Error>;
+
+    /// Gets the current revision number, even for deleted keys (tombstones).
+    ///
+    /// # Returns
+    /// * `Ok(Some(revision))` - Key or tombstone exists with revision
+    /// * `Ok(None)` - Key never existed
+    /// * `Err(e)` - Operation failed
+    ///
+    /// # Use Case
+    /// Overwriting DELETE tombstones during lease acquisition.
+    async fn get_revision(&self, key: &str) -> Result<Option<u64>, Error>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// Mock cache implementation for testing.
-    #[derive(Debug)]
-    struct MockCache {
-        data: HashMap<String, bytes::Bytes>,
-        should_error: bool,
-    }
-
-    #[derive(Debug)]
-    struct MockError;
-
-    impl std::fmt::Display for MockError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "Mock cache error")
-        }
-    }
-
-    impl std::error::Error for MockError {}
-
-    #[async_trait]
-    impl Cache for MockCache {
-        async fn put(
-            &self,
-            _key: &str,
-            _value: bytes::Bytes,
-            _ttl_secs: Option<u64>,
-        ) -> Result<(), Error> {
-            if self.should_error {
-                Err(CacheError::PutFailed(Box::new(MockError)))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, Error> {
-            if self.should_error {
-                Err(CacheError::GetFailed(Box::new(MockError)))
-            } else {
-                Ok(self.data.get(key).cloned())
-            }
-        }
-
-        async fn delete(&self, _key: &str) -> Result<(), Error> {
-            if self.should_error {
-                Err(CacheError::DeleteFailed(Box::new(MockError)))
-            } else {
-                Ok(())
-            }
-        }
-
-        async fn create(
-            &self,
-            _key: &str,
-            _value: bytes::Bytes,
-            _ttl_secs: Option<u64>,
-        ) -> Result<u64, Error> {
-            if self.should_error {
-                Err(CacheError::CreateFailed(Box::new(MockError)))
-            } else {
-                Ok(1)
-            }
-        }
-
-        async fn update(
-            &self,
-            _key: &str,
-            _value: bytes::Bytes,
-            _expected_revision: u64,
-            _ttl_secs: Option<u64>,
-        ) -> Result<u64, Error> {
-            if self.should_error {
-                Err(CacheError::UpdateFailed(Box::new(MockError)))
-            } else {
-                Ok(2)
-            }
-        }
-
-        async fn get_with_revision(&self, key: &str) -> Result<Option<(bytes::Bytes, u64)>, Error> {
-            if self.should_error {
-                Err(CacheError::GetFailed(Box::new(MockError)))
-            } else {
-                Ok(self.data.get(key).cloned().map(|v| (v, 1)))
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_cache_put_success() {
-        let cache = MockCache {
-            data: HashMap::new(),
-            should_error: false,
-        };
-
-        let result = cache
-            .put("test_key", bytes::Bytes::from("test_value"), None)
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_cache_get_success() {
-        let mut data = HashMap::new();
-        data.insert(
-            "existing_key".to_string(),
-            bytes::Bytes::from("existing_value"),
-        );
-
-        let cache = MockCache {
-            data,
-            should_error: false,
-        };
-
-        let result = cache.get("existing_key").await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(bytes::Bytes::from("existing_value")));
-    }
-
-    #[tokio::test]
-    async fn test_cache_get_not_found() {
-        let cache = MockCache {
-            data: HashMap::new(),
-            should_error: false,
-        };
-
-        let result = cache.get("nonexistent_key").await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
-    }
 
     #[test]
     fn test_cache_options_default() {
