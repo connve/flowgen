@@ -361,10 +361,16 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     // Run event loop until failure, then reinitialize.
                     match event_handler.handle().await {
                         Ok(()) => {
-                            warn!("Subscriber event loop terminated cleanly, reinitializing");
+                            if self.task_context.cancellation_token.is_cancelled() {
+                                return;
+                            }
+                            warn!("Subscriber lost connectivity, reinitializing");
                         }
                         Err(e) => {
-                            error!(error = %e, "Subscriber event loop failed, reinitializing");
+                            if self.task_context.cancellation_token.is_cancelled() {
+                                return;
+                            }
+                            error!(error = %e, "Subscriber lost connectivity, reinitializing");
                         }
                     }
 

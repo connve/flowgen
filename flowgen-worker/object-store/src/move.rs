@@ -127,9 +127,10 @@ impl EventHandler {
                 source_files
                     .iter()
                     .filter_map(|uri| {
-                        url::Url::parse(uri)
-                            .ok()
-                            .map(|url| object_store::path::Path::from(url.path()))
+                        url::Url::parse(uri).ok().map(|url| {
+                            let path = url.path().trim_start_matches('/');
+                            object_store::path::Path::from(path)
+                        })
                     })
                     .collect()
             } else {
@@ -229,7 +230,13 @@ impl EventHandler {
                     }
                 }
 
-                copy_result.map_err(|source| Error::ObjectStore { source })?;
+                // Handle copy result: if file already exists, it was moved in a previous attempt.
+                // In this case, proceed to delete the source to complete the move operation.
+                match copy_result {
+                    Ok(_) => {}
+                    Err(object_store::Error::AlreadyExists { .. }) => {}
+                    Err(e) => return Err(Error::ObjectStore { source: e }),
+                }
 
                 // Delete source file
                 let mut delete_result = {
