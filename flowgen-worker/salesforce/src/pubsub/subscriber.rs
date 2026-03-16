@@ -251,7 +251,7 @@ impl EventHandler {
             }
         }
 
-        // Only cache replay_id if ALL events in the batch succeeded.
+        // Only cache replay_id if all events in the batch succeeded.
         if all_succeeded {
             if let Some(replay_id) = last_replay_id {
                 if self
@@ -583,27 +583,41 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    error!(error = %e, "Failed to initialize subscriber");
-                    Err(tokio_retry::RetryError::transient(e))
-                }
-            }
-        })
-        .await
-        {
-            Ok(handler) => handler,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
         tokio::spawn(
             async move {
-                if let Err(e) = event_handler.handle().await {
-                    error!(error = %e, "Failed to process events");
+                // Infinite retry loop: subscribers must maintain connectivity indefinitely.
+                loop {
+                    // Initialize with circuit breaker to detect permanent errors (bad credentials, etc.).
+                    let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+                        match self.init().await {
+                            Ok(handler) => Ok(handler),
+                            Err(e) => {
+                                error!(error = %e, "Subscriber initialization failed");
+                                Err(tokio_retry::RetryError::transient(e))
+                            }
+                        }
+                    })
+                    .await
+                    {
+                        Ok(handler) => handler,
+                        Err(e) => {
+                            error!(error = %e, "Subscriber initialization exhausted retry attempts, will retry after backoff");
+                            tokio::time::sleep(retry_config.initial_backoff).await;
+                            continue;
+                        }
+                    };
+
+                    // Run event loop until failure, then reinitialize.
+                    match event_handler.handle().await {
+                        Ok(()) => {
+                            warn!("Subscriber event loop terminated cleanly, reinitializing");
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Subscriber event loop failed, reinitializing");
+                        }
+                    }
+
+                    tokio::time::sleep(retry_config.initial_backoff).await;
                 }
             }
             .instrument(tracing::Span::current()),

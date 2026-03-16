@@ -85,7 +85,11 @@ fn spawn_renewal_task(
     )
 }
 
-/// Spawns a task to retry lease acquisition with exponential backoff.
+/// Spawns a task to retry lease acquisition with infinite exponential backoff.
+///
+/// Unlike task execution retries, lease acquisition uses infinite retries (no max_attempts).
+/// This prevents outages where all pods give up trying to acquire leases during high contention
+/// (e.g., rolling restarts with DELETE tombstone races).
 fn spawn_acquisition_retry_task(
     task_id: String,
     lease_name: String,
@@ -95,10 +99,13 @@ fn spawn_acquisition_retry_task(
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
-            let mut retry_strategy = executor.config.retry_config.strategy();
+            let infinite_retry_config = crate::retry::RetryConfig {
+                max_attempts: None,
+                initial_backoff: executor.config.retry_config.initial_backoff,
+            };
+            let mut retry_strategy = infinite_retry_config.strategy();
             let mut attempt = 0;
 
-            // First attempt without delay.
             loop {
                 attempt += 1;
 
@@ -146,7 +153,6 @@ fn spawn_acquisition_retry_task(
                     }
                 }
 
-                // Get next delay from retry strategy.
                 if let Some(delay) = retry_strategy.next() {
                     debug!(
                         task_id = %task_id,
@@ -155,16 +161,6 @@ fn spawn_acquisition_retry_task(
                         "Waiting before next lease acquisition attempt"
                     );
                     tokio::time::sleep(delay).await;
-                } else {
-                    // No more retries allowed by the strategy.
-                    error!(
-                        task_id = %task_id,
-                        attempts = %attempt,
-                        "Exceeded maximum retry attempts for lease acquisition, giving up"
-                    );
-                    // Notify that we're not the leader and won't retry anymore.
-                    let _ = response_tx.send(LeaderElectionResult::NotLeader);
-                    break;
                 }
             }
         }
