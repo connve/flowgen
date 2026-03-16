@@ -230,7 +230,13 @@ impl EventHandler {
                     }
                 }
 
-                copy_result.map_err(|source| Error::ObjectStore { source })?;
+                // Handle copy result: if file already exists, it was moved in a previous attempt.
+                // In this case, proceed to delete the source to complete the move operation.
+                match copy_result {
+                    Ok(_) => {}
+                    Err(object_store::Error::AlreadyExists { .. }) => {}
+                    Err(e) => return Err(Error::ObjectStore { source: e }),
+                }
 
                 // Delete source file
                 let mut delete_result = {
