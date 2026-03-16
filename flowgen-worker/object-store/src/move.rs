@@ -127,9 +127,10 @@ impl EventHandler {
                 source_files
                     .iter()
                     .filter_map(|uri| {
-                        url::Url::parse(uri)
-                            .ok()
-                            .map(|url| object_store::path::Path::from(url.path()))
+                        url::Url::parse(uri).ok().map(|url| {
+                            let path = url.path().trim_start_matches('/');
+                            object_store::path::Path::from(path)
+                        })
                     })
                     .collect()
             } else {
