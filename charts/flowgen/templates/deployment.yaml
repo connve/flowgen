@@ -166,7 +166,7 @@ spec:
       - name: {{ $key | kebabcase }}
         secret:
           secretName: {{ $volume.secretName }}
-          defaultMode: 0400
+          defaultMode: 0440
       {{- else if eq $key "flows" }}
       {{- if and $worker.flows.existingConfigMaps (gt (len $worker.flows.existingConfigMaps) 0) }}
       {{- range $idx, $cm := $worker.flows.existingConfigMaps }}
@@ -220,7 +220,7 @@ spec:
       - name: wireguard-credentials
         secret:
           secretName: {{ $worker.wireguard.secretName }}
-          defaultMode: 0400
+          defaultMode: 0440
       - name: wireguard-runtime
         hostPath:
           path: /lib/modules

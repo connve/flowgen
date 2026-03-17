@@ -44,6 +44,7 @@ flowgen-worker:
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 65534
+    fsGroup: 65534
 
   # Termination grace period must be >= preStop sleep duration
   terminationGracePeriodSeconds: 45
@@ -90,7 +91,7 @@ flowgen-worker:
   # Also accessible in flow configs via {{env.VAR_NAME}}.
   # Example:
   # - name: RUST_LOG
-  #   value: "info,async_nats=warn"
+  #   value: "info,async_nats=warn,opentelemetry=warn,tiberius=warn"
   env: []
 
   # Flow and resource configuration management.
@@ -107,13 +108,13 @@ flowgen-worker:
     #
     # Simple array format - each ConfigMap mounts to an indexed path like /etc/app/flows/0:
     #   existingConfigMaps:
-    #     - flows-salesforce
+    #     - flows-mssql
     #     - flows-gcp
     #
     # Object format with custom paths - specify exact mount location for each ConfigMap:
     #   existingConfigMaps:
-    #     - name: flows-salesforce
-    #       mountPath: /etc/app/flows/salesforce
+    #     - name: flows-mssql
+    #       mountPath: /etc/app/flows/mssql
     #     - name: flows-gcp
     #       mountPath: /etc/app/flows/gcp
     existingConfigMaps: []
@@ -177,10 +178,6 @@ flowgen-worker:
     #   enabled: true
     #   secretName: "my-nats-secret"
     #   mountPath: /etc/nats
-    # sfdcCredentials:
-    #   enabled: true
-    #   secretName: "my-sfdc-secret"
-    #   mountPath: /etc/sfdc
     # gcpCredentials:
     #   enabled: true
     #   secretName: "my-gcp-secret"
