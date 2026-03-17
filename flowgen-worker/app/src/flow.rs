@@ -133,6 +133,9 @@ pub enum Error {
     /// Error in GCP BigQuery unified job operations.
     #[error(transparent)]
     GcpBigQueryJob(#[from] flowgen_gcp::bigquery::job::Error),
+    /// Error in Microsoft SQL Server query task.
+    #[error(transparent)]
+    MssqlQuery(#[from] flowgen_mssql::query::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1108,6 +1111,27 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_gcp::bigquery::job::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::mssql_query(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_mssql::query::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
