@@ -1,0 +1,41 @@
+flow:
+  name: mssql_query_basic
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # MSSQL query executes a simple SELECT query.
+    # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    - mssql_query:
+        name: fetch_customers
+        # Path to SQL Server credentials JSON file
+        # Expected format: {"host": "localhost", "port": 1433, "database": "mydb", "username": "sa", "password": "pass", "trust_server_certificate": true}
+        credentials_path: /etc/mssql/credentials.json
+        # SQL query (inline or resource file)
+        query: "SELECT customer_id, customer_name, email, created_at FROM customers WHERE active = 1 ORDER BY created_at DESC"
+        # Optional: Number of rows per Arrow RecordBatch (default: 10000)
+        batch_size: 10000
+        # Optional: Maximum number of connections in the pool (default: 10)
+        max_connections: 10
+        # Optional: Connection timeout (default: 30s)
+        connection_timeout: "30s"
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false

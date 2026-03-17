@@ -1,0 +1,50 @@
+flow:
+  name: mssql_query_parameterized
+  require_leader_election: true
+  tasks:
+
+    # Run this task on specified intervals to fetch recent orders.
+    - generate:
+        name: generate_jobs
+        interval: 300s
+
+    # MSSQL query with parameterized SQL for SQL injection protection.
+    # Parameters are positional (@p1, @p2, etc.) and properly escaped by the driver.
+    #
+    # This example demonstrates loading SQL from an external resource file.
+    # The query is loaded from "resources/mssql/queries/fetch_orders.sql"
+    # where "resources/" is the base path configured in config.yaml.
+    - mssql_query:
+        name: fetch_orders
+        # Path to SQL Server credentials JSON file
+        # Expected format: {"host": "localhost", "port": 1433, "database": "mydb", "username": "sa", "password": "pass", "trust_server_certificate": true}
+        credentials_path: /etc/mssql/credentials.json
+        # SQL query loaded from external file
+        query:
+          resource: "mssql/queries/fetch_orders.sql"
+        # Query parameters (referenced as @p1, @p2, etc. in SQL)
+        # Example SQL: SELECT * FROM orders WHERE status = @p1 AND order_date >= @p2
+        parameters:
+          - "completed"
+          - "2024-01-01"
+        # Optional: Number of rows per Arrow RecordBatch (default: 10000)
+        batch_size: 10000
+        # Optional: Maximum number of connections in the pool (default: 10)
+        max_connections: 10
+        # Optional: Connection timeout (default: 30s)
+        connection_timeout: "30s"
+
+    # Convert Arrow RecordBatch to JSON format for downstream processing.
+    - convert:
+        name: arrow_to_json
+        target_format: json
+
+    # Split JSON array into individual row events for per-record processing.
+    - iterate:
+        name: split_rows
+
+    # Output individual row events to console for debugging and monitoring.
+    - log:
+        name: log
+        level: info
+        structured: false

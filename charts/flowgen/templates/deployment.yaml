@@ -69,14 +69,24 @@ spec:
         {{- if and (hasKey $volume "enabled") $volume.enabled }}
         {{- if eq $key "flows" }}
         {{- if and $worker.flows.existingConfigMaps (gt (len $worker.flows.existingConfigMaps) 0) }}
-        {{- range $idx, $cmName := $worker.flows.existingConfigMaps }}
+        {{- range $idx, $cm := $worker.flows.existingConfigMaps }}
+        {{- if kindIs "string" $cm }}
         - name: {{ $key | kebabcase }}-{{ $idx }}
-          mountPath: {{ $volume.mountPath }}
+          mountPath: {{ $volume.mountPath }}/{{ $idx }}
           {{- if hasKey $volume "readOnly" }}
           readOnly: {{ $volume.readOnly }}
           {{- else }}
           readOnly: true
           {{- end }}
+        {{- else }}
+        - name: {{ $key | kebabcase }}-{{ $idx }}
+          mountPath: {{ $cm.mountPath | default (printf "%s/%d" $volume.mountPath $idx) }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
         {{- end }}
         {{- else }}
         - name: {{ $key | kebabcase }}
@@ -89,14 +99,24 @@ spec:
         {{- end }}
         {{- else if eq $key "flowResources" }}
         {{- if and $worker.flowResources.existingConfigMaps (gt (len $worker.flowResources.existingConfigMaps) 0) }}
-        {{- range $idx, $cmName := $worker.flowResources.existingConfigMaps }}
+        {{- range $idx, $cm := $worker.flowResources.existingConfigMaps }}
+        {{- if kindIs "string" $cm }}
         - name: {{ $key | kebabcase }}-{{ $idx }}
-          mountPath: {{ $volume.mountPath }}
+          mountPath: {{ $volume.mountPath }}/{{ $idx }}
           {{- if hasKey $volume "readOnly" }}
           readOnly: {{ $volume.readOnly }}
           {{- else }}
           readOnly: true
           {{- end }}
+        {{- else }}
+        - name: {{ $key | kebabcase }}-{{ $idx }}
+          mountPath: {{ $cm.mountPath | default (printf "%s/%d" $volume.mountPath $idx) }}
+          {{- if hasKey $volume "readOnly" }}
+          readOnly: {{ $volume.readOnly }}
+          {{- else }}
+          readOnly: true
+          {{- end }}
+        {{- end }}
         {{- end }}
         {{- else }}
         - name: {{ $key | kebabcase }}
@@ -118,6 +138,27 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
+      {{- if $worker.wireguard.enabled }}
+      - name: wireguard
+        image: "{{ $worker.wireguard.image.repository }}:{{ $worker.wireguard.image.tag }}"
+        imagePullPolicy: {{ $worker.wireguard.image.pullPolicy }}
+        securityContext:
+          {{- toYaml $worker.wireguard.securityContext | nindent 12 }}
+        env:
+        {{- with $worker.wireguard.env }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        volumeMounts:
+        - name: wireguard-credentials
+          mountPath: /config/wg0.conf
+          subPath: wg0.conf
+          readOnly: true
+        - name: wireguard-runtime
+          mountPath: /lib/modules
+          readOnly: true
+        resources:
+          {{- toYaml $worker.wireguard.resources | nindent 12 }}
+      {{- end }}
       volumes:
       {{- range $key, $volume := $worker.volumes }}
       {{- if and (hasKey $volume "enabled") $volume.enabled }}
@@ -125,12 +166,17 @@ spec:
       - name: {{ $key | kebabcase }}
         secret:
           secretName: {{ $volume.secretName }}
+          defaultMode: 0400
       {{- else if eq $key "flows" }}
       {{- if and $worker.flows.existingConfigMaps (gt (len $worker.flows.existingConfigMaps) 0) }}
-      {{- range $idx, $cmName := $worker.flows.existingConfigMaps }}
+      {{- range $idx, $cm := $worker.flows.existingConfigMaps }}
       - name: {{ $key | kebabcase }}-{{ $idx }}
         configMap:
-          name: {{ $cmName }}
+          {{- if kindIs "string" $cm }}
+          name: {{ $cm }}
+          {{- else }}
+          name: {{ $cm.name }}
+          {{- end }}
       {{- end }}
       {{- else }}
       - name: {{ $key | kebabcase }}
@@ -139,10 +185,14 @@ spec:
       {{- end }}
       {{- else if eq $key "flowResources" }}
       {{- if and $worker.flowResources.existingConfigMaps (gt (len $worker.flowResources.existingConfigMaps) 0) }}
-      {{- range $idx, $cmName := $worker.flowResources.existingConfigMaps }}
+      {{- range $idx, $cm := $worker.flowResources.existingConfigMaps }}
       - name: {{ $key | kebabcase }}-{{ $idx }}
         configMap:
-          name: {{ $cmName }}
+          {{- if kindIs "string" $cm }}
+          name: {{ $cm }}
+          {{- else }}
+          name: {{ $cm.name }}
+          {{- end }}
       {{- end }}
       {{- else }}
       - name: {{ $key | kebabcase }}
@@ -165,6 +215,16 @@ spec:
           name: {{ $volume.configMapName }}
       {{- end }}
       {{- end }}
+      {{- end }}
+      {{- if $worker.wireguard.enabled }}
+      - name: wireguard-credentials
+        secret:
+          secretName: {{ $worker.wireguard.secretName }}
+          defaultMode: 0400
+      - name: wireguard-runtime
+        hostPath:
+          path: /lib/modules
+          type: Directory
       {{- end }}
       {{- with $worker.nodeSelector }}
       nodeSelector:

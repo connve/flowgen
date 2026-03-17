@@ -100,14 +100,22 @@ flowgen-worker:
   # Method 3: GitOps auto-generation where ArgoCD or Flux generates ConfigMaps from git directories.
   flows:
     # Reference existing ConfigMaps created externally via kustomize, kubectl, or GitOps tools.
-    # All ConfigMaps in this array will be mounted to the same flows directory.
-    # When set, this takes precedence over inline values and prevents auto-generation of ConfigMaps.
+    # When set, this takes precedence over inline values.
     # Each ConfigMap should contain flow YAML files as keys with their complete content as values.
-    # Example:
+    #
+    # Supports two formats:
+    #
+    # Simple array format - each ConfigMap mounts to an indexed path like /etc/app/flows/0:
     #   existingConfigMaps:
     #     - flows-salesforce
-    #     - flows-cloudflare
     #     - flows-gcp
+    #
+    # Object format with custom paths - specify exact mount location for each ConfigMap:
+    #   existingConfigMaps:
+    #     - name: flows-salesforce
+    #       mountPath: /etc/app/flows/salesforce
+    #     - name: flows-gcp
+    #       mountPath: /etc/app/flows/gcp
     existingConfigMaps: []
 
     # Inline flow definitions for pure Helm deployments without external ConfigMap management.
@@ -125,13 +133,22 @@ flowgen-worker:
 
   flowResources:
     # Reference existing ConfigMaps for resource files such as SQL queries or scripts.
-    # All ConfigMaps in this array will be mounted to the same resources directory.
-    # When set, this takes precedence over inline values and prevents auto-generation of ConfigMaps.
+    # When set, this takes precedence over inline values.
     # Each ConfigMap should contain resource files as keys with their complete content as values.
-    # Example:
+    #
+    # Supports two formats:
+    #
+    # Simple array format - each ConfigMap mounts to an indexed path like /etc/app/resources/0:
     #   existingConfigMaps:
     #     - resources-sql
     #     - resources-scripts
+    #
+    # Object format with custom paths - specify exact mount location for each ConfigMap:
+    #   existingConfigMaps:
+    #     - name: resources-sql
+    #       mountPath: /etc/app/resources/sql
+    #     - name: resources-scripts
+    #       mountPath: /etc/app/resources/scripts
     existingConfigMaps: []
 
     # Inline resource definitions for pure Helm deployments without external ConfigMap management.
@@ -180,3 +197,61 @@ flowgen-worker:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+  # WireGuard VPN sidecar for secure connectivity to private networks.
+  # Enable this when flowgen needs to access resources behind a VPN, such as private databases or internal APIs.
+  # The sidecar establishes a persistent VPN tunnel that all containers in the pod can use.
+  wireguard:
+    enabled: false
+    image:
+      repository: ghcr.io/linuxserver/wireguard
+      # Pinned to specific version for security and reproducibility.
+      # Tag format: wireguard-version, alpine-revision, linuxserver-build.
+      tag: 1.0.20250521-r1-ls105
+      pullPolicy: IfNotPresent
+    # Secret containing WireGuard tunnel configuration.
+    # The secret must have a key named wg0.conf with the complete WireGuard interface configuration.
+    # Example secret:
+    #   apiVersion: v1
+    #   kind: Secret
+    #   metadata:
+    #     name: wireguard-credentials
+    #   type: Opaque
+    #   stringData:
+    #     wg0.conf: |
+    #       [Interface]
+    #       PrivateKey: <your-private-key>
+    #       Address = 10.13.13.2/24
+    #       DNS = 1.1.1.1
+    #
+    #       [Peer]
+    #       PublicKey: <peer-public-key>
+    #       Endpoint = vpn.example.com:51820
+    #       AllowedIPs = 10.0.0.0/8, 172.16.0.0/12
+    #       PersistentKeepalive = 25
+    secretName: "wireguard-credentials"
+    # Environment variables for WireGuard container.
+    # LOG_CONFS=false suppresses verbose tunnel configuration logs for cleaner output.
+    env:
+      - name: LOG_CONFS
+        value: "false"
+    # Resource limits and requests for the WireGuard sidecar container.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    # Security context for WireGuard sidecar.
+    # WireGuard requires root (runAsUser: 0) to configure network interfaces and load kernel modules.
+    # NET_ADMIN capability allows network interface creation and routing table modifications.
+    # SYS_MODULE capability allows loading the WireGuard kernel module if not already loaded.
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+      capabilities:
+        add:
+          - NET_ADMIN
+          - SYS_MODULE
+      privileged: false
