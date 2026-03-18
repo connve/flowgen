@@ -444,26 +444,23 @@ fn infer_schema_from_rows(rows: &[Row]) -> Result<Schema, arrow::error::ArrowErr
             tiberius::ColumnType::Int8 => DataType::Int64,
             tiberius::ColumnType::Float4 | tiberius::ColumnType::Floatn => DataType::Float32,
             tiberius::ColumnType::Float8 => DataType::Float64,
-            tiberius::ColumnType::Money | tiberius::ColumnType::Money4 => {
-                DataType::Decimal128(19, 4)
-            }
+            tiberius::ColumnType::Money | tiberius::ColumnType::Money4 => DataType::Float64,
+            tiberius::ColumnType::Numericn | tiberius::ColumnType::Decimaln => DataType::Float64,
             tiberius::ColumnType::Datetime
             | tiberius::ColumnType::Datetime4
             | tiberius::ColumnType::Datetimen
             | tiberius::ColumnType::Datetime2 => {
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
             }
-            tiberius::ColumnType::Daten => DataType::Date32,
-            tiberius::ColumnType::Timen => {
-                DataType::Time64(arrow::datatypes::TimeUnit::Microsecond)
-            }
             tiberius::ColumnType::DatetimeOffsetn => {
                 DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()))
             }
+            tiberius::ColumnType::Daten => DataType::Utf8,
+            tiberius::ColumnType::Timen => DataType::Utf8,
             tiberius::ColumnType::BigVarBin
             | tiberius::ColumnType::BigBinary
-            | tiberius::ColumnType::Image => DataType::Binary,
-            tiberius::ColumnType::Guid => DataType::FixedSizeBinary(16),
+            | tiberius::ColumnType::Image => DataType::Utf8,
+            tiberius::ColumnType::Guid => DataType::Utf8,
             // All string/text types map to Utf8.
             _ => DataType::Utf8,
         };
@@ -571,6 +568,7 @@ fn build_columns(
                         match col_data {
                             ColumnData::F32(Some(val)) => builder.append_value(*val as f64),
                             ColumnData::F64(Some(val)) => builder.append_value(*val),
+                            ColumnData::Numeric(Some(val)) => builder.append_value(f64::from(*val)),
                             _ => builder.append_null(),
                         }
                     } else {
@@ -602,7 +600,34 @@ fn build_columns(
                             ColumnData::Guid(Some(val)) => {
                                 builder.append_value(val.to_string());
                             }
+                            ColumnData::Xml(Some(val)) => {
+                                builder.append_value(val.as_ref());
+                            }
                             _ => builder.append_value(format!("{col_data:?}")),
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::Timestamp(_, _) => {
+                let mut builder = arrow::array::TimestampMicrosecondBuilder::new();
+                for row in rows {
+                    if let Some((_, col_data)) = row.cells().nth(col_idx) {
+                        // Tiberius with chrono feature provides FromSql trait for NaiveDateTime.
+                        // This handles all MSSQL datetime types (datetime, smalldatetime, etc.) uniformly.
+                        let datetime_opt: Option<chrono::NaiveDateTime> = match col_data {
+                            ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) => {
+                                row.get(col_idx)
+                            }
+                            _ => None,
+                        };
+                        if let Some(dt) = datetime_opt {
+                            // Convert to UTC timestamp in microseconds for Arrow compatibility.
+                            builder.append_value(dt.and_utc().timestamp_micros());
+                        } else {
+                            builder.append_null();
                         }
                     } else {
                         builder.append_null();
