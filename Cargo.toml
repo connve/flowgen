@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.72.0"
+version = "0.73.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -34,7 +34,7 @@ tokio = { version = "1.48", features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["compat"] }
 thiserror = { version = "1.0" }
-tiberius = { version = "0.12" }
+tiberius = { version = "0.12", features = ["chrono"] }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }
 reqwest = { version = "0.12", features = ["json"] }
