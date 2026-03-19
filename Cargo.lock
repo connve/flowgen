@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.73.0"
+version = "0.74.0"
 dependencies = [
  "arrow",
  "config",
@@ -4146,8 +4146,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce-pubsub-v1"
-version = "0.7.1"
-source = "git+https://github.com/connve/salesforce-rs#f22742116f52d4dc8d16bce5c0201a1dea6e11af"
+version = "0.8.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-restapi-toolingapi#b6b367e8a3161a3941ada7a2cfbb018c49987ed4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -4170,8 +4170,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core"
-version = "0.7.1"
-source = "git+https://github.com/connve/salesforce-rs#f22742116f52d4dc8d16bce5c0201a1dea6e11af"
+version = "0.8.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-restapi-toolingapi#b6b367e8a3161a3941ada7a2cfbb018c49987ed4"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -4190,8 +4190,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_v1"
-version = "0.7.1"
-source = "git+https://github.com/connve/salesforce-rs#f22742116f52d4dc8d16bce5c0201a1dea6e11af"
+version = "0.8.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-restapi-toolingapi#b6b367e8a3161a3941ada7a2cfbb018c49987ed4"
 dependencies = [
  "bytes",
  "chrono",

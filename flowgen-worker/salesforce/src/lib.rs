@@ -21,3 +21,19 @@ pub mod bulkapi {
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     pub mod query_job;
 }
+
+/// Salesforce SObject CRUD operations (create, get, update, upsert, delete).
+pub mod sobject {
+    /// Configuration structures for Salesforce SObject CRUD operations.
+    pub mod config;
+    /// Salesforce SObject CRUD processor implementation.
+    pub mod processor;
+}
+
+/// Salesforce Tooling API operations for metadata management.
+pub mod toolingapi {
+    /// Configuration structures for Salesforce Tooling API operations.
+    pub mod config;
+    /// Salesforce Tooling API processor implementation.
+    pub mod processor;
+}

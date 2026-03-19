@@ -1,0 +1,58 @@
+flow:
+  name: salesforce_sobject_upsert_example
+  require_leader_election: true
+  tasks:
+
+    # Generate contact data with external ID to demonstrate upsert functionality.
+    # Upsert will create new record or update existing one based on external ID.
+    - generate:
+        name: generate_contact
+        interval: 45s
+        count: 1
+        data:
+          first_name: "John"
+          last_name: "Doe"
+          email: "john.doe@example.com"
+          phone: "+1-555-0101"
+          external_id: "CONTACT-001"
+          department: "Sales"
+
+    # Upsert contact using external ID as the key.
+    # If a contact with this external ID exists, it will be updated.
+    # If not, a new contact will be created.
+    - salesforce_sobject:
+        name: upsert_contact
+        operation: upsert
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Contact
+        external_id_field: ExternalId__c
+        external_id_value: "{{event.data.external_id}}"
+        payload:
+          FirstName: "{{event.data.first_name}}"
+          LastName: "{{event.data.last_name}}"
+          Email: "{{event.data.email}}"
+          Phone: "{{event.data.phone}}"
+          Department: "{{event.data.department}}"
+          ExternalId__c: "{{event.data.external_id}}"
+
+    # Log the upsert results showing whether record was created or updated.
+    - log:
+        name: log_upsert_result
+        level: info
+        structured: true
+
+    # Retrieve the contact by external ID to verify the upsert.
+    - salesforce_sobject:
+        name: get_contact_by_external_id
+        operation: get_by_external_id
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Contact
+        external_id_field: ExternalId__c
+        external_id_value: "{{event.data.external_id}}"
+        fields: "Id,FirstName,LastName,Email,Phone,Department,ExternalId__c,CreatedDate,LastModifiedDate"
+
+    # Log the retrieved contact details.
+    - log:
+        name: log_retrieved_contact
+        level: info
+        structured: true

@@ -124,6 +124,12 @@ pub enum Error {
     /// Error in Salesforce Bulk API query job operations.
     #[error(transparent)]
     SalesforceBulkApiQueryJob(#[from] flowgen_salesforce::bulkapi::query_job::Error),
+    /// Error in Salesforce SObject CRUD operations.
+    #[error(transparent)]
+    SalesforceSObject(#[from] flowgen_salesforce::sobject::processor::Error),
+    /// Error in Salesforce Tooling API operations.
+    #[error(transparent)]
+    SalesforceTooling(#[from] flowgen_salesforce::toolingapi::processor::Error),
     /// Error in GCP BigQuery query task.
     #[error(transparent)]
     GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
@@ -964,6 +970,50 @@ async fn spawn_task(
                 async move {
                     let mut builder =
                         flowgen_salesforce::bulkapi::query_job::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_sobject(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::sobject::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_toolingapi(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::toolingapi::processor::ProcessorBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)

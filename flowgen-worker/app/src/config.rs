@@ -81,6 +81,10 @@ pub enum TaskType {
     salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::config::QueryJob),
+    /// Salesforce SObject CRUD operations (create, get, update, upsert, delete).
+    salesforce_sobject(flowgen_salesforce::sobject::config::SObject),
+    /// Salesforce Tooling API operations for metadata management.
+    salesforce_toolingapi(flowgen_salesforce::toolingapi::config::Tooling),
     /// GCP BigQuery query task.
     gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
     /// GCP BigQuery Storage Read API task.
@@ -112,6 +116,8 @@ impl TaskType {
             TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
             TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
             TaskType::salesforce_bulkapi_query_job(_) => "salesforce_bulkapi_query_job",
+            TaskType::salesforce_sobject(_) => "salesforce_sobject",
+            TaskType::salesforce_toolingapi(_) => "salesforce_toolingapi",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",

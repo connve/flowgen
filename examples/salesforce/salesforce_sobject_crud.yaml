@@ -1,0 +1,68 @@
+flow:
+  name: salesforce_sobject_crud_example
+  require_leader_election: true
+  tasks:
+
+    # Generate sample account data to demonstrate CRUD operations.
+    - generate:
+        name: generate_account
+        interval: 30s
+        count: 1
+        data:
+          company_name: "Acme Corporation"
+          industry: "Technology"
+          city: "San Francisco"
+          state: "CA"
+          website: "https://acme.example.com"
+          revenue: 5000000
+          external_id: "EXT-001"
+
+    # Create new Account record in Salesforce using the generated data.
+    # The record ID is returned in the event for downstream processing.
+    - salesforce_sobject:
+        name: create_account
+        operation: create
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Account
+        payload:
+          Name: "{{event.data.company_name}}"
+          Industry: "{{event.data.industry}}"
+          BillingCity: "{{event.data.city}}"
+          BillingState: "{{event.data.state}}"
+          Website: "{{event.data.website}}"
+          AnnualRevenue: "{{event.data.revenue}}"
+          ExternalId__c: "{{event.data.external_id}}"
+
+    # Log the created Account ID for verification.
+    - log:
+        name: log_created_account
+        level: info
+        structured: true
+
+    # Update the created account with additional information.
+    # Uses the record ID from the previous task's response.
+    - salesforce_sobject:
+        name: update_account
+        operation: update
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Account
+        record_id: "{{event.data.id}}"
+        payload:
+          Description: "Account created and updated via Flowgen automation"
+          NumberOfEmployees: 100
+
+    # Retrieve the updated account to verify changes.
+    # Specifies which fields to fetch from Salesforce.
+    - salesforce_sobject:
+        name: get_updated_account
+        operation: get
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Account
+        record_id: "{{event.data.id}}"
+        fields: "Id,Name,Industry,BillingCity,BillingState,Website,AnnualRevenue,Description,NumberOfEmployees,ExternalId__c"
+
+    # Log the retrieved account details.
+    - log:
+        name: log_retrieved_account
+        level: info
+        structured: true
