@@ -229,9 +229,12 @@ flowgen-worker:
     secretName: "wireguard-credentials"
     # Environment variables for WireGuard container.
     # LOG_CONFS=false suppresses verbose tunnel configuration logs for cleaner output.
+    # WIREGUARD_IMPLEMENTATION=wireguard-go uses userspace implementation (compatible with hardened kernels).
     env:
       - name: LOG_CONFS
         value: "false"
+      - name: WIREGUARD_IMPLEMENTATION
+        value: "wireguard-go"
     # Resource limits and requests for the WireGuard sidecar container.
     resources:
       limits:
@@ -241,14 +244,12 @@ flowgen-worker:
         cpu: 50m
         memory: 64Mi
     # Security context for WireGuard sidecar.
-    # WireGuard requires root (runAsUser: 0) to configure network interfaces and load kernel modules.
+    # WireGuard-go (userspace) requires root (runAsUser: 0) to configure network interfaces.
     # NET_ADMIN capability allows network interface creation and routing table modifications.
-    # SYS_MODULE capability allows loading the WireGuard kernel module if not already loaded.
     securityContext:
       runAsUser: 0
       runAsNonRoot: false
       capabilities:
         add:
           - NET_ADMIN
-          - SYS_MODULE
       privileged: false
