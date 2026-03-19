@@ -131,8 +131,13 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute query.
-            let (record_batch, job_id) =
-                execute_query(&self.client, &config, self.resource_loader.as_ref()).await?;
+            let (record_batch, job_id) = execute_query(
+                &self.client,
+                &config,
+                self.resource_loader.as_ref(),
+                &event_value,
+            )
+            .await?;
 
             // Build result event.
             let mut event_builder = EventBuilder::new()
@@ -381,20 +386,14 @@ async fn execute_query(
     client: &Client,
     config: &super::config::Query,
     resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
+    event_value: &serde_json::Value,
 ) -> Result<(arrow::array::RecordBatch, Option<String>), Error> {
-    // Resolve query from inline or resource source.
-    let query_string = match &config.query {
-        flowgen_core::resource::Source::Inline(sql) => sql.clone(),
-        flowgen_core::resource::Source::Resource { resource } => {
-            let loader = resource_loader.ok_or_else(|| Error::ResourceLoad {
-                source: flowgen_core::resource::Error::ResourcePathNotConfigured,
-            })?;
-            loader
-                .load(resource)
-                .await
-                .map_err(|source| Error::ResourceLoad { source })?
-        }
-    };
+    // Render query (inline queries already rendered, resource files need rendering).
+    let query_string = config
+        .query
+        .render(resource_loader, event_value)
+        .await
+        .map_err(|source| Error::ResourceLoad { source })?;
 
     // Build query request.
     let mut query_request = QueryRequest {
