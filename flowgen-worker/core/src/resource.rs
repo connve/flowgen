@@ -65,6 +65,56 @@ impl Source {
             }
         }
     }
+
+    /// Renders the source with template substitution.
+    ///
+    /// For inline sources, returns the content directly (already rendered by config.render()).
+    /// For resource sources, loads the file and renders it as a Handlebars template.
+    ///
+    /// This is the preferred method for handling queries, scripts, and templates that support
+    /// dynamic variable substitution from event data.
+    ///
+    /// # Arguments
+    /// * `loader` - Optional resource loader for resolving file paths.
+    /// * `template_data` - Data context for template variable substitution.
+    ///
+    /// # Returns
+    /// The resolved and rendered content string.
+    ///
+    /// # Example
+    /// ```rust
+    /// use flowgen_core::resource::{Source, ResourceLoader};
+    /// use serde_json::json;
+    /// use std::path::PathBuf;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = Source::Inline("SELECT * FROM table WHERE id = {{event.data.id}}".to_string());
+    /// let data = json!({"event": {"data": {"id": 123}}});
+    /// let result = source.render(None, &data).await?;
+    /// assert_eq!(result, "SELECT * FROM table WHERE id = 123");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn render<T>(
+        &self,
+        loader: Option<&ResourceLoader>,
+        template_data: &T,
+    ) -> Result<String, Error>
+    where
+        T: serde::Serialize,
+    {
+        match self {
+            // Inline content is already rendered by config.render(), return as-is.
+            Source::Inline(content) => Ok(content.clone()),
+            // Resource content needs to be loaded and then rendered.
+            Source::Resource { resource } => {
+                let loader = loader.ok_or(Error::ResourcePathNotConfigured)?;
+                let template = loader.load(resource).await?;
+                crate::config::render_template(&template, template_data)
+                    .map_err(|source| Error::TemplateRender { source })
+            }
+        }
+    }
 }
 
 /// Errors that can occur during resource operations.
@@ -81,6 +131,11 @@ pub enum Error {
     ResourceNotFound { key: String },
     #[error("Resource path is not configured in config.yaml")]
     ResourcePathNotConfigured,
+    #[error("Template rendering error: {source}")]
+    TemplateRender {
+        #[source]
+        source: crate::config::Error,
+    },
 }
 
 /// Resource loader that resolves resource keys to file content.

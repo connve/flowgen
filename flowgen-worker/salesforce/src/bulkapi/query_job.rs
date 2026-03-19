@@ -166,22 +166,12 @@ impl EventHandler {
         event_value: &serde_json::Value,
         completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
-        // Resolve query from inline or resource source.
+        // Render query (inline queries already rendered, resource files need rendering).
         let query_string = match &config.query {
-            Some(flowgen_core::resource::Source::Inline(soql)) => soql.clone(),
-            Some(flowgen_core::resource::Source::Resource { resource }) => {
-                let loader = self
-                    .resource_loader
-                    .as_ref()
-                    .ok_or_else(|| Error::ResourceLoad {
-                        source: flowgen_core::resource::Error::ResourcePathNotConfigured,
-                    })?;
-                let template = loader
-                    .load(resource)
-                    .await
-                    .map_err(|source| Error::ResourceLoad { source })?;
-                flowgen_core::config::render_template(&template, event_value)?
-            }
+            Some(source) => source
+                .render(self.resource_loader.as_ref(), event_value)
+                .await
+                .map_err(|source| Error::ResourceLoad { source })?,
             None => return Err(Error::MissingQuery),
         };
 
