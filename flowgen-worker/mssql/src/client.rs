@@ -48,6 +48,7 @@ type ConnectionPool = Pool<ConnectionManager>;
 /// Connections are automatically returned to the pool when dropped.
 pub struct Client {
     pool: Arc<ConnectionPool>,
+    query_timeout: std::time::Duration,
 }
 
 impl Client {
@@ -57,7 +58,8 @@ impl Client {
     ///
     /// * `connection_string` - SQL Server connection string
     /// * `max_connections` - Maximum number of connections in the pool
-    /// * `connection_timeout` - Timeout for establishing connections
+    /// * `connection_timeout` - Timeout for establishing new database connections
+    /// * `query_timeout` - Timeout for query execution and waiting for connections
     ///
     /// # Returns
     ///
@@ -66,6 +68,7 @@ impl Client {
         connection_string: &str,
         max_connections: u32,
         connection_timeout: std::time::Duration,
+        query_timeout: std::time::Duration,
     ) -> Result<Self, Error> {
         let config = Config::from_ado_string(connection_string)
             .map_err(|source| Error::ConnectionStringParse { source })?;
@@ -81,16 +84,20 @@ impl Client {
 
         Ok(Self {
             pool: Arc::new(pool),
+            query_timeout,
         })
     }
 
-    /// Gets a connection from the pool.
+    /// Gets a connection from the pool with timeout.
     ///
+    /// Waits up to query_timeout for an available connection from the pool.
     /// Connections are automatically returned to the pool when dropped.
     pub async fn get_connection(&self) -> Result<PooledConnection<'_, ConnectionManager>, Error> {
-        self.pool
-            .get()
+        tokio::time::timeout(self.query_timeout, self.pool.get())
             .await
+            .map_err(|_| Error::PoolGet {
+                source: bb8::RunError::TimedOut,
+            })?
             .map_err(|source| Error::PoolGet { source })
     }
 

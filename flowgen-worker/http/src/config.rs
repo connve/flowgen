@@ -23,8 +23,8 @@ pub struct Processor {
     pub headers: Option<HashMap<String, String>>,
     /// Optional path to credentials file.
     pub credentials_path: Option<PathBuf>,
-    /// Timeout for waiting on pipeline completion before responding to webhook (webhook only).
-    /// If not specified, waits indefinitely for pipeline completion.
+    /// Timeout for waiting on flow completion before responding to webhook (webhook only).
+    /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
     /// Optional retry configuration (overrides app-level retry config).

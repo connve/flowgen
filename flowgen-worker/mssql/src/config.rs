@@ -10,16 +10,25 @@ use std::path::PathBuf;
 ///
 /// ## Example
 ///
+/// Basic query with inline SQL:
 /// ```yaml
-/// tasks:
-///   - type: mssql_query
-///     name: fetch-customers
-///     credentials_path: /var/secrets/mssql/credentials.json
-///     query:
-///       inline: "SELECT * FROM customers WHERE created_at > @p1"
+/// - mssql_query:
+///     name: fetch_customers
+///     credentials_path: /etc/mssql/credentials.json
+///     query: "SELECT * FROM customers WHERE created_at > @p1"
 ///     parameters:
 ///       - "{{event.data.since}}"
-///     batch_size: 1000
+/// ```
+///
+/// Query from resource file with custom timeout:
+/// ```yaml
+/// - mssql_query:
+///     name: fetch_large_dataset
+///     credentials_path: /etc/mssql/credentials.json
+///     query:
+///       resource: "queries/large_dataset.sql"
+///     query_timeout: "5m"
+///     batch_size: 5000
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Query {
@@ -41,27 +50,56 @@ pub struct Query {
     /// ```
     pub credentials_path: PathBuf,
 
-    /// SQL query to execute (inline or from resource file).
+    /// SQL query to execute (inline string or resource file).
+    ///
+    /// Supports Handlebars template syntax for dynamic queries.
+    /// Inline: `query: "SELECT * FROM table WHERE id = {{event.data.id}}"`
+    /// Resource: `query: { resource: "queries/fetch.sql" }`
     pub query: flowgen_core::resource::Source,
 
     /// Optional query parameters for parameterized queries.
     ///
-    /// Parameters are passed as `@p1`, `@p2`, etc. in the SQL query.
-    /// Values support template substitution from event data.
+    /// Parameters are bound as `@p1`, `@p2`, etc. in the SQL query.
+    /// Values support Handlebars template substitution from event data.
+    ///
+    /// Example: `parameters: ["{{event.data.start_date}}", "{{event.data.end_date}}"]`
     #[serde(default)]
     pub parameters: Option<Vec<String>>,
 
-    /// Number of rows per Arrow RecordBatch (default: 10000).
+    /// Number of rows per Arrow RecordBatch.
+    ///
+    /// Larger batches use more memory but reduce overhead.
+    /// Default: 10000 rows per batch.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
 
-    /// Maximum number of connections in the pool (default: 10).
+    /// Maximum number of connections in the connection pool.
+    ///
+    /// Each task maintains its own connection pool.
+    /// Connections are created on-demand up to this limit.
+    /// Default: 10 connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
 
-    /// Optional connection timeout in seconds (default: 30s).
+    /// Connection establishment timeout.
+    ///
+    /// Maximum time to wait when establishing new database connections.
+    /// Useful for unreliable SQL servers with network issues.
+    ///
+    /// Default: "30s" (30 seconds).
+    /// Examples: "30s", "1m", "2m"
     #[serde(default = "default_connection_timeout", with = "humantime_serde")]
     pub connection_timeout: std::time::Duration,
+
+    /// Query execution timeout.
+    ///
+    /// Maximum time to wait for both acquiring a connection from the pool
+    /// and executing the query. Use human-readable duration strings.
+    ///
+    /// Default: "2m" (2 minutes).
+    /// Examples: "30s", "5m", "1h"
+    #[serde(default = "default_query_timeout", with = "humantime_serde")]
+    pub query_timeout: std::time::Duration,
 
     /// Optional retry configuration for this task.
     #[serde(default)]
@@ -80,13 +118,14 @@ impl Query {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         Ok(format!(
-            "server=tcp:{},{};database={};user={};password={};TrustServerCertificate={}",
+            "server=tcp:{},{};database={};user={};password={};TrustServerCertificate={};Encrypt={}",
             creds.host,
             creds.port,
             creds.database,
             creds.username,
             creds.password,
-            creds.trust_server_certificate
+            creds.trust_server_certificate,
+            creds.encrypt
         ))
     }
 }
@@ -100,7 +139,11 @@ fn default_max_connections() -> u32 {
 }
 
 fn default_connection_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(30)
+    std::time::Duration::from_secs(30) // 30 seconds
+}
+
+fn default_query_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(120) // 2 minutes
 }
 
 /// Microsoft SQL Server connection credentials.
@@ -127,6 +170,11 @@ pub struct Credentials {
     /// Whether to trust server certificate (required for self-signed certs).
     #[serde(default = "default_trust_cert")]
     pub trust_server_certificate: bool,
+
+    /// Whether to encrypt the connection. Defaults to true for security.
+    /// Set to false only for legacy servers that don't support encryption.
+    #[serde(default = "default_encrypt")]
+    pub encrypt: bool,
 }
 
 fn default_port() -> u16 {
@@ -135,6 +183,10 @@ fn default_port() -> u16 {
 
 fn default_trust_cert() -> bool {
     false
+}
+
+fn default_encrypt() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -179,7 +231,8 @@ mod tests {
             "database": "testdb",
             "username": "sa",
             "password": "TestPass123",
-            "trust_server_certificate": true
+            "trust_server_certificate": true,
+            "encrypt": true
         }
         "#;
 
@@ -188,6 +241,7 @@ mod tests {
         assert_eq!(creds.port, 1433);
         assert_eq!(creds.database, "testdb");
         assert!(creds.trust_server_certificate);
+        assert!(creds.encrypt);
     }
 
     #[test]
@@ -204,5 +258,6 @@ mod tests {
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.port, 1433);
         assert!(!creds.trust_server_certificate);
+        assert!(creds.encrypt); // Defaults to true for security
     }
 }

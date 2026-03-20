@@ -124,27 +124,25 @@ impl EventHandler {
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
 
-                // Wait for pipeline completion with configured ack_timeout.
+                // Wait for flow completion with configured ack_timeout.
+                // Failed flows skip message acknowledgment, allowing JetStream to automatically redeliver.
                 match self.config.ack_timeout {
                     Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
                         Ok(Ok(Ok(()))) => {
                             message.ack().await.ok();
                         }
                         Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                            // JetStream will automatically redeliver if not ack'd within ack_wait.
+                            warn!("Flow completion failed or timed out");
                         }
                     },
-                    None => {
-                        // No timeout configured, wait indefinitely.
-                        match completion_rx.await {
-                            Ok(Ok(())) => {
-                                message.ack().await.ok();
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                // JetStream will automatically redeliver if not ack'd within ack_wait.
-                            }
+                    None => match completion_rx.await {
+                        Ok(Ok(())) => {
+                            message.ack().await.ok();
                         }
-                    }
+                        Ok(Err(_)) | Err(_) => {
+                            warn!("Flow completion failed or timed out");
+                        }
+                    },
                 }
 
                 Ok(())

@@ -249,6 +249,7 @@ impl Runner for Processor {
             &connection_string,
             init_config.max_connections,
             init_config.connection_timeout,
+            init_config.query_timeout,
         )
         .await
         .map_err(|source| Error::Client { source })?;
