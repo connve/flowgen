@@ -162,16 +162,6 @@ impl EventHandler {
                 .map_err(|e| Error::SystemTime { source: e })?
                 .as_secs();
 
-            // Update cache with current execution time before sending the event to ensure replay protection.
-            // we don't lose track of execution times if the process crashes.
-            if let Err(cache_err) = cache
-                .put(&cache_key, current_time.to_string().into(), None)
-                .await
-            {
-                // Log warn for cache errors.
-                warn!("Failed to update cache: {:?}", cache_err);
-            }
-
             // Determine if there will be a next run.
             let next_run_time_val = match self.config.count {
                 Some(count) if count == counter + 1 => None,
@@ -199,17 +189,46 @@ impl EventHandler {
                 }
             };
 
-            // Build and send event.
+            // Create completion channel for flow completion tracking.
+            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+            // Build and send event with completion channel.
             let e = EventBuilder::new()
                 .data(EventData::Json(data))
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
+                .completion_tx(completion_tx)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
             e.send_with_logging(self.tx.as_ref())
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
+
+            // Wait for flow completion before updating cache.
+            let success = match self.config.ack_timeout {
+                Some(timeout) => matches!(
+                    tokio::time::timeout(timeout, completion_rx).await,
+                    Ok(Ok(Ok(())))
+                ),
+                None => matches!(completion_rx.await, Ok(Ok(()))),
+            };
+
+            // Update cache only if flow completed successfully.
+            // Failed flows skip cache update, allowing next cron run to retry from same timestamp.
+            if success {
+                if let Err(cache_err) = cache
+                    .put(&cache_key, current_time.to_string().into(), None)
+                    .await
+                {
+                    warn!("Failed to update cache: {:?}", cache_err);
+                }
+            } else {
+                warn!(
+                    task = self.config.name,
+                    "Flow completion failed or timed out"
+                );
+            }
 
             counter += 1;
             match self.config.count {
@@ -405,6 +424,7 @@ mod tests {
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
+            ack_timeout: None,
             retry: None,
         });
         let (tx, _rx) = mpsc::channel(100);
@@ -441,6 +461,7 @@ mod tests {
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(2),
+            ack_timeout: None,
             retry: None,
         });
 
@@ -459,7 +480,20 @@ mod tests {
         });
 
         let event1 = rx.recv().await.unwrap();
+        // Complete first flow.
+        if let Some(shared_tx) = &event1.completion_tx {
+            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
+                let _ = completion_tx.send(Ok(()));
+            }
+        }
+
         let event2 = rx.recv().await.unwrap();
+        // Complete second flow.
+        if let Some(shared_tx) = &event2.completion_tx {
+            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
+                let _ = completion_tx.send(Ok(()));
+            }
+        }
 
         assert_eq!(event1.subject, "test");
         assert_eq!(event2.subject, "test");
@@ -478,6 +512,7 @@ mod tests {
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(1),
+            ack_timeout: None,
             retry: None,
         });
 
@@ -517,10 +552,11 @@ mod tests {
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
+            ack_timeout: None,
             retry: None,
         });
 
-        let (tx, mut _rx) = mpsc::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         let cache = Arc::new(crate::cache::memory::MemoryCache::new());
 
         let mut labels = Map::new();
@@ -551,9 +587,21 @@ mod tests {
             task_context,
         };
 
-        let _ = subscriber.run().await;
+        // Run subscriber in background.
+        tokio::spawn(async move {
+            let _ = subscriber.run().await;
+        });
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        // Receive event and complete the flow.
+        if let Some(event) = rx.recv().await {
+            if let Some(shared_tx) = event.completion_tx {
+                if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
+                    let _ = completion_tx.send(Ok(()));
+                }
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Verify that cache key was created with flow-scoped format.
         let result = cache.get("flow.test-flow.last_run.test").await.unwrap();

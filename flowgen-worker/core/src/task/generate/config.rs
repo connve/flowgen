@@ -42,6 +42,10 @@ pub struct Subscriber {
     /// where the task executes immediately and stops after generating
     /// the specified number of events.
     pub count: Option<u64>,
+    /// Timeout for waiting on flow completion before considering the event failed.
+    /// If not specified, waits indefinitely for flow completion.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<Duration>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
@@ -76,6 +80,7 @@ mod tests {
         assert!(config.interval.is_none());
         assert!(config.cron.is_none());
         assert!(config.count.is_none());
+        assert!(config.ack_timeout.is_none());
         assert!(config.retry.is_none());
     }
 
@@ -87,6 +92,7 @@ mod tests {
             interval: Some(Duration::from_secs(5)),
             cron: None,
             count: Some(10),
+            ack_timeout: None,
             retry: None,
         };
 
@@ -106,6 +112,7 @@ mod tests {
             interval: None,
             cron: Some("0 0 * * *".to_string()),
             count: None,
+            ack_timeout: None,
             retry: None,
         };
 
@@ -122,6 +129,7 @@ mod tests {
             interval: Some(Duration::from_secs(60)),
             cron: Some("0 0 * * *".to_string()),
             count: None,
+            ack_timeout: None,
             retry: None,
         };
 
@@ -139,6 +147,7 @@ mod tests {
             interval: None,
             cron: None,
             count: None,
+            ack_timeout: None,
             retry: None,
         };
 
@@ -156,6 +165,7 @@ mod tests {
             interval: None,
             cron: None,
             count: Some(1),
+            ack_timeout: None,
             retry: None,
         };
 
@@ -171,6 +181,7 @@ mod tests {
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(5),
+            ack_timeout: None,
             retry: None,
         };
 
@@ -188,6 +199,7 @@ mod tests {
             interval: Some(Duration::from_secs(2)),
             cron: None,
             count: None,
+            ack_timeout: None,
             retry: None,
         };
 

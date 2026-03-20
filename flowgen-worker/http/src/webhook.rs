@@ -72,8 +72,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Pipeline completion failed or timed out for webhook request")]
-    PipelineCompletionFailed,
+    #[error("Flow completion failed or timed out for webhook request")]
+    FlowCompletionFailed,
 }
 
 impl IntoResponse for Error {
@@ -215,12 +215,12 @@ impl EventHandler {
             .await
             .map_err(|source| Error::SendMessage { source })?;
 
-        // Wait for pipeline completion before responding to HTTP request.
+        // Wait for flow completion before responding to HTTP request.
         match self.config.ack_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
                 Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
                 Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                    error!("{}", Error::PipelineCompletionFailed);
+                    error!("{}", Error::FlowCompletionFailed);
                     Ok(StatusCode::INTERNAL_SERVER_ERROR)
                 }
             },
@@ -229,7 +229,7 @@ impl EventHandler {
                 match completion_rx.await {
                     Ok(Ok(())) => Ok(StatusCode::OK),
                     Ok(Err(_)) | Err(_) => {
-                        error!("{}", Error::PipelineCompletionFailed);
+                        error!("{}", Error::FlowCompletionFailed);
                         Ok(StatusCode::INTERNAL_SERVER_ERROR)
                     }
                 }
