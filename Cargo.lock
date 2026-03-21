@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "config",
@@ -3618,9 +3618,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83c41efbf8f90ac44de7f3a868f0867851d261b56291732d0cbf7cceaaeb55a6"
+checksum = "14104c5a24d9bcf7eb2c24753e0f49fe14555d8bd565ea3d38e4b4303267259d"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -4100,7 +4100,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.9",
+ "rustls-webpki 0.103.10",
  "subtle",
  "zeroize",
 ]
@@ -4161,9 +4161,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.9"
+version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
  "ring",
  "rustls-pki-types",
