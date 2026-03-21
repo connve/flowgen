@@ -275,11 +275,19 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .as_ref()
                 .ok_or_else(|| Error::MissingDurableName)?;
 
-            let consumer_config = jetstream::consumer::pull::Config {
+            let mut consumer_config = jetstream::consumer::pull::Config {
                 durable_name: Some(durable_name.clone()),
                 filter_subject: init_config.subject.clone(),
                 ..Default::default()
             };
+
+            if let Some(max_ack_pending) = init_config.max_ack_pending {
+                consumer_config.max_ack_pending = max_ack_pending;
+            }
+
+            if let Some(max_waiting) = init_config.max_waiting {
+                consumer_config.max_waiting = max_waiting;
+            }
 
             let consumer = match stream.get_consumer(durable_name).await {
                 Ok(mut existing_consumer) => {

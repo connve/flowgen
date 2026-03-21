@@ -341,8 +341,7 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df5af9ebfb0a14481d3eaf6101e6391261e4f30d25b26a7635ade8a39482ded0"
+source = "git+https://github.com/nats-io/nats.rs?rev=7e6672c240a4a1bd7726d37ac7b52a290af6b690#7e6672c240a4a1bd7726d37ac7b52a290af6b690"
 dependencies = [
  "base64",
  "bytes",
@@ -350,15 +349,14 @@ dependencies = [
  "memchr",
  "nkeys",
  "nuid",
- "once_cell",
  "pin-project",
  "portable-atomic",
  "rand 0.8.5",
  "regex",
  "ring",
- "rustls-native-certs 0.7.3",
+ "rustls-native-certs 0.8.3",
  "rustls-pki-types",
- "rustls-webpki 0.102.8",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "serde_nanos",
@@ -1355,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1396,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1422,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1444,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1466,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1493,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1516,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1545,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.75.0"
+version = "0.76.0"
 dependencies = [
  "arrow",
  "config",
@@ -2235,7 +2233,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3618,9 +3616,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83c41efbf8f90ac44de7f3a868f0867851d261b56291732d0cbf7cceaaeb55a6"
+checksum = "14104c5a24d9bcf7eb2c24753e0f49fe14555d8bd565ea3d38e4b4303267259d"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -3665,7 +3663,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3702,7 +3700,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -4100,7 +4098,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.9",
+ "rustls-webpki",
  "subtle",
  "zeroize",
 ]
@@ -4151,19 +4149,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.102.8"
+version = "0.103.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
-dependencies = [
- "rustls-pki-types",
- "untrusted 0.9.0",
-]
-
-[[package]]
-name = "rustls-webpki"
-version = "0.103.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
 dependencies = [
  "ring",
  "rustls-pki-types",
