@@ -106,9 +106,10 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
+            // Render query (inline queries already rendered, resource files need rendering).
             let query_string = config
                 .query
-                .resolve(self.resource_loader.as_ref())
+                .render(self.resource_loader.as_ref(), &event_value)
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?;
 
@@ -248,6 +249,7 @@ impl Runner for Processor {
             &connection_string,
             init_config.max_connections,
             init_config.connection_timeout,
+            init_config.query_timeout,
         )
         .await
         .map_err(|source| Error::Client { source })?;

@@ -97,8 +97,8 @@ pub struct Subscriber {
     pub topic: Topic,
     /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
     pub endpoint: Option<String>,
-    /// Timeout for waiting on pipeline completion before considering the event failed.
-    /// If not specified, waits indefinitely for pipeline completion.
+    /// Timeout for waiting on flow completion before considering the event failed.
+    /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
     /// Optional retry configuration (overrides app-level retry config).

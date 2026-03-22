@@ -27,6 +27,16 @@ pub struct Config {
     pub durable_name: Option<String>,
     /// Maximum number of messages to fetch per batch (subscriber only).
     pub max_messages: Option<usize>,
+    /// Maximum number of unacknowledged messages allowed (subscriber only).
+    /// Limits concurrent in-flight messages across all consumer instances.
+    /// Set to 1 to prevent duplicate processing in multi-pod deployments.
+    /// Default: None (uses NATS server default, typically 1000).
+    pub max_ack_pending: Option<i64>,
+    /// Maximum number of waiting pull requests allowed (subscriber only).
+    /// Limits queued fetch requests when no messages are available.
+    /// Prevents resource exhaustion with many idle consumers.
+    /// Default: None (uses NATS server default, typically 512).
+    pub max_waiting: Option<i64>,
     /// Delay between message batch fetches (subscriber only).
     /// Accepts duration strings: "100ms", "1s", "5m", etc.
     #[serde(default, with = "humantime_serde")]

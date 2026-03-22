@@ -82,8 +82,6 @@ pub enum Error {
     },
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
-    #[error("Pipeline completion failed or timed out for event")]
-    PipelineCompletionFailed,
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -209,7 +207,8 @@ impl EventHandler {
                             .await
                             .map_err(|source| Error::SendMessage { source })?;
 
-                        // Wait for pipeline completion.
+                        // Wait for flow completion.
+                        // Failed flows skip replay_id advancement, allowing next fetch to retry from same position.
                         let success = match config.ack_timeout {
                             Some(timeout) => matches!(
                                 tokio::time::timeout(timeout, completion_rx).await,
@@ -221,9 +220,8 @@ impl EventHandler {
                         if !success {
                             warn!(
                                 event_id = ?event_id,
-                                "Pipeline failed or timed out"
+                                "Flow completion failed or timed out"
                             );
-                            return Err(Error::PipelineCompletionFailed);
                         }
 
                         Ok::<(), Error>(())

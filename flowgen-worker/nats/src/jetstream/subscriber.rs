@@ -124,27 +124,25 @@ impl EventHandler {
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
 
-                // Wait for pipeline completion with configured ack_timeout.
+                // Wait for flow completion with configured ack_timeout.
+                // Failed flows skip message acknowledgment, allowing JetStream to automatically redeliver.
                 match self.config.ack_timeout {
                     Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
                         Ok(Ok(Ok(()))) => {
                             message.ack().await.ok();
                         }
                         Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                            // JetStream will automatically redeliver if not ack'd within ack_wait.
+                            warn!("Flow completion failed or timed out");
                         }
                     },
-                    None => {
-                        // No timeout configured, wait indefinitely.
-                        match completion_rx.await {
-                            Ok(Ok(())) => {
-                                message.ack().await.ok();
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                // JetStream will automatically redeliver if not ack'd within ack_wait.
-                            }
+                    None => match completion_rx.await {
+                        Ok(Ok(())) => {
+                            message.ack().await.ok();
                         }
-                    }
+                        Ok(Err(_)) | Err(_) => {
+                            warn!("Flow completion failed or timed out");
+                        }
+                    },
                 }
 
                 Ok(())
@@ -277,11 +275,19 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 .as_ref()
                 .ok_or_else(|| Error::MissingDurableName)?;
 
-            let consumer_config = jetstream::consumer::pull::Config {
+            let mut consumer_config = jetstream::consumer::pull::Config {
                 durable_name: Some(durable_name.clone()),
                 filter_subject: init_config.subject.clone(),
                 ..Default::default()
             };
+
+            if let Some(max_ack_pending) = init_config.max_ack_pending {
+                consumer_config.max_ack_pending = max_ack_pending;
+            }
+
+            if let Some(max_waiting) = init_config.max_waiting {
+                consumer_config.max_waiting = max_waiting;
+            }
 
             let consumer = match stream.get_consumer(durable_name).await {
                 Ok(mut existing_consumer) => {
