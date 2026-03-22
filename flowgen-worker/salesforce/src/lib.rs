@@ -6,7 +6,7 @@
 //! with the flowgen event system.
 
 /// Salesforce Pub/Sub API functionality for real-time messaging.
-pub mod pubsub {
+pub mod pubsubapi {
     /// Configuration structures for Salesforce Pub/Sub publishers and subscribers.
     pub mod config;
     /// Salesforce Pub/Sub publisher implementation for event publishing.
@@ -20,4 +20,19 @@ pub mod bulkapi {
     pub mod config;
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     pub mod query_job;
+}
+
+/// Salesforce REST API operations (create, get, update, upsert, delete).
+pub mod restapi {
+    pub mod composite;
+    pub mod config;
+    pub mod sobject;
+}
+
+/// Salesforce Tooling API operations for metadata management.
+pub mod toolingapi {
+    /// Configuration structures for Salesforce Tooling API operations.
+    pub mod config;
+    /// Salesforce Tooling API processor implementation.
+    pub mod processor;
 }

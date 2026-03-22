@@ -280,7 +280,8 @@ impl EventHandler {
         ctx_meta: Option<&Value>,
     ) -> Result<Event, Error> {
         // Convert the original event data to JSON for comparison.
-        let original_data_json = Value::try_from(&original_event.data)
+        let original_data_json = original_event
+            .data_as_json()
             .map_err(|source| Error::EventConversion { source })?;
 
         let (subject, data, id) = match result {

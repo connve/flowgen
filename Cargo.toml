@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.76.0"
+version = "0.77.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -37,7 +37,7 @@ thiserror = { version = "1.0" }
 tiberius = { version = "0.12", features = ["chrono"] }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 url = { version = "2.5" }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550

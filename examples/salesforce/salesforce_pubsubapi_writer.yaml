@@ -1,5 +1,5 @@
 flow:
-  name: salesforce_pubsub_writer
+  name: salesforce_pubsubapi_writer
   tasks:
 
     # Subscribe to NATS stream on a given topic.
@@ -16,7 +16,7 @@ flow:
           max_age: "24h"
           retention: limits
           discard_policy: old
-        durable_name: salesforce_pubsub_writer
+        durable_name: salesforce_pubsubapi_writer
         max_messages: 100
         delay: 1s
 

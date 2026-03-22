@@ -61,12 +61,12 @@ pub enum Error {
     /// Error in buffer processor task.
     #[error(transparent)]
     BufferProcessor(#[from] flowgen_core::task::buffer::processor::Error),
-    /// Error in Salesforce Pub/Sub subscriber task.
+    /// Error in Salesforce Pub/Sub API subscriber task.
     #[error(transparent)]
-    SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsub::subscriber::Error),
-    /// Error in Salesforce Pub/Sub publisher task.
+    SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsubapi::subscriber::Error),
+    /// Error in Salesforce Pub/Sub API publisher task.
     #[error(transparent)]
-    SalesforcePubsubPublisher(#[from] flowgen_salesforce::pubsub::publisher::Error),
+    SalesforcePubsubPublisher(#[from] flowgen_salesforce::pubsubapi::publisher::Error),
     /// Error in HTTP request processor task.
     #[error(transparent)]
     HttpRequestProcessor(#[from] flowgen_http::request::Error),
@@ -124,6 +124,15 @@ pub enum Error {
     /// Error in Salesforce Bulk API query job operations.
     #[error(transparent)]
     SalesforceBulkApiQueryJob(#[from] flowgen_salesforce::bulkapi::query_job::Error),
+    /// Error in Salesforce REST API SObject operations.
+    #[error(transparent)]
+    SalesforceRestApiSObject(#[from] flowgen_salesforce::restapi::sobject::Error),
+    /// Error in Salesforce REST API Composite operations.
+    #[error(transparent)]
+    SalesforceRestApiComposite(#[from] flowgen_salesforce::restapi::composite::Error),
+    /// Error in Salesforce Tooling API operations.
+    #[error(transparent)]
+    SalesforceTooling(#[from] flowgen_salesforce::toolingapi::processor::Error),
     /// Error in GCP BigQuery query task.
     #[error(transparent)]
     GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
@@ -917,12 +926,12 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::salesforce_pubsub_subscriber(config) => {
+        TaskType::salesforce_pubsubapi_subscriber(config) => {
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
                     let mut builder =
-                        flowgen_salesforce::pubsub::subscriber::SubscriberBuilder::new()
+                        flowgen_salesforce::pubsubapi::subscriber::SubscriberBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)
@@ -936,12 +945,12 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::salesforce_pubsub_publisher(config) => {
+        TaskType::salesforce_pubsubapi_publisher(config) => {
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
                     let mut builder =
-                        flowgen_salesforce::pubsub::publisher::PublisherBuilder::new()
+                        flowgen_salesforce::pubsubapi::publisher::PublisherBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)
@@ -964,6 +973,71 @@ async fn spawn_task(
                 async move {
                     let mut builder =
                         flowgen_salesforce::bulkapi::query_job::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_restapi_sobject(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_salesforce::restapi::sobject::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_restapi_composite(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::restapi::composite::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_toolingapi(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_salesforce::toolingapi::processor::ProcessorBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)

@@ -3,7 +3,7 @@ use flowgen_core::{
     config::ConfigExt,
     event::{AvroData, Event, EventBuilder, EventData, EventExt},
 };
-use salesforce_core::pubsub::{
+use salesforce_core::pubsubapi::{
     eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
     FetchRequest, PubSubError, SchemaRequest, TopicRequest,
 };
@@ -90,7 +90,7 @@ pub enum Error {
 /// to the event channel. Supports durable consumers with replay ID caching.
 pub struct EventHandler {
     /// Salesforce Pub/Sub client context
-    pubsub: Arc<Mutex<salesforce_core::pubsub::Client>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsubapi::Client>>,
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
@@ -561,7 +561,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .map_err(|e| Error::Auth { source: e })?;
 
         // Create Pub/Sub context.
-        let pubsub = salesforce_core::pubsub::Client::new(channel, sfdc_client)
+        let pubsub = salesforce_core::pubsubapi::Client::new(channel, sfdc_client)
             .map_err(|e| Error::PubSub { source: e })?;
         let pubsub = Arc::new(Mutex::new(pubsub));
 
@@ -708,7 +708,7 @@ impl SubscriberBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pubsub::config;
+    use crate::pubsubapi::config;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::mpsc;

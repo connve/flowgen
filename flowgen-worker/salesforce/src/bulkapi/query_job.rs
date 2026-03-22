@@ -71,6 +71,11 @@ pub enum Error {
     MissingJobId,
     #[error("Create operation requires query")]
     MissingQuery,
+    #[error("Failed to build Bulk API client: {source}")]
+    BulkClientBuild {
+        #[source]
+        source: salesforce_core::bulkapi::ClientError,
+    },
 }
 
 /// Converts config QueryOperation to SDK QueryOperation.
@@ -532,8 +537,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             .connect()
             .await?;
 
-        // Create Bulk API client using Builder with default API version.
-        let bulk_client = salesforce_core::bulkapi::ClientBuilder::new(sfdc_client.clone()).build();
+        let bulk_client = salesforce_core::bulkapi::ClientBuilder::new(sfdc_client.clone())
+            .build()
+            .map_err(|e| Error::BulkClientBuild { source: e })?;
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),

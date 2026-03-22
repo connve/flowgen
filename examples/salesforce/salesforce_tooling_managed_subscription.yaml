@@ -1,0 +1,37 @@
+flow:
+  name: salesforce_tooling_managed_subscription_example
+  require_leader_election: true
+  tasks:
+
+    # Generate configuration data for creating a managed event subscription.
+    # This subscription can be used with Salesforce Pub/Sub API to receive events.
+    - generate:
+        name: generate_subscription_config
+        interval: 60s
+        count: 1
+        data:
+          object_name: "Account"
+          topic_path: "/data/AccountChangeEvent"
+          label: "Managed Sub AccountChangeEvent"
+          replay: "latest"
+          state: "run"
+
+    # Create managed event subscription using the Tooling API.
+    # This subscription allows you to use managed_subscribe() with the Pub/Sub API.
+    - salesforce_toolingapi:
+        name: create_managed_subscription
+        operation: create_managed_event_subscription
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        full_name: "Managed_Sub_{{event.data.object_name}}ChangeEvent"
+        metadata:
+          label: "{{event.data.label}}"
+          topic_name: "{{event.data.topic_path}}"
+          default_replay: "{{event.data.replay}}"
+          state: "{{event.data.state}}"
+          error_recovery_replay: "{{event.data.replay}}"
+
+    # Log the created subscription details including the Salesforce ID.
+    - log:
+        name: log_subscription_result
+        level: info
+        structured: true

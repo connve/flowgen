@@ -165,6 +165,23 @@ impl EventExt for Event {
     }
 }
 
+impl Event {
+    /// Converts event data to a serde_json::Value for processing.
+    ///
+    /// This is a convenience method that extracts the raw data payload from EventData
+    /// without the event wrapper structure (subject, id, timestamp, etc.).
+    /// Use this when you need to work with just the data portion of an event.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let event_data = event.data_as_json()?;
+    /// // event_data is the raw array/object/value, not wrapped in {"event": {...}}
+    /// ```
+    pub fn data_as_json(&self) -> Result<Value, Error> {
+        Value::try_from(&self.data)
+    }
+}
+
 /// Errors that can occur during event processing operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]

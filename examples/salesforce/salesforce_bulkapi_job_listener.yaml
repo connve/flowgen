@@ -6,7 +6,7 @@ flow:
     # Subscribe to Salesforce Bulk API job status events.
     # Salesforce publishes events to /event/BulkApi2JobEvent when jobs complete.
     # This eliminates the need for polling and enables real-time job result processing.
-    - salesforce_pubsub_subscriber:
+    - salesforce_pubsubapi_subscriber:
         name: listen_job_events
         credentials_path: /etc/sfdc/credentials.json
         topic:

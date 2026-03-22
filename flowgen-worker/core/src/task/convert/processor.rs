@@ -174,7 +174,8 @@ impl EventHandler {
                 },
                 EventData::ArrowRecordBatch(ref batch) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Json => {
-                        let value = serde_json::Value::try_from(&event.data)
+                        let value = event
+                            .data_as_json()
                             .map_err(|source| Error::ArrowToJson { source })?;
                         EventData::Json(value)
                     }

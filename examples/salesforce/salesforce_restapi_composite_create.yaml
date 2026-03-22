@@ -1,0 +1,54 @@
+flow:
+  name: salesforce_restapi_composite_create_example
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: trigger
+        interval: 60s
+        count: 1
+
+    # Prepare array of account records for bulk creation.
+    # Composite API allows creating up to 200 records in a single request.
+    - script:
+        name: prepare_accounts
+        code: |
+          event.data = [
+            #{
+              attributes: #{ type: "Account" },
+              Name: "Tech Startup Inc",
+              Industry: "Technology",
+              BillingCity: "San Francisco",
+              BillingState: "CA"
+            },
+            #{
+              attributes: #{ type: "Account" },
+              Name: "Manufacturing Corp",
+              Industry: "Manufacturing",
+              BillingCity: "Detroit",
+              BillingState: "MI"
+            },
+            #{
+              attributes: #{ type: "Account" },
+              Name: "Retail Solutions LLC",
+              Industry: "Retail",
+              BillingCity: "New York",
+              BillingState: "NY"
+            }
+          ];
+          event
+
+    # Create multiple accounts in a single Composite API call.
+    # Each record must have an 'attributes' object with a 'type' field.
+    - salesforce_restapi_composite:
+        name: create_accounts
+        operation: create
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        all_or_none: false
+        payload:
+          from_event: true
+
+    - log:
+        name: log_creation_results
+        level: info
+        structured: true

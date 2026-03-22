@@ -1,0 +1,64 @@
+flow:
+  name: salesforce_restapi_composite_tree_example
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: trigger
+        interval: 120s
+        count: 1
+
+    # Prepare hierarchical data with parent-child relationships.
+    # Tree API can create up to 200 total records across all levels.
+    - script:
+        name: prepare_account_tree
+        code: |
+          event.data = [
+            #{
+              attributes: #{
+                type: "Account",
+                referenceId: "ref1"
+              },
+              Name: "Parent Account Corp",
+              Industry: "Technology",
+              BillingCity: "San Francisco",
+              Contacts: #{
+                records: [
+                  #{
+                    attributes: #{
+                      type: "Contact",
+                      referenceId: "ref2"
+                    },
+                    FirstName: "John",
+                    LastName: "Doe",
+                    Email: "john.doe@parent.example.com"
+                  },
+                  #{
+                    attributes: #{
+                      type: "Contact",
+                      referenceId: "ref3"
+                    },
+                    FirstName: "Jane",
+                    LastName: "Smith",
+                    Email: "jane.smith@parent.example.com"
+                  }
+                ]
+              }
+            }
+          ];
+          event
+
+    # Create account with related contacts in a single tree request.
+    # Each record must have a unique referenceId in its attributes.
+    - salesforce_restapi_composite:
+        name: create_account_tree
+        operation: tree
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Account
+        payload:
+          from_event: true
+
+    - log:
+        name: log_tree_results
+        level: info
+        structured: true
