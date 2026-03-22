@@ -1,5 +1,5 @@
 flow:
-  name: salesforce_sobject_crud_example
+  name: salesforce_restapi_crud_example
   require_leader_election: true
   tasks:
 
@@ -19,7 +19,7 @@ flow:
 
     # Create new Account record in Salesforce using the generated data.
     # The record ID is returned in the event for downstream processing.
-    - salesforce_sobject:
+    - salesforce_restapi_sobject:
         name: create_account
         operation: create
         credentials_path: $SALESFORCE_CREDENTIALS_PATH
@@ -41,7 +41,7 @@ flow:
 
     # Update the created account with additional information.
     # Uses the record ID from the previous task's response.
-    - salesforce_sobject:
+    - salesforce_restapi_sobject:
         name: update_account
         operation: update
         credentials_path: $SALESFORCE_CREDENTIALS_PATH
@@ -53,7 +53,7 @@ flow:
 
     # Retrieve the updated account to verify changes.
     # Specifies which fields to fetch from Salesforce.
-    - salesforce_sobject:
+    - salesforce_restapi_sobject:
         name: get_updated_account
         operation: get
         credentials_path: $SALESFORCE_CREDENTIALS_PATH

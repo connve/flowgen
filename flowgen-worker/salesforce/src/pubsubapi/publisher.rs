@@ -4,7 +4,7 @@ use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventData, EventExt};
 use futures_util::future;
-use salesforce_core::pubsub::{
+use salesforce_core::pubsubapi::{
     ProducerEvent, PubSubError, PublishRequest, SchemaRequest, TopicRequest,
 };
 use std::sync::Arc;
@@ -86,7 +86,7 @@ pub struct EventHandler {
     /// Publisher configuration.
     config: Arc<super::config::Publisher>,
     /// Pub/Sub connection context.
-    pubsub: Arc<Mutex<salesforce_core::pubsub::Client>>,
+    pubsub: Arc<Mutex<salesforce_core::pubsubapi::Client>>,
     /// Topic name for publishing.
     topic: String,
     /// Schema ID for event serialization.
@@ -256,7 +256,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .await
             .map_err(|e| Error::Auth { source: e })?;
 
-        let pubsub = salesforce_core::pubsub::Client::new(channel, sfdc_client)
+        let pubsub = salesforce_core::pubsubapi::Client::new(channel, sfdc_client)
             .map_err(|e| Error::PubSub { source: e })?;
 
         let pubsub = Arc::new(Mutex::new(pubsub));
@@ -452,7 +452,7 @@ impl PublisherBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pubsub::config;
+    use crate::pubsubapi::config;
     use serde_json::{Map, Value};
     use std::path::PathBuf;
     use tokio::sync::mpsc;

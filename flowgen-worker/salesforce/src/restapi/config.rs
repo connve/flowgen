@@ -26,21 +26,18 @@ pub enum SObjectOperation {
 #[serde(untagged)]
 pub enum Payload {
     /// Use incoming event data as payload.
-    FromEvent {
-        #[serde(default)]
-        from_event: bool,
-    },
+    FromEvent { from_event: bool },
     /// Explicit field values.
     Fields(Map<String, Value>),
 }
 
-/// Configuration for Salesforce SObject CRUD operations.
+/// Configuration for Salesforce REST API CRUD operations.
 ///
 /// # Examples
 ///
 /// Create a new record with explicit payload:
 /// ```yaml
-/// salesforce_sobject:
+/// salesforce_restapi:
 ///   name: create_account
 ///   operation: create
 ///   credentials_path: /path/to/salesforce_creds.json
@@ -53,7 +50,7 @@ pub enum Payload {
 ///
 /// Create using event data as payload:
 /// ```yaml
-/// salesforce_sobject:
+/// salesforce_restapi:
 ///   name: create_account
 ///   operation: create
 ///   credentials_path: /path/to/salesforce_creds.json
@@ -64,7 +61,7 @@ pub enum Payload {
 ///
 /// Update a record:
 /// ```yaml
-/// salesforce_sobject:
+/// salesforce_restapi:
 ///   name: update_account
 ///   operation: update
 ///   credentials_path: /path/to/salesforce_creds.json
@@ -77,7 +74,7 @@ pub enum Payload {
 ///
 /// Upsert by external ID:
 /// ```yaml
-/// salesforce_sobject:
+/// salesforce_restapi:
 ///   name: upsert_contact
 ///   operation: upsert
 ///   credentials_path: /path/to/salesforce_creds.json
@@ -128,6 +125,54 @@ pub struct SObject {
 }
 
 impl ConfigExt for SObject {}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositeOperation {
+    Create,
+    Get,
+    Update,
+    Upsert,
+    Delete,
+    Tree,
+}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CompositePayload {
+    FromEvent { from_event: bool },
+    Records(Vec<Map<String, Value>>),
+}
+
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct Composite {
+    pub name: String,
+    pub operation: CompositeOperation,
+    pub credentials_path: PathBuf,
+
+    #[serde(default)]
+    pub sobject_type: Option<String>,
+
+    #[serde(default)]
+    pub payload: Option<CompositePayload>,
+
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub external_id_field: Option<String>,
+
+    #[serde(default)]
+    pub all_or_none: Option<bool>,
+
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl ConfigExt for Composite {}
 
 #[cfg(test)]
 mod tests {

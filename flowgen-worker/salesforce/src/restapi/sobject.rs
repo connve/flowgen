@@ -1,75 +1,67 @@
-//! Salesforce SObject CRUD processor.
+//! Salesforce REST API processor.
 //!
-//! Handles SObject operations: create, get, get_by_external_id, update, upsert, and delete.
+//! Handles SObject CRUD operations: create, get, get_by_external_id, update, upsert, and delete.
 
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
-/// Response for delete operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteResponse {
-    /// The ID of the deleted record.
-    pub record_id: String,
-    /// Confirmation that the record was deleted.
-    pub deleted: bool,
-}
-
-/// Response for upsert operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpsertResponse {
-    /// The ID of the upserted record.
-    pub id: String,
-    /// Whether the record was created (true) or updated (false).
-    pub created: bool,
-}
-
-/// Errors for Salesforce SObject CRUD operations.
+/// Errors for Salesforce REST API CRUD operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Error sending event message: {source}")]
+    #[error("Failed to send event message to next task: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error(transparent)]
-    SalesforceAuth(#[from] salesforce_core::client::Error),
-    #[error("SObject CRUD error: {source}")]
-    SObjectCrud {
+    #[error("Salesforce authentication error: {source}")]
+    SalesforceAuth {
         #[source]
-        source: Box<salesforce_core::sobject::Error>,
+        source: salesforce_core::client::Error,
     },
-    #[error("Serialization error: {source}")]
+    #[error("Salesforce REST API operation failed: {source}")]
+    RestApiOperation {
+        #[source]
+        source: Box<salesforce_core::restapi::sobject::Error>,
+    },
+    #[error("Failed to serialize or deserialize data: {source}")]
     SerdeExt {
         #[source]
         source: flowgen_core::serde::Error,
     },
     #[error(transparent)]
     EventError(#[from] flowgen_core::event::Error),
-    #[error(transparent)]
-    ConfigRender(#[from] flowgen_core::config::Error),
+    #[error("Failed to render configuration template: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,
     },
-    #[error("Operation requires record_id")]
+    #[error("Operation requires record_id field to be specified")]
     MissingRecordId,
-    #[error("Operation requires data")]
-    MissingData,
-    #[error("Operation requires external_id_field and external_id_value")]
+    #[error("Operation requires payload data (explicit fields or from_event: true)")]
+    MissingPayload,
+    #[error("Operation requires both external_id_field and external_id_value to be specified")]
     MissingExternalId,
+    #[error("Failed to build REST API client: {source}")]
+    RestClientBuild {
+        #[source]
+        source: salesforce_core::restapi::ClientError,
+    },
 }
 
 /// Event handler for processing individual SObject CRUD requests.
 pub struct EventHandler {
-    client: Arc<salesforce_core::sobject::Client>,
+    client: Arc<salesforce_core::restapi::Client>,
     config: Arc<super::config::SObject>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
@@ -90,15 +82,18 @@ impl EventHandler {
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
-            let config = self.config.render(&event_value)?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|e| Error::ConfigRender { source: e })?;
 
             // Extract event.data for payload operations
-            let event_data = &event_value["data"];
+            let event_data = event.data_as_json()?;
 
             // Execute operation based on type.
             match config.operation {
                 super::config::SObjectOperation::Create => {
-                    self.create(&config, event_data, completion_tx_arc).await?
+                    self.create(&config, &event_data, completion_tx_arc).await?
                 }
                 super::config::SObjectOperation::Get => {
                     self.get(&config, completion_tx_arc).await?
@@ -107,10 +102,10 @@ impl EventHandler {
                     self.get_by_external_id(&config, completion_tx_arc).await?
                 }
                 super::config::SObjectOperation::Update => {
-                    self.update(&config, event_data, completion_tx_arc).await?
+                    self.update(&config, &event_data, completion_tx_arc).await?
                 }
                 super::config::SObjectOperation::Upsert => {
-                    self.upsert(&config, event_data, completion_tx_arc).await?
+                    self.upsert(&config, &event_data, completion_tx_arc).await?
                 }
                 super::config::SObjectOperation::Delete => {
                     self.delete(&config, completion_tx_arc).await?
@@ -128,7 +123,7 @@ impl EventHandler {
         config: &super::config::SObject,
         event_data: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        let payload = config.payload.as_ref().ok_or(Error::MissingData)?;
+        let payload = config.payload.as_ref().ok_or(Error::MissingPayload)?;
 
         match payload {
             super::config::Payload::FromEvent { from_event } if *from_event => {
@@ -139,7 +134,7 @@ impl EventHandler {
                 // Use explicit fields
                 Ok(serde_json::Value::Object(fields.clone()))
             }
-            _ => Err(Error::MissingData),
+            _ => Err(Error::MissingPayload),
         }
     }
 
@@ -152,24 +147,22 @@ impl EventHandler {
     ) -> Result<(), Error> {
         let data = self.get_payload_data(config, event_data)?;
 
-        let record_id = self
+        let response = self
             .client
             .create(&config.sobject_type, data.clone())
             .await
-            .map_err(|e| Error::SObjectCrud {
+            .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),
             })?;
 
-        // Create response with record ID.
-        let resp = serde_json::json!({
-            "id": record_id.clone(),
-            "success": true,
-        });
+        let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
+            source: flowgen_core::serde::Error::Serde { source: e },
+        })?;
 
         let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
-            .id(record_id)
+            .id(response.id)
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -209,7 +202,7 @@ impl EventHandler {
             .client
             .get(&config.sobject_type, record_id, config.fields.as_deref())
             .await
-            .map_err(|e| Error::SObjectCrud {
+            .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),
             })?;
 
@@ -270,7 +263,7 @@ impl EventHandler {
                 config.fields.as_deref(),
             )
             .await
-            .map_err(|e| Error::SObjectCrud {
+            .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),
             })?;
 
@@ -327,15 +320,13 @@ impl EventHandler {
         self.client
             .update(&config.sobject_type, record_id, data.clone())
             .await
-            .map_err(|e| Error::SObjectCrud {
+            .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),
             })?;
 
-        // Create success response.
-        let resp = serde_json::json!({
-            "id": record_id.clone(),
-            "success": true,
-        });
+        // Salesforce update API returns nothing on success.
+        // Send empty event to maintain event chain.
+        let resp = serde_json::json!({});
 
         let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
@@ -396,81 +387,105 @@ impl EventHandler {
             )
             .await;
 
-        let (record_id, created) = match existing_record {
+        match existing_record {
             Ok(record) => {
                 // Record exists, update it.
                 let record_id = record
                     .get("Id")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| Error::SObjectCrud {
-                        source: Box::new(salesforce_core::sobject::Error::InvalidDataType {
-                            actual_type: "Missing Id field in response".to_string(),
-                        }),
+                    .ok_or_else(|| Error::RestApiOperation {
+                        source: Box::new(
+                            salesforce_core::restapi::sobject::Error::InvalidDataType {
+                                actual_type: "Missing Id field in response".to_string(),
+                            },
+                        ),
                     })?
                     .to_string();
 
                 self.client
                     .update(&config.sobject_type, &record_id, data.clone())
                     .await
-                    .map_err(|e| Error::SObjectCrud {
+                    .map_err(|e| Error::RestApiOperation {
                         source: Box::new(e),
                     })?;
 
-                (record_id, false)
-            }
-            Err(_) => {
-                // Record doesn't exist, create it.
-                let record_id = self
-                    .client
-                    .create(&config.sobject_type, data.clone())
-                    .await
-                    .map_err(|e| Error::SObjectCrud {
-                        source: Box::new(e),
-                    })?;
+                // Salesforce update API returns nothing on success.
+                // Send empty event to maintain event chain.
+                let resp = serde_json::json!({});
 
-                (record_id, true)
-            }
-        };
+                let mut e = EventBuilder::new()
+                    .data(EventData::Json(resp))
+                    .subject(config.name.to_owned())
+                    .id(record_id)
+                    .task_id(self.current_task_id)
+                    .task_type(self.task_type)
+                    .build()?;
 
-        // Create upsert response.
-        let response = UpsertResponse {
-            id: record_id.clone(),
-            created,
-        };
-
-        let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
-            source: flowgen_core::serde::Error::Serde { source: e },
-        })?;
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
-            .subject(config.name.to_owned())
-            .id(record_id)
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                match self.tx {
+                    Some(_) => {
+                        e.completion_tx = completion_tx_arc.clone();
+                    }
+                    None => {
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
+                            }
                         }
                     }
                 }
+
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|e| Error::SendMessage { source: e })?;
+
+                Ok(())
+            }
+            Err(_) => {
+                // Record doesn't exist, create it.
+                let response = self
+                    .client
+                    .create(&config.sobject_type, data.clone())
+                    .await
+                    .map_err(|e| Error::RestApiOperation {
+                        source: Box::new(e),
+                    })?;
+
+                let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
+                    source: flowgen_core::serde::Error::Serde { source: e },
+                })?;
+
+                let mut e = EventBuilder::new()
+                    .data(EventData::Json(resp))
+                    .subject(config.name.to_owned())
+                    .id(response.id)
+                    .task_id(self.current_task_id)
+                    .task_type(self.task_type)
+                    .build()?;
+
+                match self.tx {
+                    Some(_) => {
+                        e.completion_tx = completion_tx_arc.clone();
+                    }
+                    None => {
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            if let Ok(mut guard) = arc.lock() {
+                                if let Some(tx) = guard.take() {
+                                    tx.send(Ok(())).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|e| Error::SendMessage { source: e })?;
+
+                Ok(())
             }
         }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
     }
 
     /// Deletes a record.
@@ -484,24 +499,18 @@ impl EventHandler {
         self.client
             .delete(&config.sobject_type, record_id)
             .await
-            .map_err(|e| Error::SObjectCrud {
+            .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),
             })?;
 
-        // Create delete response.
-        let response = DeleteResponse {
-            record_id: record_id.to_string(),
-            deleted: true,
-        };
-
-        let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
-            source: flowgen_core::serde::Error::Serde { source: e },
-        })?;
+        // Salesforce delete API returns nothing on success.
+        // Send empty event to maintain event chain.
+        let resp = serde_json::json!({});
 
         let mut e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
-            .id(response.record_id)
+            .id(record_id.to_string())
             .task_id(self.current_task_id)
             .task_type(self.task_type)
             .build()?;
@@ -530,7 +539,7 @@ impl EventHandler {
     }
 }
 
-/// Salesforce SObject CRUD processor.
+/// Salesforce REST API processor.
 #[derive(Debug)]
 pub struct Processor {
     config: Arc<super::config::SObject>,
@@ -547,17 +556,22 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self.config.render(&serde_json::json!({}))?;
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|e| Error::ConfigRender { source: e })?;
 
         let sfdc_client = salesforce_core::client::Builder::new()
             .credentials_path(init_config.credentials_path.clone())
-            .build()?
+            .build()
+            .map_err(|e| Error::SalesforceAuth { source: e })?
             .connect()
-            .await?;
+            .await
+            .map_err(|e| Error::SalesforceAuth { source: e })?;
 
-        // Create SObject client.
-        let sobject_client =
-            salesforce_core::sobject::ClientBuilder::new(sfdc_client.clone()).build();
+        let sobject_client = salesforce_core::restapi::ClientBuilder::new(sfdc_client.clone())
+            .build()
+            .map_err(|e| Error::RestClientBuild { source: e })?;
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
@@ -580,7 +594,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!(error = %e, "Failed to initialize SObject CRUD processor");
+                    error!(error = %e, "Failed to initialize REST API processor");
                     Err(tokio_retry::RetryError::transient(e))
                 }
             }
@@ -606,11 +620,11 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!(error = %e, "Failed to process SObject CRUD operation");
-                                            let needs_reconnect = matches!(&e, Error::SalesforceAuth(_))
+                                            error!(error = %e, "Failed to process REST API operation");
+                                            let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
                                                 || matches!(&e,
-                                                    Error::SObjectCrud { source }
-                                                        if matches!(source.as_ref(), salesforce_core::sobject::Error::Auth { .. })
+                                                    Error::RestApiOperation { source }
+                                                        if matches!(source.as_ref(), salesforce_core::restapi::sobject::Error::Auth { .. })
                                                 );
 
                                             if needs_reconnect {
@@ -620,9 +634,9 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     (*sfdc_client).reconnect().await
                                                 {
                                                     error!(error = %reconnect_err, "Failed to reconnect");
-                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth(
-                                                        reconnect_err,
-                                                    )));
+                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth {
+                                                        source: reconnect_err,
+                                                    }));
                                                 }
                                             }
                                             Err(tokio_retry::RetryError::transient(e))
@@ -632,7 +646,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(error = %err, "SObject CRUD operation failed after all retry attempts");
+                                    error!(error = %err, "REST API operation failed after all retry attempts");
                                 }
                             }
                             .instrument(tracing::Span::current()),

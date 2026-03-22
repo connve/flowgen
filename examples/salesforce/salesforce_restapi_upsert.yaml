@@ -1,5 +1,5 @@
 flow:
-  name: salesforce_sobject_upsert_example
+  name: salesforce_restapi_upsert_example
   require_leader_election: true
   tasks:
 
@@ -20,7 +20,7 @@ flow:
     # Upsert contact using external ID as the key.
     # If a contact with this external ID exists, it will be updated.
     # If not, a new contact will be created.
-    - salesforce_sobject:
+    - salesforce_restapi_sobject:
         name: upsert_contact
         operation: upsert
         credentials_path: $SALESFORCE_CREDENTIALS_PATH
@@ -42,7 +42,7 @@ flow:
         structured: true
 
     # Retrieve the contact by external ID to verify the upsert.
-    - salesforce_sobject:
+    - salesforce_restapi_sobject:
         name: get_contact_by_external_id
         operation: get_by_external_id
         credentials_path: $SALESFORCE_CREDENTIALS_PATH

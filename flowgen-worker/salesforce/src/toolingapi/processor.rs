@@ -24,7 +24,7 @@ pub enum Error {
     #[error("Tooling API error: {source}")]
     ToolingApi {
         #[source]
-        source: Box<salesforce_core::tooling::Error>,
+        source: Box<salesforce_core::toolingapi::Error>,
     },
     #[error("Serialization error: {source}")]
     SerdeExt {
@@ -42,11 +42,16 @@ pub enum Error {
     },
     #[error("Operation requires full_name and metadata")]
     MissingSubscriptionData,
+    #[error("Failed to build Tooling API client: {source}")]
+    ToolingClientBuild {
+        #[source]
+        source: salesforce_core::toolingapi::Error,
+    },
 }
 
 /// Event handler for processing individual Tooling API requests.
 pub struct EventHandler {
-    client: Arc<salesforce_core::tooling::Client>,
+    client: Arc<salesforce_core::toolingapi::Client>,
     config: Arc<super::config::Tooling>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
@@ -98,9 +103,9 @@ impl EventHandler {
             .ok_or(Error::MissingSubscriptionData)?;
 
         // Build SDK request.
-        let request = salesforce_core::tooling::CreateManagedEventSubscriptionRequest {
+        let request = salesforce_core::toolingapi::CreateManagedEventSubscriptionRequest {
             full_name: full_name.clone(),
-            metadata: salesforce_core::tooling::ManagedEventSubscriptionMetadata {
+            metadata: salesforce_core::toolingapi::ManagedEventSubscriptionMetadata {
                 label: metadata.label.clone(),
                 topic_name: metadata.topic_name.clone(),
                 default_replay: super::config::to_sdk_replay_preset(&metadata.default_replay),
@@ -182,9 +187,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             .connect()
             .await?;
 
-        // Create Tooling API client.
-        let tooling_client =
-            salesforce_core::tooling::ClientBuilder::new(sfdc_client.clone()).build();
+        let tooling_client = salesforce_core::toolingapi::ClientBuilder::new(sfdc_client.clone())
+            .build()
+            .map_err(|e| Error::ToolingClientBuild { source: e })?;
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
@@ -237,7 +242,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                             let needs_reconnect = matches!(&e, Error::SalesforceAuth(_))
                                                 || matches!(&e,
                                                     Error::ToolingApi { source }
-                                                        if matches!(source.as_ref(), salesforce_core::tooling::Error::Auth { .. })
+                                                        if matches!(source.as_ref(), salesforce_core::toolingapi::Error::Auth { .. })
                                                 );
 
                                             if needs_reconnect {

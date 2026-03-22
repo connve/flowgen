@@ -88,19 +88,19 @@ pub struct ManagedEventSubscriptionMetadata {
 impl ConfigExt for Tooling {}
 
 // Conversion functions to SDK types.
-pub(crate) fn to_sdk_replay_preset(rp: &ReplayPreset) -> salesforce_core::tooling::ReplayPreset {
+pub(crate) fn to_sdk_replay_preset(rp: &ReplayPreset) -> salesforce_core::toolingapi::ReplayPreset {
     match rp {
-        ReplayPreset::Latest => salesforce_core::tooling::ReplayPreset::Latest,
-        ReplayPreset::Earliest => salesforce_core::tooling::ReplayPreset::Earliest,
+        ReplayPreset::Latest => salesforce_core::toolingapi::ReplayPreset::Latest,
+        ReplayPreset::Earliest => salesforce_core::toolingapi::ReplayPreset::Earliest,
     }
 }
 
 pub(crate) fn to_sdk_subscription_state(
     state: &SubscriptionState,
-) -> salesforce_core::tooling::SubscriptionState {
+) -> salesforce_core::toolingapi::SubscriptionState {
     match state {
-        SubscriptionState::Run => salesforce_core::tooling::SubscriptionState::Run,
-        SubscriptionState::Stop => salesforce_core::tooling::SubscriptionState::Stop,
+        SubscriptionState::Run => salesforce_core::toolingapi::SubscriptionState::Run,
+        SubscriptionState::Stop => salesforce_core::toolingapi::SubscriptionState::Stop,
     }
 }
 

@@ -75,14 +75,16 @@ pub enum TaskType {
     nats_jetstream_subscriber(flowgen_nats::jetstream::config::Subscriber),
     /// NATS JetStream publisher task.
     nats_jetstream_publisher(flowgen_nats::jetstream::config::Publisher),
-    /// Salesforce Pub/Sub subscriber task.
-    salesforce_pubsub_subscriber(flowgen_salesforce::pubsub::config::Subscriber),
-    /// Salesforce Pub/Sub publisher task.
-    salesforce_pubsub_publisher(flowgen_salesforce::pubsub::config::Publisher),
+    /// Salesforce Pub/Sub API subscriber task.
+    salesforce_pubsubapi_subscriber(flowgen_salesforce::pubsubapi::config::Subscriber),
+    /// Salesforce Pub/Sub API publisher task.
+    salesforce_pubsubapi_publisher(flowgen_salesforce::pubsubapi::config::Publisher),
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::config::QueryJob),
-    /// Salesforce SObject CRUD operations (create, get, update, upsert, delete).
-    salesforce_sobject(flowgen_salesforce::sobject::config::SObject),
+    /// Salesforce REST API SObject operations (create, get, update, upsert, delete).
+    salesforce_restapi_sobject(flowgen_salesforce::restapi::config::SObject),
+    /// Salesforce REST API Composite operations for bulk record operations.
+    salesforce_restapi_composite(flowgen_salesforce::restapi::config::Composite),
     /// Salesforce Tooling API operations for metadata management.
     salesforce_toolingapi(flowgen_salesforce::toolingapi::config::Tooling),
     /// GCP BigQuery query task.
@@ -113,10 +115,11 @@ impl TaskType {
             TaskType::http_webhook(_) => "http_webhook",
             TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
-            TaskType::salesforce_pubsub_subscriber(_) => "salesforce_pubsub_subscriber",
-            TaskType::salesforce_pubsub_publisher(_) => "salesforce_pubsub_publisher",
+            TaskType::salesforce_pubsubapi_subscriber(_) => "salesforce_pubsubapi_subscriber",
+            TaskType::salesforce_pubsubapi_publisher(_) => "salesforce_pubsubapi_publisher",
             TaskType::salesforce_bulkapi_query_job(_) => "salesforce_bulkapi_query_job",
-            TaskType::salesforce_sobject(_) => "salesforce_sobject",
+            TaskType::salesforce_restapi_sobject(_) => "salesforce_restapi_sobject",
+            TaskType::salesforce_restapi_composite(_) => "salesforce_restapi_composite",
             TaskType::salesforce_toolingapi(_) => "salesforce_toolingapi",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",

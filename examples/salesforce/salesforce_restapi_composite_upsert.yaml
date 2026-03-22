@@ -1,0 +1,59 @@
+flow:
+  name: salesforce_restapi_composite_upsert_example
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: trigger
+        interval: 60s
+        count: 1
+
+    # Prepare array of contact records for bulk upsert.
+    # Upsert will create new records or update existing based on external ID.
+    - script:
+        name: prepare_contacts
+        code: |
+          event.data = [
+            #{
+              attributes: #{ type: "Contact" },
+              ExternalId__c: "EXT-CONTACT-001",
+              FirstName: "Alice",
+              LastName: "Smith",
+              Email: "alice.smith@example.com",
+              Department: "Engineering"
+            },
+            #{
+              attributes: #{ type: "Contact" },
+              ExternalId__c: "EXT-CONTACT-002",
+              FirstName: "Bob",
+              LastName: "Johnson",
+              Email: "bob.johnson@example.com",
+              Department: "Sales"
+            },
+            #{
+              attributes: #{ type: "Contact" },
+              ExternalId__c: "EXT-CONTACT-003",
+              FirstName: "Carol",
+              LastName: "Williams",
+              Email: "carol.williams@example.com",
+              Department: "Marketing"
+            }
+          ];
+          event
+
+    # Upsert multiple contacts using external ID field.
+    # Creates new records or updates existing ones based on ExternalId__c.
+    - salesforce_restapi_composite:
+        name: upsert_contacts
+        operation: upsert
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        sobject_type: Contact
+        external_id_field: ExternalId__c
+        all_or_none: false
+        payload:
+          from_event: true
+
+    - log:
+        name: log_upsert_results
+        level: info
+        structured: true
