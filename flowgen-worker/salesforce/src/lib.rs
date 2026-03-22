@@ -24,9 +24,9 @@ pub mod bulkapi {
 
 /// Salesforce REST API operations (create, get, update, upsert, delete).
 pub mod restapi {
+    pub mod composite;
     pub mod config;
     pub mod sobject;
-    pub mod composite;
 }
 
 /// Salesforce Tooling API operations for metadata management.

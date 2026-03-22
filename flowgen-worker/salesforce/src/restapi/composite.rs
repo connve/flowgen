@@ -281,10 +281,7 @@ impl EventHandler {
         let records = self.get_payload_records(config, event_data)?;
 
         let composite_records: Result<Vec<serde_json::Map<String, serde_json::Value>>, Error> =
-            records
-                .iter()
-                .map(|r| Ok(r.clone()))
-                .collect();
+            records.iter().map(|r| Ok(r.clone())).collect();
 
         let request = CompositeCollectionUpdateRequest {
             all_or_none: config.all_or_none.unwrap_or(false),
@@ -360,10 +357,7 @@ impl EventHandler {
         let records = self.get_payload_records(config, event_data)?;
 
         let composite_records: Result<Vec<serde_json::Map<String, serde_json::Value>>, Error> =
-            records
-                .iter()
-                .map(|r| Ok(r.clone()))
-                .collect();
+            records.iter().map(|r| Ok(r.clone())).collect();
 
         let request = CompositeCollectionUpsertRequest {
             all_or_none: config.all_or_none.unwrap_or(false),
