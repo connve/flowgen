@@ -26,6 +26,11 @@ pub struct FlowConfig {
     pub flow: Flow,
 }
 
+/// Default value for parallel_instances.
+fn default_parallel_instances() -> usize {
+    1
+}
+
 /// Flow definition with name and task list.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Flow {
@@ -37,6 +42,12 @@ pub struct Flow {
     pub tasks: Vec<TaskType>,
     /// Whether this flow requires leader election (defaults to false if not specified).
     pub require_leader_election: Option<bool>,
+    /// Number of parallel flow instances to run within the same process.
+    ///
+    /// Spawns multiple independent flow pipelines for higher throughput.
+    /// Best used with leader election enabled. Defaults to 1.
+    #[serde(default = "default_parallel_instances")]
+    pub parallel_instances: usize,
 }
 
 /// Available task types in the flowgen ecosystem.
@@ -262,6 +273,7 @@ mod tests {
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         };
 
@@ -281,6 +293,7 @@ mod tests {
                 labels: Some(labels),
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         };
 
@@ -299,6 +312,7 @@ mod tests {
             labels: Some(labels.clone()),
             tasks: vec![],
             require_leader_election: None,
+            parallel_instances: 1,
         };
 
         assert_eq!(flow.name, "test_flow");
@@ -316,6 +330,7 @@ mod tests {
             labels: None,
             tasks: vec![task],
             require_leader_election: None,
+            parallel_instances: 1,
         };
 
         assert_eq!(flow.name, "flow_with_tasks");
@@ -337,6 +352,7 @@ mod tests {
             labels: Some(labels),
             tasks: vec![],
             require_leader_election: None,
+            parallel_instances: 1,
         };
 
         let serialized = serde_json::to_string(&flow).unwrap();
@@ -351,6 +367,7 @@ mod tests {
             labels: None,
             tasks: vec![],
             require_leader_election: None,
+            parallel_instances: 1,
         };
 
         let cloned = flow.clone();
@@ -577,6 +594,7 @@ mod tests {
                     TaskType::generate(generate_config),
                 ],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         };
 
