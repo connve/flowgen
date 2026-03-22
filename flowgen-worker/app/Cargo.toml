@@ -30,7 +30,6 @@ arrow = { workspace = true }
 config = { workspace = true }
 glob = { workspace = true }
 serde_json = { workspace = true }
-kube = { workspace = true }
 native-tls = { workspace = true }
 humantime-serde = { workspace = true }
 [dev-dependencies]

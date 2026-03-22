@@ -463,6 +463,46 @@ impl Flow {
         })
     }
 
+    /// Spawns multiple independent flow pipelines for higher throughput.
+    ///
+    /// Creates N separate task registries, each with its own event channels.
+    /// All instances share the same cancellation token for coordinated shutdown.
+    async fn spawn_parallel_instances(&self, count: usize) -> Result<TaskHandles, Error> {
+        let task_context = self.create_task_context()?;
+        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
+
+        let mut all_blocking_tasks = Vec::new();
+        let mut all_background_tasks = Vec::new();
+
+        // Build all task registries and collect task descriptors.
+        for _ in 0..count {
+            let registry = TaskRegistry::builder(self.config.clone(), buffer_size).build()?;
+            let (blocking_tasks, background_tasks) = registry.partition();
+            all_blocking_tasks.extend(blocking_tasks);
+            all_background_tasks.extend(background_tasks);
+        }
+
+        // Spawn all blocking tasks.
+        let mut blocking_handles = Vec::new();
+        for task_desc in all_blocking_tasks {
+            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            blocking_handles.push(handle);
+        }
+
+        // Spawn all background tasks.
+        let mut background_handles = Vec::new();
+        for task_desc in all_background_tasks {
+            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            background_handles.push(handle);
+        }
+
+        Ok(TaskHandles {
+            blocking_handles,
+            background_handles,
+            task_context,
+        })
+    }
+
     /// Spawns initial setup tasks that must complete before the HTTP server starts.
     ///
     /// This is specifically for registering webhooks for non-leader-elected flows.
@@ -586,7 +626,17 @@ impl Flow {
             }
         } else {
             // Spawn tasks for this leadership tenure.
-            self.spawn_all_tasks().await?
+            let parallel_instances = self.config.flow.parallel_instances;
+
+            if parallel_instances <= 1 {
+                self.spawn_all_tasks().await?
+            } else {
+                info!(
+                    "Spawning {} parallel instances for flow: {}",
+                    parallel_instances, self.config.flow.name
+                );
+                self.spawn_parallel_instances(parallel_instances).await?
+            }
         };
 
         let mut background_tasks: Vec<TaskHandle> = current_task_handles
@@ -1337,6 +1387,7 @@ mod tests {
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 
@@ -1371,6 +1422,7 @@ mod tests {
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
@@ -1391,6 +1443,7 @@ mod tests {
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
         let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
@@ -1423,6 +1476,7 @@ mod tests {
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                 ],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 
@@ -1461,6 +1515,7 @@ mod tests {
                     flowgen_core::task::script::config::Processor::default(),
                 )],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 
@@ -1490,6 +1545,7 @@ mod tests {
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                 ],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 
@@ -1527,6 +1583,7 @@ mod tests {
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 
@@ -1549,6 +1606,7 @@ mod tests {
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                 ],
                 require_leader_election: None,
+                parallel_instances: 1,
             },
         });
 

@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.77.0"
+version = "0.78.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -38,6 +38,8 @@ tiberius = { version = "0.12", features = ["chrono"] }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }
 reqwest = { version = "0.13", features = ["json"] }
+# Explicitly enable rustls crypto provider (required by reqwest 0.13 default features)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 url = { version = "2.5" }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550
@@ -57,8 +59,6 @@ base64 = { version = "0.22" }
 bb8 = { version = "0.9" }
 bb8-tiberius = { version = "0.16" }
 async-trait = { version = "0.1" }
-kube = { version = "0.99", features = ["runtime", "derive"] }
-k8s-openapi = { version = "0.24", features = ["v1_32"] }
 rhai = { version = "1.20", features = ["sync", "serde"] }
 tokio-retry = { package = "tokio-retry2", version = "0.6", features = [
     "jitter",
