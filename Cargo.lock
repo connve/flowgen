@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "arrow",
  "config",
@@ -2290,9 +2290,9 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "iri-string"
-version = "0.7.10"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c91338f0783edbd6195decb37bae672fd3b165faffb89bf7b9e6942f8b1a731a"
+checksum = "d8e7418f59cc01c88316161279a7f665217ae316b388e58a0d10e29f54f1e5eb"
 dependencies = [
  "memchr",
  "serde",
@@ -3966,8 +3966,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.8.0"
-source = "git+https://github.com/connve/salesforce-rs#5b9503bd61e095c97e07691450cdab9c5420f9ad"
+version = "0.9.0"
+source = "git+https://github.com/connve/salesforce-rs#03b873a3e2411241032eb9206b95eb93a2c8a428"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -3988,8 +3988,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.8.0"
-source = "git+https://github.com/connve/salesforce-rs#5b9503bd61e095c97e07691450cdab9c5420f9ad"
+version = "0.9.0"
+source = "git+https://github.com/connve/salesforce-rs#03b873a3e2411241032eb9206b95eb93a2c8a428"
 dependencies = [
  "bytes",
  "chrono",
@@ -4007,8 +4007,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.8.0"
-source = "git+https://github.com/connve/salesforce-rs#5b9503bd61e095c97e07691450cdab9c5420f9ad"
+version = "0.9.0"
+source = "git+https://github.com/connve/salesforce-rs#03b873a3e2411241032eb9206b95eb93a2c8a428"
 dependencies = [
  "bytes",
  "futures-util",
@@ -4031,8 +4031,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.8.0"
-source = "git+https://github.com/connve/salesforce-rs#5b9503bd61e095c97e07691450cdab9c5420f9ad"
+version = "0.9.0"
+source = "git+https://github.com/connve/salesforce-rs#03b873a3e2411241032eb9206b95eb93a2c8a428"
 dependencies = [
  "bytes",
  "chrono",
@@ -4050,8 +4050,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.8.0"
-source = "git+https://github.com/connve/salesforce-rs#5b9503bd61e095c97e07691450cdab9c5420f9ad"
+version = "0.9.0"
+source = "git+https://github.com/connve/salesforce-rs#03b873a3e2411241032eb9206b95eb93a2c8a428"
 dependencies = [
  "bytes",
  "chrono",
