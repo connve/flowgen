@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.79.0"
+version = "0.80.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -17,7 +17,11 @@ gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-googleapis = { git = "https://github.com/connve/google-cloud-rust" }
 google-cloud-gax = { version = "0.21" }
-object_store = { version = "0.13.1", features = ["gcp", "fs"] }
+object_store = { version = "0.13.1", default-features = false, features = [
+    "gcp",
+    "fs",
+    "tls-webpki-roots",
+] }
 bytes = { version = "1.11.1" }
 handlebars = { version = "6.3" }
 arrow = { version = "56.1" }
@@ -37,7 +41,11 @@ thiserror = { version = "1.0" }
 tiberius = { version = "0.12", features = ["chrono"] }
 futures-util = { version = "0.3" }
 futures = { version = "0.3" }
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "json",
+    "form",
+    "rustls",
+] }
 url = { version = "2.5" }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550

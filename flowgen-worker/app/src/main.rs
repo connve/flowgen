@@ -12,6 +12,9 @@ use tracing::{error, info};
 /// creates the application instance, and runs it. Exits with code 1 on any error.
 #[tokio::main]
 async fn main() {
+    // Install rustls crypto provider (ring) as process-level default.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .compact()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

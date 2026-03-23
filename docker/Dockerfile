@@ -26,13 +26,13 @@ ARG CARGO_FEATURES=""
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/sccache,sharing=locked \
-    cargo chef cook --release --features "$CARGO_FEATURES" --recipe-path recipe.json
+    cargo chef cook --release --locked --features "$CARGO_FEATURES" --recipe-path recipe.json
 
 # Copy source and build application.
 COPY ./ ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/sccache,sharing=locked \
-    cargo build --release --bin $SERVICE_NAME && \
+    cargo build --release --locked --bin $SERVICE_NAME && \
     cp ./target/release/$SERVICE_NAME /bin/$SERVICE_NAME && \
     sccache --show-stats
 
