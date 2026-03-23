@@ -1,0 +1,34 @@
+# Demonstrates parallel flow instances for higher throughput.
+#
+# This flow spawns 5 independent instances within the same process.
+# Each instance runs the complete task pipeline independently.
+# All instances share the same process memory and cancellation token.
+#
+# Use cases:
+# - High-throughput message consumers processing thousands of events per second
+# - I/O-bound tasks that benefit from parallel execution (database queries, API calls)
+# - Scenarios requiring zero duplication with leader election
+#
+# Key points:
+# - require_leader_election: true ensures only one pod is active
+# - parallel_instances: 5 spawns 5 pipelines within that single pod
+# - Each instance processes events independently with its own event channels
+
+flow:
+  name: parallel_instances_example
+  require_leader_election: true
+  parallel_instances: 5
+  tasks:
+    # Generate events every 5 seconds.
+    # Each of the 5 instances will generate its own events.
+    - generate:
+        name: trigger
+        interval: 5s
+        count: 1
+
+    # Log the event to demonstrate which instance processed it.
+    # Check logs for flow_instance span with instance=1..5
+    - log:
+        name: log_message
+        level: info
+        structured: true
