@@ -106,6 +106,8 @@ pub enum TaskType {
     gcp_bigquery_job(flowgen_gcp::bigquery::config::Job),
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::config::Query),
+    /// AI completion task for generating responses using LLMs.
+    ai_completion(flowgen_ai::completion::config::Processor),
 }
 
 impl TaskType {
@@ -136,6 +138,7 @@ impl TaskType {
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
             TaskType::mssql_query(_) => "mssql_query",
+            TaskType::ai_completion(_) => "ai_completion",
         }
     }
 }

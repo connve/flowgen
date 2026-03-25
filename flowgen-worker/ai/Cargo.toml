@@ -1,0 +1,26 @@
+
+[package]
+name = "flowgen_ai"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "flowgen_ai"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+futures-util = { workspace = true }
+flowgen_core = { path = "../core" }
+tokio = { workspace = true, features = ["fs"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+rig-core = { workspace = true }
+tokio-retry = { workspace = true }
+handlebars = { workspace = true }
+schemars = { workspace = true }

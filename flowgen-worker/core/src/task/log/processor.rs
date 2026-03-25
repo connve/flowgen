@@ -36,8 +36,6 @@ pub struct EventHandler {
     task_id: usize,
     /// Event sender for passing through logged events.
     tx: Option<Sender<Event>>,
-    /// Task type identifier (unused but kept for consistency).
-    _task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<crate::task::context::TaskContext>,
 }
@@ -122,7 +120,6 @@ impl crate::task::runner::Runner for Processor {
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
-            _task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
         };
 
@@ -338,7 +335,6 @@ mod tests {
             config,
             task_id: 1,
             tx: Some(tx),
-            _task_type: "test",
             task_context: create_mock_task_context(),
         };
 
@@ -369,7 +365,6 @@ mod tests {
             config,
             task_id: 1,
             tx: Some(tx),
-            _task_type: "test",
             task_context: create_mock_task_context(),
         };
 

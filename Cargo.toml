@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.80.0"
+version = "0.81.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -79,3 +79,5 @@ opentelemetry = { version = "0.27" }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
 tracing-opentelemetry = { version = "0.28" }
+rig-core = { version = "0.33" }
+schemars = { version = "1.2" }
