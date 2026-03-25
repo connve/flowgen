@@ -108,7 +108,6 @@ pub struct EventHandler {
     tx: Option<Sender<Event>>,
     config: Arc<super::config::Query>,
     task_type: &'static str,
-    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
@@ -134,7 +133,7 @@ impl EventHandler {
             let (record_batch, job_id) = execute_query(
                 &self.client,
                 &config,
-                self.resource_loader.as_ref(),
+                self.task_context.resource_loader.as_ref(),
                 &event_value,
             )
             .await?;
@@ -238,7 +237,6 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             config: Arc::clone(&self.config),
             task_type: self.task_type,
-            resource_loader: self.task_context.resource_loader.clone(),
             task_context: Arc::clone(&self.task_context),
         };
 

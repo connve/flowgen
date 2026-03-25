@@ -83,3 +83,5 @@ tracing-opentelemetry = { version = "0.28" }
 atty = { version = "0.2" }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = { version = "3.8" }
+rig-core = { version = "0.33" }
+schemars = { version = "1.2" }

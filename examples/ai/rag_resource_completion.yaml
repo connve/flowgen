@@ -1,0 +1,29 @@
+flow:
+  name: rag_resource_completion
+  tasks:
+
+    # Webhook trigger to receive questions.
+    # POST to /api/flowgen/workers/webhook/ask_question with JSON: {"question": "..."}
+    - http_webhook:
+        name: receive_question
+        path: /ask_question
+
+    # AI completion with RAG using external context files.
+    # Context documents are loaded from resource files at initialization.
+    - ai_completion:
+        name: answer_with_rag
+        provider: openai
+        model: gpt-4-turbo
+        credentials_path: /etc/openai/credentials.json
+        system_prompt:
+          resource: "prompts/rag_system.md"
+        prompt: "Question: {{event.data.question}}"
+        # Static context loaded from external files (truly static - no per-event templating).
+        static_context:
+          - resource: "context/product_documentation.md"
+          - resource: "context/pricing_info.md"
+          - resource: "context/support_info.txt"
+          - "Inline context also works: Company founded in 2024."
+        temperature: 0.3
+        max_tokens: 800
+        max_turns: 3
