@@ -109,7 +109,7 @@ pub enum TaskType {
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::config::Query),
     /// AI completion task for generating responses using LLMs.
-    ai_completion(flowgen_ai::completion::config::Processor),
+    ai_completion(flowgen_ai_agent::completion::config::Processor),
 }
 
 impl TaskType {
