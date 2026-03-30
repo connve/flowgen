@@ -149,12 +149,12 @@ impl EventHandler {
                                 let date_partition = self.format_date_partition(&cd);
                                 // Split the date partition by '/' and add each part as a child.
                                 for part in date_partition.split('/') {
-                                    path = path.child(part);
+                                    path = path.clone().join(part);
                                 }
                             }
                             crate::config::HiveParitionKeys::EventHour => {
                                 let hour_partition = self.format_hour_partition(&cd);
-                                path = path.child(hour_partition);
+                                path = path.clone().join(hour_partition);
                             }
                         }
                     }
@@ -236,7 +236,7 @@ impl EventHandler {
                 }
             }
 
-            let object_path = path.child(format!("{filename}.{extension}"));
+            let object_path = path.join(format!("{filename}.{extension}"));
 
             // Upload processed data to object store.
             // Automatically reconnects on auth failure to refresh expired credentials.

@@ -197,7 +197,7 @@ impl EventHandler {
                 let filename = source_location
                     .filename()
                     .unwrap_or_else(|| source_location.as_ref());
-                let destination_location = destination_base.child(filename);
+                let destination_location = destination_base.clone().join(filename);
 
                 // Copy file
                 let mut copy_result = {
