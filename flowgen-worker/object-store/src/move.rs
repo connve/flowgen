@@ -395,7 +395,7 @@ impl Runner for MoveProcessor {
         Ok(event_handler)
     }
 
-    #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
