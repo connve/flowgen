@@ -10,6 +10,7 @@ flow:
 
     # AI completion using external prompt files.
     # Prompts are loaded from .md files for easier editing and version control.
+    # Agent tool execution is sandboxed using nsjail for security.
     - ai_completion:
         name: analyze_data
         provider: anthropic
@@ -23,3 +24,9 @@ flow:
           resource: "prompts/analyze_data.md"
         temperature: 0.5
         max_tokens: 2000
+        # Optional: tune sandbox limits (defaults shown below are used if not specified).
+        # sandbox:
+        #   memory_limit_mb: 512       # Default: 512 MB
+        #   time_limit_seconds: 30     # Default: 30 seconds
+        #   max_pids: 10               # Default: 10 processes
+        #   allow_network: false       # Default: false (no network access)

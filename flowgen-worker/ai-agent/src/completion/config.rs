@@ -91,6 +91,10 @@ pub struct Processor {
     /// Enable streaming mode (sends chunks as separate events).
     #[serde(default)]
     pub stream: bool,
+    /// Optional sandbox configuration for agent tool execution.
+    /// When Some, tools are sandboxed for security. When None, tools run without sandbox.
+    #[serde(default)]
+    pub sandbox: Option<flowgen_core::nsjail::SandboxConfig>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -166,6 +170,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            sandbox: Default::default(),
             retry: None,
         };
 
@@ -202,6 +207,7 @@ mod tests {
             ]),
             max_turns: Some(5),
             stream: true,
+            sandbox: Default::default(),
             retry: None,
         };
 
@@ -244,6 +250,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            sandbox: Default::default(),
             retry: None,
         };
         let _: &dyn ConfigExt = &processor;
@@ -264,6 +271,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: true,
+            sandbox: Default::default(),
             retry: None,
         };
 
@@ -291,6 +299,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            sandbox: Default::default(),
             retry: None,
         };
 
@@ -322,6 +331,7 @@ mod tests {
             ]),
             max_turns: Some(3),
             stream: false,
+            sandbox: Default::default(),
             retry: None,
         };
 

@@ -147,7 +147,7 @@ pub enum Error {
     MssqlQuery(#[from] flowgen_mssql::query::Error),
     /// Error in AI completion task.
     #[error(transparent)]
-    AiCompletion(#[from] flowgen_ai::completion::processor::Error),
+    AiCompletion(#[from] flowgen_ai_agent::completion::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1279,11 +1279,12 @@ async fn spawn_task(
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    let mut builder = flowgen_ai::completion::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
+                    let mut builder =
+                        flowgen_ai_agent::completion::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }

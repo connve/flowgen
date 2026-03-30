@@ -17,6 +17,8 @@ pub mod event;
 pub mod executor;
 /// HTTP server trait for task context integration.
 pub mod http_server;
+/// NsJail sandbox for secure script execution.
+pub mod nsjail;
 /// Resource loading system for external assets.
 pub mod resource;
 /// Retry configuration and utilities for task execution.

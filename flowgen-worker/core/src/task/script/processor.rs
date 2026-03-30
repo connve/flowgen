@@ -843,6 +843,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
+            sandbox: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);

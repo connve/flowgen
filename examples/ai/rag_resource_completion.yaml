@@ -10,6 +10,7 @@ flow:
 
     # AI completion with RAG using external context files.
     # Context documents are loaded from resource files at initialization.
+    # Agent tool execution is sandboxed using nsjail for security.
     - ai_completion:
         name: answer_with_rag
         provider: openai
@@ -27,3 +28,10 @@ flow:
         temperature: 0.3
         max_tokens: 800
         max_turns: 3
+        # Optional: Sandbox configuration for tool execution security.
+        # Omit to disable sandboxing. Provide config to enable with custom limits.
+        sandbox:
+          memory_limit_mb: 512
+          time_limit_seconds: 30
+          max_pids: 10
+          allow_network: false
