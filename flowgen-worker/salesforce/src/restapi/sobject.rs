@@ -6,7 +6,7 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::{error, warn, Instrument};
 
 /// Errors for Salesforce REST API CRUD operations.
 #[derive(thiserror::Error, Debug)]
@@ -57,8 +57,6 @@ pub enum Error {
         #[source]
         source: salesforce_core::restapi::ClientError,
     },
-    #[error("SObject operation completed with failure")]
-    SObjectOperationFailed { event: Box<Event> },
 }
 
 /// Event handler for processing individual SObject CRUD requests.
@@ -73,12 +71,23 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Check if SObject response indicates failure.
-    fn has_failure(response: &serde_json::Value) -> bool {
-        response
+    /// Log SObject operation failure as a warning if the response indicates failure.
+    /// The event is still forwarded to downstream tasks with the full Salesforce response.
+    fn log_failure(response: &serde_json::Value) {
+        let success = response
             .get("success")
             .and_then(|s| s.as_bool())
-            .is_some_and(|success| !success)
+            .unwrap_or(true);
+        if !success {
+            let errors = response
+                .get("errors")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            warn!(
+                errors = %errors,
+                "SObject operation completed with failure."
+            );
+        }
     }
 
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -193,9 +202,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failure(&resp) {
-            return Err(Error::SObjectOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failure(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -493,9 +500,7 @@ impl EventHandler {
                     }
                 }
 
-                if Self::has_failure(&resp) {
-                    return Err(Error::SObjectOperationFailed { event: Box::new(e) });
-                }
+                Self::log_failure(&resp);
 
                 e.send_with_logging(self.tx.as_ref())
                     .await
@@ -747,7 +752,9 @@ impl ProcessorBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
-            task_id: self.task_id.unwrap_or(0),
+            task_id: self
+                .task_id
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
             task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
