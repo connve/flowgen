@@ -337,7 +337,6 @@ impl Flow {
 
     /// Initializes shared resources for the flow, such as the TaskManager.
     /// This must be called before any other run methods.
-    #[tracing::instrument(skip(self), name = "flow.init", fields(flow = %self.config.flow.name))]
     pub async fn init(&mut self) -> Result<(), Error> {
         if self.task_manager.is_some() {
             return Ok(()); // Already initialized

@@ -119,7 +119,6 @@ impl App {
     /// and finally runs all flow tasks concurrently along with the server.
     ///
     /// The shutdown_rx parameter allows graceful shutdown by releasing all leases when a shutdown signal is received.
-    #[tracing::instrument(skip(self, shutdown_rx), name = "app")]
     pub async fn start(self, shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<(), Error> {
         let app_config = Arc::new(self.config);
 

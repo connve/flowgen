@@ -63,6 +63,8 @@ pub enum Error {
     InvalidCompositeRecordFormat,
     #[error("Expected array data for composite operation")]
     InvalidCompositeDataFormat,
+    #[error("Composite operation completed with one or more failures")]
+    CompositeOperationFailed { event: Box<Event> },
 }
 
 pub struct EventHandler {
@@ -76,6 +78,18 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Check if composite response contains any failed operations.
+    fn has_failures(response: &serde_json::Value) -> bool {
+        if let Some(array) = response.as_array() {
+            return array.iter().any(|item| {
+                item.get("success")
+                    .and_then(|s| s.as_bool())
+                    .is_some_and(|success| !success)
+            });
+        }
+        false
+    }
+
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -184,7 +198,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_create_{}", response.len()))
             .task_id(self.current_task_id)
@@ -204,6 +218,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -243,7 +261,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_get_{}", response.len()))
             .task_id(self.current_task_id)
@@ -263,6 +281,10 @@ impl EventHandler {
             Some(_) => {
                 e.completion_tx = completion_tx_arc.clone();
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -311,7 +333,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_update_{}", response.len()))
             .task_id(self.current_task_id)
@@ -331,6 +353,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -387,7 +413,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_upsert_{}", response.len()))
             .task_id(self.current_task_id)
@@ -407,6 +433,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -438,7 +468,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_delete_{}", response.len()))
             .task_id(self.current_task_id)
@@ -458,6 +488,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -508,7 +542,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(format!("composite_tree_{}", response.results.len()))
             .task_id(self.current_task_id)
@@ -528,6 +562,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failures(&resp) {
+            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())

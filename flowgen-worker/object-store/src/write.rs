@@ -277,7 +277,10 @@ impl EventHandler {
             let result = WriteResult {
                 status: WriteStatus::Success,
                 path: object_path.to_string(),
-                e_tag: put_result.e_tag.clone(),
+                e_tag: put_result
+                    .e_tag
+                    .clone()
+                    .map(|tag| tag.trim_matches('"').to_string()),
             };
 
             // Build and send event.
@@ -289,7 +292,7 @@ impl EventHandler {
                 .task_type(self.task_type);
 
             if let Some(e_tag) = put_result.e_tag {
-                e = e.id(e_tag);
+                e = e.id(e_tag.trim_matches('"').to_string());
             };
 
             let mut e = e.build().map_err(|source| Error::EventBuilder { source })?;
