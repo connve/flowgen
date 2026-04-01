@@ -77,7 +77,7 @@ impl From<ObjectMeta> for FileInfo {
             location: meta.location.to_string(),
             last_modified: meta.last_modified.to_rfc3339(),
             size: meta.size,
-            e_tag: meta.e_tag,
+            e_tag: meta.e_tag.map(|tag| tag.trim_matches('"').to_string()),
         }
     }
 }

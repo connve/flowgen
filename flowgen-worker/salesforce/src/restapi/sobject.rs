@@ -57,6 +57,8 @@ pub enum Error {
         #[source]
         source: salesforce_core::restapi::ClientError,
     },
+    #[error("SObject operation completed with failure")]
+    SObjectOperationFailed { event: Box<Event> },
 }
 
 /// Event handler for processing individual SObject CRUD requests.
@@ -71,6 +73,14 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Check if SObject response indicates failure.
+    fn has_failure(response: &serde_json::Value) -> bool {
+        response
+            .get("success")
+            .and_then(|s| s.as_bool())
+            .is_some_and(|success| !success)
+    }
+
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -160,7 +170,7 @@ impl EventHandler {
         })?;
 
         let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
+            .data(EventData::Json(resp.clone()))
             .subject(config.name.to_owned())
             .id(response.id)
             .task_id(self.current_task_id)
@@ -181,6 +191,10 @@ impl EventHandler {
                     }
                 }
             }
+        }
+
+        if Self::has_failure(&resp) {
+            return Err(Error::SObjectOperationFailed { event: Box::new(e) });
         }
 
         e.send_with_logging(self.tx.as_ref())
@@ -457,7 +471,7 @@ impl EventHandler {
                 })?;
 
                 let mut e = EventBuilder::new()
-                    .data(EventData::Json(resp))
+                    .data(EventData::Json(resp.clone()))
                     .subject(config.name.to_owned())
                     .id(response.id)
                     .task_id(self.current_task_id)
@@ -477,6 +491,10 @@ impl EventHandler {
                             }
                         }
                     }
+                }
+
+                if Self::has_failure(&resp) {
+                    return Err(Error::SObjectOperationFailed { event: Box::new(e) });
                 }
 
                 e.send_with_logging(self.tx.as_ref())
