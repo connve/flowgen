@@ -7,7 +7,7 @@ use salesforce_core::restapi::{
 };
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::{error, warn, Instrument};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -63,8 +63,6 @@ pub enum Error {
     InvalidCompositeRecordFormat,
     #[error("Expected array data for composite operation")]
     InvalidCompositeDataFormat,
-    #[error("Composite operation completed with one or more failures")]
-    CompositeOperationFailed { event: Box<Event> },
 }
 
 pub struct EventHandler {
@@ -78,16 +76,35 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Check if composite response contains any failed operations.
-    fn has_failures(response: &serde_json::Value) -> bool {
+    /// Log any failed sub-requests from the composite response as warnings.
+    /// The event is still forwarded to downstream tasks with the full Salesforce response,
+    /// allowing them to process successful records.
+    fn log_failures(response: &serde_json::Value) {
         if let Some(array) = response.as_array() {
-            return array.iter().any(|item| {
-                item.get("success")
-                    .and_then(|s| s.as_bool())
-                    .is_some_and(|success| !success)
-            });
+            let failures: Vec<(usize, &serde_json::Value)> = array
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    item.get("success")
+                        .and_then(|s| s.as_bool())
+                        .is_some_and(|success| !success)
+                })
+                .collect();
+
+            if !failures.is_empty() {
+                for (i, item) in &failures {
+                    let errors = item
+                        .get("errors")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    warn!(
+                        index = i,
+                        errors = %errors,
+                        "Composite operation completed with one or more failures."
+                    );
+                }
+            }
         }
-        false
     }
 
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -220,9 +237,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -283,9 +298,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -355,9 +368,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -435,9 +446,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -490,9 +499,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -564,9 +571,7 @@ impl EventHandler {
             }
         }
 
-        if Self::has_failures(&resp) {
-            return Err(Error::CompositeOperationFailed { event: Box::new(e) });
-        }
+        Self::log_failures(&resp);
 
         e.send_with_logging(self.tx.as_ref())
             .await
@@ -763,7 +768,9 @@ impl ProcessorBuilder {
                 .rx
                 .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
             tx: self.tx,
-            task_id: self.task_id.unwrap_or(0),
+            task_id: self
+                .task_id
+                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
             task_context: self
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
