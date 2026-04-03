@@ -1,0 +1,93 @@
+flow:
+  name: bigquery_storage_write_advanced
+  require_leader_election: true
+  tasks:
+
+    # Subscribe from NATS JetStream for reliable message delivery.
+    # Messages are automatically acknowledged after successful BigQuery write.
+    - nats_jetstream_subscriber:
+        name: consume_events
+        # Path to NATS credentials file
+        credentials_path: /etc/nats/credentials.json
+        # NATS server URL
+        url: "localhost:4222"
+        # Subject to subscribe to
+        subject: bigquery.events.>
+        # Stream configuration
+        stream:
+          create_or_update: true
+          name: bigquery_events
+          description: "Real-time events for BigQuery streaming"
+          subjects: ["bigquery.events.>"]
+          max_age: "24h"
+          retention: limits
+          discard: old
+        # Durable consumer for resumable processing
+        durable_name: bigquery_writer
+        # Process multiple events concurrently for higher throughput
+        max_messages: 10
+        # Maximum time to wait for acknowledgment before redelivery
+        max_ack_pending: 100
+        # Maximum time to process a message before it's considered failed
+        max_ack_wait: "30s"
+
+    # Transform event data before writing to BigQuery.
+    # Add metadata like ingestion timestamp and source information.
+    - script:
+        name: enrich_event
+        runtime: javascript
+        script: |
+          // Add ingestion metadata
+          event.data.ingested_at = new Date().toISOString();
+          event.data.source = event.subject;
+          event.data.event_id = event.id;
+
+          // Ensure required fields exist with defaults
+          event.data.user_id = event.data.user_id || "unknown";
+          event.data.event_type = event.data.event_type || "unspecified";
+
+    # Advanced BigQuery Storage Write demonstrating enterprise features:
+    # - Template expressions for dynamic configuration
+    # - Trace IDs for request tracking and debugging
+    # - Custom retry configuration
+    # - High-throughput streaming inserts
+    - gcp_bigquery_storage_write:
+        name: stream_enriched_events
+        # Path to GCP service account JSON credentials
+        credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where the BigQuery table is located
+        project_id: my-project-id
+        # BigQuery dataset ID
+        dataset_id: analytics
+        # BigQuery table ID to write to
+        table_id: enriched_events
+        # Optional: Custom trace ID for debugging (supports templates)
+        # Helps track individual requests through GCP logging/monitoring
+        trace_id: "event-{{event.id}}-{{event.data.user_id}}"
+        # Optional: Custom retry configuration (overrides app-level retry config)
+        # Recommended for production to handle transient BigQuery API failures
+        retry:
+          max_attempts: 5
+          max_delay: "30s"
+
+    # Publish write results to NATS for downstream processing or monitoring
+    - nats_jetstream_publisher:
+        name: publish_confirmation
+        credentials_path: /etc/nats/credentials.json
+        url: "localhost:4222"
+        # Dynamic subject based on write status
+        subject: "bigquery.confirmations.{{event.data.event_type}}"
+        stream:
+          create_or_update: true
+          name: bigquery_confirmations
+          description: "BigQuery write confirmations"
+          subjects: ["bigquery.confirmations.>"]
+          max_age: "7d"
+          retention: limits
+          discard: old
+
+    # Log final results for monitoring and debugging
+    - log:
+        name: log_final
+        level: info
+        structured: true

@@ -118,15 +118,35 @@ impl EventHandler {
         // Note: This generator creates events from scratch (no incoming events),
         // so we don't use with_event_context() here. EventBuilder::new() will create fresh events.
         // create events with meta: None, which is correct for a pipeline starter.
-        let mut counter = 0;
 
         // Get cache from task context.
         let cache = &self.task_context.cache;
         let flow_name = &self.task_context.flow.name;
         let task_name = &self.config.name;
 
-        // Generate cache key with flow-scoped namespace.
+        // Generate cache keys with flow-scoped namespace.
         let cache_key = format!("flow.{flow_name}.last_run.{task_name}");
+        let counter_cache_key = format!("flow.{flow_name}.counter.{task_name}");
+
+        // Restore counter from cache to resume after restart.
+        // When allow_rerun is enabled, always start from zero.
+        let mut counter: u64 = match self.config.allow_rerun {
+            true => 0,
+            false => cache
+                .get(&counter_cache_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8_lossy(&bytes).parse::<u64>().ok())
+                .unwrap_or(0),
+        };
+
+        // If count is already reached, skip re-running.
+        if let Some(count) = self.config.count {
+            if counter >= count {
+                return Ok(());
+            }
+        }
 
         loop {
             if self.task_context.cancellation_token.is_cancelled() {
@@ -217,11 +237,19 @@ impl EventHandler {
             // Update cache only if flow completed successfully.
             // Failed flows skip cache update, allowing next cron run to retry from same timestamp.
             if success {
+                counter += 1;
                 if let Err(cache_err) = cache
                     .put(&cache_key, current_time.to_string().into(), None)
                     .await
                 {
                     warn!("Failed to update cache: {:?}", cache_err);
+                }
+                // Persist counter to cache so restarts resume from correct position.
+                if let Err(cache_err) = cache
+                    .put(&counter_cache_key, counter.to_string().into(), None)
+                    .await
+                {
+                    warn!("Failed to update counter cache: {:?}", cache_err);
                 }
             } else {
                 warn!(
@@ -230,7 +258,6 @@ impl EventHandler {
                 );
             }
 
-            counter += 1;
             match self.config.count {
                 Some(count) if count == counter => return Ok(()),
                 Some(_) | None => {}
@@ -426,6 +453,7 @@ mod tests {
             count: Some(1),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         });
         let (tx, _rx) = mpsc::channel(100);
 
@@ -463,6 +491,7 @@ mod tests {
             count: Some(2),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -514,6 +543,7 @@ mod tests {
             count: Some(1),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -554,6 +584,7 @@ mod tests {
             count: Some(1),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -606,5 +637,152 @@ mod tests {
         // Verify that cache key was created with flow-scoped format.
         let result = cache.get("flow.test-flow.last_run.test").await.unwrap();
         assert!(result.is_some());
+
+        // Verify that counter was persisted to cache.
+        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        assert!(counter_result.is_some());
+        let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(counter_val, 1);
+    }
+
+    #[tokio::test]
+    async fn test_count_resume_after_restart() {
+        let config = Arc::new(crate::task::generate::config::Subscriber {
+            name: "test".to_string(),
+            message: None,
+            interval: Some(Duration::from_secs(0)),
+            cron: None,
+            count: Some(2),
+            ack_timeout: None,
+            retry: None,
+            ..Default::default()
+        });
+
+        let cache = Arc::new(crate::cache::memory::MemoryCache::new());
+
+        // Pre-populate counter in cache to simulate a prior run that completed 1 of 2.
+        cache
+            .put("flow.test-flow.counter.test", "1".to_string().into(), None)
+            .await
+            .unwrap();
+
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Resume Test".to_string()),
+        );
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let task_context = Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .cache(cache.clone() as Arc<dyn crate::cache::Cache>)
+                .build()
+                .unwrap(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let subscriber = Subscriber {
+            config,
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context,
+        };
+
+        let handle = tokio::spawn(async move {
+            let _ = subscriber.run().await;
+        });
+
+        // Should only receive 1 event (not 2), since counter resumes from 1.
+        let event = rx.recv().await.unwrap();
+        if let Some(shared_tx) = &event.completion_tx {
+            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
+                let _ = completion_tx.send(Ok(()));
+            }
+        }
+
+        let _ = handle.await;
+
+        // Wait for spawned task to flush cache.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // No more events should be generated.
+        assert!(rx.try_recv().is_err());
+
+        // Counter should now be 2.
+        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(counter_val, 2);
+    }
+
+    #[tokio::test]
+    async fn test_count_skip_when_already_complete() {
+        let config = Arc::new(crate::task::generate::config::Subscriber {
+            name: "test".to_string(),
+            message: None,
+            interval: Some(Duration::from_secs(0)),
+            cron: None,
+            count: Some(3),
+            ack_timeout: None,
+            retry: None,
+            ..Default::default()
+        });
+
+        let cache = Arc::new(crate::cache::memory::MemoryCache::new());
+
+        // Pre-populate counter to match count — task already fully completed.
+        cache
+            .put("flow.test-flow.counter.test", "3".to_string().into(), None)
+            .await
+            .unwrap();
+
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Skip Test".to_string()),
+        );
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let task_context = Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .cache(cache.clone() as Arc<dyn crate::cache::Cache>)
+                .build()
+                .unwrap(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let subscriber = Subscriber {
+            config,
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context,
+        };
+
+        let handle = tokio::spawn(async move {
+            let _ = subscriber.run().await;
+        });
+
+        // Task should exit immediately without generating any events.
+        let _ = handle.await;
+        assert!(rx.try_recv().is_err());
     }
 }

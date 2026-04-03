@@ -22,10 +22,10 @@
 //! channels are properly connected. This is critical for webhook flows where
 //! blocking tasks (webhooks) must send events to background tasks:
 //!
-//! 1. `run_http_handlers()` spawns ALL tasks (webhooks and background)
+//! 1. `start_tasks()` spawns ALL tasks (webhooks and background)
 //! 2. Returns only blocking handles to wait for webhook registration
 //! 3. Background tasks are already running with connected channels
-//! 4. `run_background_tasks()` monitors the pre-spawned tasks
+//! 4. `monitor_tasks()` monitors the pre-spawned tasks
 //!
 //! This prevents channel mismatch bugs where webhooks send to one channel
 //! while background tasks receive from a different channel.
@@ -142,6 +142,9 @@ pub enum Error {
     /// Error in GCP BigQuery unified job operations.
     #[error(transparent)]
     GcpBigQueryJob(#[from] flowgen_gcp::bigquery::job::Error),
+    /// Error in GCP BigQuery Storage Write task.
+    #[error(transparent)]
+    GcpBigQueryStorageWrite(#[from] flowgen_gcp::bigquery::storage_write::Error),
     /// Error in Microsoft SQL Server query task.
     #[error(transparent)]
     MssqlQuery(#[from] flowgen_mssql::query::Error),
@@ -294,7 +297,7 @@ pub struct Flow {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
-    /// Background task handles spawned by run_http_handlers for run_background_tasks to monitor.
+    /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
     background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
 }
 
@@ -502,11 +505,16 @@ impl Flow {
         })
     }
 
-    /// Spawns initial setup tasks that must complete before the HTTP server starts.
+    /// Starts all tasks for non-leader-elected flows immediately.
     ///
-    /// This is specifically for registering webhooks for non-leader-elected flows.
-    pub async fn run_http_handlers(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
-        // Only non-leader-elected flows can have webhook handlers that run at setup.
+    /// Leader-elected flows return early — their tasks are spawned later by
+    /// `monitor_tasks()` after acquiring leadership.
+    ///
+    /// Returns blocking handles (webhook registrations) that must complete
+    /// before the HTTP server starts. Background handles are stored for
+    /// `monitor_tasks()` to monitor.
+    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.config.flow.name))]
+    pub async fn start_tasks(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
         if self.is_leader_elected() {
             return Ok(Vec::new());
         }
@@ -514,7 +522,7 @@ impl Flow {
         // Spawn all tasks and return only the blocking handles.
         let handles = self.spawn_all_tasks().await?;
 
-        // Store background handles for run_background_tasks to monitor.
+        // Store background handles for monitor_tasks to monitor.
         let mut lock = self
             .background_handles
             .lock()
@@ -533,7 +541,7 @@ impl Flow {
         let flow_name = self.config.flow.name.clone();
         tokio::spawn(
             async move {
-                if let Err(e) = self.run_background_tasks().await {
+                if let Err(e) = self.monitor_tasks().await {
                     error!("Flow {} terminated with an error: {}", flow_name, e);
                 }
             }
@@ -542,7 +550,10 @@ impl Flow {
     }
 
     /// The main internal run loop for the flow.
-    async fn run_background_tasks(self) -> Result<(), Error> {
+    ///
+    /// For leader-elected flows: waits for leadership, then spawns and monitors tasks.
+    /// For non-leader-elected flows: monitors tasks already spawned by `start_tasks()`.
+    async fn monitor_tasks(self) -> Result<(), Error> {
         let is_leader_elected = self.is_leader_elected();
         let task_manager = self
             .task_manager
@@ -1234,6 +1245,27 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_gcp::bigquery::job::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::gcp_bigquery_storage_write(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_gcp::bigquery::storage_write::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)

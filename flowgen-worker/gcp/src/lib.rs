@@ -14,4 +14,6 @@ pub mod bigquery {
     pub mod query;
     /// BigQuery Storage Read API processor for high-throughput parallel table reads.
     pub mod storage_read;
+    /// BigQuery Storage Write API processor for high-throughput streaming inserts.
+    pub mod storage_write;
 }

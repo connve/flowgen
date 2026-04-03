@@ -26,7 +26,7 @@ use tracing::{error, Instrument};
 /// wrapper to capture just one row per RecordBatch as a marker, then reconstruct
 /// the full RecordBatch with proper schema later.
 struct RecordBatchMarker {
-    /// Captured on first row only to mark the start of a new batch
+    /// Captured on first row only to mark the start of a new batch.
     arrays: Vec<ArrayRef>,
 }
 
@@ -144,9 +144,21 @@ impl EventHandler {
             // Read table using Storage Read API.
             let record_batches = read_table(&self.client, &config).await?;
 
+            // If no data returned, send an empty record batch to maintain event chain.
+            // Downstream tasks must receive an event to know the operation completed.
+            let record_batches = if record_batches.is_empty() {
+                vec![arrow::array::RecordBatch::new_empty(Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                ))]
+            } else {
+                record_batches
+            };
+
             // Send each record batch as a separate event.
             let batch_len = record_batches.len();
             for (idx, record_batch) in record_batches.into_iter().enumerate() {
+                let num_rows = record_batch.num_rows();
+
                 let mut result_event = EventBuilder::new()
                     .data(EventData::ArrowRecordBatch(record_batch))
                     .subject(format!("{}.{}", event.subject, config.name))
@@ -177,6 +189,7 @@ impl EventHandler {
 
                 result_event
                     .send_with_logging(self.tx.as_ref())
+                    .context("num_records", num_rows)
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
             }
@@ -488,10 +501,25 @@ async fn read_table(
     // Multiple Row objects from the same batch share the same underlying Arrow arrays.
     // We group rows by their array references to reconstruct the original batches.
 
-    let mut iterator = client
-        .read_table::<RecordBatchMarker>(&table_ref, Some(option))
-        .await
-        .map_err(|source| Error::StorageRead { source })?;
+    // The upstream library panics with index out of bounds when the table has no read
+    // streams (empty table or no matching rows). Use catch_unwind to handle this gracefully
+    // and return an empty result instead of crashing the worker.
+    let read_client = client.clone();
+    let read_result = tokio::task::spawn(async move {
+        read_client
+            .read_table::<RecordBatchMarker>(&table_ref, Some(option))
+            .await
+    })
+    .await;
+
+    let mut iterator = match read_result {
+        Ok(Ok(iter)) => iter,
+        Ok(Err(source)) => return Err(Error::StorageRead { source }),
+        Err(_) => {
+            // Task panicked (upstream library bug on empty tables). Return empty result.
+            return Ok(vec![]);
+        }
+    };
 
     let mut batches = Vec::new();
 

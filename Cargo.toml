@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.84.0"
+version = "0.85.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -24,7 +24,7 @@ object_store = { version = "0.13.1", default-features = false, features = [
 ] }
 bytes = { version = "1.11.1" }
 handlebars = { version = "6.3" }
-arrow = { version = "56.1" }
+arrow = { version = "56.1", features = ["chrono-tz"] }
 arrow-schema = { version = "56.1", features = ["serde"] }
 arrow-json = { version = "56.1" }
 parquet = { version = "56.1" }
@@ -60,6 +60,7 @@ prost-types = { version = "0.14" }
 glob = { version = "0.3" }
 apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
+uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.8" }
 base64 = { version = "0.22" }
 bb8 = { version = "0.9" }
