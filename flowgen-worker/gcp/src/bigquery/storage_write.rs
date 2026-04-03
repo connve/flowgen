@@ -79,6 +79,11 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Arrow conversion error: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
     #[error("Table metadata retrieval error: {source}")]
     TableMetadata {
         #[source]
@@ -290,24 +295,55 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Get JSON data from event and encode as protobuf.
-            let data = event.data_as_json()?;
-            let mut proto_bytes = json_to_proto_bytes(&data, &self.table_fields)?;
+            // Encode event data as protobuf rows.
+            // Supports both JSON (single row) and Arrow RecordBatch (multiple rows).
+            let proto_rows = match &event.data {
+                EventData::ArrowRecordBatch(batch) => {
+                    let mut rows = Vec::with_capacity(batch.num_rows());
+                    let mut json_writer = arrow_json::ArrayWriter::new(Vec::new());
+                    json_writer
+                        .write(batch)
+                        .map_err(|source| Error::Arrow { source })?;
+                    json_writer
+                        .finish()
+                        .map_err(|source| Error::Arrow { source })?;
+                    let json_bytes = json_writer.into_inner();
+                    let json_rows: Vec<JsonValue> = serde_json::from_slice(&json_bytes)
+                        .map_err(|source| Error::ProtoEncode { source })?;
 
-            // Append CDC _CHANGE_TYPE field if configured.
-            if let Some(ref change_type) = config.change_type {
-                let change_type_tag = (self.table_fields.len() + 1) as u32;
-                prost::encoding::string::encode(
-                    change_type_tag,
-                    &change_type.to_string(),
-                    &mut proto_bytes,
-                );
-            }
+                    for row in &json_rows {
+                        let mut proto_bytes = json_to_proto_bytes(row, &self.table_fields)?;
+                        if let Some(ref change_type) = config.change_type {
+                            let tag = (self.table_fields.len() + 1) as u32;
+                            prost::encoding::string::encode(
+                                tag,
+                                &change_type.to_string(),
+                                &mut proto_bytes,
+                            );
+                        }
+                        rows.push(proto_bytes);
+                    }
+                    rows
+                }
+                _ => {
+                    let data = event.data_as_json()?;
+                    let mut proto_bytes = json_to_proto_bytes(&data, &self.table_fields)?;
+                    if let Some(ref change_type) = config.change_type {
+                        let tag = (self.table_fields.len() + 1) as u32;
+                        prost::encoding::string::encode(
+                            tag,
+                            &change_type.to_string(),
+                            &mut proto_bytes,
+                        );
+                    }
+                    vec![proto_bytes]
+                }
+            };
 
             // Create append request with proper proto descriptor.
             let builder = AppendRowsRequestBuilder::new(
                 self.proto_descriptor.clone(),
-                vec![proto_bytes],
+                proto_rows,
             );
 
             // Append rows to the reusable default write stream.
