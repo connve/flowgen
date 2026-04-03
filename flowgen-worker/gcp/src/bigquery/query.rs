@@ -546,8 +546,16 @@ fn response_to_record_batch(
     schema: Option<google_cloud_bigquery::http::table::TableSchema>,
     rows: Vec<Tuple>,
 ) -> Result<arrow::array::RecordBatch, Error> {
-    // Get schema.
-    let bq_schema = schema.ok_or_else(|| Error::MissingSchema)?;
+    // DDL/DML statements (CREATE TABLE, INSERT, etc.) don't return a schema.
+    // Return an empty RecordBatch in this case.
+    let bq_schema = match schema {
+        Some(s) => s,
+        None => {
+            return Ok(arrow::array::RecordBatch::new_empty(Arc::new(
+                Schema::empty(),
+            )));
+        }
+    };
 
     // Convert BigQuery schema to Arrow schema.
     let arrow_fields: Vec<Field> = bq_schema.fields.iter().map(field_to_arrow).collect();
@@ -1451,8 +1459,10 @@ mod tests {
     }
 
     #[test]
-    fn test_response_to_record_batch_missing_schema() {
-        let result = response_to_record_batch(None, vec![]);
-        assert!(matches!(result.unwrap_err(), Error::MissingSchema));
+    fn test_response_to_record_batch_no_schema_returns_empty_batch() {
+        // DDL/DML statements return no schema — should succeed with empty batch.
+        let result = response_to_record_batch(None, vec![]).unwrap();
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.num_columns(), 0);
     }
 }

@@ -366,7 +366,7 @@ impl App {
 
         let mut http_handler_tasks = Vec::new();
         for flow in &flows {
-            match flow.run_http_handlers().await {
+            match flow.start_tasks().await {
                 Ok(handles) => http_handler_tasks.extend(handles),
                 Err(source) => {
                     let err = Error::HttpHandlerStartup {

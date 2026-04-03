@@ -1,0 +1,37 @@
+flow:
+  name: bigquery_storage_write_basic
+  require_leader_election: true
+  tasks:
+
+    # HTTP webhook to receive incoming events (e.g., from external services).
+    # Each webhook POST becomes an individual event for processing.
+    - http_webhook:
+        name: receive_webhook
+        # Webhook path: http://localhost:3000/webhooks/events
+        path: /webhooks/events
+        # Allow concurrent webhook processing
+        max_concurrent_requests: 100
+
+    # BigQuery Storage Write API for high-throughput streaming inserts.
+    # More efficient than Query API (INSERT/MERGE) for real-time data ingestion.
+    # Uses default streams for immediate data availability (< 1 second latency).
+    - gcp_bigquery_storage_write:
+        name: stream_to_bigquery
+        # Path to GCP service account JSON credentials
+        credentials_path: /etc/gcp/credentials.json
+        # GCP project ID where the BigQuery table is located
+        project_id: my-project-id
+        # BigQuery dataset ID
+        dataset_id: analytics
+        # BigQuery table ID to write to
+        table_id: events
+        # Optional: Custom retry configuration for transient failures
+        retry:
+          max_attempts: 3
+          max_delay: "10s"
+
+    # Log successful writes for monitoring
+    - log:
+        name: log_result
+        level: info
+        structured: false

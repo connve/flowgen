@@ -487,6 +487,9 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        // Register function to generate a random UUID v4 string.
+        engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
+
         // Register function to get current Unix timestamp.
         engine.register_fn("timestamp_now", || -> i64 {
             // Returns current Unix timestamp in seconds.

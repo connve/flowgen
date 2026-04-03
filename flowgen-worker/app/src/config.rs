@@ -104,6 +104,8 @@ pub enum TaskType {
     gcp_bigquery_storage_read(flowgen_gcp::bigquery::config::StorageRead),
     /// GCP BigQuery unified job operations (create, get, cancel, delete).
     gcp_bigquery_job(flowgen_gcp::bigquery::config::Job),
+    /// GCP BigQuery Storage Write API task for high-throughput streaming inserts.
+    gcp_bigquery_storage_write(flowgen_gcp::bigquery::config::StorageWrite),
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::config::Query),
 }
@@ -135,6 +137,7 @@ impl TaskType {
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
+            TaskType::gcp_bigquery_storage_write(_) => "gcp_bigquery_storage_write",
             TaskType::mssql_query(_) => "mssql_query",
         }
     }

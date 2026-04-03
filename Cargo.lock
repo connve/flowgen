@@ -149,6 +149,7 @@ dependencies = [
  "arrow-data",
  "arrow-schema",
  "chrono",
+ "chrono-tz",
  "half",
  "hashbrown 0.16.1",
  "num",
@@ -779,6 +780,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1330,11 +1341,12 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1342,12 +1354,14 @@ dependencies = [
  "base64",
  "chrono",
  "flowgen_core",
+ "futures-util",
  "gcloud-auth",
  "gcloud-bigquery",
  "gcloud-gax",
  "gcloud-googleapis",
  "google-cloud-gax",
  "humantime-serde",
+ "prost 0.13.5",
  "prost-types",
  "serde",
  "serde_json",
@@ -1360,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1382,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1404,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1431,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1454,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1483,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.84.0"
+version = "0.85.0"
 dependencies = [
  "arrow",
  "atty",
@@ -3110,6 +3124,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4452,6 +4484,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "siphasher"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5330,6 +5368,7 @@ version = "1.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

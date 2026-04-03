@@ -42,6 +42,10 @@ pub struct Subscriber {
     /// where the task executes immediately and stops after generating
     /// the specified number of events.
     pub count: Option<u64>,
+    /// When true, resets the persisted counter on startup so the task always
+    /// re-runs from zero. Useful for test/setup flows that should execute on every deploy.
+    #[serde(default)]
+    pub allow_rerun: bool,
     /// Timeout for waiting on flow completion before considering the event failed.
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
@@ -94,6 +98,7 @@ mod tests {
             count: Some(10),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         assert_eq!(config.name, "test_task_name");
@@ -114,6 +119,7 @@ mod tests {
             count: None,
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         assert_eq!(config.cron, Some("0 0 * * *".to_string()));
@@ -131,6 +137,7 @@ mod tests {
             count: None,
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         assert!(matches!(
@@ -149,6 +156,7 @@ mod tests {
             count: None,
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         assert!(matches!(
@@ -167,6 +175,7 @@ mod tests {
             count: Some(1),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         // Should be valid - run-once mode
@@ -183,6 +192,7 @@ mod tests {
             count: Some(5),
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
@@ -201,6 +211,7 @@ mod tests {
             count: None,
             ack_timeout: None,
             retry: None,
+            ..Default::default()
         };
 
         let cloned = config.clone();

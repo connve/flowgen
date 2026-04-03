@@ -319,7 +319,6 @@ pub struct Job {
     /// Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
     #[serde(default)]
     pub location: Option<String>,
-
     // Fields for create operation.
     /// Job type for create operation (load, query, extract, copy). Default: load.
     #[serde(default = "default_job_type")]
@@ -987,3 +986,117 @@ impl StorageRead {
         self.job_project_id.as_deref().unwrap_or(&self.project_id)
     }
 }
+
+/// Configuration structure for BigQuery Storage Write API operations.
+///
+/// The Storage Write API provides high-throughput, low-latency streaming writes to BigQuery
+/// tables. It uses protocol buffers for efficient data transfer and supports both default
+/// streams (immediate availability) and committed streams (exactly-once semantics).
+///
+/// # Key Benefits
+/// - Low latency writes (sub-second vs minutes for LOAD jobs)
+/// - High throughput streaming (100k+ rows/sec)
+/// - Exactly-once semantics with committed streams
+/// - No intermediate storage required
+/// - Automatic schema evolution
+///
+/// # Stream Types
+/// - **Default Stream**: Immediate data availability, suitable for real-time dashboards and webhooks
+/// - **Committed Stream**: Exactly-once guarantees with deduplication (not yet implemented)
+/// - **Pending Stream**: Batch commits for transactional writes (not yet implemented)
+///
+/// # Fields
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to GCP service account credentials JSON file.
+/// - `project_id`: GCP project ID where BigQuery resources are located.
+/// - `dataset_id`: BigQuery dataset ID containing the table.
+/// - `table_id`: BigQuery table ID to write to.
+/// - `stream_name`: Optional custom stream name (uses default stream if not specified).
+/// - `trace_id`: Optional trace ID for debugging and monitoring.
+/// - `retry`: Optional retry configuration (overrides app-level retry config).
+///
+/// # Examples
+///
+/// Basic write to table:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_events
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: analytics
+///   table_id: events
+/// ```
+///
+/// Write with retry configuration:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_with_retry
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: landing
+///   table_id: webhook_events
+///   retry:
+///     max_attempts: 5
+///     initial_interval: 2s
+///     max_interval: 30s
+/// ```
+///
+/// Write to custom stream:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_to_custom_stream
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: realtime
+///   table_id: metrics
+///   stream_name: "projects/my-project/datasets/realtime/tables/metrics/streams/stream1"
+///   trace_id: "webhook-{{event.id}}"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct StorageWrite {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to GCP service account credentials JSON file.
+    pub credentials_path: PathBuf,
+    /// GCP project ID where BigQuery resources are located.
+    pub project_id: String,
+    /// BigQuery dataset ID containing the table.
+    pub dataset_id: String,
+    /// BigQuery table ID to write to.
+    pub table_id: String,
+    /// Optional custom stream name. If not specified, uses the default stream.
+    /// Format: "projects/{project}/datasets/{dataset}/tables/{table}/streams/{stream}".
+    #[serde(default)]
+    pub stream_name: Option<String>,
+    /// Optional trace ID for debugging and request tracking.
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    /// Optional CDC change type for BigQuery Change Data Capture.
+    /// Requires the target table to have a primary key defined.
+    #[serde(default)]
+    pub change_type: Option<ChangeType>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+/// BigQuery CDC change type for Storage Write API.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeType {
+    /// Insert or update row by primary key.
+    Upsert,
+    /// Delete row by primary key.
+    Delete,
+}
+
+impl std::fmt::Display for ChangeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangeType::Upsert => write!(f, "UPSERT"),
+            ChangeType::Delete => write!(f, "DELETE"),
+        }
+    }
+}
+
+impl ConfigExt for StorageWrite {}

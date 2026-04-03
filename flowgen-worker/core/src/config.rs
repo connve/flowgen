@@ -125,7 +125,17 @@ pub fn render_template<T>(template: &str, data: &T) -> Result<String, Error>
 where
     T: Serialize,
 {
-    let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+    let mut data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+
+    // Add environment variables to the data context under "env" key.
+    // This allows templates to use {{env.VAR_NAME}} syntax.
+    if let serde_json::Value::Object(ref mut map) = data_value {
+        let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let env_value =
+            serde_json::to_value(&env_vars).map_err(|e| Error::SerdeJson { source: e })?;
+        map.insert("env".to_string(), env_value);
+    }
+
     let mut handlebars = Handlebars::new();
     // Disable HTML escaping since we're rendering data, not HTML.
     handlebars.register_escape_fn(handlebars::no_escape);
