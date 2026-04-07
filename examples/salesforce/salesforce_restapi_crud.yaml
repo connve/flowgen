@@ -8,7 +8,7 @@ flow:
         name: generate_account
         interval: 30s
         count: 1
-        data:
+        payload:
           company_name: "Acme Corporation"
           industry: "Technology"
           city: "San Francisco"

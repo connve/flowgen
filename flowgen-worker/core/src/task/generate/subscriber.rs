@@ -196,8 +196,8 @@ impl EventHandler {
                 next_run_time: next_run_time_val,
             };
 
-            // Prepare event data with system information and optional user-defined data.
-            let mut data = match &self.config.data {
+            // Prepare event data with system information and optional user-defined payload.
+            let mut data = match &self.config.payload {
                 Some(user_data) => user_data.clone(),
                 None => json!({}),
             };
@@ -446,7 +446,7 @@ mod tests {
     async fn test_subscriber_builder() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: Some(json!({"test": "data"})),
+            payload: Some(json!({"test": "data"})),
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
@@ -484,7 +484,7 @@ mod tests {
     async fn test_subscriber_run_with_count() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: Some(json!({"test": "data"})),
+            payload: Some(json!({"test": "data"})),
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(2),
@@ -536,7 +536,7 @@ mod tests {
     async fn test_subscriber_event_content() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: Some(json!({"custom_field": "custom_value"})),
+            payload: Some(json!({"custom_field": "custom_value"})),
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(1),
@@ -578,7 +578,7 @@ mod tests {
     async fn test_cache_key_generation() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
@@ -651,7 +651,7 @@ mod tests {
     async fn test_count_resume_after_restart() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(2),
@@ -730,7 +730,7 @@ mod tests {
     async fn test_count_skip_when_already_complete() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(3),
