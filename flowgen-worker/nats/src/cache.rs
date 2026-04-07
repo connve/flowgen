@@ -46,6 +46,11 @@ pub enum Error {
     MissingJetStreamContext,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("KV keys listing error: {source}")]
+    KVKeys {
+        #[source]
+        source: async_nats::jetstream::kv::StatusError,
+    },
 }
 
 /// NATS JetStream Key-Value store cache.

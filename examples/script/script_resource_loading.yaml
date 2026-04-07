@@ -1,0 +1,44 @@
+flow:
+  name: script_resource_loading
+  require_leader_election: true
+  tasks:
+
+    # Generate a sample event with user data for template rendering.
+    - generate:
+        name: trigger
+        interval: 30s
+        count: 1
+        data:
+          first_name: "Jan"
+          order_id: "ORD-2026-001"
+          amount: "149.99"
+
+    # Demonstrates ctx.resource.get() for loading static files
+    # and render() for Handlebars template rendering within scripts.
+    #
+    # ctx.resource.get(key) loads a file from the configured resource path
+    # and returns its content as a raw string. The key resolves relative to
+    # the resource directory (e.g. "templates/sms.txt" resolves to
+    # "<resource_path>/templates/sms.txt").
+    #
+    # render(template, data) renders a Handlebars template string against
+    # a data map. Supports {{field}}, {{nested.field}}, and {{env.VAR}} syntax.
+    - script:
+        name: render_sms_template
+        code: |
+          // Load a static template file from mounted resources.
+          let tpl = ctx.resource.get("campaigns/template_sms.txt");
+
+          // Render the template with event data as the context.
+          // Template can use {{first_name}}, {{amount}}, etc.
+          let body = render(tpl, event.data);
+
+          // Assign rendered content to the event.
+          event.data.sms_body = body;
+          event
+
+    # Log the rendered event to console.
+    - log:
+        name: log_result
+        level: info
+        structured: false
