@@ -107,6 +107,18 @@ struct CacheHandle {
     flow_name: String,
 }
 
+/// Wrapper for resource loading from Rhai scripts.
+///
+/// This type is registered with the Rhai engine to enable scripts to load
+/// static resource files via `ctx.resource.get(key)`. Like `CacheHandle`,
+/// it bridges Rhai's synchronous execution with async file I/O using
+/// `tokio::task::block_in_place()`.
+#[derive(Clone)]
+struct ResourceHandle {
+    /// The resource loader for resolving file paths.
+    resource_loader: crate::resource::ResourceLoader,
+}
+
 impl EventHandler {
     /// Processes an event by executing the script on its data.
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -147,6 +159,15 @@ impl EventHandler {
                 flow_name: self.task_context.flow.name.clone(),
             };
             ctx_map.insert("cache".into(), Dynamic::from(cache_handle));
+
+            // Add resource handle to enable loading static files from scripts.
+            // Scripts can load mounted configmap files via ctx.resource.get("path/to/file.txt").
+            if let Some(loader) = &self.task_context.resource_loader {
+                let resource_handle = ResourceHandle {
+                    resource_loader: loader.clone(),
+                };
+                ctx_map.insert("resource".into(), Dynamic::from(resource_handle));
+            }
 
             // Add event metadata to allow scripts to read and modify it.
             // Scripts can modify ctx.meta and changes will be preserved in the output event.
@@ -646,6 +667,35 @@ impl crate::task::runner::Runner for Processor {
                     .block_on(async move { cache.delete(&namespaced_key).await.is_ok() })
             })
         });
+
+        // Register resource methods on ResourceHandle type to enable loading static files from Rhai scripts.
+        // This allows scripts to access mounted configmap files via ctx.resource.get("path/to/file.txt").
+        engine.register_type_with_name::<ResourceHandle>("ResourceHandle");
+
+        // Register ctx.resource.get(key) -> String.
+        // Loads a resource file by key and returns its content as a string.
+        // Returns an empty string if the resource cannot be loaded.
+        engine.register_fn("get", |handle: &mut ResourceHandle, key: &str| -> String {
+            let loader = handle.resource_loader.clone();
+            let key = key.to_string();
+            tokio::task::block_in_place(move || {
+                tokio::runtime::Handle::current()
+                    .block_on(async move { loader.load(&key).await.unwrap_or_default() })
+            })
+        });
+
+        // Register render(template, data) -> String.
+        // Renders a Handlebars template string against a data map.
+        // Supports {{field}}, {{nested.field}}, and {{env.VAR}} syntax.
+        engine.register_fn(
+            "render",
+            |template: &str, data: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
+                let json_value: Value =
+                    rhai::serde::from_dynamic(&data).map_err(|e| e.to_string())?;
+                crate::config::render_template(template, &json_value)
+                    .map_err(|e| e.to_string().into())
+            },
+        );
 
         let event_handler = EventHandler {
             code: script_code,
