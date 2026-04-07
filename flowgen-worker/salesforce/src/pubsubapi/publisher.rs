@@ -111,7 +111,21 @@ impl EventHandler {
             // Render config to support templates inside configuration.
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
             let config = self.config.render(&event_value)?;
-            let mut publish_payload = config.payload;
+
+            let mut publish_payload = match &config.payload {
+                super::config::Payload::FromEvent { from_event } if *from_event => {
+                    // Use incoming event data as the payload.
+                    let event_data = event.data_as_json()?;
+                    match event_data {
+                        serde_json::Value::Object(map) => map,
+                        _ => return Err(Error::EmptyObject()),
+                    }
+                }
+                super::config::Payload::FromEvent { .. } => {
+                    return Err(Error::EmptyObject());
+                }
+                super::config::Payload::Fields(fields) => fields.clone(),
+            };
 
             let now = Utc::now().timestamp_millis();
             publish_payload.insert(
@@ -488,7 +502,7 @@ mod tests {
             name: "test_publisher".to_string(),
             credentials_path: PathBuf::from("test_creds"),
             topic: "/event/Test__e".to_string(),
-            payload: serde_json::Map::new(),
+            payload: config::Payload::Fields(serde_json::Map::new()),
             endpoint: None,
             retry: None,
         });
