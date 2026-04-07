@@ -9,7 +9,7 @@ flow:
         name: generate_subscription_config
         interval: 60s
         count: 1
-        data:
+        payload:
           object_name: "Account"
           topic_path: "/data/AccountChangeEvent"
           label: "Managed Sub AccountChangeEvent"

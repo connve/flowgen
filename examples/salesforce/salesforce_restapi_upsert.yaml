@@ -9,7 +9,7 @@ flow:
         name: generate_contact
         interval: 45s
         count: 1
-        data:
+        payload:
           first_name: "John"
           last_name: "Doe"
           email: "john.doe@example.com"

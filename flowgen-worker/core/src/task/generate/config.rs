@@ -20,9 +20,9 @@ pub enum ConfigError {
 pub struct Subscriber {
     /// The unique name / identifier of the task.
     pub name: String,
-    /// Optional structured data payload for generated events.
+    /// Optional structured payload for generated events.
     /// Accepts arbitrary JSON that will be included in the event alongside system_info.
-    pub data: Option<serde_json::Value>,
+    pub payload: Option<serde_json::Value>,
     /// Interval - runs IMMEDIATELY then repeats every duration.
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     /// Mutually exclusive with `cron`.
@@ -82,7 +82,7 @@ mod tests {
     fn test_subscriber_config_default() {
         let config = Subscriber::default();
         assert_eq!(config.name, String::new());
-        assert!(config.data.is_none());
+        assert!(config.payload.is_none());
         assert!(config.interval.is_none());
         assert!(config.cron.is_none());
         assert!(config.count.is_none());
@@ -94,7 +94,7 @@ mod tests {
     fn test_subscriber_config_with_interval() {
         let config = Subscriber {
             name: "test_task_name".to_string(),
-            data: Some(json!({"test": "data"})),
+            payload: Some(json!({"test": "data"})),
             interval: Some(Duration::from_secs(5)),
             cron: None,
             count: Some(10),
@@ -104,7 +104,7 @@ mod tests {
         };
 
         assert_eq!(config.name, "test_task_name");
-        assert_eq!(config.data, Some(json!({"test": "data"})));
+        assert_eq!(config.payload, Some(json!({"test": "data"})));
         assert_eq!(config.interval, Some(Duration::from_secs(5)));
         assert!(config.cron.is_none());
         assert_eq!(config.count, Some(10));
@@ -115,7 +115,7 @@ mod tests {
     fn test_subscriber_config_with_cron() {
         let config = Subscriber {
             name: "cron_task".to_string(),
-            data: None,
+            payload: None,
             interval: None,
             cron: Some("0 0 * * *".to_string()),
             count: None,
@@ -133,7 +133,7 @@ mod tests {
     fn test_validation_both_specified() {
         let config = Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: Some(Duration::from_secs(60)),
             cron: Some("0 0 * * *".to_string()),
             count: None,
@@ -152,7 +152,7 @@ mod tests {
     fn test_validation_neither_specified_no_count() {
         let config = Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: None,
             cron: None,
             count: None,
@@ -171,7 +171,7 @@ mod tests {
     fn test_validation_run_once_mode() {
         let config = Subscriber {
             name: "test".to_string(),
-            data: None,
+            payload: None,
             interval: None,
             cron: None,
             count: Some(1),
@@ -188,7 +188,7 @@ mod tests {
     fn test_subscriber_config_serialization() {
         let config = Subscriber {
             name: "serialize_test".to_string(),
-            data: None,
+            payload: None,
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(5),
@@ -207,7 +207,7 @@ mod tests {
     fn test_subscriber_config_clone() {
         let config = Subscriber {
             name: "clone_test".to_string(),
-            data: Some(json!({"clone": "data"})),
+            payload: Some(json!({"clone": "data"})),
             interval: Some(Duration::from_secs(2)),
             cron: None,
             count: None,
