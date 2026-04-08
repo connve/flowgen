@@ -289,6 +289,14 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 consumer_config.max_waiting = max_waiting;
             }
 
+            if let Some(max_deliver) = init_config.max_deliver {
+                consumer_config.max_deliver = max_deliver;
+            }
+
+            if !init_config.backoff.is_empty() {
+                consumer_config.backoff = init_config.backoff.clone();
+            }
+
             let consumer = match stream.get_consumer(durable_name).await {
                 Ok(mut existing_consumer) => {
                     let consumer_info = existing_consumer
