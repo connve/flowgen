@@ -30,6 +30,20 @@ where
         .collect()
 }
 
+/// Serializes a vector of durations as human-readable strings.
+/// This ensures ConfigExt::render JSON round-trip compatibility with deserialize_backoff.
+fn serialize_backoff<S>(durations: &Vec<Duration>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(durations.len()))?;
+    for d in durations {
+        seq.serialize_element(&humantime::format_duration(*d).to_string())?;
+    }
+    seq.end()
+}
+
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
     crate::client::DEFAULT_NATS_URL.to_string()
@@ -91,6 +105,7 @@ pub struct Config {
     #[serde(
         default,
         deserialize_with = "deserialize_backoff",
+        serialize_with = "serialize_backoff",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub backoff: Vec<Duration>,
