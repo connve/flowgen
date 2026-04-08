@@ -511,6 +511,23 @@ impl crate::task::runner::Runner for Processor {
         // Register function to generate a random UUID v4 string.
         engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
 
+        // Register function to compute SHA-256 hash of a string.
+        // Returns lowercase hexadecimal string. Useful for deterministic message identifiers
+        // composed from multiple fields (e.g., campaign_id + reference_id).
+        engine.register_fn("sha256", |input: &str| -> String {
+            use sha2::Digest;
+            let hash = sha2::Sha256::digest(input.as_bytes());
+            format!("{hash:x}")
+        });
+
+        // Register function to compute SHA-512 hash of a string.
+        // Returns lowercase hexadecimal string.
+        engine.register_fn("sha512", |input: &str| -> String {
+            use sha2::Digest;
+            let hash = sha2::Sha512::digest(input.as_bytes());
+            format!("{hash:x}")
+        });
+
         // Register function to get current Unix timestamp.
         engine.register_fn("timestamp_now", || -> i64 {
             // Returns current Unix timestamp in seconds.
@@ -646,6 +663,28 @@ impl crate::task::runner::Runner for Processor {
                 tokio::task::block_in_place(move || {
                     tokio::runtime::Handle::current().block_on(async move {
                         let bytes = bytes::Bytes::from(value_str);
+                        cache
+                            .put(&namespaced_key, bytes, Some(ttl_secs as u64))
+                            .await
+                            .is_ok()
+                    })
+                })
+            },
+        );
+
+        // Register ctx.cache.put(key, value, ttl_seconds) -> bool for string values.
+        // Stores a string value in the distributed cache with a time-to-live in seconds.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn(
+            "put",
+            |handle: &mut CacheHandle, key: &str, value: &str, ttl_secs: i64| -> bool {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                let value_owned = value.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let bytes = bytes::Bytes::from(value_owned);
                         cache
                             .put(&namespaced_key, bytes, Some(ttl_secs as u64))
                             .await
@@ -862,6 +901,7 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::runner::Runner;
     use serde_json::{json, Map, Value};
     use tokio::sync::mpsc;
 
@@ -1092,5 +1132,225 @@ mod tests {
         let output_event = rx.try_recv().unwrap();
         assert_eq!(output_event.subject, "input.subject");
         assert_eq!(output_event.task_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_script_sha256() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_sha256".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                let id = value["id"].as_str().expect("Expected string id.");
+                assert_eq!(id.len(), 64);
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_script_sha512() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_sha512".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                let id = value["id"].as_str().expect("Expected string id.");
+                assert_eq!(id.len(), 128);
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_script_sha256_deterministic() {
+        let task_context = create_mock_task_context();
+        let (tx1, mut rx1) = mpsc::channel(100);
+        let (tx2, mut rx2) = mpsc::channel(100);
+
+        let code = r#"let id = sha256("same_input"); #{ id: id }"#;
+
+        for (tx, _rx_ref) in [(tx1, &mut rx1), (tx2, &mut rx2)] {
+            let processor = Processor {
+                config: Arc::new(crate::task::script::config::Processor {
+                    name: "test_deterministic".to_string(),
+                    engine: crate::task::script::config::ScriptEngine::Rhai,
+                    code: crate::resource::Source::Inline(code.to_string()),
+                    retry: None,
+                }),
+                tx: Some(tx),
+                rx: mpsc::channel(100).1,
+                task_id: 1,
+                task_context: task_context.clone(),
+                task_type: "test",
+            };
+
+            let handler = processor
+                .init()
+                .await
+                .expect("Failed to initialize processor.");
+            let event = Event {
+                data: EventData::Json(json!({})),
+                subject: "test".to_string(),
+                task_id: 0,
+                id: None,
+                timestamp: 123456789,
+                task_type: "test",
+                meta: None,
+                completion_tx: None,
+            };
+            handler
+                .handle(event)
+                .await
+                .expect("Failed to handle event.");
+        }
+
+        let out1 = rx1.recv().await.expect("Expected first output.");
+        let out2 = rx2.recv().await.expect("Expected second output.");
+
+        let id1 = match &out1.data {
+            EventData::Json(v) => v["id"].as_str().expect("Expected string.").to_string(),
+            _ => panic!("Expected JSON."),
+        };
+        let id2 = match &out2.data {
+            EventData::Json(v) => v["id"].as_str().expect("Expected string.").to_string(),
+            _ => panic!("Expected JSON."),
+        };
+        assert_eq!(id1, id2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_cache_put_string_value() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_cache_put_string".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"
+                    ctx.cache.put("lock_key", "holder_pod_1", 120);
+                    let cached = ctx.cache.get("lock_key");
+                    #{ cached: cached }
+                    "#
+                    .to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(
+                    value["cached"].as_str().expect("Expected string."),
+                    "holder_pod_1"
+                );
+            }
+            _ => panic!("Expected JSON output."),
+        }
     }
 }
