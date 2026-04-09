@@ -633,22 +633,29 @@ impl crate::task::runner::Runner for Processor {
         // by using block_on within each spawned script task.
         engine.register_type_with_name::<CacheHandle>("CacheHandle");
 
-        // Register ctx.cache.get(key) -> Option<String>.
-        // Retrieves a value from the distributed cache. Returns None if the key does not exist.
-        // or if the cached value is not valid UTF-8.
+        // Register ctx.cache.get(key) -> Dynamic.
+        // Retrieves a value from the distributed cache. Returns () if the key does not exist,
+        // or the string value if found. This allows scripts to check for missing keys
+        // using `if ctx.cache.get(key) != ()`.
         // Keys are automatically namespaced by flow name.
-        engine.register_fn("get", |handle: &mut CacheHandle, key: &str| -> String {
-            let namespaced_key = format!("{}.{}", handle.flow_name, key);
-            let cache = handle.cache.clone();
-            tokio::task::block_in_place(move || {
-                tokio::runtime::Handle::current().block_on(async move {
-                    match cache.get(&namespaced_key).await {
-                        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
-                        _ => String::new(),
-                    }
+        engine.register_fn(
+            "get",
+            |handle: &mut CacheHandle, key: &str| -> rhai::Dynamic {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        match cache.get(&namespaced_key).await {
+                            Ok(Some(bytes)) => {
+                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                                rhai::Dynamic::from(s)
+                            }
+                            _ => rhai::Dynamic::UNIT,
+                        }
+                    })
                 })
-            })
-        });
+            },
+        );
 
         // Register ctx.cache.put(key, value, ttl_seconds) -> bool.
         // Stores a value in the distributed cache with a time-to-live in seconds.
@@ -711,17 +718,25 @@ impl crate::task::runner::Runner for Processor {
         // This allows scripts to access mounted configmap files via ctx.resource.get("path/to/file.txt").
         engine.register_type_with_name::<ResourceHandle>("ResourceHandle");
 
-        // Register ctx.resource.get(key) -> String.
+        // Register ctx.resource.get(key) -> Dynamic.
         // Loads a resource file by key and returns its content as a string.
-        // Returns an empty string if the resource cannot be loaded.
-        engine.register_fn("get", |handle: &mut ResourceHandle, key: &str| -> String {
-            let loader = handle.resource_loader.clone();
-            let key = key.to_string();
-            tokio::task::block_in_place(move || {
-                tokio::runtime::Handle::current()
-                    .block_on(async move { loader.load(&key).await.unwrap_or_default() })
-            })
-        });
+        // Returns () if the resource cannot be loaded, allowing scripts to check
+        // with `if ctx.resource.get("path") != ()`.
+        engine.register_fn(
+            "get",
+            |handle: &mut ResourceHandle, key: &str| -> rhai::Dynamic {
+                let loader = handle.resource_loader.clone();
+                let key = key.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        match loader.load(&key).await {
+                            Ok(content) => rhai::Dynamic::from(content),
+                            Err(_) => rhai::Dynamic::UNIT,
+                        }
+                    })
+                })
+            },
+        );
 
         // Register render(template, data) -> String.
         // Renders a Handlebars template string against a data map.
