@@ -281,6 +281,10 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 ..Default::default()
             };
 
+            if let Some(ack_timeout) = init_config.ack_timeout {
+                consumer_config.ack_wait = ack_timeout;
+            }
+
             if let Some(max_ack_pending) = init_config.max_ack_pending {
                 consumer_config.max_ack_pending = max_ack_pending;
             }
