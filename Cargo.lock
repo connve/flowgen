@@ -1497,6 +1497,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowgen_server"
+version = "0.90.0"
+dependencies = [
+ "atty",
+ "bytes",
+ "chrono",
+ "config",
+ "flowgen_core",
+ "flowgen_nats",
+ "futures",
+ "humantime-serde",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
 name = "flowgen_worker"
 version = "0.90.0"
 dependencies = [

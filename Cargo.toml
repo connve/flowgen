@@ -1,5 +1,5 @@
 [workspace]
-members = ["flowgen-worker/app"]
+members = ["flowgen-worker/app", "flowgen-server"]
 resolver = "2"
 exclude = [".cargo"]
 
@@ -84,3 +84,4 @@ tracing-opentelemetry = { version = "0.28" }
 atty = { version = "0.2" }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = { version = "3.8" }
+walkdir = { version = "2.5" }
