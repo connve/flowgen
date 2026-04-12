@@ -327,16 +327,28 @@ impl EventHandler {
                 }
                 _ => {
                     let data = event.data_as_json()?;
-                    let mut proto_bytes = json_to_proto_bytes(&data, &self.table_fields)?;
-                    if let Some(ref change_type) = config.change_type {
-                        let tag = (self.table_fields.len() + 1) as u32;
-                        prost::encoding::string::encode(
-                            tag,
-                            &change_type.to_string(),
-                            &mut proto_bytes,
-                        );
+
+                    // Support both single JSON objects and JSON arrays as input.
+                    let json_rows: Vec<&JsonValue> = match &data {
+                        JsonValue::Array(arr) => arr.iter().collect(),
+                        _ => vec![&data],
+                    };
+
+                    let mut rows = Vec::with_capacity(json_rows.len());
+                    for row in json_rows {
+                        let mut proto_bytes =
+                            json_to_proto_bytes(row, &self.table_fields)?;
+                        if let Some(ref change_type) = config.change_type {
+                            let tag = (self.table_fields.len() + 1) as u32;
+                            prost::encoding::string::encode(
+                                tag,
+                                &change_type.to_string(),
+                                &mut proto_bytes,
+                            );
+                        }
+                        rows.push(proto_bytes);
                     }
-                    vec![proto_bytes]
+                    rows
                 }
             };
 
