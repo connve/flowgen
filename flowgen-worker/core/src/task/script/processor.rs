@@ -107,6 +107,18 @@ struct CacheHandle {
     flow_name: String,
 }
 
+/// Wrapper for resource loading from Rhai scripts.
+///
+/// This type is registered with the Rhai engine to enable scripts to load
+/// static resource files via `ctx.resource.get(key)`. Like `CacheHandle`,
+/// it bridges Rhai's synchronous execution with async file I/O using
+/// `tokio::task::block_in_place()`.
+#[derive(Clone)]
+struct ResourceHandle {
+    /// The resource loader for resolving file paths.
+    resource_loader: crate::resource::ResourceLoader,
+}
+
 impl EventHandler {
     /// Processes an event by executing the script on its data.
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -147,6 +159,15 @@ impl EventHandler {
                 flow_name: self.task_context.flow.name.clone(),
             };
             ctx_map.insert("cache".into(), Dynamic::from(cache_handle));
+
+            // Add resource handle to enable loading static files from scripts.
+            // Scripts can load mounted configmap files via ctx.resource.get("path/to/file.txt").
+            if let Some(loader) = &self.task_context.resource_loader {
+                let resource_handle = ResourceHandle {
+                    resource_loader: loader.clone(),
+                };
+                ctx_map.insert("resource".into(), Dynamic::from(resource_handle));
+            }
 
             // Add event metadata to allow scripts to read and modify it.
             // Scripts can modify ctx.meta and changes will be preserved in the output event.
@@ -490,6 +511,23 @@ impl crate::task::runner::Runner for Processor {
         // Register function to generate a random UUID v4 string.
         engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
 
+        // Register function to compute SHA-256 hash of a string.
+        // Returns lowercase hexadecimal string. Useful for deterministic message identifiers
+        // composed from multiple fields (e.g., campaign_id + reference_id).
+        engine.register_fn("sha256", |input: &str| -> String {
+            use sha2::Digest;
+            let hash = sha2::Sha256::digest(input.as_bytes());
+            format!("{hash:x}")
+        });
+
+        // Register function to compute SHA-512 hash of a string.
+        // Returns lowercase hexadecimal string.
+        engine.register_fn("sha512", |input: &str| -> String {
+            use sha2::Digest;
+            let hash = sha2::Sha512::digest(input.as_bytes());
+            format!("{hash:x}")
+        });
+
         // Register function to get current Unix timestamp.
         engine.register_fn("timestamp_now", || -> i64 {
             // Returns current Unix timestamp in seconds.
@@ -595,22 +633,29 @@ impl crate::task::runner::Runner for Processor {
         // by using block_on within each spawned script task.
         engine.register_type_with_name::<CacheHandle>("CacheHandle");
 
-        // Register ctx.cache.get(key) -> Option<String>.
-        // Retrieves a value from the distributed cache. Returns None if the key does not exist.
-        // or if the cached value is not valid UTF-8.
+        // Register ctx.cache.get(key) -> Dynamic.
+        // Retrieves a value from the distributed cache. Returns () if the key does not exist,
+        // or the string value if found. This allows scripts to check for missing keys
+        // using `if ctx.cache.get(key) != ()`.
         // Keys are automatically namespaced by flow name.
-        engine.register_fn("get", |handle: &mut CacheHandle, key: &str| -> String {
-            let namespaced_key = format!("{}.{}", handle.flow_name, key);
-            let cache = handle.cache.clone();
-            tokio::task::block_in_place(move || {
-                tokio::runtime::Handle::current().block_on(async move {
-                    match cache.get(&namespaced_key).await {
-                        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
-                        _ => String::new(),
-                    }
+        engine.register_fn(
+            "get",
+            |handle: &mut CacheHandle, key: &str| -> rhai::Dynamic {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        match cache.get(&namespaced_key).await {
+                            Ok(Some(bytes)) => {
+                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                                rhai::Dynamic::from(s)
+                            }
+                            _ => rhai::Dynamic::UNIT,
+                        }
+                    })
                 })
-            })
-        });
+            },
+        );
 
         // Register ctx.cache.put(key, value, ttl_seconds) -> bool.
         // Stores a value in the distributed cache with a time-to-live in seconds.
@@ -634,6 +679,28 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        // Register ctx.cache.put(key, value, ttl_seconds) -> bool for string values.
+        // Stores a string value in the distributed cache with a time-to-live in seconds.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn(
+            "put",
+            |handle: &mut CacheHandle, key: &str, value: &str, ttl_secs: i64| -> bool {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                let value_owned = value.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let bytes = bytes::Bytes::from(value_owned);
+                        cache
+                            .put(&namespaced_key, bytes, Some(ttl_secs as u64))
+                            .await
+                            .is_ok()
+                    })
+                })
+            },
+        );
+
         // Register ctx.cache.delete(key) -> bool.
         // Removes a value from the distributed cache.
         // Returns true if the operation succeeded, false otherwise.
@@ -646,6 +713,43 @@ impl crate::task::runner::Runner for Processor {
                     .block_on(async move { cache.delete(&namespaced_key).await.is_ok() })
             })
         });
+
+        // Register resource methods on ResourceHandle type to enable loading static files from Rhai scripts.
+        // This allows scripts to access mounted configmap files via ctx.resource.get("path/to/file.txt").
+        engine.register_type_with_name::<ResourceHandle>("ResourceHandle");
+
+        // Register ctx.resource.get(key) -> Dynamic.
+        // Loads a resource file by key and returns its content as a string.
+        // Returns () if the resource cannot be loaded, allowing scripts to check
+        // with `if ctx.resource.get("path") != ()`.
+        engine.register_fn(
+            "get",
+            |handle: &mut ResourceHandle, key: &str| -> rhai::Dynamic {
+                let loader = handle.resource_loader.clone();
+                let key = key.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        match loader.load(&key).await {
+                            Ok(content) => rhai::Dynamic::from(content),
+                            Err(_) => rhai::Dynamic::UNIT,
+                        }
+                    })
+                })
+            },
+        );
+
+        // Register render(template, data) -> String.
+        // Renders a Handlebars template string against a data map.
+        // Supports {{field}}, {{nested.field}}, and {{env.VAR}} syntax.
+        engine.register_fn(
+            "render",
+            |template: &str, data: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
+                let json_value: Value =
+                    rhai::serde::from_dynamic(&data).map_err(|e| e.to_string())?;
+                crate::config::render_template(template, &json_value)
+                    .map_err(|e| e.to_string().into())
+            },
+        );
 
         let event_handler = EventHandler {
             code: script_code,
@@ -692,7 +796,6 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        // Check if error is non-retriable (syntax errors, type errors, etc.).
                                         let is_retriable = !matches!(
                                             &e,
                                             Error::ScriptExecution { .. }
@@ -703,7 +806,7 @@ impl crate::task::runner::Runner for Processor {
                                         if is_retriable {
                                             Err(tokio_retry::RetryError::transient(e))
                                         } else {
-                                            error!(error = %e, "Non-retriable error");
+                                            error!(error = %e, "Script error, skipping event");
                                             Err(tokio_retry::RetryError::permanent(e))
                                         }
                                     }
@@ -711,16 +814,12 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if let Err(err) = result {
+                            if result.is_err() {
+                                // Ack the message so bad data does not block the pipeline.
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
                                         if let Some(tx) = guard.take() {
-                                            let boxed_error: Box<
-                                                dyn std::error::Error + Send + Sync,
-                                            > = Box::new(Error::RetryExhausted {
-                                                source: Box::new(err),
-                                            });
-                                            tx.send(Err(boxed_error)).ok();
+                                            tx.send(Ok(())).ok();
                                         }
                                     }
                                 }
@@ -812,6 +911,7 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::runner::Runner;
     use serde_json::{json, Map, Value};
     use tokio::sync::mpsc;
 
@@ -955,6 +1055,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rhai_trim_behavior() {
+        let engine = Engine::new();
+
+        // trim() in Rhai is in-place and returns ().
+        let result: rhai::Dynamic = engine.eval(r#"let s = " hello "; s.trim(); s"#).unwrap();
+        assert_eq!(result.into_string().unwrap(), "hello");
+
+        // to_lower() returns a new string.
+        let result: rhai::Dynamic = engine.eval(r#""HELLO".to_lower()"#).unwrap();
+        assert_eq!(result.into_string().unwrap(), "hello");
+
+        // Chaining to_lower().trim() — trim() returns () because it modifies in-place.
+        let result: rhai::Dynamic = engine.eval(r#""HELLO ".to_lower().trim()"#).unwrap();
+        // If trim() returns (), this will be unit, not a string.
+        let is_unit = result.is_unit();
+
+        // Verify: to_lower() returns new string, but trim() on it returns ().
+        assert!(
+            is_unit,
+            "to_lower().trim() should return () because trim() is in-place"
+        );
+
+        // .map() with broken chain produces array of ().
+        let result: rhai::Dynamic = engine
+            .eval(r#"[#{ name: " HELLO " }].map(|row| row.name.to_lower().trim())"#)
+            .unwrap();
+        let arr = result.into_array().unwrap();
+        assert!(
+            arr[0].is_unit(),
+            ".map() with to_lower().trim() produces () per element"
+        );
+
+        // Correct pattern: separate trim into its own statement.
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"[#{ name: " HELLO " }].map(|row| { let n = row.name.to_lower(); n.trim(); n })"#,
+            )
+            .unwrap();
+        let arr = result.into_array().unwrap();
+        assert_eq!(arr[0].clone().into_string().unwrap(), "hello");
+    }
+
+    #[tokio::test]
     async fn test_script_array_output() {
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -1002,6 +1145,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_script_map_closure_property_access() {
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let event_handler = EventHandler {
+            code: r#"
+                event.data.map(|row| #{
+                    full_name: row.first_name + " " + row.last_name
+                })
+            "#
+            .to_string(),
+            tx: Some(tx),
+            task_id: 1,
+            engine: Engine::new(),
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+
+        let input_event = Event {
+            data: EventData::Json(json!([
+                {"first_name": "John", "last_name": "Doe"},
+                {"first_name": "Jane", "last_name": "Smith"}
+            ])),
+            subject: "test".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        tokio::spawn(async move {
+            let result = event_handler.handle(input_event).await;
+            if let Err(e) = &result {
+                eprintln!("Handle error: {e}");
+            }
+        });
+
+        let event1 = rx.recv().await.unwrap();
+        match event1.data {
+            EventData::Json(value) => {
+                assert_eq!(value["full_name"], "John Doe");
+            }
+            _ => panic!("Expected JSON output"),
+        }
+
+        let event2 = rx.recv().await.unwrap();
+        match event2.data {
+            EventData::Json(value) => {
+                assert_eq!(value["full_name"], "Jane Smith");
+            }
+            _ => panic!("Expected JSON output"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_event_handler_arrow_input() {
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -1043,5 +1242,225 @@ mod tests {
         let output_event = rx.try_recv().unwrap();
         assert_eq!(output_event.subject, "input.subject");
         assert_eq!(output_event.task_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_script_sha256() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_sha256".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                let id = value["id"].as_str().expect("Expected string id.");
+                assert_eq!(id.len(), 64);
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_script_sha512() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_sha512".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                let id = value["id"].as_str().expect("Expected string id.");
+                assert_eq!(id.len(), 128);
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_script_sha256_deterministic() {
+        let task_context = create_mock_task_context();
+        let (tx1, mut rx1) = mpsc::channel(100);
+        let (tx2, mut rx2) = mpsc::channel(100);
+
+        let code = r#"let id = sha256("same_input"); #{ id: id }"#;
+
+        for (tx, _rx_ref) in [(tx1, &mut rx1), (tx2, &mut rx2)] {
+            let processor = Processor {
+                config: Arc::new(crate::task::script::config::Processor {
+                    name: "test_deterministic".to_string(),
+                    engine: crate::task::script::config::ScriptEngine::Rhai,
+                    code: crate::resource::Source::Inline(code.to_string()),
+                    retry: None,
+                }),
+                tx: Some(tx),
+                rx: mpsc::channel(100).1,
+                task_id: 1,
+                task_context: task_context.clone(),
+                task_type: "test",
+            };
+
+            let handler = processor
+                .init()
+                .await
+                .expect("Failed to initialize processor.");
+            let event = Event {
+                data: EventData::Json(json!({})),
+                subject: "test".to_string(),
+                task_id: 0,
+                id: None,
+                timestamp: 123456789,
+                task_type: "test",
+                meta: None,
+                completion_tx: None,
+            };
+            handler
+                .handle(event)
+                .await
+                .expect("Failed to handle event.");
+        }
+
+        let out1 = rx1.recv().await.expect("Expected first output.");
+        let out2 = rx2.recv().await.expect("Expected second output.");
+
+        let id1 = match &out1.data {
+            EventData::Json(v) => v["id"].as_str().expect("Expected string.").to_string(),
+            _ => panic!("Expected JSON."),
+        };
+        let id2 = match &out2.data {
+            EventData::Json(v) => v["id"].as_str().expect("Expected string.").to_string(),
+            _ => panic!("Expected JSON."),
+        };
+        assert_eq!(id1, id2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_cache_put_string_value() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_cache_put_string".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"
+                    ctx.cache.put("lock_key", "holder_pod_1", 120);
+                    let cached = ctx.cache.get("lock_key");
+                    #{ cached: cached }
+                    "#
+                    .to_string(),
+                ),
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(
+                    value["cached"].as_str().expect("Expected string."),
+                    "holder_pod_1"
+                );
+            }
+            _ => panic!("Expected JSON output."),
+        }
     }
 }

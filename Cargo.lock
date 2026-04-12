@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1377,6 +1377,7 @@ dependencies = [
  "serde_avro_fast",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry2",
@@ -1391,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1419,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1441,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1463,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1490,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1513,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1542,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "arrow",
  "atty",

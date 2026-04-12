@@ -1,7 +1,7 @@
 //! Event generation subscriber for producing scheduled synthetic events.
 //!
 //! Implements a timer-based event generator that creates events at regular intervals
-//! with optional message content and count limits for testing and simulation workflows.
+//! with optional structured data payloads and count limits for testing and simulation workflows.
 
 use crate::event::{Event, EventBuilder, EventData, EventExt};
 use chrono::DateTime;
@@ -189,25 +189,24 @@ impl EventHandler {
             };
 
             // Create system information.
+            // Use current execution time as last_run_time (this is the time of the current run).
+            // Fall back to cached last_run only if current_time is unavailable.
             let system_info = SystemInfo {
-                last_run_time: last_run,
+                last_run_time: Some(current_time),
                 next_run_time: next_run_time_val,
             };
 
-            // Prepare message data with system information.
-            let data = match &self.config.message {
-                Some(message) => {
-                    json!({
-                        "message": message,
-                        "system_info": system_info
-                    })
-                }
-                None => {
-                    json!({
-                        "system_info": system_info
-                    })
-                }
+            // Prepare event data with system information and optional user-defined payload.
+            let mut data = match &self.config.payload {
+                Some(user_data) => user_data.clone(),
+                None => json!({}),
             };
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert(
+                    "system_info".to_string(),
+                    serde_json::to_value(&system_info).unwrap_or_default(),
+                );
+            }
 
             // Create completion channel for flow completion tracking.
             let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
@@ -447,7 +446,7 @@ mod tests {
     async fn test_subscriber_builder() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: Some("test message".to_string()),
+            payload: Some(json!({"test": "data"})),
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
@@ -485,7 +484,7 @@ mod tests {
     async fn test_subscriber_run_with_count() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: Some("test message".to_string()),
+            payload: Some(json!({"test": "data"})),
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(2),
@@ -537,7 +536,7 @@ mod tests {
     async fn test_subscriber_event_content() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: Some("custom message".to_string()),
+            payload: Some(json!({"custom_field": "custom_value"})),
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(1),
@@ -564,10 +563,11 @@ mod tests {
 
         match event.data {
             EventData::Json(value) => {
-                assert_eq!(value["message"], "custom message");
+                assert_eq!(value["custom_field"], "custom_value");
                 assert!(value["system_info"].is_object());
-                // First run with count=1, so no last_run_time and no next_run_time
-                assert!(value["system_info"]["last_run_time"].is_null());
+                // last_run_time is always populated with current execution time.
+                assert!(value["system_info"]["last_run_time"].is_number());
+                // First run with count=1, so no next_run_time.
                 assert!(value["system_info"]["next_run_time"].is_null());
             }
             _ => panic!("Expected JSON event data"),
@@ -578,7 +578,7 @@ mod tests {
     async fn test_cache_key_generation() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: None,
+            payload: None,
             interval: Some(Duration::from_secs(1)),
             cron: None,
             count: Some(1),
@@ -651,7 +651,7 @@ mod tests {
     async fn test_count_resume_after_restart() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: None,
+            payload: None,
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(2),
@@ -730,7 +730,7 @@ mod tests {
     async fn test_count_skip_when_already_complete() {
         let config = Arc::new(crate::task::generate::config::Subscriber {
             name: "test".to_string(),
-            message: None,
+            payload: None,
             interval: Some(Duration::from_secs(0)),
             cron: None,
             count: Some(3),

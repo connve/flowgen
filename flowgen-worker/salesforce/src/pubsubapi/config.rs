@@ -20,6 +20,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+/// Payload configuration for Pub/Sub publisher operations.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Payload {
+    /// Use incoming event data as payload.
+    FromEvent { from_event: bool },
+    /// Explicit field values.
+    Fields(Map<String, Value>),
+}
+
+impl Default for Payload {
+    fn default() -> Self {
+        Payload::Fields(Map::new())
+    }
+}
+
 /// Default Salesforce Pub/Sub API URL.
 pub const DEFAULT_PUBSUB_URL: &str = "https://api.pubsub.salesforce.com";
 /// Default Salesforce Pub/Sub API port.
@@ -235,8 +251,8 @@ pub struct Publisher {
     pub credentials_path: PathBuf,
     /// Target topic name for publishing events (e.g., "/event/CustomEvent__e").
     pub topic: String,
-    /// Event payload template with static values and dynamic placeholders.
-    pub payload: Map<String, Value>,
+    /// Event payload: either explicit field values or from_event to use incoming event data.
+    pub payload: Payload,
     /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
     pub endpoint: Option<String>,
     /// Optional retry configuration (overrides app-level retry config).
@@ -408,22 +424,37 @@ mod tests {
         assert_eq!(publisher.name, String::new());
         assert_eq!(publisher.credentials_path, PathBuf::new());
         assert_eq!(publisher.topic, "");
-        assert!(publisher.payload.is_empty());
         assert_eq!(publisher.endpoint, None);
     }
 
     #[test]
-    fn test_publisher_config_serialization() {
-        let mut payload = Map::new();
-        payload.insert("Order_ID__c".to_string(), json!("ORD-12345"));
-        payload.insert("Status__c".to_string(), json!("Shipped"));
+    fn test_publisher_config_serialization_fields() {
+        let mut fields = Map::new();
+        fields.insert("Order_ID__c".to_string(), json!("ORD-12345"));
+        fields.insert("Status__c".to_string(), json!("Shipped"));
 
         let publisher = Publisher {
             name: "order_publisher".to_string(),
             credentials_path: PathBuf::from("sf_creds"),
             topic: "/event/Order_Status__e".to_string(),
-            payload,
+            payload: Payload::Fields(fields),
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
+            retry: None,
+        };
+
+        let json = serde_json::to_string(&publisher).unwrap();
+        let deserialized: Publisher = serde_json::from_str(&json).unwrap();
+        assert_eq!(publisher, deserialized);
+    }
+
+    #[test]
+    fn test_publisher_config_serialization_from_event() {
+        let publisher = Publisher {
+            name: "event_publisher".to_string(),
+            credentials_path: PathBuf::from("sf_creds"),
+            topic: "/event/Order_Status__e".to_string(),
+            payload: Payload::FromEvent { from_event: true },
+            endpoint: None,
             retry: None,
         };
 

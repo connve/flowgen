@@ -281,12 +281,24 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 ..Default::default()
             };
 
+            if let Some(ack_timeout) = init_config.ack_timeout {
+                consumer_config.ack_wait = ack_timeout;
+            }
+
             if let Some(max_ack_pending) = init_config.max_ack_pending {
                 consumer_config.max_ack_pending = max_ack_pending;
             }
 
             if let Some(max_waiting) = init_config.max_waiting {
                 consumer_config.max_waiting = max_waiting;
+            }
+
+            if let Some(max_deliver) = init_config.max_deliver {
+                consumer_config.max_deliver = max_deliver;
+            }
+
+            if !init_config.backoff.is_empty() {
+                consumer_config.backoff = init_config.backoff.clone();
             }
 
             let consumer = match stream.get_consumer(durable_name).await {
