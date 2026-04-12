@@ -65,6 +65,8 @@ pub enum Error {
     },
     #[error("Cron schedule has no next occurrence")]
     CronNoNextOccurrence,
+    #[error("Invalid timezone '{0}'")]
+    InvalidTimezone(String),
     #[error("Configuration validation error: {source}")]
     ConfigValidation {
         #[source]
@@ -95,17 +97,33 @@ impl EventHandler {
                     source: e,
                 })?;
 
-                let datetime = DateTime::from_timestamp(now as i64, 0)
+                let utc_dt = DateTime::from_timestamp(now as i64, 0)
                     .ok_or_else(|| Error::InvalidTimestamp(now as i64))?;
 
-                let next = cron.find_next_occurrence(&datetime, false).map_err(|e| {
-                    Error::InvalidCron {
-                        expression: cron_expr.clone(),
-                        source: e,
-                    }
-                })?;
+                // Convert to configured timezone for cron evaluation, or use UTC.
+                let next_timestamp = if let Some(ref tz_str) = self.config.timezone {
+                    let tz: chrono_tz::Tz = tz_str
+                        .parse()
+                        .map_err(|_| Error::InvalidTimezone(tz_str.clone()))?;
+                    let local_dt = utc_dt.with_timezone(&tz);
+                    let next = cron.find_next_occurrence(&local_dt, false).map_err(|e| {
+                        Error::InvalidCron {
+                            expression: cron_expr.clone(),
+                            source: e,
+                        }
+                    })?;
+                    next.timestamp() as u64
+                } else {
+                    let next = cron.find_next_occurrence(&utc_dt, false).map_err(|e| {
+                        Error::InvalidCron {
+                            expression: cron_expr.clone(),
+                            source: e,
+                        }
+                    })?;
+                    next.timestamp() as u64
+                };
 
-                Ok(next.timestamp() as u64)
+                Ok(next_timestamp)
             }
             // Neither interval nor cron - run immediately (run-once mode).
             // This is allowed when count is specified.
