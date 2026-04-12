@@ -796,7 +796,6 @@ impl crate::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        // Check if error is non-retriable (syntax errors, type errors, etc.).
                                         let is_retriable = !matches!(
                                             &e,
                                             Error::ScriptExecution { .. }
@@ -807,7 +806,7 @@ impl crate::task::runner::Runner for Processor {
                                         if is_retriable {
                                             Err(tokio_retry::RetryError::transient(e))
                                         } else {
-                                            error!(error = %e, "Non-retriable error");
+                                            error!(error = %e, "Script error, skipping event");
                                             Err(tokio_retry::RetryError::permanent(e))
                                         }
                                     }
@@ -815,16 +814,12 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if let Err(err) = result {
+                            if result.is_err() {
+                                // Ack the message so bad data does not block the pipeline.
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
                                         if let Some(tx) = guard.take() {
-                                            let boxed_error: Box<
-                                                dyn std::error::Error + Send + Sync,
-                                            > = Box::new(Error::RetryExhausted {
-                                                source: Box::new(err),
-                                            });
-                                            tx.send(Err(boxed_error)).ok();
+                                            tx.send(Ok(())).ok();
                                         }
                                     }
                                 }
@@ -1059,6 +1054,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rhai_trim_behavior() {
+        let engine = Engine::new();
+
+        // trim() in Rhai is in-place and returns ().
+        let result: rhai::Dynamic = engine.eval(r#"let s = " hello "; s.trim(); s"#).unwrap();
+        assert_eq!(result.into_string().unwrap(), "hello");
+
+        // to_lower() returns a new string.
+        let result: rhai::Dynamic = engine.eval(r#""HELLO".to_lower()"#).unwrap();
+        assert_eq!(result.into_string().unwrap(), "hello");
+
+        // Chaining to_lower().trim() — trim() returns () because it modifies in-place.
+        let result: rhai::Dynamic = engine.eval(r#""HELLO ".to_lower().trim()"#).unwrap();
+        // If trim() returns (), this will be unit, not a string.
+        let is_unit = result.is_unit();
+
+        // Verify: to_lower() returns new string, but trim() on it returns ().
+        assert!(
+            is_unit,
+            "to_lower().trim() should return () because trim() is in-place"
+        );
+
+        // .map() with broken chain produces array of ().
+        let result: rhai::Dynamic = engine
+            .eval(r#"[#{ name: " HELLO " }].map(|row| row.name.to_lower().trim())"#)
+            .unwrap();
+        let arr = result.into_array().unwrap();
+        assert!(
+            arr[0].is_unit(),
+            ".map() with to_lower().trim() produces () per element"
+        );
+
+        // Correct pattern: separate trim into its own statement.
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"[#{ name: " HELLO " }].map(|row| { let n = row.name.to_lower(); n.trim(); n })"#,
+            )
+            .unwrap();
+        let arr = result.into_array().unwrap();
+        assert_eq!(arr[0].clone().into_string().unwrap(), "hello");
+    }
+
+    #[tokio::test]
     async fn test_script_array_output() {
         let (tx, mut rx) = mpsc::channel(100);
 
@@ -1101,6 +1139,62 @@ mod tests {
         }
         match event3.data {
             EventData::Json(value) => assert_eq!(value["id"], 3),
+            _ => panic!("Expected JSON output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_script_map_closure_property_access() {
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let event_handler = EventHandler {
+            code: r#"
+                event.data.map(|row| #{
+                    full_name: row.first_name + " " + row.last_name
+                })
+            "#
+            .to_string(),
+            tx: Some(tx),
+            task_id: 1,
+            engine: Engine::new(),
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+
+        let input_event = Event {
+            data: EventData::Json(json!([
+                {"first_name": "John", "last_name": "Doe"},
+                {"first_name": "Jane", "last_name": "Smith"}
+            ])),
+            subject: "test".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            completion_tx: None,
+        };
+
+        tokio::spawn(async move {
+            let result = event_handler.handle(input_event).await;
+            if let Err(e) = &result {
+                eprintln!("Handle error: {e}");
+            }
+        });
+
+        let event1 = rx.recv().await.unwrap();
+        match event1.data {
+            EventData::Json(value) => {
+                assert_eq!(value["full_name"], "John Doe");
+            }
+            _ => panic!("Expected JSON output"),
+        }
+
+        let event2 = rx.recv().await.unwrap();
+        match event2.data {
+            EventData::Json(value) => {
+                assert_eq!(value["full_name"], "Jane Smith");
+            }
             _ => panic!("Expected JSON output"),
         }
     }
