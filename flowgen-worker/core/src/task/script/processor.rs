@@ -1256,6 +1256,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                sandbox: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1308,6 +1309,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                sandbox: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1362,6 +1364,7 @@ mod tests {
                     name: "test_deterministic".to_string(),
                     engine: crate::task::script::config::ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
+                    sandbox: None,
                     retry: None,
                 }),
                 tx: Some(tx),
@@ -1422,6 +1425,7 @@ mod tests {
                     "#
                     .to_string(),
                 ),
+                sandbox: None,
                 retry: None,
             }),
             tx: Some(tx),

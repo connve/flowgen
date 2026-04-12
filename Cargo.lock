@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.86.0"
+version = "0.92.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
