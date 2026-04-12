@@ -28,6 +28,7 @@ arrow-json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
 regex = { workspace = true }

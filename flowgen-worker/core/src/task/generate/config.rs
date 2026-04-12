@@ -38,6 +38,10 @@ pub struct Subscriber {
     ///
     /// Mutually exclusive with `interval`.
     pub cron: Option<String>,
+    /// Optional timezone for cron scheduling (defaults to UTC).
+    /// Uses IANA timezone names (e.g., "US/Eastern", "Europe/London", "Asia/Tokyo").
+    #[serde(default)]
+    pub timezone: Option<String>,
     /// Optional maximum number of events to generate before stopping.
     /// When specified without `interval` or `cron`, enables run-once mode
     /// where the task executes immediately and stops after generating
