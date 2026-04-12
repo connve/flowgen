@@ -60,13 +60,44 @@ Tasks are connected sequentially via internal event channels. Each task receives
 
 ## Flow discovery
 
-Flowgen discovers flows from the configured path at startup:
+Flowgen can load flows from two sources at startup:
+
+### Local filesystem
 
 ```yaml
 flows:
-  path: /etc/flowgen/flows/    # directory: loads all *.yaml files
+  path: /etc/flowgen/flows/    # directory: loads all *.yaml files recursively
   # or
   path: /etc/flowgen/flows/*.yaml  # glob pattern
 ```
 
 Each YAML file should contain a single flow definition.
+
+### Distributed cache (via flowgen-server)
+
+When running `flowgen-server` alongside workers, the server syncs flows from a
+Git repository into the cache. Workers can load flows directly from
+the cache, enabling hot-reload and centralized management:
+
+```yaml
+cache:
+  enabled: true
+  type: nats
+  credentials_path: /etc/nats/credentials.json
+  url: nats://nats:4222
+
+flows:
+  cache:
+    enabled: true
+    # Optional cache key prefix (defaults to "flowgen.flows").
+    # Must match the prefix used by flowgen-server.
+    prefix: flowgen.flows
+```
+
+Cache keys preserve the Git folder structure. For example,
+`flows/billing/invoices.yaml` becomes cache key
+`flowgen.flows.billing/invoices`, so the original directory layout
+can be reconstructed by downstream consumers (e.g., a flow browser UI).
+
+If both `path` and `cache.enabled: true` are set, `cache` takes precedence and
+`path` is ignored.

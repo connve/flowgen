@@ -148,6 +148,9 @@ pub enum Error {
     /// Error in Microsoft SQL Server query task.
     #[error(transparent)]
     MssqlQuery(#[from] flowgen_mssql::query::Error),
+    /// Error in Git sync task.
+    #[error(transparent)]
+    GitSync(#[from] flowgen_git::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1287,6 +1290,27 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_mssql::query::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::git_sync(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_git::processor::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)

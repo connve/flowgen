@@ -23,7 +23,7 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
-          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version')
+          VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Detect and tag new version
@@ -31,7 +31,7 @@ jobs:
         uses: salsify/action-detect-and-tag-new-version@v2
         with:
           version-command: |
-            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version'
+            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
 
   build-and-push-docker:
     needs: detect-version
@@ -63,7 +63,6 @@ jobs:
           if [ "${{ needs.detect-version.outputs.version-changed }}" == "true" ]; then
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:$VERSION"
 
-            # Add major.minor tag (e.g., 0.1) for convenience
             MAJOR_MINOR=$(echo $VERSION | cut -d. -f1,2)
             TAGS="$TAGS,ghcr.io/${{ github.repository }}:$MAJOR_MINOR"
           fi
@@ -81,7 +80,7 @@ jobs:
           provenance: false
           sbom: false
           build-args: |
-            SERVICE_NAME=flowgen_worker
+            SERVICE_NAME=flowgen
             COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -101,10 +100,8 @@ jobs:
         id: changelog
         run: |
           if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
-            # For first release, only show commits since the previous commit (not all history)
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -1)
           else
-            # Show commits between previous tag and current tag
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }})
           fi
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
@@ -124,4 +121,3 @@ jobs:
             ${{ steps.changelog.outputs.changelog }}
           draft: false
           prerelease: false
-          

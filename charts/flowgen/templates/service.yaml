@@ -1,15 +1,15 @@
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if $worker.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "flowgen-worker.fullname" . }}
+  name: {{ include "flowgen.fullname" . }}
   labels:
-    {{- include "flowgen-worker.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" . | nindent 4 }}
 spec:
   type: {{ $worker.service.type }}
   selector:
-    {{- include "flowgen-worker.selectorLabels" . | nindent 4 }}
+    {{- include "flowgen.selectorLabels" . | nindent 4 }}
   ports:
   - port: {{ $worker.service.port }}
     targetPort: http

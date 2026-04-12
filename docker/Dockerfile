@@ -19,7 +19,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Builder stage - compile with caching.
 FROM rust_base AS builder
-ARG SERVICE_NAME
+ARG SERVICE_NAME=flowgen
 ARG CARGO_FEATURES=""
 
 # Copy recipe and cook dependencies (cached layer).

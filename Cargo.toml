@@ -1,5 +1,5 @@
 [workspace]
-members = ["flowgen-worker/app", "flowgen-server"]
+members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 

@@ -1,9 +1,9 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "flowgen-worker.name" -}}
-{{- $worker := index .Values "flowgen-worker" -}}
-{{- default "flowgen-worker" $worker.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- define "flowgen.name" -}}
+{{- $worker := index .Values "flowgen" -}}
+{{- default "flowgen" $worker.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -11,8 +11,8 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
 */}}
-{{- define "flowgen-worker.fullname" -}}
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- define "flowgen.fullname" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if $worker.fullnameOverride }}
 {{- $worker.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -28,16 +28,16 @@ If release name contains chart name it will be used as a full name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "flowgen-worker.chart" -}}
+{{- define "flowgen.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "flowgen-worker.labels" -}}
-helm.sh/chart: {{ include "flowgen-worker.chart" . }}
-{{ include "flowgen-worker.selectorLabels" . }}
+{{- define "flowgen.labels" -}}
+helm.sh/chart: {{ include "flowgen.chart" . }}
+{{ include "flowgen.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -47,19 +47,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels
 */}}
-{{- define "flowgen-worker.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "flowgen-worker.name" . }}
+{{- define "flowgen.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "flowgen.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app: flowgen-worker
+app: flowgen
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "flowgen-worker.serviceAccountName" -}}
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- define "flowgen.serviceAccountName" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if $worker.serviceAccount.create }}
-{{- default (include "flowgen-worker.fullname" .) $worker.serviceAccount.name }}
+{{- default (include "flowgen.fullname" .) $worker.serviceAccount.name }}
 {{- else }}
 {{- default "default" $worker.serviceAccount.name }}
 {{- end }}

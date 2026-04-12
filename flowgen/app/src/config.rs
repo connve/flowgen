@@ -108,6 +108,8 @@ pub enum TaskType {
     gcp_bigquery_storage_write(flowgen_gcp::bigquery::config::StorageWrite),
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::config::Query),
+    /// Git sync task for syncing flows and resources from a Git repository to the cache.
+    git_sync(flowgen_git::config::Processor),
 }
 
 impl TaskType {
@@ -139,6 +141,7 @@ impl TaskType {
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
             TaskType::gcp_bigquery_storage_write(_) => "gcp_bigquery_storage_write",
             TaskType::mssql_query(_) => "mssql_query",
+            TaskType::git_sync(_) => "git_sync",
         }
     }
 }
@@ -203,6 +206,7 @@ pub struct CacheOptions {
 }
 
 /// Flow loading configuration.
+/// If `cache.enabled` is true, flows are loaded from the cache and `path` is ignored.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowOptions {
     /// Path for discovering flow configuration files.
@@ -210,6 +214,35 @@ pub struct FlowOptions {
     /// - A base directory path (e.g., "/flows") - will recursively discover all .yaml, .yml, and .json files
     /// - A glob pattern (e.g., "/flows/*.yaml") - for backward compatibility, uses pattern directly
     pub path: Option<PathBuf>,
+    /// Optional cache-based flow loading configuration.
+    /// When enabled, flows are loaded from the distributed cache instead of the filesystem.
+    #[serde(default)]
+    pub cache: Option<FlowCacheOptions>,
+}
+
+/// Default cache key prefix for flows.
+fn default_flows_cache_prefix() -> String {
+    "flowgen.flows".to_string()
+}
+
+/// Default metadata bucket name for flow/resource loading.
+fn default_metadata_db_name() -> String {
+    "flowgen_metadata".to_string()
+}
+
+/// Cache-based flow loading options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct FlowCacheOptions {
+    /// Whether to load flows from the cache instead of the filesystem.
+    pub enabled: bool,
+    /// Optional cache key prefix (defaults to "flowgen.flows").
+    /// Must match the prefix used by flowgen-server when syncing flows.
+    #[serde(default = "default_flows_cache_prefix")]
+    pub prefix: String,
+    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Separate from the runtime cache bucket to avoid key collisions.
+    #[serde(default = "default_metadata_db_name")]
+    pub db_name: String,
 }
 
 /// Resource loading configuration.
@@ -220,6 +253,30 @@ pub struct ResourceOptions {
     /// Example: with path="local/resources/", key="queries/orders.sql" resolves to "local/resources/queries/orders.sql".
     #[serde(default)]
     pub path: PathBuf,
+    /// Optional cache-based resource loading configuration.
+    /// When enabled, resources are loaded from the distributed cache instead of the filesystem.
+    #[serde(default)]
+    pub cache: Option<ResourceCacheOptions>,
+}
+
+/// Default cache key prefix for resources.
+fn default_resources_cache_prefix() -> String {
+    "flowgen.resources".to_string()
+}
+
+/// Cache-based resource loading options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct ResourceCacheOptions {
+    /// Whether to load resources from the cache instead of the filesystem.
+    pub enabled: bool,
+    /// Optional cache key prefix (defaults to "flowgen.resources").
+    /// Must match the prefix used by flowgen-server when syncing resources.
+    #[serde(default = "default_resources_cache_prefix")]
+    pub prefix: String,
+    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Separate from the runtime cache bucket to avoid key collisions.
+    #[serde(default = "default_metadata_db_name")]
+    pub db_name: String,
 }
 
 /// HTTP server configuration options.
@@ -241,7 +298,7 @@ pub struct TelemetryOptions {
     /// OTLP endpoint for exporting metrics and traces (defaults to "http://localhost:4317").
     #[serde(default = "default_otlp_endpoint")]
     pub otlp_endpoint: String,
-    /// Service name for resource identification (defaults to "flowgen-worker").
+    /// Service name for resource identification (defaults to "flowgen").
     #[serde(default = "default_service_name")]
     pub service_name: String,
     /// Metrics export interval (defaults to "60s").
@@ -255,7 +312,7 @@ fn default_otlp_endpoint() -> String {
 }
 
 fn default_service_name() -> String {
-    "flowgen-worker".to_string()
+    "flowgen".to_string()
 }
 
 fn default_metrics_interval() -> Duration {
@@ -400,6 +457,7 @@ mod tests {
             }),
             flows: FlowOptions {
                 path: Some(PathBuf::from("/test/flows/*")),
+                cache: None,
             },
             flow_resources: None,
             telemetry: None,
@@ -431,6 +489,7 @@ mod tests {
             cache: None,
             flows: FlowOptions {
                 path: Some(PathBuf::from("/flows/*")),
+                cache: None,
             },
             flow_resources: None,
             telemetry: None,
@@ -457,6 +516,7 @@ mod tests {
             }),
             flows: FlowOptions {
                 path: Some(PathBuf::from("/serialize/flows/*")),
+                cache: None,
             },
             flow_resources: None,
             telemetry: None,
@@ -482,7 +542,7 @@ mod tests {
                 url: "localhost:4222".to_string(),
                 db_name: None,
             }),
-            flows: FlowOptions { path: None },
+            flows: FlowOptions { path: None, cache: None },
             flow_resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
@@ -549,6 +609,7 @@ mod tests {
     fn test_flow_options_with_path() {
         let flow_options = FlowOptions {
             path: Some(PathBuf::from("/test/flows/*.toml")),
+            cache: None,
         };
 
         assert!(flow_options.path.is_some());
@@ -560,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_flow_options_without_path() {
-        let flow_options = FlowOptions { path: None };
+        let flow_options = FlowOptions { path: None, cache: None };
 
         assert!(flow_options.path.is_none());
     }
@@ -569,6 +630,7 @@ mod tests {
     fn test_flow_options_serialization() {
         let flow_options = FlowOptions {
             path: Some(PathBuf::from("/serialize/flows/*.toml")),
+            cache: None,
         };
 
         let serialized = serde_json::to_string(&flow_options).unwrap();
@@ -636,7 +698,7 @@ mod tests {
     fn test_app_config_with_http_server_options() {
         let app_config = AppConfig {
             cache: None,
-            flows: FlowOptions { path: None },
+            flows: FlowOptions { path: None, cache: None },
             flow_resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
@@ -668,7 +730,7 @@ mod tests {
         let telemetry_options = TelemetryOptions {
             enabled: true,
             otlp_endpoint: "http://otel-collector:4317".to_string(),
-            service_name: "flowgen-worker".to_string(),
+            service_name: "flowgen".to_string(),
             metrics_export_interval: Duration::from_secs(30),
         };
 
@@ -677,7 +739,7 @@ mod tests {
             telemetry_options.otlp_endpoint,
             "http://otel-collector:4317"
         );
-        assert_eq!(telemetry_options.service_name, "flowgen-worker");
+        assert_eq!(telemetry_options.service_name, "flowgen");
         assert_eq!(
             telemetry_options.metrics_export_interval,
             Duration::from_secs(30)
@@ -694,7 +756,7 @@ mod tests {
         };
 
         assert!(!telemetry_options.enabled);
-        assert_eq!(telemetry_options.service_name, "flowgen-worker");
+        assert_eq!(telemetry_options.service_name, "flowgen");
         assert_eq!(
             telemetry_options.metrics_export_interval,
             Duration::from_secs(60)
@@ -719,12 +781,12 @@ mod tests {
     fn test_app_config_with_telemetry() {
         let app_config = AppConfig {
             cache: None,
-            flows: FlowOptions { path: None },
+            flows: FlowOptions { path: None, cache: None },
             flow_resources: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
                 otlp_endpoint: "http://otel-collector:4317".to_string(),
-                service_name: "flowgen-worker".to_string(),
+                service_name: "flowgen".to_string(),
                 metrics_export_interval: Duration::from_secs(60),
             }),
             worker: None,
@@ -734,7 +796,7 @@ mod tests {
         let telemetry = app_config.telemetry.as_ref().unwrap();
         assert!(telemetry.enabled);
         assert_eq!(telemetry.otlp_endpoint, "http://otel-collector:4317");
-        assert_eq!(telemetry.service_name, "flowgen-worker");
+        assert_eq!(telemetry.service_name, "flowgen");
         assert_eq!(telemetry.metrics_export_interval, Duration::from_secs(60));
     }
 }

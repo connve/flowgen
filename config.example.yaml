@@ -14,14 +14,49 @@ cache:
   type: nats
 
 # Flow discovery configuration (shared across worker and server).
-# Path can be either a base directory path (e.g., "flows") - recursively loads all .yaml, .yml, and .json files.
+# Flows can be loaded from one of two sources:
+#   1. Local filesystem via `path` (default).
+#   2. Distributed cache via `cache` (synced from Git by flowgen-server).
+# If both are set, `cache` takes precedence and `path` is ignored.
 flows:
+  # Local filesystem path. Can be either a base directory (recursively loads all
+  # .yaml, .yml, and .json files) or a glob pattern (e.g., "flows/*.yaml").
   path: "path_to_configs_folder"
+
+  # Optional cache-based flow loading.
+  # When enabled, the worker lists keys from the distributed cache under `prefix`
+  # and loads each flow's YAML. The server syncs flows from Git to the same cache.
+  # Requires `cache.enabled: true` above.
+  # Uses a separate metadata bucket from the runtime cache to avoid key collisions.
+  # cache:
+  #   enabled: true
+  #   # Optional cache key prefix (defaults to "flowgen.flows").
+  #   # Must match the prefix used by flowgen-server when syncing flows.
+  #   prefix: "flowgen.flows"
+  #   # Optional metadata bucket name (defaults to "flowgen_metadata").
+  #   # Must match the db_name used by flowgen-server.
+  #   db_name: "flowgen_metadata"
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
+# Same two-source model as `flows`: filesystem `path` or distributed `cache`.
+# If both are set, `cache` takes precedence and `path` is ignored.
 flow_resources:
+  # Base directory for resource files. Resource keys resolve relative to this path.
+  # Example: with path="local/resources/", key="queries/orders.sql" resolves to
+  # "local/resources/queries/orders.sql".
   path: "path_to_resources_folder"
+
+  # Optional cache-based resource loading.
+  # When enabled, resources are loaded from the distributed cache under `prefix`.
+  # Requires `cache.enabled: true` above.
+  # cache:
+  #   enabled: true
+  #   # Optional cache key prefix (defaults to "flowgen.resources").
+  #   # Must match the prefix used by flowgen-server when syncing resources.
+  #   prefix: "flowgen.resources"
+  #   # Optional metadata bucket name (defaults to "flowgen_metadata").
+  #   db_name: "flowgen_metadata"
 
 # OpenTelemetry configuration for metrics and distributed tracing (optional).
 # Exports metrics and traces to an OTLP endpoint (e.g., OpenTelemetry Collector, Grafana Cloud, Honeycomb).
@@ -29,8 +64,8 @@ telemetry:
   enabled: false
   # Optional: OTLP endpoint (defaults to "http://localhost:4317").
   # otlp_endpoint: "http://localhost:4317"
-  # Optional: service name (defaults to "flowgen-worker").
-  # service_name: "flowgen-worker"
+  # Optional: service name (defaults to "flowgen").
+  # service_name: "flowgen"
   # Optional: metrics export interval using human-readable format (defaults to "60s").
   # metrics_export_interval: "60s"
 
