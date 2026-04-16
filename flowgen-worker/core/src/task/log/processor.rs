@@ -3,6 +3,7 @@
 use crate::event::Event;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use std::time::Instant;
 use tracing::{debug, error, info, trace, warn, Instrument};
 
 /// Errors that can occur during log processing.
@@ -81,7 +82,7 @@ impl EventHandler {
                 if let Some(arc) = event.completion_tx.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(event.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -155,6 +156,7 @@ impl crate::task::runner::Runner for Processor {
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
                         async move {
+                            let start = Instant::now();
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
@@ -166,8 +168,10 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if let Err(err) = result {
-                                error!(error = %err, "Log failed after all retry attempts");
+                            let elapsed = start.elapsed();
+                            match &result {
+                                Ok(_) => info!(duration_ms = elapsed.as_millis() as u64, "Event processed."),
+                                Err(err) => error!(duration_ms = elapsed.as_millis() as u64, error = %err, "Event processing failed."),
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -218,7 +218,7 @@ impl EventHandler {
         // Wait for flow completion before responding to HTTP request.
         match self.config.ack_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
-                Ok(Ok(Ok(()))) => Ok(StatusCode::OK),
+                Ok(Ok(Ok(_))) => Ok(StatusCode::OK),
                 Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
                     error!("{}", Error::FlowCompletionFailed);
                     Ok(StatusCode::INTERNAL_SERVER_ERROR)
@@ -227,7 +227,7 @@ impl EventHandler {
             None => {
                 // No timeout configured, wait indefinitely.
                 match completion_rx.await {
-                    Ok(Ok(())) => Ok(StatusCode::OK),
+                    Ok(Ok(_)) => Ok(StatusCode::OK),
                     Ok(Err(_)) | Err(_) => {
                         error!("{}", Error::FlowCompletionFailed);
                         Ok(StatusCode::INTERNAL_SERVER_ERROR)
@@ -264,7 +264,25 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials = match &init_config.credentials_path {
+        // Resolve credentials: task-level overrides global.
+        let global_credentials_path = self
+            .task_context
+            .http_server
+            .as_ref()
+            .and_then(|server| {
+                server
+                    .as_any()
+                    .downcast_ref::<super::server::HttpServer>()
+            })
+            .and_then(|server| server.global_credentials_path())
+            .map(|p| p.to_path_buf());
+
+        let credentials_path = init_config
+            .credentials_path
+            .as_ref()
+            .or(global_credentials_path.as_ref());
+
+        let credentials = match credentials_path {
             Some(path) => {
                 let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
                     path: path.clone(),

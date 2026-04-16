@@ -41,7 +41,20 @@ worker:
     enabled: true
     port: 3000
     # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
-    routes_prefix: "/api/flowgen/workers"
+    path: "/api/flowgen/workers"
+    # Optional global credentials file for webhook authentication.
+    # Individual http_webhook tasks can override this with their own credentials_path.
+    # credentials_path: "/etc/http/credentials.json"
+
+  # MCP server configuration for exposing flows as MCP tools (optional).
+  # Runs on its own port, independent of the HTTP server.
+  # Must be explicitly enabled for mcp_tool tasks to be registered.
+  # Global credentials apply to all mcp_tool endpoints unless overridden per tool.
+  # mcp_server:
+  #   enabled: true
+  #   port: 3001
+  #   path: "/mcp"
+  #   credentials_path: "/etc/mcp/api-keys.json"
 
   # Event channel buffer size (optional, defaults to 10M).
   # Controls memory allocation for broadcast channel between tasks.

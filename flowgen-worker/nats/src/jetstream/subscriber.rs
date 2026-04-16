@@ -128,7 +128,7 @@ impl EventHandler {
                 // Failed flows skip message acknowledgment, allowing JetStream to automatically redeliver.
                 match self.config.ack_timeout {
                     Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
-                        Ok(Ok(Ok(()))) => {
+                        Ok(Ok(Ok(_))) => {
                             message.ack().await.ok();
                         }
                         Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
@@ -136,7 +136,7 @@ impl EventHandler {
                         }
                     },
                     None => match completion_rx.await {
-                        Ok(Ok(())) => {
+                        Ok(Ok(_)) => {
                             message.ack().await.ok();
                         }
                         Ok(Err(_)) | Err(_) => {

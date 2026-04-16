@@ -43,14 +43,19 @@ pub struct HttpServer {
     /// Flag to track if server has been started.
     server_started: Arc<Mutex<bool>>,
     /// Optional path prefix for all routes (e.g., "/workers").
-    routes_prefix: Option<String>,
+    path: Option<String>,
+    /// Optional global credentials path for webhook authentication.
+    /// Individual webhooks can override this with their own `credentials_path`.
+    global_credentials_path: Option<std::path::PathBuf>,
 }
 
 /// Builder for constructing HttpServer instances.
 #[derive(Default)]
 pub struct HttpServerBuilder {
     /// Optional path prefix for all routes.
-    routes_prefix: Option<String>,
+    path: Option<String>,
+    /// Optional global credentials path for webhook authentication.
+    global_credentials_path: Option<std::path::PathBuf>,
 }
 
 impl HttpServerBuilder {
@@ -59,9 +64,15 @@ impl HttpServerBuilder {
         Self::default()
     }
 
-    /// Sets the routes prefix.
-    pub fn routes_prefix(mut self, prefix: String) -> Self {
-        self.routes_prefix = Some(prefix);
+    /// Sets the path prefix for all routes (e.g., "/api/flowgen/workers").
+    pub fn path(mut self, path: String) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    /// Sets the global credentials path for webhook authentication.
+    pub fn global_credentials_path(mut self, path: std::path::PathBuf) -> Self {
+        self.global_credentials_path = Some(path);
         self
     }
 
@@ -70,7 +81,8 @@ impl HttpServerBuilder {
         HttpServer {
             routes: Arc::new(RwLock::new(HashMap::new())),
             server_started: Arc::new(Mutex::new(false)),
-            routes_prefix: self.routes_prefix,
+            path: self.path,
+            global_credentials_path: self.global_credentials_path,
         }
     }
 }
@@ -82,6 +94,11 @@ impl flowgen_core::http_server::HttpServer for HttpServer {
 }
 
 impl HttpServer {
+    /// Returns the global credentials path if configured.
+    pub fn global_credentials_path(&self) -> Option<&std::path::Path> {
+        self.global_credentials_path.as_deref()
+    }
+
     /// Register a route with the HTTP Server.
     pub async fn register_route(&self, path: String, method_router: MethodRouter) {
         let mut routes = self.routes.write().await;
@@ -106,7 +123,7 @@ impl HttpServer {
 
         // Apply routes prefix (use default if not configured).
         let base_path = self
-            .routes_prefix
+            .path
             .clone()
             .unwrap_or_else(|| DEFAULT_ROUTES_PREFIX.to_string());
 
@@ -149,7 +166,7 @@ mod tests {
     #[test]
     fn test_http_server_builder_with_prefix() {
         let server = HttpServerBuilder::new()
-            .routes_prefix("/workers".to_string())
+            .path("/workers".to_string())
             .build();
         assert!(format!("{server:?}").contains("HttpServer"));
     }

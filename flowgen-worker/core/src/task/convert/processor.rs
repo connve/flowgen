@@ -15,7 +15,8 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tracing::{error, Instrument};
+use std::time::Instant;
+use tracing::{error, info, Instrument};
 
 /// Errors that can occur during event conversion operations.
 #[derive(thiserror::Error, Debug)]
@@ -145,6 +146,7 @@ impl EventHandler {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
+            let event_builder = EventBuilder::new();
             let data = match &event.data {
                 EventData::Json(data) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Avro => match &self.schema_config {
@@ -260,7 +262,7 @@ impl EventHandler {
                 },
             };
 
-            let mut e = EventBuilder::new()
+            let mut e = event_builder
                 .data(data)
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
@@ -274,7 +276,7 @@ impl EventHandler {
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
-                                tx.send(Ok(())).ok();
+                                tx.send(Ok(e.data_as_json().ok())).ok();
                             }
                         }
                     }
@@ -431,6 +433,7 @@ impl crate::task::runner::Runner for Processor {
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
                         async move {
+                            let start = Instant::now();
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
@@ -442,8 +445,10 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if let Err(err) = result {
-                                error!(error = %err, "Convert failed after all retry attempts");
+                            let elapsed = start.elapsed();
+                            match &result {
+                                Ok(_) => info!(duration_ms = elapsed.as_millis() as u64, "Event processed."),
+                                Err(err) => error!(duration_ms = elapsed.as_millis() as u64, error = %err, "Event processing failed."),
                             }
                         }
                         .instrument(tracing::Span::current()),

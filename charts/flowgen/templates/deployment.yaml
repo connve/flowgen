@@ -60,8 +60,13 @@ spec:
         {{- end }}
         ports:
         - name: http
-          containerPort: {{ $worker.service.port }}
+          containerPort: {{ $worker.http_server.port }}
           protocol: TCP
+        {{- if $worker.mcp_server }}
+        - name: mcp
+          containerPort: {{ $worker.mcp_server.port }}
+          protocol: TCP
+        {{- end }}
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:

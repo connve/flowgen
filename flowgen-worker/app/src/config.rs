@@ -110,6 +110,8 @@ pub enum TaskType {
     mssql_query(flowgen_mssql::config::Query),
     /// AI completion task for generating responses using LLMs.
     ai_completion(flowgen_ai_agent::completion::config::Processor),
+    /// MCP tool task for exposing flows as MCP tools callable by LLMs.
+    mcp_tool(flowgen_mcp::config::Processor),
 }
 
 impl TaskType {
@@ -142,6 +144,7 @@ impl TaskType {
             TaskType::gcp_bigquery_storage_write(_) => "gcp_bigquery_storage_write",
             TaskType::mssql_query(_) => "mssql_query",
             TaskType::ai_completion(_) => "ai_completion",
+            TaskType::mcp_tool(_) => "mcp_tool",
         }
     }
 }
@@ -172,6 +175,8 @@ pub struct AppConfig {
 pub struct WorkerConfig {
     /// Optional HTTP server configuration for webhooks, health checks, and metrics.
     pub http_server: Option<HttpServerOptions>,
+    /// Optional MCP server configuration for exposing flows as MCP tools.
+    pub mcp_server: Option<McpServerOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional event channel buffer size (defaults to 10M if not specified).
@@ -225,6 +230,33 @@ pub struct ResourceOptions {
     pub path: PathBuf,
 }
 
+/// Default MCP server port.
+fn default_mcp_port() -> u16 {
+    3001
+}
+
+/// Default MCP endpoint path.
+fn default_mcp_path() -> String {
+    "/mcp".to_string()
+}
+
+/// MCP server configuration options.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct McpServerOptions {
+    /// Whether MCP server is enabled. Must be explicitly enabled by the admin
+    /// for `mcp_tool` tasks to be registered.
+    pub enabled: bool,
+    /// MCP server port number (defaults to 3001).
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    /// MCP endpoint path (defaults to "/mcp").
+    #[serde(default = "default_mcp_path")]
+    pub path: String,
+    /// Optional path to global credentials file for API key authentication.
+    /// Individual `mcp_tool` tasks can override this with their own `credentials_path`.
+    pub credentials_path: Option<std::path::PathBuf>,
+}
+
 /// HTTP server configuration options.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct HttpServerOptions {
@@ -232,8 +264,11 @@ pub struct HttpServerOptions {
     pub enabled: bool,
     /// Optional HTTP server port number (defaults to 3000).
     pub port: Option<u16>,
-    /// Optional path prefix for all routes (e.g., "/workers").
-    pub routes_prefix: Option<String>,
+    /// Optional path prefix for all routes (e.g., "/api/flowgen/workers").
+    pub path: Option<String>,
+    /// Optional path to global credentials file for webhook authentication.
+    /// Individual `http_webhook` tasks can override this with their own `credentials_path`.
+    pub credentials_path: Option<std::path::PathBuf>,
 }
 
 /// OpenTelemetry configuration options for metrics and distributed tracing.
@@ -408,6 +443,7 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
+                mcp_server: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -439,6 +475,7 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
+                mcp_server: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -465,6 +502,7 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
+                mcp_server: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -490,6 +528,7 @@ mod tests {
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
+                mcp_server: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -616,7 +655,8 @@ mod tests {
         let http_server_options = HttpServerOptions {
             enabled: true,
             port: Some(8080),
-            routes_prefix: None,
+            path: None,
+            credentials_path: None,
         };
 
         assert!(http_server_options.enabled);
@@ -628,7 +668,8 @@ mod tests {
         let http_server_options = HttpServerOptions {
             enabled: false,
             port: None,
-            routes_prefix: None,
+            path: None,
+            credentials_path: None,
         };
 
         assert!(!http_server_options.enabled);
@@ -646,8 +687,10 @@ mod tests {
                 http_server: Some(HttpServerOptions {
                     enabled: true,
                     port: Some(8080),
-                    routes_prefix: Some("/workers".to_string()),
+                    path: Some("/workers".to_string()),
+                    credentials_path: None,
                 }),
+                mcp_server: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -663,7 +706,7 @@ mod tests {
             .unwrap();
         assert!(http_server.enabled);
         assert_eq!(http_server.port, Some(8080));
-        assert_eq!(http_server.routes_prefix, Some("/workers".to_string()));
+        assert_eq!(http_server.path, Some("/workers".to_string()));
     }
 
     #[test]

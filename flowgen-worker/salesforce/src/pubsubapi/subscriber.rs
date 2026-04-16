@@ -212,9 +212,9 @@ impl EventHandler {
                         let success = match config.ack_timeout {
                             Some(timeout) => matches!(
                                 tokio::time::timeout(timeout, completion_rx).await,
-                                Ok(Ok(Ok(())))
+                                Ok(Ok(Ok(_)))
                             ),
-                            None => matches!(completion_rx.await, Ok(Ok(()))),
+                            None => matches!(completion_rx.await, Ok(Ok(_))),
                         };
 
                         if !success {

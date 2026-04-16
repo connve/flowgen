@@ -33,6 +33,8 @@ pub struct TaskContext {
     pub cache: std::sync::Arc<dyn crate::cache::Cache>,
     /// Optional shared HTTP server for webhook tasks.
     pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
+    /// Optional shared MCP server for exposing flows as MCP tools.
+    pub mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Optional resource loader for loading external assets (SQL files, templates, etc.).
     pub resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration (can be overridden per task).
@@ -50,6 +52,10 @@ impl std::fmt::Debug for TaskContext {
             .field(
                 "http_server",
                 &self.http_server.as_ref().map(|_| "<HttpServer>"),
+            )
+            .field(
+                "mcp_server",
+                &self.mcp_server.as_ref().map(|_| "<McpServer>"),
             )
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
@@ -71,6 +77,8 @@ pub struct TaskContextBuilder {
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
     /// Optional shared HTTP server for webhook tasks.
     http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
+    /// Optional shared MCP server for exposing flows as MCP tools.
+    mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Resource loader for loading external assets.
     resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration.
@@ -136,6 +144,18 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the optional MCP server for exposing flows as MCP tools.
+    ///
+    /// # Arguments
+    /// * `mcp_server` - Optional MCP server instance
+    pub fn mcp_server(
+        mut self,
+        mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
+    ) -> Self {
+        self.mcp_server = mcp_server;
+        self
+    }
+
     /// Sets the resource loader for loading external assets.
     ///
     /// # Arguments
@@ -188,6 +208,7 @@ impl TaskContextBuilder {
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
             http_server: self.http_server,
+            mcp_server: self.mcp_server,
             resource_loader: self.resource_loader,
             retry: self.retry,
             cancellation_token: self.cancellation_token.unwrap_or_default(),

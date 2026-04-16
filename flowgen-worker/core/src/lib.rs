@@ -17,6 +17,10 @@ pub mod event;
 pub mod executor;
 /// HTTP server trait for task context integration.
 pub mod http_server;
+/// MCP (Model Context Protocol) core types and response registry.
+pub mod mcp;
+/// MCP server trait for task context integration.
+pub mod mcp_server;
 /// NsJail sandbox for secure script execution.
 pub mod nsjail;
 /// Resource loading system for external assets.

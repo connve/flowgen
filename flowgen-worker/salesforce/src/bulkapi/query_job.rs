@@ -228,7 +228,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -280,7 +280,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -343,7 +343,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -398,7 +398,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -493,7 +493,7 @@ impl EventHandler {
                         if let Some(arc) = completion_tx_arc.as_ref() {
                             if let Ok(mut guard) = arc.lock() {
                                 if let Some(tx) = guard.take() {
-                                    tx.send(Ok(())).ok();
+                                    tx.send(Ok(e.data_as_json().ok())).ok();
                                 }
                             }
                         }
@@ -838,6 +838,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
@@ -892,6 +893,7 @@ mod tests {
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 

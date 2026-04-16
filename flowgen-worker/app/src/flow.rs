@@ -151,6 +151,9 @@ pub enum Error {
     /// Error in AI completion task.
     #[error(transparent)]
     AiCompletion(#[from] flowgen_ai_agent::completion::processor::Error),
+    /// Error in MCP tool processor task.
+    #[error(transparent)]
+    McpToolProcessor(#[from] flowgen_mcp::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -160,6 +163,9 @@ pub enum Error {
     /// Flow cannot be initialized because HTTP server is not enabled.
     #[error("Flow cannot be initialized as http_server is not enabled")]
     HttpServerNotEnabled,
+    /// Flow cannot be initialized because MCP server is not enabled.
+    #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool tasks.")]
+    McpServerNotEnabled,
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -250,8 +256,8 @@ impl TaskRegistryBuilder {
         let mut task_descriptors = Vec::with_capacity(task_count);
 
         for (idx, task_type) in tasks_config.iter().enumerate() {
-            // Determine blocking status (only webhooks are blocking).
-            let is_blocking = matches!(task_type, TaskType::http_webhook(_));
+            // Determine blocking status (webhooks and mcp_tool tasks are blocking).
+            let is_blocking = matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
 
             // Wire input: task receives from the previous channel (if not the first task).
             let input_rx = if idx > 0 {
@@ -290,6 +296,8 @@ pub struct Flow {
     pub config: Arc<FlowConfig>,
     /// An optional shared HTTP server instance, passed in from the main application.
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
+    /// An optional shared MCP server instance, passed in from the main application.
+    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
     /// Shared cache, passed in from the main application.
     cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
@@ -320,21 +328,21 @@ impl Flow {
     /// If a flow contains any webhook tasks, it will always be treated as
     /// non-leader-elected by disregarding the `required_leader_election` flag.
     fn is_leader_elected(&self) -> bool {
-        let has_webhooks = self
+        let has_blocking_tasks = self
             .config
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_)));
+            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::mcp_tool(_)));
 
-        if has_webhooks {
+        if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a webhook; `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook or mcp_tool); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
-            return false; // Webhook flows are never leader elected.
+            return false; // Flows with blocking tasks are never leader elected.
         }
 
         // Otherwise, respect the configuration.
@@ -358,6 +366,18 @@ impl Flow {
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
+        }
+
+        // Validate: Flow with mcp_tool tasks requires MCP server to be configured.
+        let has_mcp_tasks = self
+            .config
+            .flow
+            .tasks
+            .iter()
+            .any(|task| matches!(task, TaskType::mcp_tool(_)));
+
+        if has_mcp_tasks && self.mcp_server.is_none() {
+            return Err(Error::McpServerNotEnabled);
         }
 
         // Create an Executor with the cache for lease management.
@@ -393,6 +413,7 @@ impl Flow {
             .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
             .http_server(self.http_server.clone())
+            .mcp_server(self.mcp_server.clone())
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token);
 
@@ -1328,6 +1349,24 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
+        TaskType::mcp_tool(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_mcp::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
     };
 
     Ok(handle)
@@ -1340,6 +1379,8 @@ pub struct FlowBuilder {
     config: Option<Arc<FlowConfig>>,
     /// Optional shared HTTP server instance.
     http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
+    /// Optional shared MCP server instance.
+    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
     /// Shared cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
@@ -1365,6 +1406,12 @@ impl FlowBuilder {
     /// Sets the shared HTTP server instance.
     pub fn http_server(mut self, server: Arc<dyn flowgen_core::http_server::HttpServer>) -> Self {
         self.http_server = Some(server);
+        self
+    }
+
+    /// Sets the shared MCP server instance.
+    pub fn mcp_server(mut self, server: Arc<dyn flowgen_core::mcp_server::McpServer>) -> Self {
+        self.mcp_server = Some(server);
         self
     }
 
@@ -1405,6 +1452,7 @@ impl FlowBuilder {
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
+            mcp_server: self.mcp_server,
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
