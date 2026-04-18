@@ -281,13 +281,18 @@ impl App {
                         .as_deref()
                         .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
 
-                    match flowgen_nats::cache::CacheBuilder::new()
+                    let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
                         .credentials_path(cache_config.credentials_path.clone())
-                        .url(cache_config.url.clone())
-                        .build()
-                        .and_then(|builder| {
-                            futures::executor::block_on(async { builder.init(db_name).await })
-                        }) {
+                        .url(cache_config.url.clone());
+                    if let Some(history) = cache_config.history {
+                        cache_builder = cache_builder.history(history);
+                    }
+                    if let Some(ttl) = cache_config.tombstone_ttl {
+                        cache_builder = cache_builder.tombstone_ttl(ttl);
+                    }
+                    match cache_builder.build().and_then(|builder| {
+                        futures::executor::block_on(async { builder.init(db_name).await })
+                    }) {
                         Ok(nats_cache) => {
                             info!("Using NATS distributed cache");
                             Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
