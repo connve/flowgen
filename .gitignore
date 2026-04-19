@@ -4,3 +4,4 @@
 .DS_Store
 .git
 /local
+.mcp.json
