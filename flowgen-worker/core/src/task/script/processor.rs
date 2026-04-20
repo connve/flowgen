@@ -121,6 +121,7 @@ struct ResourceHandle {
 
 impl EventHandler {
     /// Processes an event by executing the script on its data.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -814,7 +815,13 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if result.is_err() {
+                            if let Err(err) = result {
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                                 // Ack the message so bad data does not block the pipeline.
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
@@ -946,6 +953,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -997,6 +1005,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1035,6 +1044,7 @@ mod tests {
             subject: "input.subject".to_string(),
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
             task_id: 0,
             id: None,
@@ -1117,6 +1127,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1172,6 +1183,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1232,6 +1244,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1255,6 +1268,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1277,6 +1291,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1307,6 +1322,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1329,6 +1345,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1361,6 +1378,7 @@ mod tests {
                     name: "test_deterministic".to_string(),
                     engine: crate::task::script::config::ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
+                    depends_on: None,
                     retry: None,
                 }),
                 tx: Some(tx),
@@ -1382,6 +1400,7 @@ mod tests {
                 timestamp: 123456789,
                 task_type: "test",
                 meta: None,
+                error: None,
                 completion_tx: None,
             };
             handler
@@ -1421,6 +1440,7 @@ mod tests {
                     "#
                     .to_string(),
                 ),
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1443,6 +1463,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 

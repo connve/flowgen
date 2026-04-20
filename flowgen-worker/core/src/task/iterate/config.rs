@@ -14,6 +14,11 @@ pub struct Processor {
     /// If None, assumes the root element is an array.
     /// If Some("key"), extracts the array from data["key"].
     pub iterate_key: Option<String>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,

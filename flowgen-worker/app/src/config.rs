@@ -144,6 +144,70 @@ impl TaskType {
             TaskType::mssql_query(_) => "mssql_query",
         }
     }
+
+    /// Returns the task name from its configuration.
+    pub fn name(&self) -> &str {
+        match self {
+            TaskType::convert(c) => &c.name,
+            TaskType::iterate(c) => &c.name,
+            TaskType::log(c) => &c.name,
+            TaskType::script(c) => &c.name,
+            TaskType::buffer(c) => &c.name,
+            TaskType::object_store_read(c) => &c.name,
+            TaskType::object_store_write(c) => &c.name,
+            TaskType::object_store_list(c) => &c.name,
+            TaskType::object_store_move(c) => &c.name,
+            TaskType::generate(c) => &c.name,
+            TaskType::http_request(c) => &c.name,
+            TaskType::http_webhook(c) => &c.name,
+            TaskType::html_scrape(c) => &c.name,
+            TaskType::nats_jetstream_subscriber(c) => &c.name,
+            TaskType::nats_jetstream_publisher(c) => &c.name,
+            TaskType::salesforce_pubsubapi_subscriber(c) => &c.name,
+            TaskType::salesforce_pubsubapi_publisher(c) => &c.name,
+            TaskType::salesforce_bulkapi_query_job(c) => &c.name,
+            TaskType::salesforce_restapi_sobject(c) => &c.name,
+            TaskType::salesforce_restapi_composite(c) => &c.name,
+            TaskType::salesforce_toolingapi(c) => &c.name,
+            TaskType::gcp_bigquery_query(c) => &c.name,
+            TaskType::gcp_bigquery_storage_read(c) => &c.name,
+            TaskType::gcp_bigquery_job(c) => &c.name,
+            TaskType::gcp_bigquery_storage_write(c) => &c.name,
+            TaskType::mssql_query(c) => &c.name,
+        }
+    }
+
+    /// Returns the `depends_on` list if configured on the task.
+    pub fn depends_on(&self) -> Option<&Vec<String>> {
+        match self {
+            TaskType::convert(c) => c.depends_on.as_ref(),
+            TaskType::iterate(c) => c.depends_on.as_ref(),
+            TaskType::log(c) => c.depends_on.as_ref(),
+            TaskType::script(c) => c.depends_on.as_ref(),
+            TaskType::buffer(c) => c.depends_on.as_ref(),
+            TaskType::object_store_read(c) => c.depends_on.as_ref(),
+            TaskType::object_store_write(c) => c.depends_on.as_ref(),
+            TaskType::object_store_list(c) => c.depends_on.as_ref(),
+            TaskType::object_store_move(c) => c.depends_on.as_ref(),
+            TaskType::generate(c) => c.depends_on.as_ref(),
+            TaskType::http_request(c) => c.depends_on.as_ref(),
+            TaskType::http_webhook(c) => c.depends_on.as_ref(),
+            TaskType::html_scrape(c) => c.depends_on.as_ref(),
+            TaskType::nats_jetstream_subscriber(c) => c.depends_on.as_ref(),
+            TaskType::nats_jetstream_publisher(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_pubsubapi_subscriber(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_pubsubapi_publisher(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_bulkapi_query_job(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_restapi_sobject(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_restapi_composite(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_toolingapi(c) => c.depends_on.as_ref(),
+            TaskType::gcp_bigquery_query(c) => c.depends_on.as_ref(),
+            TaskType::gcp_bigquery_storage_read(c) => c.depends_on.as_ref(),
+            TaskType::gcp_bigquery_job(c) => c.depends_on.as_ref(),
+            TaskType::gcp_bigquery_storage_write(c) => c.depends_on.as_ref(),
+            TaskType::mssql_query(c) => c.depends_on.as_ref(),
+        }
+    }
 }
 
 impl std::fmt::Display for TaskType {

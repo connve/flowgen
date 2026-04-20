@@ -101,6 +101,11 @@ pub struct Query {
     #[serde(default = "default_query_timeout", with = "humantime_serde")]
     pub query_timeout: std::time::Duration,
 
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration for this task.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,

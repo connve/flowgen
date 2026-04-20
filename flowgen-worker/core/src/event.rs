@@ -180,6 +180,11 @@ impl Event {
     pub fn data_as_json(&self) -> Result<Value, Error> {
         Value::try_from(&self.data)
     }
+
+    /// Returns true if this event carries an error from a failed upstream task.
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
 }
 
 /// Errors that can occur during event processing operations.
@@ -233,6 +238,10 @@ pub struct Event {
     /// Metadata can be set by script tasks and accessed in templates using event.meta syntax.
     /// Useful for adding context that should travel with the event but is separate from the payload.
     pub meta: Option<Map<String, Value>>,
+    /// Error message set when a task fails after exhausting all retries.
+    /// When present, the event flows downstream as an error event so scripts
+    /// can inspect it and route to DLQ, audit tables, or other error handlers.
+    pub error: Option<String>,
     /// Completion notifier for end-to-end pipeline acknowledgment.
     /// Present only for events from replayable sources (NATS, Kafka, Pub/Sub).
     /// Intermediate tasks pass this through unchanged, final tasks signal completion.
@@ -250,6 +259,7 @@ impl Clone for Event {
             task_id: self.task_id,
             task_type: self.task_type,
             meta: self.meta.clone(),
+            error: self.error.clone(),
             completion_tx: self.completion_tx.clone(),
         }
     }
@@ -268,6 +278,7 @@ impl TryFrom<&Event> for Value {
                 "task_id": event.task_id,
                 "task_type": event.task_type,
                 "meta": event.meta,
+                "error": event.error,
             }
         }))
     }
@@ -286,6 +297,7 @@ impl std::fmt::Display for Event {
             "task_id": self.task_id,
             "task_type": self.task_type,
             "meta": self.meta,
+            "error": self.error,
         });
 
         let formatted =
@@ -452,6 +464,7 @@ impl EventBuilder {
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
+            error: None,
             completion_tx: self
                 .completion_tx
                 .map(|tx| std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
