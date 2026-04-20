@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// MCP tool result following the MCP protocol content format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,11 +97,7 @@ impl ResponseRegistry {
     ///
     /// Returns `true` if the progress was sent successfully, `false` if the
     /// correlation ID was not found or the receiver was dropped.
-    pub async fn send_progress(
-        &self,
-        correlation_id: &str,
-        progress: McpProgressEvent,
-    ) -> bool {
+    pub async fn send_progress(&self, correlation_id: &str, progress: McpProgressEvent) -> bool {
         let entries = self.entries.lock().await;
         if let Some(sender) = entries.get(correlation_id) {
             sender.progress_tx.send(progress).await.is_ok()

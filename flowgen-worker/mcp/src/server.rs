@@ -6,7 +6,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
@@ -53,7 +53,9 @@ pub enum Error {
     },
     #[error("Failed to send event to pipeline: {0}")]
     PipelineSend(String),
-    #[error("MCP tool name collision: '{name}' is already registered. Use distinct names across flows.")]
+    #[error(
+        "MCP tool name collision: '{name}' is already registered. Use distinct names across flows."
+    )]
     ToolNameCollision { name: String },
     #[error("Unsupported JSON-RPC version: {version}")]
     UnsupportedJsonRpcVersion { version: String },
@@ -140,16 +142,14 @@ impl McpServer {
     const DEFAULT_PATH: &str = "/mcp";
 
     /// Starts the MCP server on its own port with the configured endpoint path.
-    pub async fn start_server(
-        &self,
-        port: Option<u16>,
-        path: Option<String>,
-    ) -> Result<(), Error> {
+    pub async fn start_server(&self, port: Option<u16>, path: Option<String>) -> Result<(), Error> {
         let server_port = port.unwrap_or(Self::DEFAULT_PORT);
         let mcp_path = path.unwrap_or_else(|| Self::DEFAULT_PATH.to_string());
 
-        let router = axum::Router::new()
-            .route(&mcp_path, axum::routing::post(handle_mcp).with_state(self.clone()));
+        let router = axum::Router::new().route(
+            &mcp_path,
+            axum::routing::post(handle_mcp).with_state(self.clone()),
+        );
 
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
             .await
@@ -278,7 +278,9 @@ async fn handle_mcp(
     // Validate JSON-RPC version if provided.
     if let Some(ref version) = request.jsonrpc {
         if version != "2.0" {
-            let err = Error::UnsupportedJsonRpcVersion { version: version.clone() };
+            let err = Error::UnsupportedJsonRpcVersion {
+                version: version.clone(),
+            };
             return json_rpc_error_response(request.id, -32600, err.to_string());
         }
     }
@@ -292,7 +294,9 @@ async fn handle_mcp(
             StatusCode::OK.into_response()
         }
         _ => {
-            let err = Error::MethodNotFound { method: request.method.clone() };
+            let err = Error::MethodNotFound {
+                method: request.method.clone(),
+            };
             json_rpc_error_response(request.id, -32601, err.to_string())
         }
     }
@@ -318,11 +322,7 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
 }
 
 /// Handles the `tools/list` method by returning all registered tools.
-fn handle_tools_list(
-    server: &McpServer,
-    headers: &HeaderMap,
-    request: JsonRpcRequest,
-) -> Response {
+fn handle_tools_list(server: &McpServer, headers: &HeaderMap, request: JsonRpcRequest) -> Response {
     if let Err(status) = server.validate_auth(headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
@@ -411,10 +411,9 @@ async fn execute_tool_call(
     );
 
     // Create completion channel to receive the pipeline result.
-    let (completion_tx, completion_rx) =
-        tokio::sync::oneshot::channel::<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-        >();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<
+        Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
+    >();
 
     let event = flowgen_core::event::EventBuilder::new()
         .data(flowgen_core::event::EventData::Json(params.arguments))
@@ -657,11 +656,7 @@ fn completion_to_result_event(
 }
 
 /// Builds a JSON-RPC error response.
-fn json_rpc_error_response(
-    id: Option<serde_json::Value>,
-    code: i32,
-    message: String,
-) -> Response {
+fn json_rpc_error_response(id: Option<serde_json::Value>, code: i32, message: String) -> Response {
     let response = JsonRpcResponse {
         jsonrpc: "2.0",
         id,

@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.95.0"
+version = "0.97.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -85,5 +85,11 @@ tracing-opentelemetry = { version = "0.28" }
 atty = { version = "0.2" }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = { version = "3.8" }
-rig-core = { version = "0.33" }
+rig-core = { version = "0.35", features = ["rmcp"] }
+rig-vertexai = { version = "0.3" }
+rmcp = { version = "1", features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
 schemars = { version = "1.2" }
+scraper = { version = "0.21" }

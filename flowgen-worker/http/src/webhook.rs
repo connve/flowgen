@@ -269,11 +269,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             .task_context
             .http_server
             .as_ref()
-            .and_then(|server| {
-                server
-                    .as_any()
-                    .downcast_ref::<super::server::HttpServer>()
-            })
+            .and_then(|server| server.as_any().downcast_ref::<super::server::HttpServer>())
             .and_then(|server| server.global_credentials_path())
             .map(|p| p.to_path_buf());
 

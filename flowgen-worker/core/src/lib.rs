@@ -11,6 +11,8 @@ pub mod cache;
 pub mod client;
 /// Configuration structures and serialization support.
 pub mod config;
+/// Shared credential types for authenticating with external services.
+pub mod credentials;
 /// Event system with data formats, subject generation, and logging.
 pub mod event;
 /// Executor for distributed coordination via cache-based leases.

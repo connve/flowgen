@@ -174,7 +174,7 @@ impl EventExt for Event {
         EventLogger {
             event: self,
             tx,
-            fields: Vec::new()
+            fields: Vec::new(),
         }
     }
 }
@@ -437,10 +437,7 @@ impl EventBuilder {
         self
     }
 
-    pub fn completion_tx(
-        mut self,
-        completion_tx: CompletionTx,
-    ) -> Self {
+    pub fn completion_tx(mut self, completion_tx: CompletionTx) -> Self {
         self.completion_tx = Some(completion_tx);
         self
     }

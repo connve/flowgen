@@ -124,6 +124,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());

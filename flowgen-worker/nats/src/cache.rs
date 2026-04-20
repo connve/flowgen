@@ -2,6 +2,20 @@
 
 use flowgen_core::client::Client as FlowgenClientTrait;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Number of historical entries retained per key in the KV bucket.
+const DEFAULT_HISTORY: i64 = 10;
+
+/// Default TTL for KV delete and purge tombstone markers.
+///
+/// This only applies to tombstones left behind after a key is deleted,
+/// not to the actual values (those use the per-put TTL passed to `put`).
+/// Setting this to any `Some(Duration)` enables per-message TTL on the
+/// underlying JetStream stream (`allow_message_ttl`), which makes per-key
+/// TTLs work at all. One hour is plenty for flowgen's usage — we do not
+/// have watchers that need to observe delete events after long disconnects.
+const DEFAULT_TOMBSTONE_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -53,6 +67,8 @@ pub enum Error {
 pub struct Cache {
     credentials_path: PathBuf,
     url: String,
+    history: Option<i64>,
+    tombstone_ttl: Option<Duration>,
     store: Option<async_nats::jetstream::kv::Store>,
     jetstream: Option<async_nats::jetstream::Context>,
 }
@@ -78,9 +94,12 @@ impl Cache {
             Err(_) => jetstream
                 .create_key_value(async_nats::jetstream::kv::Config {
                     bucket: bucket.to_string(),
-                    history: 10,
-                    // Enables per-key TTL without maximum limit.
-                    limit_markers: None,
+                    history: self.history.unwrap_or(DEFAULT_HISTORY),
+                    // Setting any `Some(Duration)` enables `allow_message_ttl` on the
+                    // underlying stream, which is required for per-key TTLs passed via
+                    // the `Nats-TTL` header to be honored. The Duration itself only
+                    // controls how long delete/purge tombstones are retained.
+                    limit_markers: Some(self.tombstone_ttl.unwrap_or(DEFAULT_TOMBSTONE_TTL)),
                     ..Default::default()
                 })
                 .await
@@ -340,6 +359,10 @@ pub struct CacheBuilder {
     credentials_path: Option<PathBuf>,
     /// NATS server URL. Defaults to DEFAULT_NATS_URL if not set.
     url: Option<String>,
+    /// Number of historical entries retained per key. Defaults to DEFAULT_HISTORY.
+    history: Option<i64>,
+    /// TTL for delete/purge tombstone markers. Defaults to DEFAULT_TOMBSTONE_TTL.
+    tombstone_ttl: Option<Duration>,
 }
 
 impl CacheBuilder {
@@ -370,6 +393,23 @@ impl CacheBuilder {
         self
     }
 
+    /// Sets the number of historical entries retained per key.
+    ///
+    /// Only applies when the bucket is created. Defaults to `DEFAULT_HISTORY` if unset.
+    pub fn history(mut self, history: i64) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Sets the TTL for delete/purge tombstone markers.
+    ///
+    /// Setting this also enables per-key TTL on cache entries. Defaults to
+    /// `DEFAULT_TOMBSTONE_TTL` if unset.
+    pub fn tombstone_ttl(mut self, ttl: Duration) -> Self {
+        self.tombstone_ttl = Some(ttl);
+        self
+    }
+
     /// Builds the [`Cache`].
     ///
     /// Consumes builder. `Cache` is returned unconnected; call `init()` to connect.
@@ -385,6 +425,8 @@ impl CacheBuilder {
             url: self
                 .url
                 .unwrap_or_else(|| crate::client::DEFAULT_NATS_URL.to_string()),
+            history: self.history,
+            tombstone_ttl: self.tombstone_ttl,
             ..Default::default()
         })
     }

@@ -91,6 +91,19 @@ pub struct Processor {
     /// Enable streaming mode (sends chunks as separate events).
     #[serde(default)]
     pub stream: bool,
+    /// Optional MCP server URLs to connect to for tool discovery.
+    /// The agent will connect to each MCP server, discover available tools,
+    /// and make them callable during completions. Supports both flowgen's
+    /// own MCP server and external MCP-compatible servers.
+    ///
+    /// Example:
+    /// ```yaml
+    /// mcp_servers:
+    ///   - url: "http://localhost:3001/mcp"
+    ///   - url: "http://external-tools:8080/mcp"
+    /// ```
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
     /// Optional sandbox configuration for agent tool execution.
     /// When Some, tools are sandboxed for security. When None, tools run without sandbox.
     #[serde(default)]
@@ -98,6 +111,17 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+/// Configuration for connecting to an MCP server.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp").
+    pub url: String,
+    /// Optional path to credentials file for authenticating with the MCP server.
+    /// Uses the same format as http_request credentials (JSON file with
+    /// `bearer_auth` and/or `basic_auth` fields).
+    pub credentials_path: Option<std::path::PathBuf>,
 }
 
 impl ConfigExt for Processor {}
@@ -147,6 +171,8 @@ pub enum Provider {
     VoyageAi,
     /// xAI (Grok) provider.
     Xai,
+    /// Google Vertex AI provider (uses service account credentials).
+    VertexAi,
     /// Custom provider (requires custom endpoint configuration).
     Custom,
 }
@@ -170,6 +196,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };
@@ -207,6 +234,7 @@ mod tests {
             ]),
             max_turns: Some(5),
             stream: true,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };
@@ -250,6 +278,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };
@@ -271,6 +300,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: true,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };
@@ -299,6 +329,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };
@@ -331,6 +362,7 @@ mod tests {
             ]),
             max_turns: Some(3),
             stream: false,
+            mcp_servers: vec![],
             sandbox: Default::default(),
             retry: None,
         };

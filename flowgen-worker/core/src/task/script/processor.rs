@@ -9,8 +9,7 @@ use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use std::time::Instant;
-use tracing::{error, info, Instrument};
+use tracing::{error, Instrument};
 
 /// Errors that can occur during script execution.
 #[derive(thiserror::Error, Debug)]
@@ -122,6 +121,7 @@ struct ResourceHandle {
 
 impl EventHandler {
     /// Processes an event by executing the script on its data.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -793,7 +793,6 @@ impl crate::task::runner::Runner for Processor {
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
                         async move {
-                            let start = Instant::now();
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
@@ -815,12 +814,6 @@ impl crate::task::runner::Runner for Processor {
                                 }
                             })
                             .await;
-
-                            let elapsed = start.elapsed();
-                            match &result {
-                                Ok(_) => info!(duration_ms = elapsed.as_millis() as u64, "Event processed."),
-                                Err(err) => error!(duration_ms = elapsed.as_millis() as u64, error = %err, "Event processing failed."),
-                            }
 
                             if result.is_err() {
                                 // Ack the message so bad data does not block the pipeline.

@@ -73,6 +73,9 @@ pub enum Error {
     /// Error in HTTP webhook processor task.
     #[error(transparent)]
     HttpWebhookProcessor(#[from] flowgen_http::webhook::Error),
+    /// Error in HTML scrape processor task.
+    #[error(transparent)]
+    HtmlScrapeProcessor(#[from] flowgen_html::scrape::processor::Error),
     /// Error in HTTP server task.
     #[error(transparent)]
     HttpServer(#[from] flowgen_http::server::Error),
@@ -257,7 +260,8 @@ impl TaskRegistryBuilder {
 
         for (idx, task_type) in tasks_config.iter().enumerate() {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
-            let is_blocking = matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
+            let is_blocking =
+                matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
 
             // Wire input: task receives from the previous channel (if not the first task).
             let input_rx = if idx > 0 {
@@ -962,6 +966,27 @@ async fn spawn_task(
                         .task_id(task_id)
                         .task_type(task_type_str)
                         .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::html_scrape(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_html::scrape::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }

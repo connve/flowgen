@@ -82,6 +82,8 @@ pub enum TaskType {
     http_request(flowgen_http::config::Processor),
     /// HTTP webhook handler task.
     http_webhook(flowgen_http::config::Processor),
+    /// HTML scrape task for extracting structured data using CSS selectors.
+    html_scrape(flowgen_html::scrape::config::Processor),
     /// NATS JetStream subscriber task.
     nats_jetstream_subscriber(flowgen_nats::jetstream::config::Subscriber),
     /// NATS JetStream publisher task.
@@ -130,6 +132,7 @@ impl TaskType {
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
             TaskType::http_webhook(_) => "http_webhook",
+            TaskType::html_scrape(_) => "html_scrape",
             TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
             TaskType::salesforce_pubsubapi_subscriber(_) => "salesforce_pubsubapi_subscriber",
@@ -208,6 +211,17 @@ pub struct CacheOptions {
     pub url: String,
     /// Cache database name (defaults to DEFAULT_CACHE_DB if not provided).
     pub db_name: Option<String>,
+    /// Number of historical entries retained per key in the KV bucket.
+    /// Only applies when the bucket is created; changing this on an existing
+    /// bucket has no effect. Defaults to 10.
+    pub history: Option<i64>,
+    /// TTL for KV delete and purge tombstone markers.
+    /// Accepts human-readable durations (e.g., "1h", "30m", "1d").
+    /// Must be set to some duration for per-key TTLs on cache entries to work —
+    /// this flag enables per-message TTL on the underlying JetStream stream.
+    /// Defaults to 1 hour.
+    #[serde(default, with = "humantime_serde")]
+    pub tombstone_ttl: Option<std::time::Duration>,
 }
 
 /// Flow loading configuration.
@@ -435,6 +449,8 @@ mod tests {
                 credentials_path: PathBuf::from("/test/cache"),
                 url: "localhost:4222".to_string(),
                 db_name: None,
+                history: None,
+                tombstone_ttl: None,
             }),
             flows: FlowOptions {
                 path: Some(PathBuf::from("/test/flows/*")),
@@ -494,6 +510,8 @@ mod tests {
                 credentials_path: PathBuf::from("/serialize/cache"),
                 url: "localhost:4222".to_string(),
                 db_name: Some("test_db".to_string()),
+                history: None,
+                tombstone_ttl: None,
             }),
             flows: FlowOptions {
                 path: Some(PathBuf::from("/serialize/flows/*")),
@@ -522,6 +540,8 @@ mod tests {
                 credentials_path: PathBuf::from("/clone/cache"),
                 url: "localhost:4222".to_string(),
                 db_name: None,
+                history: None,
+                tombstone_ttl: None,
             }),
             flows: FlowOptions { path: None },
             flow_resources: None,
@@ -546,6 +566,8 @@ mod tests {
             credentials_path: PathBuf::from("/test/credentials_path"),
             url: "localhost:4222".to_string(),
             db_name: None,
+            history: None,
+            tombstone_ttl: None,
         };
 
         assert!(cache_options.enabled);
@@ -563,6 +585,8 @@ mod tests {
             credentials_path: PathBuf::from("/disabled/cache"),
             url: "localhost:4222".to_string(),
             db_name: Some("custom_db".to_string()),
+            history: None,
+            tombstone_ttl: None,
         };
 
         assert!(!cache_options.enabled);
@@ -580,6 +604,8 @@ mod tests {
             credentials_path: PathBuf::from("/serialize/credentials_path"),
             url: "localhost:4222".to_string(),
             db_name: None,
+            history: None,
+            tombstone_ttl: None,
         };
 
         let serialized = serde_json::to_string(&cache_options).unwrap();

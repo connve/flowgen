@@ -15,8 +15,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use std::time::Instant;
-use tracing::{error, info, Instrument};
+use tracing::{error, Instrument};
 
 /// Errors that can occur during event conversion operations.
 #[derive(thiserror::Error, Debug)]
@@ -138,6 +137,7 @@ enum SchemaConfig {
 
 impl EventHandler {
     /// Processes an event and converts to selected target format.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -433,7 +433,6 @@ impl crate::task::runner::Runner for Processor {
                     let retry_strategy = retry_config.strategy();
                     tokio::spawn(
                         async move {
-                            let start = Instant::now();
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
@@ -445,10 +444,8 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            let elapsed = start.elapsed();
-                            match &result {
-                                Ok(_) => info!(duration_ms = elapsed.as_millis() as u64, "Event processed."),
-                                Err(err) => error!(duration_ms = elapsed.as_millis() as u64, error = %err, "Event processing failed."),
+                            if let Err(err) = result {
+                                error!(error = %err, "Convert failed after all retry attempts.");
                             }
                         }
                         .instrument(tracing::Span::current()),

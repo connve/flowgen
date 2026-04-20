@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Type alias for dynamic context storage (vector store indexes with sample sizes).
-type DynamicContext = Arc<RwLock<Vec<(usize, Box<dyn VectorStoreIndexDyn + Send + Sync>)>>>;
+type DynamicContext = Arc<RwLock<Vec<(usize, Arc<dyn VectorStoreIndexDyn + Send + Sync>)>>>;
 
 /// Streaming chunk from completion.
 #[derive(Debug, Clone)]
@@ -101,6 +101,8 @@ pub enum Error {
         #[source]
         source: rig::http_client::Error,
     },
+    #[error("Vertex AI client creation failed: {message}")]
+    VertexAiClient { message: String },
     #[error("Completion request failed: {source}")]
     CompletionRequest {
         #[source]
@@ -217,7 +219,7 @@ impl ClientBuilder {
     pub fn dynamic_context_index(
         self,
         sample_size: usize,
-        index: Box<dyn VectorStoreIndexDyn + Send + Sync>,
+        index: Arc<dyn VectorStoreIndexDyn + Send + Sync>,
     ) -> Self {
         if let Ok(mut context) = self.dynamic_context.try_write() {
             context.push((sample_size, index));
@@ -296,6 +298,39 @@ impl ClientBuilder {
             Provider::OpenRouter => build_provider!(openrouter, OpenRouter, OpenRouterClient),
             Provider::Perplexity => build_provider!(perplexity, Perplexity, PerplexityClient),
             Provider::HuggingFace => build_provider!(huggingface, HuggingFace, HuggingFaceClient),
+            Provider::VertexAi => {
+                // Vertex AI uses Google Cloud Application Default Credentials (ADC).
+                // Project and location can be set via credentials fields or environment
+                // variables (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION).
+                let mut builder = rig_vertexai::Client::builder();
+                if let Some(ref creds) = self.credentials {
+                    if let Some(ref project_id) = creds.project_id {
+                        builder = builder.with_project(project_id);
+                    }
+                    if let Some(ref region) = creds.region {
+                        builder = builder.with_location(region);
+                    }
+                }
+                let client = builder
+                    .build()
+                    .map_err(|e| Error::VertexAiClient { message: e })?;
+                Ok(AgentClient {
+                    provider: self.provider,
+                    model: self.model,
+                    name: self.name,
+                    description: self.description,
+                    temperature: self.temperature.map(|t| t as f64),
+                    max_tokens: self.max_tokens.map(|t| t as u64),
+                    static_context: self.static_context,
+                    dynamic_context: self.dynamic_context,
+                    tool_server_handle: self.tool_server_handle,
+                    tool_choice: self.tool_choice,
+                    max_turns: self.max_turns,
+                    output_schema: self.output_schema,
+                    additional_params: self.additional_params,
+                    client: ProviderClient::VertexAi(client),
+                })
+            }
             Provider::Ollama | Provider::Custom => self.build_openai_compatible_provider(),
             _ => Err(Error::ProviderNotImplemented {
                 provider: format!("{:?}", self.provider),
@@ -474,6 +509,7 @@ enum ProviderClient {
     OpenRouter(rig::providers::openrouter::Client),
     Perplexity(rig::providers::perplexity::Client),
     HuggingFace(rig::providers::huggingface::Client),
+    VertexAi(rig_vertexai::Client),
 }
 
 /// Macro to dispatch to the correct build macro based on tool presence.
@@ -529,6 +565,7 @@ impl ProviderClient {
             Self::OpenRouter(client) => dispatch_build_agent!(OpenRouter, client, params),
             Self::Perplexity(client) => dispatch_build_agent!(Perplexity, client, params),
             Self::HuggingFace(client) => dispatch_build_agent!(HuggingFace, client, params),
+            Self::VertexAi(client) => dispatch_build_agent!(VertexAi, client, params),
         }
     }
 }
@@ -546,6 +583,7 @@ enum AgentEnum {
     OpenRouter(Agent<rig::providers::openrouter::CompletionModel>),
     Perplexity(Agent<rig::providers::perplexity::CompletionModel>),
     HuggingFace(Agent<rig::providers::huggingface::completion::CompletionModel>),
+    VertexAi(Agent<rig_vertexai::completion::CompletionModel>),
 }
 
 impl AgentEnum {
@@ -563,6 +601,7 @@ impl AgentEnum {
             Self::OpenRouter(agent) => agent.prompt(prompt).await,
             Self::Perplexity(agent) => agent.prompt(prompt).await,
             Self::HuggingFace(agent) => agent.prompt(prompt).await,
+            Self::VertexAi(agent) => agent.prompt(prompt).await,
         }
     }
 
@@ -600,6 +639,7 @@ impl AgentEnum {
             Self::OpenRouter(agent) => map_stream!(agent, prompt),
             Self::Perplexity(agent) => map_stream!(agent, prompt),
             Self::HuggingFace(agent) => map_stream!(agent, prompt),
+            Self::VertexAi(agent) => map_stream!(agent, prompt),
         }
     }
 }

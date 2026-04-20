@@ -3,11 +3,14 @@
 //! Provides both standard and streaming completion modes with support for
 //! multiple AI providers through the Rig framework.
 
+use crate::agent::CompletionChunk as AgentChunk;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
+use futures_util::StreamExt;
+use rig::tool::{rmcp::McpClientHandler, server::ToolServer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::{error, info, Instrument};
 
 /// Errors that can occur during completion processing.
 #[derive(thiserror::Error, Debug)]
@@ -68,6 +71,8 @@ pub enum Error {
         #[source]
         source: flowgen_core::resource::Error,
     },
+    #[error("Failed to connect to MCP server at {url}: {message}")]
+    McpConnection { url: String, message: String },
 }
 
 /// Response structure for completion events.
@@ -155,39 +160,28 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by generating a completion.
+    ///
+    /// Dispatches to streaming or non-streaming path based on config.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
 
+        if self.config.stream {
+            self.handle_streaming(event).await
+        } else {
+            self.handle_non_streaming(event).await
+        }
+    }
+
+    /// Non-streaming completion: waits for the full response and emits a single event.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            // Render config with event data for template substitution.
-            let event_value = serde_json::value::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
-
-            // Render prompt from Source (inline or external file).
-            let rendered_prompt = self
-                .config
-                .prompt
-                .render(self.task_context.resource_loader.as_ref(), &event_value)
-                .await
-                .map_err(|source| Error::ResourceLoad { source })?;
-
-            // Render optional system prompt from Source.
-            let rendered_system_prompt = if let Some(ref system_prompt) = self.config.system_prompt
-            {
-                Some(
-                    system_prompt
-                        .render(self.task_context.resource_loader.as_ref(), &event_value)
-                        .await
-                        .map_err(|source| Error::ResourceLoad { source })?,
-                )
-            } else {
-                None
-            };
+            let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
 
             // Generate completion using the Rig agent client.
             let completion_text = self
@@ -196,8 +190,6 @@ impl EventHandler {
                 .await
                 .map_err(|source| Error::AgentClient { source })?;
 
-            // Build response with completion result.
-            // Note: Usage statistics are not available from Rig's non-streaming prompt() method.
             let response = CompletionResponse {
                 text: completion_text,
                 model: self.config.model.clone(),
@@ -205,10 +197,134 @@ impl EventHandler {
                 usage: None,
             };
 
-            // Send the completion response as an event.
             self.send_response(response, completion_tx_arc).await
         })
         .await
+    }
+
+    /// Streaming completion: emits intermediate chunk events as they arrive,
+    /// then a final chunk with `is_final: true`. Only the final event carries
+    /// the completion signal so downstream tasks see all chunks before the
+    /// source considers the request complete.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    async fn handle_streaming(&self, event: Event) -> Result<(), Error> {
+        let event = Arc::new(event);
+        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
+
+        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
+            let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
+
+            let mut stream = self
+                .client
+                .complete_stream(&rendered_prompt, rendered_system_prompt.as_deref())
+                .await;
+
+            let mut index: usize = 0;
+            let mut accumulated_text = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                if self.task_context.cancellation_token.is_cancelled() {
+                    return Ok(());
+                }
+
+                match chunk {
+                    AgentChunk::Text(text) => {
+                        accumulated_text.push_str(&text);
+                        let chunk_event = CompletionChunk {
+                            text,
+                            is_final: false,
+                            index,
+                        };
+                        let data = serde_json::to_value(&chunk_event)
+                            .map_err(|source| Error::SerdeJson { source })?;
+
+                        // Intermediate chunks do not carry the completion signal.
+                        let e = EventBuilder::new()
+                            .data(EventData::Json(data))
+                            .task_id(self.task_id)
+                            .task_type(self.task_type)
+                            .build()
+                            .map_err(|source| Error::EventBuilder { source })?;
+
+                        e.send_with_logging(self.tx.as_ref())
+                            .await
+                            .map_err(|source| Error::SendMessage { source })?;
+                        index += 1;
+                    }
+                    AgentChunk::Final(text) => {
+                        accumulated_text = text;
+                    }
+                    AgentChunk::Error(err) => {
+                        error!(error = %err, "Streaming completion error.");
+                    }
+                }
+            }
+
+            // Emit the final chunk with the complete accumulated text.
+            let final_chunk = CompletionChunk {
+                text: accumulated_text,
+                is_final: true,
+                index,
+            };
+            let data =
+                serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
+
+            let mut e = EventBuilder::new()
+                .data(EventData::Json(data))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
+
+            // Only the final event carries the completion signal.
+            match self.tx {
+                None => {
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        if let Ok(mut guard) = arc.lock() {
+                            if let Some(tx) = guard.take() {
+                                tx.send(Ok(e.data_as_json().ok())).ok();
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    e.completion_tx = completion_tx_arc.clone();
+                }
+            }
+
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            Ok(())
+        })
+        .await
+    }
+
+    /// Renders prompt and optional system prompt from the event data.
+    async fn render_prompts(&self, event: &Arc<Event>) -> Result<(String, Option<String>), Error> {
+        let event_value = serde_json::value::Value::try_from(event.as_ref())
+            .map_err(|source| Error::EventBuilder { source })?;
+
+        let rendered_prompt = self
+            .config
+            .prompt
+            .render(self.task_context.resource_loader.as_ref(), &event_value)
+            .await
+            .map_err(|source| Error::ResourceLoad { source })?;
+
+        let rendered_system_prompt = if let Some(ref system_prompt) = self.config.system_prompt {
+            Some(
+                system_prompt
+                    .render(self.task_context.resource_loader.as_ref(), &event_value)
+                    .await
+                    .map_err(|source| Error::ResourceLoad { source })?,
+            )
+        } else {
+            None
+        };
+
+        Ok((rendered_prompt, rendered_system_prompt))
     }
 
     /// Sends a completion response as an event.
@@ -341,6 +457,49 @@ impl flowgen_core::task::runner::Runner for Processor {
         // Set maximum agent turns for multi-turn conversations.
         if let Some(max_turns) = self.config.max_turns {
             builder = builder.max_turns(max_turns);
+        }
+
+        // Connect to MCP servers and register discovered tools.
+        if !self.config.mcp_servers.is_empty() {
+            let tool_server_handle = ToolServer::new().run();
+            let client_info = rmcp::model::ClientInfo::new(
+                rmcp::model::ClientCapabilities::default(),
+                rmcp::model::Implementation::from_build_env(),
+            );
+
+            for mcp_config in &self.config.mcp_servers {
+                let handler =
+                    McpClientHandler::new(client_info.clone(), tool_server_handle.clone());
+                let mut transport_config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(mcp_config.url.as_str());
+
+                // Load credentials from file and set the authorization header.
+                if let Some(ref creds_path) = mcp_config.credentials_path {
+                    let creds = flowgen_core::credentials::load_http_credentials(creds_path)
+                        .await
+                        .map_err(|e| Error::McpConnection {
+                            url: mcp_config.url.clone(),
+                            message: e.to_string(),
+                        })?;
+                    if let Some(bearer_token) = creds.bearer_auth {
+                        transport_config = transport_config.auth_header(bearer_token);
+                    }
+                }
+
+                let transport =
+                    rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
+
+                handler
+                    .connect(transport)
+                    .await
+                    .map_err(|e| Error::McpConnection {
+                        url: mcp_config.url.clone(),
+                        message: e.to_string(),
+                    })?;
+
+                info!(url = %mcp_config.url, "Connected to MCP server and discovered tools.");
+            }
+
+            builder = builder.tool_server_handle(tool_server_handle);
         }
 
         let client = builder

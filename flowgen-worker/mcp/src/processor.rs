@@ -155,15 +155,12 @@ impl Runner for Processor {
         let tool_name = event_handler.config.name.clone();
 
         // The sender channel connects the MCP server to the downstream pipeline.
-        let tool_tx = event_handler
-            .tx
-            .clone()
-            .ok_or_else(|| {
-                Error::MissingBuilderAttribute(
-                    "mcp_tool must have an output channel (cannot be the last task in a flow)."
-                        .to_string(),
-                )
-            })?;
+        let tool_tx = event_handler.tx.clone().ok_or_else(|| {
+            Error::MissingBuilderAttribute(
+                "mcp_tool must have an output channel (cannot be the last task in a flow)."
+                    .to_string(),
+            )
+        })?;
 
         server
             .register_tool(

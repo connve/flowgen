@@ -68,9 +68,9 @@ fn render_json_value(
     data: &serde_json::Value,
 ) -> Result<(), handlebars::RenderError> {
     match value {
-        serde_json::Value::String(s) => {
+        serde_json::Value::String(s)
             // Only render if the string contains template syntax.
-            if s.contains("{{") {
+            if s.contains("{{") => {
                 // Check if this is a template that references a path in the data.
                 // If so, try to directly access and use that value instead of rendering as string.
                 // This preserves type information for objects, arrays, and primitives.
@@ -97,7 +97,6 @@ fn render_json_value(
                 // Fallback to string if parsing fails or parsed value is a string.
                 *s = rendered;
             }
-        }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
                 render_json_value(v, handlebars, data)?;

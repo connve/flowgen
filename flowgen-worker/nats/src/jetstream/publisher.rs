@@ -95,6 +95,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();

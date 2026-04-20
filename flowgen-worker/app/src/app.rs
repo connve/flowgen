@@ -292,7 +292,8 @@ impl App {
                     http_server_builder = http_server_builder.path(path.clone());
                 }
                 if let Some(ref creds_path) = http_config.credentials_path {
-                    http_server_builder = http_server_builder.global_credentials_path(creds_path.clone());
+                    http_server_builder =
+                        http_server_builder.global_credentials_path(creds_path.clone());
                 }
                 Some(Arc::new(http_server_builder.build()))
             }
@@ -307,43 +308,54 @@ impl App {
             .map(|mcp| mcp.enabled)
             .unwrap_or(false);
 
-
-        let has_mcp_tools = flow_configs
-            .iter()
-            .any(|fc| fc.flow.tasks.iter().any(|t| matches!(t, crate::config::TaskType::mcp_tool(_))));
+        let has_mcp_tools = flow_configs.iter().any(|fc| {
+            fc.flow
+                .tasks
+                .iter()
+                .any(|t| matches!(t, crate::config::TaskType::mcp_tool(_)))
+        });
 
         if has_mcp_tools && !mcp_enabled {
             warn!("Flows contain mcp_tool tasks but mcp_server is not enabled in config. MCP tools will not be registered.");
         }
 
-        let mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>> = if mcp_enabled && has_mcp_tools {
+        let mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>> = if mcp_enabled
+            && has_mcp_tools
+        {
             // Load global MCP credentials if configured.
             let global_credentials = app_config
                 .worker
                 .as_ref()
                 .and_then(|w| w.mcp_server.as_ref())
                 .and_then(|mcp_config| mcp_config.credentials_path.as_ref())
-                .and_then(|path| {
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => {
-                            match serde_json::from_str::<flowgen_mcp::config::Credentials>(&content) {
-                                Ok(creds) => Some(creds),
-                                Err(source) => {
-                                    let err = Error::McpCredentialsParse { path: path.clone(), source };
-                                    error!("{err}");
-                                    None
-                                }
+                .and_then(|path| match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<flowgen_mcp::config::Credentials>(&content) {
+                            Ok(creds) => Some(creds),
+                            Err(source) => {
+                                let err = Error::McpCredentialsParse {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{err}");
+                                None
                             }
                         }
-                        Err(source) => {
-                            let err = Error::McpCredentialsRead { path: path.clone(), source };
-                            error!("{err}");
-                            None
-                        }
+                    }
+                    Err(source) => {
+                        let err = Error::McpCredentialsRead {
+                            path: path.clone(),
+                            source,
+                        };
+                        error!("{err}");
+                        None
                     }
                 });
 
-            Some(Arc::new(flowgen_mcp::server::McpServer::new(global_credentials)) as Arc<dyn flowgen_core::mcp_server::McpServer>)
+            Some(
+                Arc::new(flowgen_mcp::server::McpServer::new(global_credentials))
+                    as Arc<dyn flowgen_core::mcp_server::McpServer>,
+            )
         } else {
             None
         };
@@ -356,13 +368,18 @@ impl App {
                         .as_deref()
                         .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
 
-                    match flowgen_nats::cache::CacheBuilder::new()
+                    let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
                         .credentials_path(cache_config.credentials_path.clone())
-                        .url(cache_config.url.clone())
-                        .build()
-                        .and_then(|builder| {
-                            futures::executor::block_on(async { builder.init(db_name).await })
-                        }) {
+                        .url(cache_config.url.clone());
+                    if let Some(history) = cache_config.history {
+                        cache_builder = cache_builder.history(history);
+                    }
+                    if let Some(ttl) = cache_config.tombstone_ttl {
+                        cache_builder = cache_builder.tombstone_ttl(ttl);
+                    }
+                    match cache_builder.build().and_then(|builder| {
+                        futures::executor::block_on(async { builder.init(db_name).await })
+                    }) {
                         Ok(nats_cache) => {
                             info!("Using NATS distributed cache");
                             Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
