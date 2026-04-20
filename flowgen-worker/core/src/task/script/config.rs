@@ -36,6 +36,11 @@ pub struct Processor {
     ///   resource: "scripts/transform_data.rhai"
     /// ```
     pub code: crate::resource::Source,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
@@ -47,6 +52,7 @@ impl Default for Processor {
             name: String::new(),
             engine: ScriptEngine::default(),
             code: crate::resource::Source::Inline(String::new()),
+            depends_on: None,
             retry: None,
         }
     }
@@ -71,6 +77,7 @@ mod tests {
             name: "test_script".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data + 1".to_string()),
+            depends_on: None,
             retry: None,
         };
 
@@ -103,6 +110,7 @@ mod tests {
             name: "transform".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data * 2".to_string()),
+            depends_on: None,
             retry: None,
         };
 
@@ -117,6 +125,7 @@ mod tests {
             name: "clone_test".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data".to_string()),
+            depends_on: None,
             retry: None,
         };
 
@@ -132,6 +141,7 @@ mod tests {
             code: crate::resource::Source::Resource {
                 resource: "scripts/transform.rhai".to_string(),
             },
+            depends_on: None,
             retry: None,
         };
 

@@ -771,6 +771,7 @@ mod tests {
             },
             endpoint: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, _) = mpsc::channel::<Event>(10);

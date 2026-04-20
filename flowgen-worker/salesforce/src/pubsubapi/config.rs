@@ -117,6 +117,11 @@ pub struct Subscriber {
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -255,6 +260,11 @@ pub struct Publisher {
     pub payload: Payload,
     /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
     pub endpoint: Option<String>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -384,6 +394,7 @@ mod tests {
             },
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -439,6 +450,7 @@ mod tests {
             topic: "/event/Order_Status__e".to_string(),
             payload: Payload::Fields(fields),
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
+            depends_on: None,
             retry: None,
         };
 
@@ -455,6 +467,7 @@ mod tests {
             topic: "/event/Order_Status__e".to_string(),
             payload: Payload::FromEvent { from_event: true },
             endpoint: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -497,6 +510,7 @@ mod tests {
             },
             endpoint: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         };
 

@@ -162,6 +162,7 @@ impl EventHandler {
     }
 
     /// Processes a single event: extract HTML, scrape, and emit results.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -354,6 +355,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "HTML scrape failed after all retry attempts.");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),

@@ -103,6 +103,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -504,6 +505,7 @@ mod tests {
             topic: "/event/Test__e".to_string(),
             payload: config::Payload::Fields(serde_json::Map::new()),
             endpoint: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel::<Event>(10);

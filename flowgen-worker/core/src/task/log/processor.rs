@@ -44,6 +44,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by logging its data and passing it through.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -171,6 +172,12 @@ impl crate::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Log failed after all retry attempts");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -293,6 +300,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -329,6 +337,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            depends_on: None,
             retry: None,
         });
 
@@ -360,6 +369,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            depends_on: None,
             retry: None,
         });
 

@@ -35,6 +35,11 @@ pub struct ReadProcessor {
     pub delimiter: Option<String>,
     /// Delete the file from object store after successfully reading it.
     pub delete_after_read: Option<bool>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -51,6 +56,11 @@ pub struct ListProcessor {
     pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -75,6 +85,11 @@ pub struct MoveProcessor {
     pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -113,6 +128,11 @@ pub struct WriteProcessor {
     pub format: WriteFormat,
     /// Hive-style partitioning configuration.
     pub hive_partition_options: Option<HivePartitionOptions>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -163,6 +183,7 @@ mod tests {
             has_header: Some(true),
             delimiter: None,
             delete_after_read: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -188,6 +209,7 @@ mod tests {
             has_header: Some(false),
             delimiter: None,
             delete_after_read: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -227,6 +249,7 @@ mod tests {
             client_options: Some(client_options.clone()),
             format: WriteFormat::Auto,
             hive_partition_options: Some(hive_options.clone()),
+            depends_on: None,
             retry: None,
         };
 
@@ -252,6 +275,7 @@ mod tests {
                 enabled: false,
                 partition_keys: vec![],
             }),
+            depends_on: None,
             retry: None,
         };
 
@@ -296,6 +320,7 @@ mod tests {
             has_header: Some(true),
             delimiter: None,
             delete_after_read: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -321,6 +346,7 @@ mod tests {
             has_header: None,
             delimiter: None,
             delete_after_read: Some(true),
+            depends_on: None,
             retry: None,
         };
 
@@ -338,6 +364,7 @@ mod tests {
             has_header: None,
             delimiter: None,
             delete_after_read: Some(false),
+            depends_on: None,
             retry: None,
         };
 
@@ -355,6 +382,7 @@ mod tests {
             has_header: None,
             delimiter: None,
             delete_after_read: None,
+            depends_on: None,
             retry: None,
         };
 
