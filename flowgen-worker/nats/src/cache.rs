@@ -91,19 +91,38 @@ impl Cache {
 
         let store = match jetstream.get_key_value(bucket).await {
             Ok(store) => store,
-            Err(_) => jetstream
-                .create_key_value(async_nats::jetstream::kv::Config {
-                    bucket: bucket.to_string(),
-                    history: self.history.unwrap_or(DEFAULT_HISTORY),
-                    // Setting any `Some(Duration)` enables `allow_message_ttl` on the
-                    // underlying stream, which is required for per-key TTLs passed via
-                    // the `Nats-TTL` header to be honored. The Duration itself only
-                    // controls how long delete/purge tombstones are retained.
-                    limit_markers: Some(self.tombstone_ttl.unwrap_or(DEFAULT_TOMBSTONE_TTL)),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| Error::KVBucketCreate { source: e })?,
+            Err(_) => {
+                let history = self.history.unwrap_or(DEFAULT_HISTORY);
+
+                // Try creating with limit_markers (enables per-key TTL, requires NATS 2.11+).
+                // Falls back to creating without if the server rejects it.
+                let with_ttl = jetstream
+                    .create_key_value(async_nats::jetstream::kv::Config {
+                        bucket: bucket.to_string(),
+                        history,
+                        limit_markers: Some(self.tombstone_ttl.unwrap_or(DEFAULT_TOMBSTONE_TTL)),
+                        ..Default::default()
+                    })
+                    .await;
+
+                match with_ttl {
+                    Ok(store) => store,
+                    Err(_) => {
+                        tracing::warn!(
+                            "NATS server does not support limit_markers (requires 2.11+), \
+                             creating KV bucket without per-key TTL support."
+                        );
+                        jetstream
+                            .create_key_value(async_nats::jetstream::kv::Config {
+                                bucket: bucket.to_string(),
+                                history,
+                                ..Default::default()
+                            })
+                            .await
+                            .map_err(|e| Error::KVBucketCreate { source: e })?
+                    }
+                }
+            }
         };
 
         self.store = Some(store);
