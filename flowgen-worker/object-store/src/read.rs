@@ -400,6 +400,12 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Read failed after all retry attempts");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -536,6 +542,7 @@ mod tests {
             has_header: Some(true),
             delete_after_read: None,
             delimiter: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel::<Event>(10);

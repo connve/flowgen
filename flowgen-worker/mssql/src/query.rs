@@ -308,6 +308,12 @@ impl Runner for Processor {
 
                             if let Err(e) = result {
                                 error!(error = %e, "Query failed after all retry attempts");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(e.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -604,7 +610,10 @@ fn build_columns(
                             ColumnData::Xml(Some(val)) => {
                                 builder.append_value(val.as_ref());
                             }
-                            _ => builder.append_value(format!("{col_data:?}")),
+                            ColumnData::Numeric(Some(val)) => {
+                                builder.append_value(f64::from(*val).to_string());
+                            }
+                            _ => builder.append_null(),
                         }
                     } else {
                         builder.append_null();
@@ -637,10 +646,29 @@ fn build_columns(
                 Arc::new(builder.finish())
             }
             _ => {
+                // Fallback for unmapped data types: extract the value as a string
+                // representation, or null if the column value is None.
                 let mut builder = StringBuilder::new();
                 for row in rows {
                     if let Some((_, col_data)) = row.cells().nth(col_idx) {
-                        builder.append_value(format!("{col_data:?}"));
+                        match col_data {
+                            ColumnData::String(Some(val)) => builder.append_value(val.as_ref()),
+                            ColumnData::Guid(Some(val)) => {
+                                builder.append_value(val.to_string());
+                            }
+                            ColumnData::Xml(Some(val)) => builder.append_value(val.as_ref()),
+                            ColumnData::Numeric(Some(val)) => {
+                                builder.append_value(f64::from(*val).to_string());
+                            }
+                            ColumnData::U8(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::I16(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::I32(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::I64(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::F32(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::F64(Some(val)) => builder.append_value(val.to_string()),
+                            ColumnData::Bit(Some(val)) => builder.append_value(val.to_string()),
+                            _ => builder.append_null(),
+                        }
                     } else {
                         builder.append_null();
                     }

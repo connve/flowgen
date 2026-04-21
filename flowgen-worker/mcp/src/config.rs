@@ -42,6 +42,11 @@ pub struct Processor {
     /// Accepts human-readable durations (e.g., "30s", "5m", "1h").
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
@@ -85,6 +90,7 @@ mod tests {
             }),
             credentials_path: Some(std::path::PathBuf::from("/etc/mcp/keys.json")),
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         };
 

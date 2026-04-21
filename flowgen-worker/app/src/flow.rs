@@ -169,6 +169,9 @@ pub enum Error {
     /// Flow cannot be initialized because MCP server is not enabled.
     #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool tasks.")]
     McpServerNotEnabled,
+    /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
+    #[error("Flow configuration error: {0}")]
+    ConfigError(String),
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -240,17 +243,27 @@ struct TaskRegistryBuilder {
 }
 
 impl TaskRegistryBuilder {
-    /// Builds a complete task registry with all channels properly wired.
+    /// Builds a task registry with channels wired between tasks.
+    ///
+    /// Dispatches to the DAG path when any task declares `depends_on`,
+    /// otherwise uses the linear chain for backward compatibility.
     fn build(self) -> Result<TaskRegistry, Error> {
         let tasks_config = &self.flow_config.flow.tasks;
-        let task_count = tasks_config.len();
 
-        if task_count == 0 {
+        if tasks_config.is_empty() {
             return Ok(TaskRegistry { tasks: Vec::new() });
         }
 
-        // Create channels for the linear task chain.
-        // For N tasks, we need N-1 channels connecting them.
+        if tasks_config.iter().any(|t| t.depends_on().is_some()) {
+            self.build_dag(tasks_config)
+        } else {
+            self.build_linear(tasks_config)
+        }
+    }
+
+    /// Linear chain: task N receives from task N-1. No branching.
+    fn build_linear(&self, tasks_config: &[TaskType]) -> Result<TaskRegistry, Error> {
+        let task_count = tasks_config.len();
         let mut channels: Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)> = (0..task_count
             .saturating_sub(1))
             .map(|_| mpsc::channel(self.buffer_size))
@@ -263,17 +276,14 @@ impl TaskRegistryBuilder {
             let is_blocking =
                 matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
 
-            // Wire input: task receives from the previous channel (if not the first task).
             let input_rx = if idx > 0 {
-                channels.get_mut(idx - 1).map(|(_, rx)| {
-                    // Take ownership of the receiver by replacing it with a dummy channel.
-                    std::mem::replace(rx, mpsc::channel(1).1)
-                })
+                channels
+                    .get_mut(idx - 1)
+                    .map(|(_, rx)| std::mem::replace(rx, mpsc::channel(1).1))
             } else {
                 None
             };
 
-            // Wire output: task sends to the next channel (if not the last task).
             let output_tx = if idx < task_count - 1 {
                 channels.get(idx).map(|(tx, _)| tx.clone())
             } else {
@@ -285,6 +295,123 @@ impl TaskRegistryBuilder {
                 task_type: task_type.clone(),
                 input_rx,
                 output_tx,
+                is_blocking,
+            });
+        }
+
+        Ok(TaskRegistry {
+            tasks: task_descriptors,
+        })
+    }
+
+    /// DAG wiring: tasks declare their upstream via `depends_on`.
+    ///
+    /// Tasks without `depends_on` fall back to depending on the previous task
+    /// in the list, so mixed flows (some tasks with `depends_on`, some without)
+    /// work intuitively. Fan-out points (multiple tasks depending on the same
+    /// parent) use a dispatcher that clones events to each child channel.
+    fn build_dag(&self, tasks_config: &[TaskType]) -> Result<TaskRegistry, Error> {
+        let task_count = tasks_config.len();
+
+        let mut name_to_idx: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (idx, task_type) in tasks_config.iter().enumerate() {
+            let name = task_type.name().to_string();
+            if name_to_idx.contains_key(&name) {
+                return Err(Error::ConfigError(format!(
+                    "Duplicate task name '{name}' in flow"
+                )));
+            }
+            name_to_idx.insert(name, idx);
+        }
+
+        // Resolve each task's parent indices from `depends_on` names.
+        let mut parent_indices: Vec<Vec<usize>> = Vec::with_capacity(task_count);
+        for (idx, task_type) in tasks_config.iter().enumerate() {
+            let parents = match task_type.depends_on() {
+                Some(deps) => {
+                    let mut indices = Vec::with_capacity(deps.len());
+                    for dep_name in deps {
+                        let &parent_idx = name_to_idx.get(dep_name).ok_or_else(|| {
+                            Error::ConfigError(format!(
+                                "Task '{}' depends on unknown task '{dep_name}'",
+                                task_type.name()
+                            ))
+                        })?;
+                        if parent_idx >= idx {
+                            return Err(Error::ConfigError(format!(
+                                "Task '{}' depends on '{dep_name}' which appears later in the list",
+                                task_type.name()
+                            )));
+                        }
+                        indices.push(parent_idx);
+                    }
+                    indices
+                }
+                None if idx > 0 => vec![idx - 1],
+                None => vec![],
+            };
+            parent_indices.push(parents);
+        }
+
+        // Group children by parent to identify fan-out points.
+        let mut children_per_parent: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (child_idx, parents) in parent_indices.iter().enumerate() {
+            for &parent_idx in parents {
+                children_per_parent
+                    .entry(parent_idx)
+                    .or_default()
+                    .push(child_idx);
+            }
+        }
+
+        // Wire channels. Single-child parents get a direct channel. Multi-child
+        // parents get a dispatcher that reads from one channel and clones events
+        // into per-child channels, preserving backpressure on each branch.
+        let mut child_rx: Vec<Option<mpsc::Receiver<Event>>> =
+            (0..task_count).map(|_| None).collect();
+        let mut parent_tx: Vec<Option<mpsc::Sender<Event>>> =
+            (0..task_count).map(|_| None).collect();
+
+        for (&parent_idx, children) in &children_per_parent {
+            if children.len() == 1 {
+                let (tx, rx) = mpsc::channel(self.buffer_size);
+                parent_tx[parent_idx] = Some(tx);
+                child_rx[children[0]] = Some(rx);
+            } else {
+                let (dispatcher_tx, dispatcher_rx) = mpsc::channel(self.buffer_size);
+                parent_tx[parent_idx] = Some(dispatcher_tx);
+
+                let mut child_senders = Vec::with_capacity(children.len());
+                for &child_idx in children {
+                    let (tx, rx) = mpsc::channel(self.buffer_size);
+                    child_senders.push(tx);
+                    child_rx[child_idx] = Some(rx);
+                }
+
+                tokio::spawn(async move {
+                    let mut rx = dispatcher_rx;
+                    while let Some(event) = rx.recv().await {
+                        for tx in &child_senders {
+                            if tx.send(event.clone()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        let mut task_descriptors = Vec::with_capacity(task_count);
+        for (idx, task_type) in tasks_config.iter().enumerate() {
+            let is_blocking =
+                matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
+            task_descriptors.push(TaskDescriptor {
+                id: idx,
+                task_type: task_type.clone(),
+                input_rx: child_rx[idx].take(),
+                output_tx: parent_tx[idx].take(),
                 is_blocking,
             });
         }

@@ -432,6 +432,16 @@ impl crate::task::runner::Runner for Processor {
 
         let mut engine = Engine::new();
 
+        // Route Rhai print() and debug() through tracing so output inherits
+        // the current span context (flow, task, task_id, task_type).
+        engine.on_print(|msg| {
+            tracing::info!(target: "rhai::script", "{msg}");
+        });
+        engine.on_debug(|msg, source, pos| {
+            let src = source.unwrap_or("script");
+            tracing::debug!(target: "rhai::script", source = src, line = pos.line().unwrap_or(0), "{msg}");
+        });
+
         // Register function to parse RFC 2822 timestamps to Unix milliseconds.
         engine.register_fn(
             "parse_rfc2822_timestamp",
@@ -815,7 +825,13 @@ impl crate::task::runner::Runner for Processor {
                             })
                             .await;
 
-                            if result.is_err() {
+                            if let Err(err) = result {
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                                 // Ack the message so bad data does not block the pipeline.
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
@@ -948,6 +964,7 @@ mod tests {
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
             sandbox: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -999,6 +1016,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1037,6 +1055,7 @@ mod tests {
             subject: "input.subject".to_string(),
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
             task_id: 0,
             id: None,
@@ -1119,6 +1138,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1174,6 +1194,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1234,6 +1255,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1258,6 +1280,7 @@ mod tests {
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
                 sandbox: None,
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1280,6 +1303,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1311,6 +1335,7 @@ mod tests {
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
                 sandbox: None,
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1333,6 +1358,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -1366,6 +1392,7 @@ mod tests {
                     engine: crate::task::script::config::ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
                     sandbox: None,
+                    depends_on: None,
                     retry: None,
                 }),
                 tx: Some(tx),
@@ -1387,6 +1414,7 @@ mod tests {
                 timestamp: 123456789,
                 task_type: "test",
                 meta: None,
+                error: None,
                 completion_tx: None,
             };
             handler
@@ -1427,6 +1455,7 @@ mod tests {
                     .to_string(),
                 ),
                 sandbox: None,
+                depends_on: None,
                 retry: None,
             }),
             tx: Some(tx),
@@ -1449,6 +1478,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 

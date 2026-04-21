@@ -586,6 +586,7 @@ mod tests {
             size: 100,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);

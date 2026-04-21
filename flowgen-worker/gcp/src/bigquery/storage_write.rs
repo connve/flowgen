@@ -592,6 +592,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(e) = result {
                                 error!(error = %e, "Storage write failed after all retry attempts");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(e.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -712,6 +718,7 @@ mod tests {
             stream_name: None,
             trace_id: None,
             change_type: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -733,6 +740,7 @@ mod tests {
             stream_name: None,
             trace_id: None,
             change_type: None,
+            depends_on: None,
             retry: None,
         });
         let (_tx, rx) = mpsc::channel(10);
@@ -759,6 +767,7 @@ mod tests {
             stream_name: None,
             trace_id: None,
             change_type: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(10);
@@ -787,6 +796,7 @@ mod tests {
             stream_name: None,
             trace_id: None,
             change_type: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(10);

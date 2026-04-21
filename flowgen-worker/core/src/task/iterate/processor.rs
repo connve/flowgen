@@ -315,6 +315,12 @@ impl crate::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Iterate failed after all retry attempts.");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -435,6 +441,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
@@ -470,6 +477,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -491,6 +499,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -520,6 +529,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: Some("items".to_string()),
+            depends_on: None,
             retry: None,
         });
 
@@ -544,6 +554,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -573,6 +584,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: Some("missing".to_string()),
+            depends_on: None,
             retry: None,
         });
 
@@ -594,6 +606,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 
@@ -611,6 +624,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -635,6 +649,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: Some(Arc::clone(&upstream_shared)),
         };
 
@@ -726,6 +741,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -748,6 +764,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: Some(upstream_shared),
         };
 
@@ -765,6 +782,7 @@ mod tests {
         let config = Arc::new(super::super::config::Processor {
             name: "test".to_string(),
             iterate_key: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -786,6 +804,7 @@ mod tests {
             timestamp: 123456789,
             task_type: "test",
             meta: None,
+            error: None,
             completion_tx: None,
         };
 

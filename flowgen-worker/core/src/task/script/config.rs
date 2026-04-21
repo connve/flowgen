@@ -40,6 +40,11 @@ pub struct Processor {
     /// Required for Python/Bash scripts, not needed for Rhai (safe embedded language).
     #[serde(default)]
     pub sandbox: Option<crate::nsjail::SandboxConfig>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
@@ -52,6 +57,7 @@ impl Default for Processor {
             engine: ScriptEngine::default(),
             code: crate::resource::Source::Inline(String::new()),
             sandbox: None,
+            depends_on: None,
             retry: None,
         }
     }
@@ -77,6 +83,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data + 1".to_string()),
             sandbox: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -111,6 +118,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data * 2".to_string()),
             sandbox: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -126,6 +134,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data".to_string()),
             sandbox: None,
+            depends_on: None,
             retry: None,
         };
 
@@ -142,6 +151,7 @@ mod tests {
                 resource: "scripts/transform.rhai".to_string(),
             },
             sandbox: None,
+            depends_on: None,
             retry: None,
         };
 

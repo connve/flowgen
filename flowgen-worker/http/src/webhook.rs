@@ -495,6 +495,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, _rx) = mpsc::channel(100);
@@ -558,6 +559,7 @@ mod tests {
             headers: Some(configured_headers),
             credentials_path: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         });
 
@@ -589,6 +591,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         });
 

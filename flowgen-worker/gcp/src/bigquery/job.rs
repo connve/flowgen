@@ -525,6 +525,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(e) = result {
                                 error!(error = %e, "Job failed after all retry attempts");
+                                // Emit error event downstream for error handling.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(e.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -746,6 +752,7 @@ mod tests {
             job_id: None,
             poll_interval: std::time::Duration::from_secs(5),
             max_poll_duration: std::time::Duration::from_secs(600),
+            depends_on: None,
             retry: None,
             schema: None,
         });
@@ -832,6 +839,7 @@ mod tests {
             job_id: None,
             poll_interval: std::time::Duration::from_secs(5),
             max_poll_duration: std::time::Duration::from_secs(600),
+            depends_on: None,
             retry: None,
             schema: None,
         });

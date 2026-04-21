@@ -688,6 +688,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                                 if let Err(err) = result {
                                     error!(error = %err, "Composite API operation failed after all retry attempts");
+                                    // Emit error event downstream for error handling.
+                                    let mut error_event = event_clone.clone();
+                                    error_event.error = Some(err.to_string());
+                                    if let Some(ref tx) = event_handler.tx {
+                                        tx.send(error_event).await.ok();
+                                    }
                                 }
                             }
                             .instrument(tracing::Span::current()),

@@ -326,7 +326,14 @@ impl flowgen_core::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "HTTP request failed after all retry attempts");
+                                error!(error = %err, "HTTP request failed after all retry attempts.");
+                                // Emit error event downstream so scripts can route
+                                // to DLQ, audit tables, or other error handlers.
+                                let mut error_event = event.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = event_handler.tx {
+                                    tx.send(error_event).await.ok();
+                                }
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -550,6 +557,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            depends_on: None,
             retry: None,
         });
         let (tx, rx) = mpsc::channel(100);
