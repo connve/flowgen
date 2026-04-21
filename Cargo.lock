@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.97.0"
+version = "0.98.0"
 dependencies = [
  "arrow",
  "atty",
@@ -4938,9 +4938,9 @@ dependencies = [
 
 [[package]]
 name = "thin-vec"
-version = "0.2.14"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144f754d318415ac792f9d69fc87abbbfc043ce2ef041c60f16ad828f638717d"
+checksum = "259cdf8ed4e4aca6f1e9d011e10bd53f524a2d0637d7b28450f6c64ac298c4c6"
 dependencies = [
  "serde",
 ]
