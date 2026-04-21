@@ -315,8 +315,21 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
-                                        error!(error = %e, "Failed to process HTTP request");
-                                        Err(tokio_retry::RetryError::transient(e))
+                                        // 4xx client errors (except 429) are permanent — the
+                                        // request data is invalid and retrying will not help.
+                                        let is_permanent = matches!(
+                                            &e,
+                                            Error::HttpError { status, .. }
+                                                if (400..500).contains(status) && *status != 429
+                                        );
+
+                                        if is_permanent {
+                                            error!(error = %e, "HTTP request failed with client error, skipping retries.");
+                                            Err(tokio_retry::RetryError::permanent(e))
+                                        } else {
+                                            error!(error = %e, "Failed to process HTTP request.");
+                                            Err(tokio_retry::RetryError::transient(e))
+                                        }
                                     }
                                 }
                             })
