@@ -26,3 +26,7 @@ rmcp = { workspace = true }
 tokio-retry = { workspace = true }
 handlebars = { workspace = true }
 schemars = { workspace = true }
+axum = { workspace = true }
+uuid = { workspace = true }
+tokio-stream = { workspace = true }
+chrono = { workspace = true }

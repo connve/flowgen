@@ -114,6 +114,8 @@ pub enum TaskType {
     ai_completion(flowgen_ai_agent::completion::config::Processor),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
     mcp_tool(flowgen_mcp::config::Processor),
+    /// LLM proxy — OpenAI-compatible chat completions endpoint.
+    llm_proxy(flowgen_ai_agent::llm_proxy::config::Processor),
 }
 
 impl TaskType {
@@ -148,6 +150,7 @@ impl TaskType {
             TaskType::mssql_query(_) => "mssql_query",
             TaskType::ai_completion(_) => "ai_completion",
             TaskType::mcp_tool(_) => "mcp_tool",
+            TaskType::llm_proxy(_) => "llm_proxy",
         }
     }
 
@@ -182,6 +185,7 @@ impl TaskType {
             TaskType::mssql_query(c) => &c.name,
             TaskType::ai_completion(c) => &c.name,
             TaskType::mcp_tool(c) => &c.name,
+            TaskType::llm_proxy(c) => &c.name,
         }
     }
 
@@ -216,6 +220,7 @@ impl TaskType {
             TaskType::mssql_query(c) => c.depends_on.as_ref(),
             TaskType::ai_completion(c) => c.depends_on.as_ref(),
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
+            TaskType::llm_proxy(c) => c.depends_on.as_ref(),
         }
     }
 }

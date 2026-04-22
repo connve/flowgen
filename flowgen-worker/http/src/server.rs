@@ -87,9 +87,22 @@ impl HttpServerBuilder {
     }
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::http_server::HttpServer for HttpServer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    async fn register_route(&self, path: String, route: Box<dyn std::any::Any + Send>) {
+        match route.downcast::<MethodRouter>() {
+            Ok(method_router) => self.register_route_typed(path, *method_router).await,
+            Err(_) => {
+                warn!(
+                    "Failed to downcast route to MethodRouter for path: {}",
+                    path
+                );
+            }
+        }
     }
 }
 
@@ -99,8 +112,8 @@ impl HttpServer {
         self.global_credentials_path.as_deref()
     }
 
-    /// Register a route with the HTTP Server.
-    pub async fn register_route(&self, path: String, method_router: MethodRouter) {
+    /// Register a typed route with the HTTP Server.
+    pub async fn register_route_typed(&self, path: String, method_router: MethodRouter) {
         let mut routes = self.routes.write().await;
         info!("Registering HTTP route: {}", path);
         routes.insert(path, method_router);
@@ -188,13 +201,13 @@ mod tests {
 
         // Should not panic when registering a route
         server
-            .register_route("/test".to_string(), method_router)
+            .register_route_typed("/test".to_string(), method_router)
             .await;
 
         // Verify we can register multiple routes
         let method_router2 = get(|| async { "test response 2" });
         server
-            .register_route("/test2".to_string(), method_router2)
+            .register_route_typed("/test2".to_string(), method_router2)
             .await;
     }
 
@@ -238,7 +251,9 @@ mod tests {
         ];
 
         for (path, method_router) in routes {
-            server.register_route(path.to_string(), method_router).await;
+            server
+                .register_route_typed(path.to_string(), method_router)
+                .await;
         }
 
         assert!(!server.is_started().await);
@@ -250,10 +265,12 @@ mod tests {
         let path = "/test".to_string();
 
         let method_router1 = get(|| async { "response 1" });
-        server.register_route(path.clone(), method_router1).await;
+        server
+            .register_route_typed(path.clone(), method_router1)
+            .await;
 
         let method_router2 = get(|| async { "response 2" });
-        server.register_route(path, method_router2).await;
+        server.register_route_typed(path, method_router2).await;
 
         assert!(!server.is_started().await);
     }

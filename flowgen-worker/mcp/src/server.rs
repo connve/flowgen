@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
-use flowgen_core::mcp::registry::{McpContent, McpProgressEvent, McpToolResult, ResponseRegistry};
+use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -389,14 +389,14 @@ async fn execute_tool_call(
     let correlation_id = uuid::Uuid::new_v4().to_string();
 
     // Create progress channel for streaming intermediate updates to the client.
-    let (progress_tx, mut progress_rx) = mpsc::channel::<McpProgressEvent>(32);
+    let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
     // Register in the response registry so pipeline tasks can send progress events.
     server
         .response_registry
         .insert(
             correlation_id.clone(),
-            flowgen_core::mcp::registry::ResponseSender {
+            flowgen_core::registry::ResponseSender {
                 progress_tx,
                 result_tx: None,
             },
@@ -454,7 +454,7 @@ async fn execute_tool_call(
     tokio::spawn(async move {
         let start = std::time::Instant::now();
         // Formats a progress event as an SSE string.
-        let format_progress = |evt: &McpProgressEvent| -> Option<String> {
+        let format_progress = |evt: &ProgressEvent| -> Option<String> {
             serde_json::to_string(evt)
                 .ok()
                 .map(|data| format!("event: progress\ndata: {data}\n\n"))
@@ -493,8 +493,8 @@ async fn execute_tool_call(
                                     // Timeout expired.
                                     let duration = humantime::format_duration(timeout).to_string();
                                     let err = Error::ToolTimeout { duration };
-                                    let tool_result = McpToolResult {
-                                        content: vec![McpContent::Text { text: err.to_string() }],
+                                    let tool_result = ToolResult {
+                                        content: vec![Content::Text { text: err.to_string() }],
                                         is_error: true,
                                     };
                                     response_registry.remove(&cid_for_cleanup).await;
@@ -581,7 +581,7 @@ fn json_rpc_response(id: Option<serde_json::Value>, result: serde_json::Value) -
 /// Builds an SSE result event string from a tool result or error.
 fn build_result_event(
     id: Option<serde_json::Value>,
-    tool_result: Option<McpToolResult>,
+    tool_result: Option<ToolResult>,
     error: Option<JsonRpcError>,
 ) -> Option<String> {
     let response = JsonRpcResponse {
@@ -609,8 +609,8 @@ fn completion_to_result_event(
 ) -> Option<String> {
     match result {
         Ok(Ok(Some(data))) => {
-            let tool_result = McpToolResult {
-                content: vec![McpContent::Text {
+            let tool_result = ToolResult {
+                content: vec![Content::Text {
                     text: match serde_json::to_string_pretty(&data) {
                         Ok(s) => s,
                         Err(e) => {
@@ -624,8 +624,8 @@ fn completion_to_result_event(
             build_result_event(id, Some(tool_result), None)
         }
         Ok(Ok(None)) => {
-            let tool_result = McpToolResult {
-                content: vec![McpContent::Text {
+            let tool_result = ToolResult {
+                content: vec![Content::Text {
                     text: "Tool executed successfully.".to_string(),
                 }],
                 is_error: false,
@@ -633,8 +633,8 @@ fn completion_to_result_event(
             build_result_event(id, Some(tool_result), None)
         }
         Ok(Err(e)) => {
-            let tool_result = McpToolResult {
-                content: vec![McpContent::Text {
+            let tool_result = ToolResult {
+                content: vec![Content::Text {
                     text: format!("Tool execution failed: {e}"),
                 }],
                 is_error: true,

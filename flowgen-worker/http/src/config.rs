@@ -27,6 +27,11 @@ pub struct Processor {
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
+    /// Enable SSE streaming responses.
+    /// When true, the webhook returns an SSE stream instead of blocking for a single result.
+    /// Intermediate events from downstream tasks are streamed as they arrive.
+    #[serde(default)]
+    pub stream: bool,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -85,24 +90,6 @@ pub enum Method {
     Head,
 }
 
-/// Authentication credentials for HTTP requests.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Credentials {
-    /// Bearer token for authorization header.
-    pub bearer_auth: Option<String>,
-    /// Basic authentication credentials.
-    pub basic_auth: Option<BasicAuth>,
-}
-
-/// Basic authentication username and password.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct BasicAuth {
-    /// Username for basic authentication.
-    pub username: String,
-    /// Password for basic authentication.
-    pub password: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +133,7 @@ mod tests {
             headers: Some(headers.clone()),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         };
@@ -171,6 +159,7 @@ mod tests {
             headers: None,
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         };
@@ -190,6 +179,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         };
@@ -345,6 +335,7 @@ mod tests {
             headers: Some(headers),
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         };

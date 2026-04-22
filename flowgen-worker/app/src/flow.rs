@@ -157,6 +157,9 @@ pub enum Error {
     /// Error in MCP tool processor task.
     #[error(transparent)]
     McpToolProcessor(#[from] flowgen_mcp::processor::Error),
+    /// Error in LLM proxy task.
+    #[error(transparent)]
+    LlmProxy(#[from] flowgen_ai_agent::llm_proxy::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -273,8 +276,10 @@ impl TaskRegistryBuilder {
 
         for (idx, task_type) in tasks_config.iter().enumerate() {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
-            let is_blocking =
-                matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
+            let is_blocking = matches!(
+                task_type,
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+            );
 
             let input_rx = if idx > 0 {
                 channels
@@ -405,8 +410,10 @@ impl TaskRegistryBuilder {
 
         let mut task_descriptors = Vec::with_capacity(task_count);
         for (idx, task_type) in tasks_config.iter().enumerate() {
-            let is_blocking =
-                matches!(task_type, TaskType::http_webhook(_) | TaskType::mcp_tool(_));
+            let is_blocking = matches!(
+                task_type,
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+            );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
                 task_type: task_type.clone(),
@@ -459,17 +466,17 @@ impl Flow {
     /// If a flow contains any webhook tasks, it will always be treated as
     /// non-leader-elected by disregarding the `required_leader_election` flag.
     fn is_leader_elected(&self) -> bool {
-        let has_blocking_tasks = self
-            .config
-            .flow
-            .tasks
-            .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::mcp_tool(_)));
+        let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
+            matches!(
+                task,
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+            )
+        });
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook or mcp_tool); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook, mcp_tool, or llm_proxy); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -493,7 +500,7 @@ impl Flow {
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_)));
+            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::llm_proxy(_)));
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
@@ -1514,6 +1521,24 @@ async fn spawn_task(
                         builder = builder.sender(tx);
                     }
                     builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::llm_proxy(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    flowgen_ai_agent::llm_proxy::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context)
+                        .build()
+                        .await?
+                        .run()
+                        .await?;
                     Ok(())
                 }
                 .instrument(span),

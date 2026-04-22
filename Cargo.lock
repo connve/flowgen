@@ -1432,9 +1432,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.8",
+ "chrono",
  "flowgen_core",
  "futures-util",
  "handlebars",
@@ -1447,12 +1449,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry2",
+ "tokio-stream",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "flowgen_core"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1494,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1522,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1538,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1555,12 +1559,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry2",
+ "tokio-stream",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1583,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1605,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1632,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1655,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1684,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_worker"
-version = "0.98.0"
+version = "0.99.0"
 dependencies = [
  "arrow",
  "atty",
@@ -4685,9 +4691,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "aws-lc-rs",
  "ring",

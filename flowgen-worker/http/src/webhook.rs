@@ -3,16 +3,19 @@
 //! Processes incoming HTTP webhook requests, extracting headers and payload
 //! data and converting them into events for further processing in the pipeline.
 
-use crate::config::Credentials;
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::config::ConfigExt;
+use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use reqwest::{header::HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
-use tracing::{error, Instrument};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::{error, info, Instrument};
 
 /// JSON key for HTTP headers in webhook events.
 const DEFAULT_HEADERS_KEY: &str = "headers";
@@ -96,11 +99,13 @@ pub struct EventHandler {
     /// Task identifier.
     task_id: usize,
     /// Pre-loaded authentication credentials.
-    credentials: Option<Credentials>,
+    credentials: Option<HttpCredentials>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Shared response registry for SSE streaming (only used when stream: true).
+    response_registry: Option<Arc<ResponseRegistry>>,
 }
 
 impl EventHandler {
@@ -152,18 +157,19 @@ impl EventHandler {
         Err(Error::InvalidCredentials)
     }
 
-    async fn handle(
+    /// Parse and validate the incoming request, returning the JSON data.
+    async fn parse_request(
         &self,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         request: Request<Body>,
-    ) -> Result<StatusCode, Error> {
+    ) -> Result<Value, Error> {
         if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(StatusCode::SERVICE_UNAVAILABLE);
+            return Err(Error::FlowCompletionFailed);
         }
 
-        if let Err(auth_error) = self.validate_authentication(&headers) {
+        if let Err(auth_error) = self.validate_authentication(headers) {
             error!("Webhook authentication failed for: {}", auth_error);
-            return Ok(StatusCode::UNAUTHORIZED);
+            return Err(auth_error);
         }
 
         let body = axum::body::to_bytes(request.into_body(), usize::MAX)
@@ -192,28 +198,65 @@ impl EventHandler {
             }
         }
 
-        let data = json!({
+        Ok(json!({
             DEFAULT_HEADERS_KEY: Value::Object(headers_map),
             DEFAULT_PAYLOAD_KEY: json_body
-        });
+        }))
+    }
 
+    /// Build an event with completion channel and inject into pipeline.
+    async fn inject_event(
+        &self,
+        data: Value,
+        meta: Option<serde_json::Map<String, Value>>,
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<
+            Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>>,
+        >,
+        Error,
+    > {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
-        let mut e = EventBuilder::new()
+        let mut builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
+            .completion_tx(completion_tx);
+
+        if let Some(meta) = meta {
+            builder = builder.meta(meta);
+        }
+
+        let e = builder
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
-
-        e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-            completion_tx,
-        ))));
 
         e.send_with_logging(self.tx.as_ref())
             .await
             .map_err(|source| Error::SendMessage { source })?;
+
+        Ok(completion_rx)
+    }
+
+    async fn handle(
+        &self,
+        headers: HeaderMap,
+        request: Request<Body>,
+    ) -> Result<StatusCode, Error> {
+        let data = match self.parse_request(&headers, request).await {
+            Ok(data) => data,
+            Err(Error::FlowCompletionFailed) => return Ok(StatusCode::SERVICE_UNAVAILABLE),
+            Err(
+                e
+                @ (Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials),
+            ) => {
+                return Ok(e.into_response().status());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let completion_rx = self.inject_event(data, None).await?;
 
         // Wait for flow completion before responding to HTTP request.
         match self.config.ack_timeout {
@@ -236,6 +279,151 @@ impl EventHandler {
             }
         }
     }
+
+    /// Handle an incoming request with SSE streaming response.
+    async fn handle_stream(
+        &self,
+        headers: HeaderMap,
+        request: Request<Body>,
+    ) -> Result<axum::response::Response, Error> {
+        let data = match self.parse_request(&headers, request).await {
+            Ok(data) => data,
+            Err(Error::FlowCompletionFailed) => {
+                return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+            }
+            Err(
+                e
+                @ (Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials),
+            ) => {
+                return Ok(e.into_response());
+            }
+            Err(e) => return Err(e),
+        };
+
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+
+        // Set up progress channel for streaming intermediate events.
+        let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
+
+        let response_registry = self
+            .response_registry
+            .as_ref()
+            .expect("response_registry required for streaming webhook");
+
+        response_registry
+            .insert(
+                correlation_id.clone(),
+                ResponseSender {
+                    progress_tx,
+                    result_tx: None,
+                },
+            )
+            .await;
+
+        // Inject correlation_id into event meta so downstream tasks can stream progress.
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "correlation_id".to_string(),
+            Value::String(correlation_id.clone()),
+        );
+
+        let completion_rx = self.inject_event(data, Some(meta)).await?;
+
+        info!(
+            webhook = %self.config.name,
+            correlation_id = %correlation_id,
+            "Streaming webhook request accepted."
+        );
+
+        // Spawn background task to stream progress + final result as SSE.
+        let registry = response_registry.clone();
+        let cid = correlation_id.clone();
+        let ack_timeout = self.config.ack_timeout;
+        let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
+
+        tokio::spawn(async move {
+            let format_data = |value: &Value| -> Option<String> {
+                serde_json::to_string(value)
+                    .ok()
+                    .map(|data| format!("data: {data}\n\n"))
+            };
+
+            tokio::pin!(completion_rx);
+
+            type CompletionResult = Result<
+                Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>>,
+                tokio::sync::oneshot::error::RecvError,
+            >;
+
+            let result: Option<CompletionResult> = loop {
+                tokio::select! {
+                    progress = progress_rx.recv() => {
+                        match progress {
+                            Some(evt) => {
+                                let value = serde_json::to_value(&evt).unwrap_or_default();
+                                if let Some(msg) = format_data(&value) {
+                                    if sse_tx.send(Ok(msg)).await.is_err() {
+                                        registry.remove(&cid).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            None => break None,
+                        }
+                    }
+                    result = async {
+                        match ack_timeout {
+                            Some(timeout) => {
+                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                                    Ok(result) => Some(result),
+                                    Err(_) => {
+                                        registry.remove(&cid).await;
+                                        let err = json!({"error": "Flow completion timed out."});
+                                        if let Some(msg) = format_data(&err) {
+                                            let _ = sse_tx.send(Ok(msg)).await;
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None => Some((&mut completion_rx).await),
+                        }
+                    } => {
+                        registry.remove(&cid).await;
+
+                        // Drain remaining progress events.
+                        while let Ok(evt) = progress_rx.try_recv() {
+                            let value = serde_json::to_value(&evt).unwrap_or_default();
+                            if let Some(msg) = format_data(&value) {
+                                let _ = sse_tx.send(Ok(msg)).await;
+                            }
+                        }
+
+                        match result {
+                            Some(completion) => break Some(completion),
+                            None => return,
+                        }
+                    }
+                }
+            };
+
+            // Send final result.
+            if let Some(Ok(Ok(Some(data)))) = result {
+                if let Some(msg) = format_data(&data) {
+                    let _ = sse_tx.send(Ok(msg)).await;
+                }
+            }
+        });
+
+        let stream = ReceiverStream::new(sse_rx);
+
+        Ok(axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+            .header(axum::http::header::CACHE_CONTROL, "no-cache")
+            .body(Body::from_stream(stream))
+            .unwrap())
+    }
 }
 
 /// HTTP webhook processor.
@@ -251,6 +439,8 @@ pub struct Processor {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
     /// Task type for event categorization and logging.
     task_type: &'static str,
+    /// Shared response registry for SSE streaming.
+    response_registry: Option<Arc<ResponseRegistry>>,
 }
 
 #[async_trait::async_trait]
@@ -296,6 +486,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             credentials,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
+            response_registry: self.response_registry.clone(),
         };
 
         Ok(event_handler)
@@ -325,31 +516,42 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let config = Arc::clone(&self.config);
         let span = tracing::Span::current();
-        let handler = move |headers: HeaderMap, request: Request<Body>| {
-            let span = span.clone();
-            let event_handler = event_handler.clone();
-            async move { event_handler.handle(headers, request).await }.instrument(span)
-        };
+        let stream = config.stream;
 
-        let method_router = match config.method {
-            crate::config::Method::Get => MethodRouter::new().get(handler),
-            crate::config::Method::Post => MethodRouter::new().post(handler),
-            crate::config::Method::Put => MethodRouter::new().put(handler),
-            crate::config::Method::Delete => MethodRouter::new().delete(handler),
-            crate::config::Method::Patch => MethodRouter::new().patch(handler),
-            crate::config::Method::Head => MethodRouter::new().head(handler),
+        let method_router: MethodRouter = if stream {
+            let handler = move |headers: HeaderMap, request: Request<Body>| {
+                let span = span.clone();
+                let event_handler = event_handler.clone();
+                async move { event_handler.handle_stream(headers, request).await }.instrument(span)
+            };
+            match config.method {
+                crate::config::Method::Get => MethodRouter::new().get(handler),
+                crate::config::Method::Post => MethodRouter::new().post(handler),
+                crate::config::Method::Put => MethodRouter::new().put(handler),
+                crate::config::Method::Delete => MethodRouter::new().delete(handler),
+                crate::config::Method::Patch => MethodRouter::new().patch(handler),
+                crate::config::Method::Head => MethodRouter::new().head(handler),
+            }
+        } else {
+            let handler = move |headers: HeaderMap, request: Request<Body>| {
+                let span = span.clone();
+                let event_handler = event_handler.clone();
+                async move { event_handler.handle(headers, request).await }.instrument(span)
+            };
+            match config.method {
+                crate::config::Method::Get => MethodRouter::new().get(handler),
+                crate::config::Method::Post => MethodRouter::new().post(handler),
+                crate::config::Method::Put => MethodRouter::new().put(handler),
+                crate::config::Method::Delete => MethodRouter::new().delete(handler),
+                crate::config::Method::Patch => MethodRouter::new().patch(handler),
+                crate::config::Method::Head => MethodRouter::new().head(handler),
+            }
         };
 
         if let Some(http_server) = &self.task_context.http_server {
-            // Downcast the trait object to the concrete HttpServer type.
-            if let Some(server) = http_server
-                .as_any()
-                .downcast_ref::<super::server::HttpServer>()
-            {
-                server
-                    .register_route(config.endpoint.clone(), method_router)
-                    .await;
-            }
+            http_server
+                .register_route(config.endpoint.clone(), Box::new(method_router))
+                .await;
         }
 
         Ok(())
@@ -369,6 +571,8 @@ pub struct ProcessorBuilder {
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
     /// Task type for event categorization and logging.
     task_type: Option<&'static str>,
+    /// Shared response registry for SSE streaming.
+    response_registry: Option<Arc<ResponseRegistry>>,
 }
 
 impl ProcessorBuilder {
@@ -406,6 +610,11 @@ impl ProcessorBuilder {
         self
     }
 
+    pub fn response_registry(mut self, registry: Arc<ResponseRegistry>) -> Self {
+        self.response_registry = Some(registry);
+        self
+    }
+
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
             config: self
@@ -419,6 +628,7 @@ impl ProcessorBuilder {
             task_type: self
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
+            response_registry: self.response_registry,
         })
     }
 }
@@ -495,6 +705,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         });
@@ -542,6 +753,7 @@ mod tests {
             credentials: None,
             task_type: "test",
             task_context: create_mock_task_context(),
+            response_registry: None,
         };
     }
 
@@ -559,6 +771,7 @@ mod tests {
             headers: Some(configured_headers),
             credentials_path: None,
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         });
@@ -572,6 +785,7 @@ mod tests {
             credentials: None,
             task_type: "test",
             task_context: create_mock_task_context(),
+            response_registry: None,
         };
 
         assert!(handler.config.headers.is_some());
@@ -591,6 +805,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         });
@@ -604,6 +819,7 @@ mod tests {
             credentials: None,
             task_type: "test",
             task_context: create_mock_task_context(),
+            response_registry: None,
         };
 
         assert!(handler.config.headers.is_none());

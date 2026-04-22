@@ -4,7 +4,7 @@
 //! and various payload formats. Processes events by making HTTP requests
 //! and publishing the responses as new events.
 
-use crate::config::Credentials;
+use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
@@ -34,7 +34,7 @@ pub enum Error {
         source: flowgen_core::event::Error,
     },
     #[error("Error reading credentials file at {path}: {source}")]
-    ReadCredentials {
+    ReadHttpCredentials {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
@@ -169,12 +169,12 @@ impl EventHandler {
             if let Some(credentials_path) = &config.credentials_path {
                 let credentials_string =
                     fs::read_to_string(credentials_path).await.map_err(|e| {
-                        Error::ReadCredentials {
+                        Error::ReadHttpCredentials {
                             path: credentials_path.clone(),
                             source: e,
                         }
                     })?;
-                let credentials: Credentials = serde_json::from_str(&credentials_string)
+                let credentials: HttpCredentials = serde_json::from_str(&credentials_string)
                     .map_err(|source| Error::SerdeJson { source })?;
 
                 if let Some(bearer_token) = credentials.bearer_auth {
@@ -443,7 +443,7 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BasicAuth;
+    use flowgen_core::credentials::BasicAuth;
     use serde_json::Map;
     use tokio::sync::mpsc;
 
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_credentials_default() {
-        let creds = Credentials::default();
+        let creds = HttpCredentials::default();
         assert_eq!(creds.bearer_auth, None);
         assert_eq!(creds.basic_auth, None);
     }
@@ -486,7 +486,7 @@ mod tests {
             password: "testpass".to_string(),
         };
 
-        let creds = Credentials {
+        let creds = HttpCredentials {
             bearer_auth: Some("bearer_token_123".to_string()),
             basic_auth: Some(basic_auth.clone()),
         };
@@ -502,13 +502,13 @@ mod tests {
             password: "pass".to_string(),
         };
 
-        let creds = Credentials {
+        let creds = HttpCredentials {
             bearer_auth: Some("token".to_string()),
             basic_auth: Some(basic_auth),
         };
 
         let json = serde_json::to_string(&creds).unwrap();
-        let deserialized: Credentials = serde_json::from_str(&json).unwrap();
+        let deserialized: HttpCredentials = serde_json::from_str(&json).unwrap();
         assert_eq!(creds, deserialized);
     }
 
@@ -546,11 +546,11 @@ mod tests {
     fn test_error_read_credentials_structure() {
         use std::path::PathBuf;
         let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error = Error::ReadCredentials {
+        let error = Error::ReadHttpCredentials {
             path: PathBuf::from("/test/credentials.json"),
             source: io_error,
         };
-        assert!(matches!(error, Error::ReadCredentials { .. }));
+        assert!(matches!(error, Error::ReadHttpCredentials { .. }));
     }
 
     #[test]
@@ -570,6 +570,7 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            stream: false,
             depends_on: None,
             retry: None,
         });

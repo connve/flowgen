@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod completion;
+pub mod llm_proxy;
 
 pub use agent::{AgentClient, ClientBuilder, CompletionChunk};
 pub use completion::config::Provider;

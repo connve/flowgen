@@ -1,8 +1,8 @@
 //! HTTP server trait for task context integration.
 //!
 //! Provides an abstraction for HTTP server functionality that can be shared
-//! across tasks through the task context. Since implementations use axum-specific
-//! types, this trait is intentionally minimal to avoid framework coupling.
+//! across tasks through the task context. Route registration uses type-erased
+//! `Box<dyn Any>` to avoid coupling core to web framework specifics.
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -10,17 +10,20 @@ use std::fmt::Debug;
 /// Error type for HTTP server operations.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// HTTP server trait marker for task context integration.
+/// HTTP server trait for task context integration.
 ///
-/// This is a marker trait that allows HTTP server instances to be stored
-/// in the task context. The actual HTTP server implementation lives in the
-/// http crate and provides concrete methods for route registration and
-/// server startup.
-///
-/// This trait is intentionally minimal to avoid coupling the core crate
-/// to web framework specifics like axum. Implementations should provide
-/// downcasting support via `as_any`.
+/// Allows tasks to register HTTP routes without depending on the concrete
+/// server implementation or web framework types. The `route` parameter in
+/// `register_route` is a type-erased `Box<dyn Any + Send>` — implementations
+/// downcast it to the expected framework type (e.g., axum `MethodRouter`).
+#[async_trait::async_trait]
 pub trait HttpServer: Debug + Send + Sync + 'static {
     /// Provides downcasting support for trait objects.
     fn as_any(&self) -> &dyn Any;
+
+    /// Register a route at the given path.
+    ///
+    /// The `route` parameter is a type-erased route handler. Implementations
+    /// should downcast it to the expected type (e.g., `axum::routing::MethodRouter`).
+    async fn register_route(&self, path: String, route: Box<dyn Any + Send>);
 }

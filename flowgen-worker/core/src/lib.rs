@@ -25,6 +25,8 @@ pub mod mcp;
 pub mod mcp_server;
 /// NsJail sandbox for secure script execution.
 pub mod nsjail;
+/// Response registry for correlating requests with pipeline results.
+pub mod registry;
 /// Resource loading system for external assets.
 pub mod resource;
 /// Retry configuration and utilities for task execution.
