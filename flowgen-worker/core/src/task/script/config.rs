@@ -36,6 +36,10 @@ pub struct Processor {
     ///   resource: "scripts/transform_data.rhai"
     /// ```
     pub code: crate::resource::Source,
+    /// Optional sandbox configuration for script execution.
+    /// Required for Python/Bash scripts, not needed for Rhai (safe embedded language).
+    #[serde(default)]
+    pub sandbox: Option<crate::nsjail::SandboxConfig>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -52,6 +56,7 @@ impl Default for Processor {
             name: String::new(),
             engine: ScriptEngine::default(),
             code: crate::resource::Source::Inline(String::new()),
+            sandbox: None,
             depends_on: None,
             retry: None,
         }
@@ -77,6 +82,7 @@ mod tests {
             name: "test_script".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data + 1".to_string()),
+            sandbox: None,
             depends_on: None,
             retry: None,
         };
@@ -95,6 +101,7 @@ mod tests {
         assert_eq!(config.name, "");
         assert_eq!(config.engine, ScriptEngine::Rhai);
         assert_eq!(config.code, crate::resource::Source::Inline("".to_string()));
+        assert!(config.sandbox.is_none());
         assert!(config.retry.is_none());
     }
 
@@ -110,6 +117,7 @@ mod tests {
             name: "transform".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data * 2".to_string()),
+            sandbox: None,
             depends_on: None,
             retry: None,
         };
@@ -125,6 +133,7 @@ mod tests {
             name: "clone_test".to_string(),
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data".to_string()),
+            sandbox: None,
             depends_on: None,
             retry: None,
         };
@@ -141,6 +150,7 @@ mod tests {
             code: crate::resource::Source::Resource {
                 resource: "scripts/transform.rhai".to_string(),
             },
+            sandbox: None,
             depends_on: None,
             retry: None,
         };

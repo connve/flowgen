@@ -4,6 +4,7 @@
 //! to register routes dynamically before starting the server.
 
 use axum::{routing::MethodRouter, Router};
+use flowgen_core::auth::AuthProvider;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -16,6 +17,7 @@ const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
 
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to bind TCP listener on specified port.
     #[error("Error binding TCP listener on port {port}: {source}")]
@@ -36,21 +38,40 @@ pub enum Error {
 /// Allows multiple webhook processors to register routes before starting
 /// the server. Routes are stored in a thread-safe HashMap and the server
 /// can only be started once.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpServer {
     /// Thread-safe storage for registered routes.
     routes: Arc<RwLock<HashMap<String, MethodRouter>>>,
     /// Flag to track if server has been started.
     server_started: Arc<Mutex<bool>>,
     /// Optional path prefix for all routes (e.g., "/workers").
-    routes_prefix: Option<String>,
+    path: Option<String>,
+    /// Optional global credentials path for webhook authentication.
+    /// Individual webhooks can override this with their own `credentials_path`.
+    credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider for user identity resolution (JWT, OIDC, session).
+    auth_provider: Option<Arc<dyn AuthProvider>>,
+}
+
+impl std::fmt::Debug for HttpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpServer")
+            .field("path", &self.path)
+            .field("credentials_path", &self.credentials_path)
+            .field("has_auth_provider", &self.auth_provider.is_some())
+            .finish()
+    }
 }
 
 /// Builder for constructing HttpServer instances.
 #[derive(Default)]
 pub struct HttpServerBuilder {
     /// Optional path prefix for all routes.
-    routes_prefix: Option<String>,
+    path: Option<String>,
+    /// Optional credentials path for webhook authentication.
+    credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider for user identity resolution.
+    auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl HttpServerBuilder {
@@ -59,9 +80,21 @@ impl HttpServerBuilder {
         Self::default()
     }
 
-    /// Sets the routes prefix.
-    pub fn routes_prefix(mut self, prefix: String) -> Self {
-        self.routes_prefix = Some(prefix);
+    /// Sets the path prefix for all routes (e.g., "/api/flowgen/workers").
+    pub fn path(mut self, path: String) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    /// Sets the global credentials path for webhook authentication.
+    pub fn credentials_path(mut self, path: std::path::PathBuf) -> Self {
+        self.credentials_path = Some(path);
+        self
+    }
+
+    /// Sets the auth provider for user identity resolution.
+    pub fn auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
         self
     }
 
@@ -70,20 +103,44 @@ impl HttpServerBuilder {
         HttpServer {
             routes: Arc::new(RwLock::new(HashMap::new())),
             server_started: Arc::new(Mutex::new(false)),
-            routes_prefix: self.routes_prefix,
+            path: self.path,
+            credentials_path: self.credentials_path,
+            auth_provider: self.auth_provider,
         }
     }
 }
 
+#[async_trait::async_trait]
 impl flowgen_core::http_server::HttpServer for HttpServer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    async fn register_route(&self, path: String, route: Box<dyn std::any::Any + Send>) {
+        match route.downcast::<MethodRouter>() {
+            Ok(method_router) => self.register_route_typed(path, *method_router).await,
+            Err(_) => {
+                warn!(
+                    "Failed to downcast route to MethodRouter for path: {}",
+                    path
+                );
+            }
+        }
+    }
+
+    fn auth_provider(&self) -> Option<Arc<dyn AuthProvider>> {
+        self.auth_provider.clone()
+    }
 }
 
 impl HttpServer {
-    /// Register a route with the HTTP Server.
-    pub async fn register_route(&self, path: String, method_router: MethodRouter) {
+    /// Returns the global credentials path if configured.
+    pub fn credentials_path(&self) -> Option<&std::path::Path> {
+        self.credentials_path.as_deref()
+    }
+
+    /// Register a typed route with the HTTP Server.
+    pub async fn register_route_typed(&self, path: String, method_router: MethodRouter) {
         let mut routes = self.routes.write().await;
         info!("Registering HTTP route: {}", path);
         routes.insert(path, method_router);
@@ -106,7 +163,7 @@ impl HttpServer {
 
         // Apply routes prefix (use default if not configured).
         let base_path = self
-            .routes_prefix
+            .path
             .clone()
             .unwrap_or_else(|| DEFAULT_ROUTES_PREFIX.to_string());
 
@@ -149,7 +206,7 @@ mod tests {
     #[test]
     fn test_http_server_builder_with_prefix() {
         let server = HttpServerBuilder::new()
-            .routes_prefix("/workers".to_string())
+            .path("/workers".to_string())
             .build();
         assert!(format!("{server:?}").contains("HttpServer"));
     }
@@ -171,13 +228,13 @@ mod tests {
 
         // Should not panic when registering a route
         server
-            .register_route("/test".to_string(), method_router)
+            .register_route_typed("/test".to_string(), method_router)
             .await;
 
         // Verify we can register multiple routes
         let method_router2 = get(|| async { "test response 2" });
         server
-            .register_route("/test2".to_string(), method_router2)
+            .register_route_typed("/test2".to_string(), method_router2)
             .await;
     }
 
@@ -221,7 +278,9 @@ mod tests {
         ];
 
         for (path, method_router) in routes {
-            server.register_route(path.to_string(), method_router).await;
+            server
+                .register_route_typed(path.to_string(), method_router)
+                .await;
         }
 
         assert!(!server.is_started().await);
@@ -233,10 +292,12 @@ mod tests {
         let path = "/test".to_string();
 
         let method_router1 = get(|| async { "response 1" });
-        server.register_route(path.clone(), method_router1).await;
+        server
+            .register_route_typed(path.clone(), method_router1)
+            .await;
 
         let method_router2 = get(|| async { "response 2" });
-        server.register_route(path, method_router2).await;
+        server.register_route_typed(path, method_router2).await;
 
         assert!(!server.is_started().await);
     }

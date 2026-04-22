@@ -11,6 +11,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tracing::{error, Instrument};
 
+/// Receiver for a per-event completion signal carrying an optional JSON value.
+type PerEventCompletionRx =
+    oneshot::Receiver<Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>>;
+
 /// Errors that can occur during loop processing operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -60,9 +64,7 @@ pub enum Error {
 /// deadlocking the source on buggy downstream handlers.
 fn spawn_fan_in_completion(
     upstream: SharedCompletionTx,
-    per_event_receivers: Vec<
-        oneshot::Receiver<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-    >,
+    per_event_receivers: Vec<PerEventCompletionRx>,
 ) {
     tokio::spawn(async move {
         let total = per_event_receivers.len();
@@ -103,7 +105,7 @@ fn spawn_fan_in_completion(
             if let Some(tx) = guard.take() {
                 let result = match first_error.lock().ok().and_then(|mut g| g.take()) {
                     Some(err) => Err(err),
-                    None => Ok(()),
+                    None => Ok(None),
                 };
                 tx.send(result).ok();
             }
@@ -177,7 +179,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(event.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -191,7 +193,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(None)).ok();
                         }
                     }
                 }
@@ -312,7 +314,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Iterate failed after all retry attempts");
+                                error!(error = %err, "Iterate failed after all retry attempts.");
                                 // Emit error event downstream for error handling.
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
@@ -690,7 +692,7 @@ mod tests {
         for arc in per_event_completions.iter().take(2) {
             if let Ok(mut guard) = arc.lock() {
                 if let Some(tx) = guard.take() {
-                    tx.send(Ok(())).unwrap();
+                    tx.send(Ok(None)).unwrap();
                 }
             }
         }
@@ -717,7 +719,7 @@ mod tests {
         // Signal the last one — upstream should now fire.
         if let Ok(mut guard) = per_event_completions[2].lock() {
             if let Some(tx) = guard.take() {
-                tx.send(Ok(())).unwrap();
+                tx.send(Ok(None)).unwrap();
             }
         }
 

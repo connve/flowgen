@@ -1,0 +1,32 @@
+flow:
+  name: resource_prompt_completion
+  tasks:
+
+    # Webhook trigger to receive data for analysis.
+    # POST to /api/flowgen/workers/webhook/analyze with JSON payload.
+    - http_webhook:
+        name: receive_data
+        path: /analyze
+
+    # AI completion using external prompt files.
+    # Prompts are loaded from .md files for easier editing and version control.
+    # Agent tool execution is sandboxed using nsjail for security.
+    - ai_completion:
+        name: analyze_data
+        provider: anthropic
+        model: claude-3-5-sonnet-20241022
+        credentials_path: /etc/anthropic/credentials.json
+        # System prompt from external markdown file.
+        system_prompt:
+          resource: "prompts/analyst_system.md"
+        # User prompt from external markdown file with event templating.
+        prompt:
+          resource: "prompts/analyze_data.md"
+        temperature: 0.5
+        max_tokens: 2000
+        # Optional: tune sandbox limits (defaults shown below are used if not specified).
+        # sandbox:
+        #   memory_limit_mb: 512       # Default: 512 MB
+        #   time_limit_seconds: 30     # Default: 30 seconds
+        #   max_pids: 10               # Default: 10 processes
+        #   allow_network: false       # Default: false (no network access)

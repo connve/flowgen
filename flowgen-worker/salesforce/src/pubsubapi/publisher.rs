@@ -23,6 +23,7 @@ fn is_auth_error(error: &PubSubError) -> bool {
 
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {
@@ -195,7 +196,7 @@ impl EventHandler {
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
-                                tx.send(Ok(())).ok();
+                                tx.send(Ok(e.data_as_json().ok())).ok();
                             }
                         }
                     }

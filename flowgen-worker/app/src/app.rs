@@ -68,8 +68,37 @@ pub enum Error {
         source: flowgen_http::server::Error,
     },
     /// HTTP server downcast error.
-    #[error("Failed to downcast HTTP server to concrete type")]
+    #[error("Failed to downcast HTTP server to concrete type.")]
     HttpServerDowncast,
+    /// MCP server startup error.
+    #[error("Failed to start MCP server: {source}")]
+    McpServerStart {
+        #[source]
+        source: flowgen_mcp::server::Error,
+    },
+    /// MCP server downcast error.
+    #[error("Failed to downcast MCP server to concrete type.")]
+    McpServerDowncast,
+    /// Auth provider initialization failed.
+    #[error("Failed to build auth provider: {source}")]
+    AuthProviderInit {
+        #[source]
+        source: flowgen_core::auth::AuthError,
+    },
+    /// Failed to read MCP credentials file.
+    #[error("Failed to read MCP credentials from {path}: {source}")]
+    McpCredentialsRead {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failed to parse MCP credentials file.
+    #[error("Failed to parse MCP credentials from {path}: {source}")]
+    McpCredentialsParse {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     /// Background task panic error.
     #[error("Background task panicked: {source}")]
     BackgroundTaskPanic {
@@ -265,12 +294,83 @@ impl App {
         {
             Some(http_config) if http_config.enabled => {
                 let mut http_server_builder = flowgen_http::server::HttpServerBuilder::new();
-                if let Some(ref prefix) = http_config.routes_prefix {
-                    http_server_builder = http_server_builder.routes_prefix(prefix.clone());
+                if let Some(ref path) = http_config.path {
+                    http_server_builder = http_server_builder.path(path.clone());
+                }
+                if let Some(ref creds_path) = http_config.credentials_path {
+                    http_server_builder = http_server_builder.credentials_path(creds_path.clone());
+                }
+                if let Some(auth_config) = http_config.auth.clone() {
+                    let provider = auth_config
+                        .build()
+                        .await
+                        .map_err(|source| Error::AuthProviderInit { source })?;
+                    http_server_builder = http_server_builder.auth_provider(provider);
                 }
                 Some(Arc::new(http_server_builder.build()))
             }
             _ => None,
+        };
+
+        // Create MCP server if enabled by admin, HTTP server is available, and flows contain mcp_tool tasks.
+        let mcp_enabled = app_config
+            .worker
+            .as_ref()
+            .and_then(|w| w.mcp_server.as_ref())
+            .map(|mcp| mcp.enabled)
+            .unwrap_or(false);
+
+        let has_mcp_tools = flow_configs.iter().any(|fc| {
+            fc.flow
+                .tasks
+                .iter()
+                .any(|t| matches!(t, crate::config::TaskType::mcp_tool(_)))
+        });
+
+        if has_mcp_tools && !mcp_enabled {
+            warn!("Flows contain mcp_tool tasks but mcp_server is not enabled in config. MCP tools will not be registered.");
+        }
+
+        let mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>> = if mcp_enabled
+            && has_mcp_tools
+        {
+            // Load MCP credentials if configured.
+            let credentials = app_config
+                .worker
+                .as_ref()
+                .and_then(|w| w.mcp_server.as_ref())
+                .and_then(|mcp_config| mcp_config.credentials_path.as_ref())
+                .and_then(|path| match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        match serde_json::from_str::<flowgen_mcp::config::Credentials>(&content) {
+                            Ok(creds) => Some(creds),
+                            Err(source) => {
+                                let err = Error::McpCredentialsParse {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{err}");
+                                None
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let err = Error::McpCredentialsRead {
+                            path: path.clone(),
+                            source,
+                        };
+                        error!("{err}");
+                        None
+                    }
+                });
+
+            Some(Arc::new(flowgen_mcp::server::McpServer::new(
+                credentials,
+                http_server.as_ref().and_then(|s| s.auth_provider()),
+            ))
+                as Arc<dyn flowgen_core::mcp_server::McpServer>)
+        } else {
+            None
         };
 
         let cache: Arc<dyn flowgen_core::cache::Cache> =
@@ -333,6 +433,10 @@ impl App {
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);
+            }
+
+            if let Some(ref server) = mcp_server {
+                flow_builder = flow_builder.mcp_server(Arc::clone(server));
             }
 
             if let Some(retry_config) = app_config.worker.as_ref().and_then(|w| w.retry.as_ref()) {
@@ -419,6 +523,39 @@ impl App {
                         }
                     } else {
                         error!("{}", Error::HttpServerDowncast);
+                    }
+                }
+                .instrument(span),
+            );
+            background_handles.push(server_handle);
+        }
+
+        // Start the MCP server on its own port.
+        if let Some(ref mcp_server) = mcp_server {
+            let mcp_config = app_config
+                .worker
+                .as_ref()
+                .and_then(|w| w.mcp_server.as_ref());
+
+            let configured_port = mcp_config.map(|c| c.port);
+            let configured_path = mcp_config.map(|c| c.path.clone());
+
+            let server = Arc::clone(mcp_server);
+            let span = tracing::Span::current();
+            let server_handle = tokio::spawn(
+                async move {
+                    if let Some(concrete) = server
+                        .as_any()
+                        .downcast_ref::<flowgen_mcp::server::McpServer>()
+                    {
+                        if let Err(source) = concrete
+                            .start_server(configured_port, configured_path)
+                            .await
+                        {
+                            error!("{}", Error::McpServerStart { source });
+                        }
+                    } else {
+                        error!("{}", Error::McpServerDowncast);
                     }
                 }
                 .instrument(span),

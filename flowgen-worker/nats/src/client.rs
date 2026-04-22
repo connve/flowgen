@@ -22,6 +22,7 @@ pub struct NKeyCredentials {
 
 /// Errors that can occur during NATS client operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Error reading credentials file '{path}': {source}")]
     ReadCredentials {

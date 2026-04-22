@@ -25,7 +25,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 handlebars = { workspace = true }
 arrow-json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
 tokio-util = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
@@ -46,6 +46,8 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

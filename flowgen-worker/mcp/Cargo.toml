@@ -1,0 +1,31 @@
+
+[package]
+name = "flowgen_mcp"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "flowgen_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+futures-util = { workspace = true }
+flowgen_core = { path = "../core" }
+tokio = { workspace = true, features = ["sync"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+async-trait = { workspace = true }
+tokio-retry = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+handlebars = { workspace = true }
+tokio-stream = { workspace = true }
+humantime-serde = { workspace = true }
+humantime = { workspace = true }

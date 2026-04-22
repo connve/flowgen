@@ -1,0 +1,27 @@
+SUPPORT INFORMATION
+
+Contact Methods:
+- Email: support@example.com
+- Phone: +1-555-0123 (Business hours: Mon-Fri 9am-5pm PST)
+- Emergency hotline: +1-555-0911 (Enterprise customers only, 24/7)
+
+Help Resources:
+- Documentation: https://docs.example.com
+- Community Forum: https://community.example.com
+- Status Page: https://status.example.com
+- GitHub Issues: https://github.com/example/issues
+
+Response Times:
+- Starter Plan: 48 hours
+- Professional Plan: 12 hours
+- Enterprise Plan: 1 hour (4 hours for non-critical)
+
+Office Locations:
+- San Francisco, CA (HQ)
+- Austin, TX
+- London, UK
+
+Business Hours:
+- Monday - Friday: 9:00 AM - 5:00 PM PST
+- Weekends: Closed (except Enterprise emergency hotline)
+- Holidays: Closed (status page has schedule)

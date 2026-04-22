@@ -220,7 +220,7 @@ impl EventHandler {
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
-                                let _ = tx.send(Ok(()));
+                                let _ = tx.send(Ok(None));
                             }
                         }
                     }
@@ -241,7 +241,7 @@ impl EventHandler {
                                     if let Some(arc) = completion_tx_arc.as_ref() {
                                         if let Ok(mut guard) = arc.lock() {
                                             if let Some(tx) = guard.take() {
-                                                tx.send(Ok(())).ok();
+                                                tx.send(Ok(new_event.data_as_json().ok())).ok();
                                             }
                                         }
                                     }
@@ -269,7 +269,7 @@ impl EventHandler {
                             if let Some(arc) = completion_tx_arc.as_ref() {
                                 if let Ok(mut guard) = arc.lock() {
                                     if let Some(tx) = guard.take() {
-                                        tx.send(Ok(())).ok();
+                                        tx.send(Ok(new_event.data_as_json().ok())).ok();
                                     }
                                 }
                             }
@@ -431,6 +431,16 @@ impl crate::task::runner::Runner for Processor {
             .map_err(|source| Error::ResourceLoad { source })?;
 
         let mut engine = Engine::new();
+
+        // Route Rhai print() and debug() through tracing so output inherits
+        // the current span context (flow, task, task_id, task_type).
+        engine.on_print(|msg| {
+            tracing::info!(target: "rhai::script", "{msg}");
+        });
+        engine.on_debug(|msg, source, pos| {
+            let src = source.unwrap_or("script");
+            tracing::debug!(target: "rhai::script", source = src, line = pos.line().unwrap_or(0), "{msg}");
+        });
 
         // Register function to parse RFC 2822 timestamps to Unix milliseconds.
         engine.register_fn(
@@ -648,7 +658,9 @@ impl crate::task::runner::Runner for Processor {
                     tokio::runtime::Handle::current().block_on(async move {
                         match cache.get(&namespaced_key).await {
                             Ok(Some(bytes)) => {
-                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_else(|e| {
+                                    String::from_utf8_lossy(e.as_bytes()).to_string()
+                                });
                                 rhai::Dynamic::from(s)
                             }
                             _ => rhai::Dynamic::UNIT,
@@ -826,7 +838,7 @@ impl crate::task::runner::Runner for Processor {
                                 if let Some(arc) = event.completion_tx.as_ref() {
                                     if let Ok(mut guard) = arc.lock() {
                                         if let Some(tx) = guard.take() {
-                                            tx.send(Ok(())).ok();
+                                            tx.send(Ok(event.data_as_json().ok())).ok();
                                         }
                                     }
                                 }
@@ -953,6 +965,7 @@ mod tests {
             name: "test".to_string(),
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
+            sandbox: None,
             depends_on: None,
             retry: None,
         });
@@ -1268,6 +1281,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                sandbox: None,
                 depends_on: None,
                 retry: None,
             }),
@@ -1322,6 +1336,7 @@ mod tests {
                 code: crate::resource::Source::Inline(
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
+                sandbox: None,
                 depends_on: None,
                 retry: None,
             }),
@@ -1378,6 +1393,7 @@ mod tests {
                     name: "test_deterministic".to_string(),
                     engine: crate::task::script::config::ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
+                    sandbox: None,
                     depends_on: None,
                     retry: None,
                 }),
@@ -1440,6 +1456,7 @@ mod tests {
                     "#
                     .to_string(),
                 ),
+                sandbox: None,
                 depends_on: None,
                 retry: None,
             }),

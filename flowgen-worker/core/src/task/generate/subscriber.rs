@@ -222,7 +222,7 @@ impl EventHandler {
             if let Some(obj) = data.as_object_mut() {
                 obj.insert(
                     "system_info".to_string(),
-                    serde_json::to_value(&system_info).unwrap_or_default(),
+                    serde_json::to_value(&system_info).unwrap_or(serde_json::Value::Null),
                 );
             }
 
@@ -246,9 +246,9 @@ impl EventHandler {
             let success = match self.config.ack_timeout {
                 Some(timeout) => matches!(
                     tokio::time::timeout(timeout, completion_rx).await,
-                    Ok(Ok(Ok(())))
+                    Ok(Ok(Ok(_)))
                 ),
-                None => matches!(completion_rx.await, Ok(Ok(()))),
+                None => matches!(completion_rx.await, Ok(Ok(_))),
             };
 
             // Update cache only if flow completed successfully.
@@ -529,7 +529,7 @@ mod tests {
         // Complete first flow.
         if let Some(shared_tx) = &event1.completion_tx {
             if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(()));
+                let _ = completion_tx.send(Ok(None));
             }
         }
 
@@ -537,7 +537,7 @@ mod tests {
         // Complete second flow.
         if let Some(shared_tx) = &event2.completion_tx {
             if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(()));
+                let _ = completion_tx.send(Ok(None));
             }
         }
 
@@ -645,7 +645,7 @@ mod tests {
         if let Some(event) = rx.recv().await {
             if let Some(shared_tx) = event.completion_tx {
                 if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                    let _ = completion_tx.send(Ok(()));
+                    let _ = completion_tx.send(Ok(None));
                 }
             }
         }
@@ -724,7 +724,7 @@ mod tests {
         let event = rx.recv().await.unwrap();
         if let Some(shared_tx) = &event.completion_tx {
             if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(()));
+                let _ = completion_tx.send(Ok(None));
             }
         }
 

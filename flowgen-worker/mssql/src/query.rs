@@ -84,7 +84,6 @@ pub struct EventHandler {
     task_id: usize,
     tx: Option<Sender<Event>>,
     task_type: &'static str,
-    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     task_context: Arc<TaskContext>,
 }
 
@@ -110,7 +109,7 @@ impl EventHandler {
             // Render query (inline queries already rendered, resource files need rendering).
             let query_string = config
                 .query
-                .render(self.resource_loader.as_ref(), &event_value)
+                .render(self.task_context.resource_loader.as_ref(), &event_value)
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?;
 
@@ -155,7 +154,7 @@ impl EventHandler {
                         if let Some(arc) = completion_tx_arc.as_ref() {
                             if let Ok(mut guard) = arc.lock() {
                                 if let Some(tx) = guard.take() {
-                                    tx.send(Ok(())).ok();
+                                    tx.send(Ok(result_event.data_as_json().ok())).ok();
                                 }
                             }
                         }
@@ -195,7 +194,7 @@ impl EventHandler {
                             if let Some(arc) = completion_tx_arc.as_ref() {
                                 if let Ok(mut guard) = arc.lock() {
                                     if let Some(tx) = guard.take() {
-                                        tx.send(Ok(())).ok();
+                                        tx.send(Ok(result_event.data_as_json().ok())).ok();
                                     }
                                 }
                             }
@@ -261,7 +260,6 @@ impl Runner for Processor {
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
-            resource_loader: self.task_context.resource_loader.clone(),
             task_context: Arc::clone(&self.task_context),
         };
 

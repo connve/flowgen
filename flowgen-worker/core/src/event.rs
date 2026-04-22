@@ -15,8 +15,11 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Type alias for completion channel sender.
-pub type CompletionTx =
-    tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+/// Carries an optional result payload for request-response flows (MCP, future HTTP streaming).
+/// Source tasks that need the response data send `Ok(Some(value))`, others send `Ok(None)`.
+pub type CompletionTx = tokio::sync::oneshot::Sender<
+    Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
+>;
 
 /// Type alias for shared completion channel sender (used in Event struct for cloning support).
 pub type SharedCompletionTx = Arc<std::sync::Mutex<Option<CompletionTx>>>;
@@ -58,6 +61,10 @@ where
 }
 
 /// Builder for sending events with structured logging context.
+///
+/// Automatically computes `duration_ms` from `event.timestamp` to the time of sending.
+/// For accurate duration tracking, call `EventBuilder::new()` at the start of `handle()`
+/// so that `event.timestamp` reflects processing start time.
 pub struct EventLogger<'a> {
     event: Event,
     tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
@@ -94,18 +101,24 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
             };
             let subject = self.event.subject.clone();
 
+            // Compute processing duration from event timestamp to now.
+            let duration_ms = {
+                let now_micros = Utc::now().timestamp_micros();
+                ((now_micros - self.event.timestamp) / 1000).max(0) as u64
+            };
+
             if let Some(tx) = self.tx {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
             }
 
-            // Build structured log with context fields.
+            // Build structured log with duration and context fields.
             if self.fields.is_empty() {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
+                    duration_ms = duration_ms,
                 );
             } else {
-                // Create log record with dynamic fields.
                 let field_str = self
                     .fields
                     .iter()
@@ -116,6 +129,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
+                    duration_ms = duration_ms,
                     context = %field_str,
                 );
             }
@@ -435,12 +449,7 @@ impl EventBuilder {
         self
     }
 
-    pub fn completion_tx(
-        mut self,
-        completion_tx: tokio::sync::oneshot::Sender<
-            Result<(), Box<dyn std::error::Error + Send + Sync>>,
-        >,
-    ) -> Self {
+    pub fn completion_tx(mut self, completion_tx: CompletionTx) -> Self {
         self.completion_tx = Some(completion_tx);
         self
     }

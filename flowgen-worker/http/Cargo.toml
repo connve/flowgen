@@ -28,3 +28,5 @@ base64 = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
+uuid = { workspace = true }
+tokio-stream = { workspace = true }

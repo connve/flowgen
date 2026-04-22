@@ -146,6 +146,7 @@ impl EventHandler {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
+            let event_builder = EventBuilder::new();
             let data = match &event.data {
                 EventData::Json(data) => match self.config.target_format {
                     crate::task::convert::config::TargetFormat::Avro => match &self.schema_config {
@@ -261,7 +262,7 @@ impl EventHandler {
                 },
             };
 
-            let mut e = EventBuilder::new()
+            let mut e = event_builder
                 .data(data)
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
@@ -275,7 +276,7 @@ impl EventHandler {
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         if let Ok(mut guard) = arc.lock() {
                             if let Some(tx) = guard.take() {
-                                tx.send(Ok(())).ok();
+                                tx.send(Ok(e.data_as_json().ok())).ok();
                             }
                         }
                     }
@@ -444,7 +445,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Convert failed after all retry attempts");
+                                error!(error = %err, "Convert failed after all retry attempts.");
                                 // Emit error event downstream for error handling.
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());

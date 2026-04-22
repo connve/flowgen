@@ -121,7 +121,6 @@ pub struct EventHandler {
     current_task_id: usize,
     sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
     task_type: &'static str,
-    resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
@@ -175,7 +174,7 @@ impl EventHandler {
         // Render query (inline queries already rendered, resource files need rendering).
         let query_string = match &config.query {
             Some(source) => source
-                .render(self.resource_loader.as_ref(), event_value)
+                .render(self.task_context.resource_loader.as_ref(), event_value)
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?,
             None => return Err(Error::MissingQuery),
@@ -230,7 +229,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -282,7 +281,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -345,7 +344,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -400,7 +399,7 @@ impl EventHandler {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     if let Ok(mut guard) = arc.lock() {
                         if let Some(tx) = guard.take() {
-                            tx.send(Ok(())).ok();
+                            tx.send(Ok(e.data_as_json().ok())).ok();
                         }
                     }
                 }
@@ -495,7 +494,7 @@ impl EventHandler {
                         if let Some(arc) = completion_tx_arc.as_ref() {
                             if let Ok(mut guard) = arc.lock() {
                                 if let Some(tx) = guard.take() {
-                                    tx.send(Ok(())).ok();
+                                    tx.send(Ok(e.data_as_json().ok())).ok();
                                 }
                             }
                         }
@@ -549,7 +548,6 @@ impl flowgen_core::task::runner::Runner for Processor {
             client: Arc::new(bulk_client),
             sfdc_client: Arc::new(tokio::sync::Mutex::new(sfdc_client)),
             task_type: self.task_type,
-            resource_loader: self.task_context.resource_loader.clone(),
             task_context: Arc::clone(&self.task_context),
         };
         Ok(event_handler)
@@ -844,10 +842,12 @@ mod tests {
             },
             task_manager,
             retry: None,
+            response_registry: None,
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
@@ -899,10 +899,12 @@ mod tests {
             },
             task_manager,
             retry: None,
+            response_registry: None,
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
             http_server: None,
+            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
         });
 
