@@ -1,12 +1,13 @@
 //! LLM proxy processor — OpenAI-compatible chat completions endpoint.
 //!
-//! Accepts OpenAI-format requests and routes them to any configured AI provider
-//! via the Rig framework. Supports streaming and non-streaming responses.
+//! Thin HTTP layer that accepts OpenAI-format requests, translates them into
+//! pipeline events, and formats responses back to OpenAI format. The actual
+//! LLM call is handled by a downstream `ai_completion` task in the flow.
+//! Registers at the exact path (no prefix nesting) for OpenAI client compatibility.
 
-use super::config;
-use super::types::*;
-use crate::agent::{AgentClient, ClientBuilder, CompletionChunk};
-use crate::completion::processor::Credentials;
+use super::config::{
+    self, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, SSE_DONE,
+};
 use axum::{
     body::Body,
     extract::State,
@@ -14,10 +15,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::MethodRouter,
 };
+use base64::Engine;
+use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::credentials::HttpCredentials;
-use futures_util::StreamExt;
-use rig::tool::{rmcp::McpClientHandler, server::ToolServer};
+use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use std::{fs, sync::Arc};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -27,10 +30,20 @@ use tracing::{error, info, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("AI client error: {source}")]
-    AgentClient {
+    #[error("Error sending event to channel: {source}")]
+    SendMessage {
         #[source]
-        source: crate::agent::Error,
+        source: flowgen_core::event::Error,
+    },
+    #[error("Error building event: {source}")]
+    EventBuilder {
+        #[source]
+        source: flowgen_core::event::Error,
+    },
+    #[error("JSON error: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
     },
     #[error("Error reading credentials file at {path}: {source}")]
     ReadCredentials {
@@ -38,25 +51,32 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    #[error("JSON error: {source}")]
-    SerdeJson {
-        #[source]
-        source: serde_json::Error,
-    },
     #[error("Missing required builder attribute: {0}")]
     MissingBuilderAttribute(String),
-    #[error("No authorization header provided")]
+    #[error("No authorization header provided.")]
     NoCredentials,
-    #[error("Invalid authorization credentials")]
+    #[error("Invalid authorization credentials.")]
     InvalidCredentials,
-    #[error("Malformed authorization header")]
+    #[error("Malformed authorization header.")]
     MalformedCredentials,
-    #[error("MCP connection failed: {message}")]
-    McpConnection { message: String },
+    #[error("User authentication failed: {source}")]
+    AuthFailed {
+        #[source]
+        source: flowgen_core::auth::AuthError,
+    },
+    #[error("Auth provider not configured but auth.required is true.")]
+    AuthProviderMissing,
+    #[error("Flow completion failed or timed out.")]
+    FlowCompletionFailed,
     #[error("Config template rendering error: {source}")]
     ConfigRender {
         #[source]
         source: flowgen_core::config::Error,
+    },
+    #[error("Task failed after all retry attempts: {source}")]
+    RetryExhausted {
+        #[source]
+        source: Box<Error>,
     },
 }
 
@@ -64,6 +84,9 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials => {
+                (StatusCode::UNAUTHORIZED, self.to_string())
+            }
+            Error::AuthFailed { .. } | Error::AuthProviderMissing => {
                 (StatusCode::UNAUTHORIZED, self.to_string())
             }
             Error::SerdeJson { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
@@ -84,25 +107,33 @@ impl IntoResponse for Error {
 /// Shared state for the LLM proxy Axum handler.
 #[derive(Clone)]
 struct ProxyState {
-    /// Pre-built AI client (reused across requests).
-    client: Arc<AgentClient>,
-    /// Default model from config.
-    default_model: String,
-    /// Default system prompt from config.
-    system_prompt: Option<String>,
-    /// Pre-loaded auth credentials for validating incoming requests.
-    auth_credentials: Option<HttpCredentials>,
+    /// Cancellation token for graceful shutdown.
+    cancellation_token: tokio_util::sync::CancellationToken,
+    /// Processor configuration.
+    config: Arc<config::Processor>,
+    /// Event sender channel into the pipeline.
+    tx: Option<mpsc::Sender<Event>>,
+    /// Task identifier.
+    task_id: usize,
+    /// Task type for event categorization.
+    task_type: &'static str,
+    /// Pre-loaded endpoint credentials for basic/bearer auth.
+    credentials: Option<HttpCredentials>,
+    /// Auth provider for user identity resolution (from worker config).
+    auth_provider: Option<Arc<dyn AuthProvider>>,
+    /// Response registry for streaming responses.
+    response_registry: Arc<ResponseRegistry>,
 }
 
 impl ProxyState {
-    /// Validate authentication credentials against incoming request.
-    fn validate_auth(&self, headers: &axum::http::HeaderMap) -> Result<(), Error> {
-        let credentials = match &self.auth_credentials {
+    /// Validate endpoint-level authentication (bearer/basic).
+    fn validate_endpoint_auth(&self, headers: &axum::http::HeaderMap) -> Result<(), Error> {
+        let credentials = match &self.credentials {
             Some(creds) => creds,
             None => return Ok(()),
         };
 
-        let auth_header = match headers.get("authorization") {
+        let auth_header = match headers.get(axum::http::header::AUTHORIZATION) {
             Some(header) => header,
             None => return Err(Error::NoCredentials),
         };
@@ -113,14 +144,63 @@ impl ProxyState {
         };
 
         if let Some(expected_token) = &credentials.bearer_auth {
-            match auth_value.strip_prefix("Bearer ") {
+            match flowgen_core::auth::extract_bearer_token(auth_value) {
                 Some(token) if token == expected_token => return Ok(()),
                 Some(_) => return Err(Error::InvalidCredentials),
                 None => {}
             }
         }
 
+        if let Some(basic_auth) = &credentials.basic_auth {
+            if let Some(encoded) = auth_value.strip_prefix("Basic ") {
+                match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
+                        Ok(decoded_str) => {
+                            let expected =
+                                format!("{}:{}", basic_auth.username, basic_auth.password);
+                            return match decoded_str == expected {
+                                true => Ok(()),
+                                false => Err(Error::InvalidCredentials),
+                            };
+                        }
+                        Err(_) => return Err(Error::MalformedCredentials),
+                    },
+                    Err(_) => return Err(Error::MalformedCredentials),
+                }
+            }
+        }
+
         Err(Error::InvalidCredentials)
+    }
+
+    /// Validate user-level authentication via the worker auth provider.
+    async fn validate_user_auth(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<Option<flowgen_core::auth::UserContext>, Error> {
+        match &self.config.auth {
+            Some(config) if config.required => {}
+            _ => return Ok(None),
+        }
+
+        let provider = self
+            .auth_provider
+            .as_ref()
+            .ok_or(Error::AuthProviderMissing)?;
+
+        let auth_header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or(Error::NoCredentials)?;
+
+        let token = extract_bearer_token(auth_header).ok_or(Error::MalformedCredentials)?;
+
+        let user_context = provider
+            .validate(token)
+            .await
+            .map_err(|source| Error::AuthFailed { source })?;
+
+        Ok(Some(user_context))
     }
 }
 
@@ -130,91 +210,108 @@ async fn handle_chat_completion(
     headers: axum::http::HeaderMap,
     axum::Json(request): axum::Json<ChatCompletionRequest>,
 ) -> Result<Response, Error> {
-    state.validate_auth(&headers)?;
+    if state.cancellation_token.is_cancelled() {
+        return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    }
 
-    // Extract system prompt from messages or use default.
+    state.validate_endpoint_auth(&headers)?;
+
+    // User-level auth (JWT/OIDC/session via worker auth provider).
+    let user_context = state.validate_user_auth(&headers).await?;
+
+    // Extract prompt from OpenAI messages.
     let system_prompt = request
         .messages
         .iter()
-        .find(|m| m.role == "system")
-        .map(|m| m.content.clone())
-        .or_else(|| state.system_prompt.clone());
+        .find(|m| m.is_system())
+        .map(|m| m.content.clone());
 
-    // Build the user prompt from non-system messages.
-    let user_messages: Vec<&Message> = request
-        .messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .collect();
+    let user_messages: Vec<&Message> = request.messages.iter().filter(|m| !m.is_system()).collect();
 
     let prompt = user_messages
         .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
+        .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
 
-    let model = request
-        .model
-        .as_deref()
-        .unwrap_or(&state.default_model)
-        .to_string();
-
+    let model = request.model.unwrap_or_default();
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = chrono::Utc::now().timestamp();
+    let is_stream = request.stream;
 
-    if request.stream {
-        handle_streaming(
-            state,
-            &prompt,
-            system_prompt.as_deref(),
-            model,
-            request_id,
-            created,
-        )
-        .await
+    // Build event data with the parsed request.
+    let data = serde_json::json!({
+        "prompt": prompt,
+        "system_prompt": system_prompt,
+        "model": model,
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "stream": is_stream,
+    });
+
+    // Inject user context into event meta if authenticated.
+    let mut meta = serde_json::Map::new();
+    if let Some(ref ctx) = user_context {
+        if let Ok(value) = serde_json::to_value(ctx) {
+            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+        }
+    }
+
+    if is_stream {
+        handle_streaming(state, data, meta, model, request_id, created).await
     } else {
-        handle_non_streaming(
-            state,
-            &prompt,
-            system_prompt.as_deref(),
-            model,
-            request_id,
-            created,
-        )
-        .await
+        handle_non_streaming(state, data, meta, model, request_id, created).await
     }
 }
 
 /// Handle a non-streaming chat completion request.
 async fn handle_non_streaming(
     state: ProxyState,
-    prompt: &str,
-    system_prompt: Option<&str>,
+    data: serde_json::Value,
+    meta: serde_json::Map<String, serde_json::Value>,
     model: String,
     request_id: String,
     created: i64,
 ) -> Result<Response, Error> {
-    let text = state
-        .client
-        .complete(prompt, system_prompt)
-        .await
-        .map_err(|source| Error::AgentClient { source })?;
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
-    let response = ChatCompletionResponse {
-        id: request_id,
-        object: "chat.completion",
-        created,
-        model,
-        choices: vec![Choice {
-            index: 0,
-            message: Message {
-                role: "assistant".to_string(),
-                content: text,
-            },
-            finish_reason: "stop",
-        }],
-        usage: None,
+    let mut builder = EventBuilder::new()
+        .data(EventData::Json(data))
+        .subject(state.config.name.to_owned())
+        .task_id(state.task_id)
+        .task_type(state.task_type)
+        .completion_tx(completion_tx);
+
+    if !meta.is_empty() {
+        builder = builder.meta(meta);
+    }
+
+    let e = builder
+        .build()
+        .map_err(|source| Error::EventBuilder { source })?;
+
+    e.send_with_logging(state.tx.as_ref())
+        .await
+        .map_err(|source| Error::SendMessage { source })?;
+
+    // Wait for pipeline completion.
+    let result = match state.config.ack_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, completion_rx)
+            .await
+            .map_err(|_| Error::FlowCompletionFailed)?
+            .map_err(|_| Error::FlowCompletionFailed)?,
+        None => completion_rx
+            .await
+            .map_err(|_| Error::FlowCompletionFailed)?,
     };
+
+    let completion_data = result.map_err(|_| Error::FlowCompletionFailed)?;
+
+    let content = completion_data
+        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_default();
+
+    let response = ChatCompletionResponse::new(request_id, created, model, content);
 
     Ok(axum::Json(response).into_response())
 }
@@ -222,90 +319,167 @@ async fn handle_non_streaming(
 /// Handle a streaming chat completion request with SSE.
 async fn handle_streaming(
     state: ProxyState,
-    prompt: &str,
-    system_prompt: Option<&str>,
+    data: serde_json::Value,
+    meta: serde_json::Map<String, serde_json::Value>,
     model: String,
     request_id: String,
     created: i64,
 ) -> Result<Response, Error> {
-    let mut stream = state.client.complete_stream(prompt, system_prompt).await;
-    let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
+    let correlation_id = uuid::Uuid::new_v4().to_string();
 
-    // Send initial role chunk.
-    let initial_chunk = ChatCompletionChunk {
-        id: request_id.clone(),
-        object: "chat.completion.chunk",
-        created,
-        model: model.clone(),
-        choices: vec![StreamChoice {
-            index: 0,
-            delta: Delta {
-                role: Some("assistant".to_string()),
-                content: None,
+    // Set up progress channel for streaming intermediate events.
+    let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
+
+    state
+        .response_registry
+        .insert(
+            correlation_id.clone(),
+            ResponseSender {
+                progress_tx,
+                result_tx: None,
             },
-            finish_reason: None,
-        }],
-    };
-
-    let _ = sse_tx
-        .send(Ok(format!(
-            "data: {}\n\n",
-            serde_json::to_string(&initial_chunk).unwrap_or_default()
-        )))
+        )
         .await;
 
+    // Inject correlation_id into event meta.
+    let mut meta = meta;
+    meta.insert(
+        flowgen_core::registry::CORRELATION_ID.to_string(),
+        serde_json::Value::String(correlation_id.clone()),
+    );
+
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+    let e = EventBuilder::new()
+        .data(EventData::Json(data))
+        .subject(state.config.name.to_owned())
+        .task_id(state.task_id)
+        .task_type(state.task_type)
+        .meta(meta)
+        .completion_tx(completion_tx)
+        .build()
+        .map_err(|source| Error::EventBuilder { source })?;
+
+    e.send_with_logging(state.tx.as_ref())
+        .await
+        .map_err(|source| Error::SendMessage { source })?;
+
+    info!(
+        proxy = %state.config.name,
+        correlation_id = %correlation_id,
+        "Streaming LLM proxy request accepted."
+    );
+
+    // Spawn background task to stream progress + final result as OpenAI SSE.
+    let registry = state.response_registry.clone();
+    let cid = correlation_id.clone();
+    let ack_timeout = state.config.ack_timeout;
+    let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
+
     tokio::spawn(async move {
-        while let Some(chunk) = stream.next().await {
-            let (content, finish) = match chunk {
-                CompletionChunk::Text(text) => (Some(text), None),
-                CompletionChunk::Final(_) => (None, Some("stop")),
-                CompletionChunk::Error(e) => {
-                    error!(error = %e, "LLM proxy stream error.");
-                    break;
+        /// Send an SSE chunk to the client, logging and skipping on serialization failure.
+        async fn send_sse(
+            tx: &mpsc::Sender<Result<String, std::convert::Infallible>>,
+            chunk: &ChatCompletionChunk,
+        ) -> bool {
+            match chunk.to_sse() {
+                Ok(data) => tx.send(Ok(data)).await.is_ok(),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to serialize SSE chunk.");
+                    true // Continue streaming, skip this chunk.
                 }
-            };
-
-            let sse_chunk = ChatCompletionChunk {
-                id: request_id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model.clone(),
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: Delta {
-                        role: None,
-                        content,
-                    },
-                    finish_reason: finish,
-                }],
-            };
-
-            let data = format!(
-                "data: {}\n\n",
-                serde_json::to_string(&sse_chunk).unwrap_or_default()
-            );
-
-            if sse_tx.send(Ok(data)).await.is_err() {
-                break;
-            }
-
-            if finish.is_some() {
-                break;
             }
         }
 
-        // Send [DONE] marker per OpenAI spec.
-        let _ = sse_tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+        if !send_sse(
+            &sse_tx,
+            &ChatCompletionChunk::role(&request_id, created, &model),
+        )
+        .await
+        {
+            return;
+        }
+
+        tokio::pin!(completion_rx);
+
+        type CompletionResult = Result<
+            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
+            tokio::sync::oneshot::error::RecvError,
+        >;
+
+        let result: Option<CompletionResult> = loop {
+            tokio::select! {
+                progress = progress_rx.recv() => {
+                    match progress {
+                        Some(evt) => {
+                            let chunk = ChatCompletionChunk::content(
+                                &request_id, created, &model, evt.status.clone(),
+                            );
+                            if !send_sse(&sse_tx, &chunk).await {
+                                registry.remove(&cid).await;
+                                return;
+                            }
+                        }
+                        None => break None,
+                    }
+                }
+                completion = async {
+                    match ack_timeout {
+                        Some(timeout) => {
+                            match tokio::time::timeout(timeout, &mut completion_rx).await {
+                                Ok(r) => Some(r),
+                                Err(_) => { registry.remove(&cid).await; None }
+                            }
+                        }
+                        None => Some((&mut completion_rx).await),
+                    }
+                } => {
+                    registry.remove(&cid).await;
+
+                    // Drain remaining progress events.
+                    while let Ok(evt) = progress_rx.try_recv() {
+                        let chunk = ChatCompletionChunk::content(
+                            &request_id, created, &model, evt.status.clone(),
+                        );
+                        send_sse(&sse_tx, &chunk).await;
+                    }
+
+                    match completion {
+                        Some(r) => break Some(r),
+                        None => return,
+                    }
+                }
+            }
+        };
+
+        // Send final content from pipeline result if present.
+        if let Some(Ok(Ok(Some(data)))) = &result {
+            if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
+                let chunk =
+                    ChatCompletionChunk::content(&request_id, created, &model, content.to_string());
+                send_sse(&sse_tx, &chunk).await;
+            }
+        }
+
+        send_sse(
+            &sse_tx,
+            &ChatCompletionChunk::stop(&request_id, created, &model),
+        )
+        .await;
+        let _ = sse_tx.send(Ok(SSE_DONE.to_string())).await;
     });
 
     let stream = ReceiverStream::new(sse_rx);
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
-        .unwrap())
+        .map_err(|e| {
+            error!(error = %e, "Failed to build SSE response.");
+            Error::FlowCompletionFailed
+        })
 }
 
 /// LLM proxy processor.
@@ -313,6 +487,8 @@ async fn handle_streaming(
 pub struct Processor {
     /// Processor configuration.
     config: Arc<config::Processor>,
+    /// Event sender channel into the pipeline.
+    tx: Option<mpsc::Sender<Event>>,
     /// Task identifier.
     task_id: usize,
     /// Task execution context.
@@ -337,100 +513,8 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        // Load provider credentials.
+        // Load endpoint credentials.
         let credentials = match &init_config.credentials_path {
-            Some(path) => {
-                let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
-                    path: path.clone(),
-                    source: e,
-                })?;
-                Some(
-                    serde_json::from_str::<Credentials>(&content)
-                        .map_err(|source| Error::SerdeJson { source })?,
-                )
-            }
-            None => None,
-        };
-
-        // Build the AI client.
-        let mut builder =
-            ClientBuilder::new(init_config.provider.clone(), init_config.model.clone());
-
-        if let Some(creds) = credentials {
-            builder = builder.credentials(creds);
-        }
-
-        if let Some(endpoint) = &init_config.endpoint {
-            builder = builder.endpoint(endpoint.clone());
-        }
-
-        if let Some(temp) = init_config.temperature {
-            builder = builder.temperature(temp);
-        }
-
-        if let Some(tokens) = init_config.max_tokens {
-            builder = builder.max_tokens(tokens);
-        }
-
-        if let Some(turns) = init_config.max_turns {
-            builder = builder.max_turns(turns);
-        }
-
-        builder = builder.name(init_config.name.clone());
-
-        // Connect to MCP servers for tool discovery.
-        if !init_config.mcp_servers.is_empty() {
-            let tool_server_handle = ToolServer::new().run();
-            let client_info = rmcp::model::ClientInfo::new(
-                rmcp::model::ClientCapabilities::default(),
-                rmcp::model::Implementation::from_build_env(),
-            );
-
-            for mcp_config in &init_config.mcp_servers {
-                let handler =
-                    McpClientHandler::new(client_info.clone(), tool_server_handle.clone());
-                let mut transport_config =
-                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                        mcp_config.url.as_str(),
-                    );
-
-                if let Some(ref creds_path) = mcp_config.credentials_path {
-                    let creds = flowgen_core::credentials::load_http_credentials(creds_path)
-                        .await
-                        .map_err(|e| Error::McpConnection {
-                            message: e.to_string(),
-                        })?;
-                    if let Some(bearer_token) = creds.bearer_auth {
-                        transport_config = transport_config.auth_header(bearer_token);
-                    }
-                }
-
-                let transport =
-                    rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
-                handler
-                    .connect(transport)
-                    .await
-                    .map_err(|e| Error::McpConnection {
-                        message: e.to_string(),
-                    })?;
-
-                info!(
-                    url = %mcp_config.url,
-                    "Connected to MCP server for LLM proxy tool discovery."
-                );
-            }
-
-            builder = builder.tool_server_handle(tool_server_handle);
-        }
-
-        let client = Arc::new(
-            builder
-                .build()
-                .map_err(|source| Error::AgentClient { source })?,
-        );
-
-        // Load auth credentials for incoming request validation.
-        let auth_credentials = match &init_config.auth_credentials_path {
             Some(path) => {
                 let content = fs::read_to_string(path).map_err(|e| Error::ReadCredentials {
                     path: path.clone(),
@@ -444,11 +528,28 @@ impl flowgen_core::task::runner::Runner for Processor {
             None => None,
         };
 
+        // Get auth provider from the worker-level HTTP server.
+        let auth_provider = self
+            .task_context
+            .http_server
+            .as_ref()
+            .and_then(|server| server.auth_provider());
+
+        let response_registry = self
+            .task_context
+            .response_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(ResponseRegistry::new()));
+
         let state = ProxyState {
-            client,
-            default_model: init_config.model.clone(),
-            system_prompt: init_config.system_prompt.clone(),
-            auth_credentials,
+            cancellation_token: self.task_context.cancellation_token.clone(),
+            config: Arc::clone(&self.config),
+            tx: self.tx.clone(),
+            task_id: self.task_id,
+            task_type: self.task_type,
+            credentials,
+            auth_provider,
+            response_registry,
         };
 
         let span = tracing::Span::current();
@@ -468,8 +569,6 @@ impl flowgen_core::task::runner::Runner for Processor {
 
             info!(
                 path = %init_config.path,
-                provider = ?init_config.provider,
-                model = %init_config.model,
                 "LLM proxy endpoint registered."
             );
         }
@@ -482,6 +581,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 #[derive(Debug, Default)]
 pub struct ProcessorBuilder {
     config: Option<Arc<config::Processor>>,
+    tx: Option<mpsc::Sender<Event>>,
     task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
     task_type: Option<&'static str>,
@@ -494,6 +594,11 @@ impl ProcessorBuilder {
 
     pub fn config(mut self, config: Arc<config::Processor>) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    pub fn sender(mut self, sender: mpsc::Sender<Event>) -> Self {
+        self.tx = Some(sender);
         self
     }
 
@@ -520,6 +625,7 @@ impl ProcessorBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
+            tx: self.tx,
             task_id: self.task_id,
             task_context: self
                 .task_context

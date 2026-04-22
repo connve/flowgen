@@ -35,6 +35,8 @@ pub struct TaskContext {
     pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
     /// Optional shared MCP server for exposing flows as MCP tools.
     pub mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
+    /// Optional shared response registry for streaming progress back to source tasks.
+    pub response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Optional resource loader for loading external assets (SQL files, templates, etc.).
     pub resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration (can be overridden per task).
@@ -56,6 +58,13 @@ impl std::fmt::Debug for TaskContext {
             .field(
                 "mcp_server",
                 &self.mcp_server.as_ref().map(|_| "<McpServer>"),
+            )
+            .field(
+                "response_registry",
+                &self
+                    .response_registry
+                    .as_ref()
+                    .map(|_| "<ResponseRegistry>"),
             )
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
@@ -79,6 +88,8 @@ pub struct TaskContextBuilder {
     http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
     /// Optional shared MCP server for exposing flows as MCP tools.
     mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
+    /// Optional shared response registry for streaming progress.
+    response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Resource loader for loading external assets.
     resource_loader: Option<crate::resource::ResourceLoader>,
     /// Optional app-level retry configuration.
@@ -156,6 +167,15 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the shared response registry for streaming progress.
+    pub fn response_registry(
+        mut self,
+        registry: std::sync::Arc<crate::registry::ResponseRegistry>,
+    ) -> Self {
+        self.response_registry = Some(registry);
+        self
+    }
+
     /// Sets the resource loader for loading external assets.
     ///
     /// # Arguments
@@ -209,6 +229,7 @@ impl TaskContextBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
             http_server: self.http_server,
             mcp_server: self.mcp_server,
+            response_registry: self.response_registry,
             resource_loader: self.resource_loader,
             retry: self.retry,
             cancellation_token: self.cancellation_token.unwrap_or_default(),

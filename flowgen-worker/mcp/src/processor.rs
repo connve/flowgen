@@ -171,6 +171,12 @@ impl Runner for Processor {
                     tx: tool_tx,
                     credentials,
                     ack_timeout: event_handler.config.ack_timeout,
+                    auth_required: event_handler
+                        .config
+                        .auth
+                        .as_ref()
+                        .map(|a| a.required)
+                        .unwrap_or(false),
                 },
             )
             .map_err(|source| Error::ToolRegistration { source })?;

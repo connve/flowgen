@@ -790,6 +790,7 @@ mod tests {
             },
             task_manager,
             retry: None,
+            response_registry: None,
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
@@ -856,6 +857,7 @@ mod tests {
             },
             task_manager,
             retry: None,
+            response_registry: None,
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,

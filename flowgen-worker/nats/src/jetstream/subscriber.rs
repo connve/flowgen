@@ -13,6 +13,7 @@ use tracing::{error, warn, Instrument};
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Error sending event to channel: {source}")]
     SendMessage {

@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf};
 use url::Url;
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Invalid URL format: {source}")]
     ParseUrl {

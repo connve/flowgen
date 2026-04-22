@@ -5,8 +5,18 @@
 //! multi-modal capabilities (text, images, speech, etc.).
 
 pub mod agent;
-pub mod completion;
-pub mod llm_proxy;
+
+/// AI completion processor for generating responses using LLMs.
+pub mod completion {
+    pub mod config;
+    pub mod processor;
+}
+
+/// OpenAI-compatible chat completions proxy endpoint.
+pub mod llm_proxy {
+    pub mod config;
+    pub mod processor;
+}
 
 pub use agent::{AgentClient, ClientBuilder, CompletionChunk};
 pub use completion::config::Provider;

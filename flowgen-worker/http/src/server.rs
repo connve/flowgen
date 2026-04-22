@@ -4,6 +4,7 @@
 //! to register routes dynamically before starting the server.
 
 use axum::{routing::MethodRouter, Router};
+use flowgen_core::auth::AuthProvider;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -16,6 +17,7 @@ const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
 
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Failed to bind TCP listener on specified port.
     #[error("Error binding TCP listener on port {port}: {source}")]
@@ -36,7 +38,7 @@ pub enum Error {
 /// Allows multiple webhook processors to register routes before starting
 /// the server. Routes are stored in a thread-safe HashMap and the server
 /// can only be started once.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpServer {
     /// Thread-safe storage for registered routes.
     routes: Arc<RwLock<HashMap<String, MethodRouter>>>,
@@ -46,7 +48,19 @@ pub struct HttpServer {
     path: Option<String>,
     /// Optional global credentials path for webhook authentication.
     /// Individual webhooks can override this with their own `credentials_path`.
-    global_credentials_path: Option<std::path::PathBuf>,
+    credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider for user identity resolution (JWT, OIDC, session).
+    auth_provider: Option<Arc<dyn AuthProvider>>,
+}
+
+impl std::fmt::Debug for HttpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpServer")
+            .field("path", &self.path)
+            .field("credentials_path", &self.credentials_path)
+            .field("has_auth_provider", &self.auth_provider.is_some())
+            .finish()
+    }
 }
 
 /// Builder for constructing HttpServer instances.
@@ -54,8 +68,10 @@ pub struct HttpServer {
 pub struct HttpServerBuilder {
     /// Optional path prefix for all routes.
     path: Option<String>,
-    /// Optional global credentials path for webhook authentication.
-    global_credentials_path: Option<std::path::PathBuf>,
+    /// Optional credentials path for webhook authentication.
+    credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider for user identity resolution.
+    auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl HttpServerBuilder {
@@ -71,8 +87,14 @@ impl HttpServerBuilder {
     }
 
     /// Sets the global credentials path for webhook authentication.
-    pub fn global_credentials_path(mut self, path: std::path::PathBuf) -> Self {
-        self.global_credentials_path = Some(path);
+    pub fn credentials_path(mut self, path: std::path::PathBuf) -> Self {
+        self.credentials_path = Some(path);
+        self
+    }
+
+    /// Sets the auth provider for user identity resolution.
+    pub fn auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
         self
     }
 
@@ -82,7 +104,8 @@ impl HttpServerBuilder {
             routes: Arc::new(RwLock::new(HashMap::new())),
             server_started: Arc::new(Mutex::new(false)),
             path: self.path,
-            global_credentials_path: self.global_credentials_path,
+            credentials_path: self.credentials_path,
+            auth_provider: self.auth_provider,
         }
     }
 }
@@ -104,12 +127,16 @@ impl flowgen_core::http_server::HttpServer for HttpServer {
             }
         }
     }
+
+    fn auth_provider(&self) -> Option<Arc<dyn AuthProvider>> {
+        self.auth_provider.clone()
+    }
 }
 
 impl HttpServer {
     /// Returns the global credentials path if configured.
-    pub fn global_credentials_path(&self) -> Option<&std::path::Path> {
-        self.global_credentials_path.as_deref()
+    pub fn credentials_path(&self) -> Option<&std::path::Path> {
+        self.credentials_path.as_deref()
     }
 
     /// Register a typed route with the HTTP Server.

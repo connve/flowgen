@@ -23,6 +23,7 @@ fn is_auth_error(error: &PubSubError) -> bool {
 
 /// Errors that can occur during Salesforce Pub/Sub publishing operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Pub/Sub error: {source}")]
     PubSub {

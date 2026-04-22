@@ -1436,10 +1436,12 @@ version = "0.99.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
+ "base64",
  "chrono",
  "flowgen_core",
  "futures-util",
  "handlebars",
+ "humantime-serde",
  "rig-core",
  "rig-vertexai",
  "rmcp",
@@ -1450,6 +1452,7 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -1473,11 +1476,13 @@ dependencies = [
  "futures-util",
  "handlebars",
  "humantime-serde",
+ "jsonwebtoken 9.3.1",
  "opentelemetry 0.27.1",
  "opentelemetry-otlp",
  "opentelemetry_sdk 0.27.1",
  "parquet",
  "regex",
+ "reqwest 0.13.2",
  "rhai",
  "serde",
  "serde_avro_fast",
@@ -1891,7 +1896,7 @@ dependencies = [
  "base64",
  "gcloud-metadata",
  "home",
- "jsonwebtoken",
+ "jsonwebtoken 10.3.0",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -2096,7 +2101,7 @@ dependencies = [
  "hex",
  "hmac",
  "http",
- "jsonwebtoken",
+ "jsonwebtoken 10.3.0",
  "reqwest 0.13.2",
  "rustc_version",
  "rustls",
@@ -2883,6 +2888,21 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
 ]
 
 [[package]]

@@ -571,6 +571,7 @@ mod tests {
             credentials_path: None,
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         });

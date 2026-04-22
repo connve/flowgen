@@ -230,6 +230,7 @@ impl Query {
 
 /// Errors that can occur when resolving query configuration.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum ResolveError {
     #[error("Error loading resource: {source}")]
     Resource {

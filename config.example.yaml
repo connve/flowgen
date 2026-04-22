@@ -49,9 +49,39 @@ worker:
     port: 3000
     # Optional path prefix for all routes (e.g., "/api/flowgen/workers").
     path: "/api/flowgen/workers"
-    # Optional global credentials file for webhook authentication.
+    # Optional credentials file for webhook authentication.
     # Individual http_webhook tasks can override this with their own credentials_path.
     # credentials_path: "/etc/http/credentials.json"
+
+    # Optional user authentication provider for JWT, OIDC, or session token validation.
+    # Shared across all HTTP-facing tasks (http_webhook, llm_proxy, mcp_tool).
+    # Tasks opt in with auth.required: true in their config.
+
+    # JWT with local HMAC secret:
+    # auth:
+    #   type: jwt
+    #   secret: "your-hmac-secret"
+    #   audience: "flowgen-api"        # optional: validate audience claim
+    #   issuer: "https://auth.example.com"  # optional: validate issuer claim
+    #   user_id_claim: "sub"           # optional: claim to extract as user_id (defaults to "sub")
+
+    # JWT with remote JWKS (RS256/ES256):
+    # auth:
+    #   type: jwt
+    #   jwks_url: "https://auth.example.com/.well-known/jwks.json"
+    #   audience: "flowgen-api"
+
+    # OIDC discovery (auto-fetches JWKS from issuer):
+    # auth:
+    #   type: oidc
+    #   issuer_url: "https://auth.example.com/realms/myapp"
+    #   audience: "flowgen-api"
+
+    # Session token validation via external HTTP endpoint:
+    # auth:
+    #   type: session
+    #   validation_url: "https://auth.example.com/validate"
+    #   user_id_field: "user_id"       # optional: JSON field in response (defaults to "user_id")
 
   # MCP server configuration for exposing flows as MCP tools (optional).
   # Runs on its own port, independent of the HTTP server.

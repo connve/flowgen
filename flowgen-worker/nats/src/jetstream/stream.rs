@@ -2,6 +2,7 @@ use async_nats::jetstream::{self, stream::Config};
 
 /// Errors that can occur during stream operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Stream creation error: {source}")]
     CreateStream {

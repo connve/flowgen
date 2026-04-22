@@ -11,6 +11,7 @@ use std::fmt::Debug;
 
 /// Cache operation errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CacheError {
     /// Key already exists during create operation.
     #[error("Key already exists")]

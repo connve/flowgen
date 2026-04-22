@@ -32,6 +32,12 @@ pub struct Processor {
     /// Intermediate events from downstream tasks are streamed as they arrive.
     #[serde(default)]
     pub stream: bool,
+    /// Optional user authentication configuration.
+    /// When `auth.required` is true, requests must include a valid bearer token
+    /// validated by the worker-level auth provider (JWT, OIDC, or session).
+    /// The resolved user context is injected into `event.meta.auth`.
+    #[serde(default)]
+    pub auth: Option<flowgen_core::auth::TaskAuthConfig>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -134,6 +140,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         };
@@ -160,6 +167,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         };
@@ -180,6 +188,7 @@ mod tests {
             credentials_path: None,
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         };
@@ -336,6 +345,7 @@ mod tests {
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         };

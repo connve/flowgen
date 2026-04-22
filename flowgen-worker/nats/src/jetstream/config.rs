@@ -4,6 +4,7 @@ use std::{path::PathBuf, time::Duration};
 
 /// Errors that can occur during configuration parsing.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("Failed to parse backoff duration '{value}': {source}")]
     BackoffDurationParse {

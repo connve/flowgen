@@ -101,8 +101,8 @@ pub enum Error {
         #[source]
         source: rig::http_client::Error,
     },
-    #[error("Vertex AI client creation failed: {message}")]
-    VertexAiClient { message: String },
+    #[error("Vertex AI client creation failed: {reason}")]
+    VertexAiClient { reason: String },
     #[error("Completion request failed: {source}")]
     CompletionRequest {
         #[source]
@@ -313,7 +313,7 @@ impl ClientBuilder {
                 }
                 let client = builder
                     .build()
-                    .map_err(|e| Error::VertexAiClient { message: e })?;
+                    .map_err(|reason| Error::VertexAiClient { reason })?;
                 Ok(AgentClient {
                     provider: self.provider,
                     model: self.model,

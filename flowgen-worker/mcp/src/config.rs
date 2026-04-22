@@ -42,6 +42,12 @@ pub struct Processor {
     /// Accepts human-readable durations (e.g., "30s", "5m", "1h").
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<std::time::Duration>,
+    /// Optional user authentication configuration.
+    /// When `auth.required` is true, requests must include a valid bearer token
+    /// validated by the worker-level auth provider (JWT, OIDC, or session).
+    /// The resolved user context is injected into `event.meta.auth`.
+    #[serde(default)]
+    pub auth: Option<flowgen_core::auth::TaskAuthConfig>,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -90,6 +96,7 @@ mod tests {
             }),
             credentials_path: Some(std::path::PathBuf::from("/etc/mcp/keys.json")),
             ack_timeout: None,
+            auth: None,
             depends_on: None,
             retry: None,
         };

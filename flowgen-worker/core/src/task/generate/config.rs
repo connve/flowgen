@@ -8,6 +8,7 @@ use std::time::Duration;
 
 /// Errors that can occur during configuration validation.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("Either 'interval' or 'cron' params must be specified")]
     MissingSchedule,

@@ -4,8 +4,10 @@
 //! across tasks through the task context. Route registration uses type-erased
 //! `Box<dyn Any>` to avoid coupling core to web framework specifics.
 
+use crate::auth::AuthProvider;
 use std::any::Any;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 /// Error type for HTTP server operations.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -26,4 +28,10 @@ pub trait HttpServer: Debug + Send + Sync + 'static {
     /// The `route` parameter is a type-erased route handler. Implementations
     /// should downcast it to the expected type (e.g., `axum::routing::MethodRouter`).
     async fn register_route(&self, path: String, route: Box<dyn Any + Send>);
+
+    /// Returns the configured auth provider, if any.
+    ///
+    /// Tasks that require user authentication call this to validate bearer
+    /// tokens and extract `UserContext` from incoming requests.
+    fn auth_provider(&self) -> Option<Arc<dyn AuthProvider>>;
 }

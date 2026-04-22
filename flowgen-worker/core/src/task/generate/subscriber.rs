@@ -222,7 +222,7 @@ impl EventHandler {
             if let Some(obj) = data.as_object_mut() {
                 obj.insert(
                     "system_info".to_string(),
-                    serde_json::to_value(&system_info).unwrap_or_default(),
+                    serde_json::to_value(&system_info).unwrap_or(serde_json::Value::Null),
                 );
             }
 

@@ -545,6 +545,9 @@ impl Flow {
         // Create a fresh cancellation token for this task tenure.
         let cancellation_token = tokio_util::sync::CancellationToken::new();
 
+        // Shared response registry for streaming progress between tasks in this flow.
+        let response_registry = Arc::new(flowgen_core::registry::ResponseRegistry::new());
+
         let mut task_context_builder = flowgen_core::task::context::TaskContextBuilder::new()
             .flow_name(self.config.flow.name.clone())
             .flow_labels(self.config.flow.labels.clone())
@@ -552,6 +555,7 @@ impl Flow {
             .cache(Arc::clone(&self.cache))
             .http_server(self.http_server.clone())
             .mcp_server(self.mcp_server.clone())
+            .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token);
 
@@ -1530,15 +1534,16 @@ async fn spawn_task(
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    flowgen_ai_agent::llm_proxy::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context)
-                        .build()
-                        .await?
-                        .run()
-                        .await?;
+                    let mut builder =
+                        flowgen_ai_agent::llm_proxy::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
                     Ok(())
                 }
                 .instrument(span),

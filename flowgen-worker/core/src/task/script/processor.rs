@@ -658,7 +658,9 @@ impl crate::task::runner::Runner for Processor {
                     tokio::runtime::Handle::current().block_on(async move {
                         match cache.get(&namespaced_key).await {
                             Ok(Some(bytes)) => {
-                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                                let s = String::from_utf8(bytes.to_vec()).unwrap_or_else(|e| {
+                                    String::from_utf8_lossy(e.as_bytes()).to_string()
+                                });
                                 rhai::Dynamic::from(s)
                             }
                             _ => rhai::Dynamic::UNIT,

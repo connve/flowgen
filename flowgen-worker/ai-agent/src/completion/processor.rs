@@ -71,8 +71,14 @@ pub enum Error {
         #[source]
         source: flowgen_core::resource::Error,
     },
-    #[error("Failed to connect to MCP server at {url}: {message}")]
-    McpConnection { url: String, message: String },
+    #[error("Failed to load MCP credentials for {url}: {source}")]
+    McpCredentials {
+        url: String,
+        #[source]
+        source: flowgen_core::credentials::Error,
+    },
+    #[error("Failed to connect to MCP server at {url}: {reason}")]
+    McpConnection { url: String, reason: String },
 }
 
 /// Response structure for completion events.
@@ -211,6 +217,14 @@ impl EventHandler {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
+        // Extract correlation_id from event meta for streaming progress back to source tasks.
+        let correlation_id = event
+            .meta
+            .as_ref()
+            .and_then(|m| m.get(flowgen_core::registry::CORRELATION_ID))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
 
@@ -230,6 +244,23 @@ impl EventHandler {
                 match chunk {
                     AgentChunk::Text(text) => {
                         accumulated_text.push_str(&text);
+
+                        // Push streaming progress to the response registry if a
+                        // correlation_id is present (webhook/llm_proxy SSE streaming).
+                        if let (Some(cid), Some(registry)) =
+                            (&correlation_id, &self.task_context.response_registry)
+                        {
+                            registry
+                                .send_progress(
+                                    cid,
+                                    flowgen_core::registry::ProgressEvent {
+                                        task: self.config.name.clone(),
+                                        status: text.clone(),
+                                    },
+                                )
+                                .await;
+                        }
+
                         let chunk_event = CompletionChunk {
                             text,
                             is_final: false,
@@ -476,9 +507,9 @@ impl flowgen_core::task::runner::Runner for Processor {
                 if let Some(ref creds_path) = mcp_config.credentials_path {
                     let creds = flowgen_core::credentials::load_http_credentials(creds_path)
                         .await
-                        .map_err(|e| Error::McpConnection {
+                        .map_err(|source| Error::McpCredentials {
                             url: mcp_config.url.clone(),
-                            message: e.to_string(),
+                            source,
                         })?;
                     if let Some(bearer_token) = creds.bearer_auth {
                         transport_config = transport_config.auth_header(bearer_token);
@@ -493,7 +524,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                     .await
                     .map_err(|e| Error::McpConnection {
                         url: mcp_config.url.clone(),
-                        message: e.to_string(),
+                        reason: e.to_string(),
                     })?;
 
                 info!(url = %mcp_config.url, "Connected to MCP server and discovered tools.");

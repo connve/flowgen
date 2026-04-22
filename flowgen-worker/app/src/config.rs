@@ -356,6 +356,9 @@ pub struct HttpServerOptions {
     /// Optional path to global credentials file for webhook authentication.
     /// Individual `http_webhook` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider configuration for user identity resolution.
+    /// Shared across all HTTP-facing tasks on this worker.
+    pub auth: Option<flowgen_core::auth::AuthConfig>,
 }
 
 /// OpenTelemetry configuration options for metrics and distributed tracing.
@@ -756,6 +759,7 @@ mod tests {
             port: Some(8080),
             path: None,
             credentials_path: None,
+            auth: None,
         };
 
         assert!(http_server_options.enabled);
@@ -769,6 +773,7 @@ mod tests {
             port: None,
             path: None,
             credentials_path: None,
+            auth: None,
         };
 
         assert!(!http_server_options.enabled);
@@ -788,6 +793,7 @@ mod tests {
                     port: Some(8080),
                     path: Some("/workers".to_string()),
                     credentials_path: None,
+                    auth: None,
                 }),
                 mcp_server: None,
                 retry: None,

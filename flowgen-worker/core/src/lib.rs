@@ -3,6 +3,8 @@
 //! This crate contains shared types, traits, and utilities used across all flowgen workers
 //! including event handling, content buffering, caching, and task execution frameworks.
 
+/// Authentication providers for user identity resolution (JWT, OIDC, session).
+pub mod auth;
 /// Content format handling and reader/writer abstractions.
 pub mod buffer;
 /// Caching interface for persistent storage across workflow executions.
@@ -19,12 +21,20 @@ pub mod event;
 pub mod executor;
 /// HTTP server trait for task context integration.
 pub mod http_server;
-/// MCP (Model Context Protocol) core types and response registry.
-pub mod mcp;
+/// MCP (Model Context Protocol) core types and backward-compatible re-exports.
+pub mod mcp {
+    /// Backward-compatible re-exports from the registry module.
+    pub mod registry;
+}
 /// MCP server trait for task context integration.
 pub mod mcp_server;
 /// NsJail sandbox for secure script execution.
-pub mod nsjail;
+pub mod nsjail {
+    /// Sandbox executor using nsjail for process isolation.
+    pub mod sandbox;
+
+    pub use sandbox::{Error, SandboxConfig, SandboxExecutor, SandboxResult};
+}
 /// Response registry for correlating requests with pipeline results.
 pub mod registry;
 /// Resource loading system for external assets.

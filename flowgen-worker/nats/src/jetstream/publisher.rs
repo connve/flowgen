@@ -32,6 +32,7 @@ impl From<async_nats::jetstream::publish::PublishAck> for PublishAck {
 
 /// Errors that can occur during NATS JetStream publishing operations.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Error sending event to channel: {source}")]
     SendMessage {

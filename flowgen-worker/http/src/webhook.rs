@@ -5,11 +5,15 @@
 
 use axum::{body::Body, extract::Request, response::IntoResponse, routing::MethodRouter};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
-use reqwest::{header::HeaderMap, StatusCode};
+use reqwest::{
+    header::{HeaderMap, AUTHORIZATION},
+    StatusCode,
+};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
 use tokio::sync::mpsc;
@@ -106,6 +110,8 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
     /// Shared response registry for SSE streaming (only used when stream: true).
     response_registry: Option<Arc<ResponseRegistry>>,
+    /// Auth provider for user identity resolution (from worker config).
+    auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl EventHandler {
@@ -116,7 +122,7 @@ impl EventHandler {
             None => return Ok(()),
         };
 
-        let auth_header = match headers.get("authorization") {
+        let auth_header = match headers.get(AUTHORIZATION) {
             Some(header) => header,
             None => return Err(Error::NoCredentials),
         };
@@ -128,7 +134,7 @@ impl EventHandler {
 
         // Check bearer authentication.
         if let Some(expected_token) = &credentials.bearer_auth {
-            match auth_value.strip_prefix("Bearer ") {
+            match extract_bearer_token(auth_value) {
                 Some(token) if token == expected_token => return Ok(()),
                 Some(_) => return Err(Error::InvalidCredentials),
                 None => {}
@@ -157,20 +163,49 @@ impl EventHandler {
         Err(Error::InvalidCredentials)
     }
 
-    /// Parse and validate the incoming request, returning the JSON data.
+    /// Validate user-level authentication via the worker auth provider.
+    /// Returns the user context if auth is required and valid, None otherwise.
+    async fn validate_user_auth(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<flowgen_core::auth::UserContext>, Error> {
+        match &self.config.auth {
+            Some(config) if config.required => {}
+            _ => return Ok(None),
+        }
+
+        let provider = match &self.auth_provider {
+            Some(p) => p,
+            None => return Err(Error::NoCredentials),
+        };
+
+        let auth_header = headers
+            .get(AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or(Error::NoCredentials)?;
+
+        let token = extract_bearer_token(auth_header).ok_or(Error::MalformedCredentials)?;
+
+        provider
+            .validate(token)
+            .await
+            .map(Some)
+            .map_err(|_| Error::InvalidCredentials)
+    }
+
+    /// Parse and validate the incoming request, returning the JSON data and optional user context.
     async fn parse_request(
         &self,
         headers: &HeaderMap,
         request: Request<Body>,
-    ) -> Result<Value, Error> {
+    ) -> Result<(Value, Option<flowgen_core::auth::UserContext>), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Err(Error::FlowCompletionFailed);
         }
 
-        if let Err(auth_error) = self.validate_authentication(headers) {
-            error!("Webhook authentication failed for: {}", auth_error);
-            return Err(auth_error);
-        }
+        self.validate_authentication(headers)?;
+
+        let user_context = self.validate_user_auth(headers).await?;
 
         let body = axum::body::to_bytes(request.into_body(), usize::MAX)
             .await
@@ -178,13 +213,9 @@ impl EventHandler {
 
         let json_body = match body.is_empty() {
             true => Value::Null,
-            false => serde_json::from_slice(&body).map_err(|e| {
-                error!("Failed to parse webhook request body as JSON: {}", e);
-                Error::SerdeJson { source: e }
-            })?,
+            false => serde_json::from_slice(&body).map_err(|source| Error::SerdeJson { source })?,
         };
 
-        // Only store headers that are specified in the configuration.
         let mut headers_map = Map::new();
         if let Some(configured_headers) = &self.config.headers {
             for (key, value) in headers.iter() {
@@ -198,10 +229,12 @@ impl EventHandler {
             }
         }
 
-        Ok(json!({
+        let data = json!({
             DEFAULT_HEADERS_KEY: Value::Object(headers_map),
             DEFAULT_PAYLOAD_KEY: json_body
-        }))
+        });
+
+        Ok((data, user_context))
     }
 
     /// Build an event with completion channel and inject into pipeline.
@@ -244,8 +277,8 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<StatusCode, Error> {
-        let data = match self.parse_request(&headers, request).await {
-            Ok(data) => data,
+        let (data, user_context) = match self.parse_request(&headers, request).await {
+            Ok(result) => result,
             Err(Error::FlowCompletionFailed) => return Ok(StatusCode::SERVICE_UNAVAILABLE),
             Err(
                 e
@@ -256,7 +289,15 @@ impl EventHandler {
             Err(e) => return Err(e),
         };
 
-        let completion_rx = self.inject_event(data, None).await?;
+        let meta = user_context.map(|ctx| {
+            let mut meta = serde_json::Map::new();
+            if let Ok(value) = serde_json::to_value(ctx) {
+                meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+            }
+            meta
+        });
+
+        let completion_rx = self.inject_event(data, meta).await?;
 
         // Wait for flow completion before responding to HTTP request.
         match self.config.ack_timeout {
@@ -286,8 +327,8 @@ impl EventHandler {
         headers: HeaderMap,
         request: Request<Body>,
     ) -> Result<axum::response::Response, Error> {
-        let data = match self.parse_request(&headers, request).await {
-            Ok(data) => data,
+        let (data, user_context) = match self.parse_request(&headers, request).await {
+            Ok(result) => result,
             Err(Error::FlowCompletionFailed) => {
                 return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
             }
@@ -302,13 +343,12 @@ impl EventHandler {
 
         let correlation_id = uuid::Uuid::new_v4().to_string();
 
-        // Set up progress channel for streaming intermediate events.
         let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
-        let response_registry = self
-            .response_registry
-            .as_ref()
-            .expect("response_registry required for streaming webhook");
+        let response_registry = match &self.response_registry {
+            Some(registry) => registry,
+            None => return Err(Error::FlowCompletionFailed),
+        };
 
         response_registry
             .insert(
@@ -320,12 +360,17 @@ impl EventHandler {
             )
             .await;
 
-        // Inject correlation_id into event meta so downstream tasks can stream progress.
+        // Build meta with correlation_id and optional user context.
         let mut meta = serde_json::Map::new();
         meta.insert(
-            "correlation_id".to_string(),
+            flowgen_core::registry::CORRELATION_ID.to_string(),
             Value::String(correlation_id.clone()),
         );
+        if let Some(ctx) = user_context {
+            if let Ok(value) = serde_json::to_value(ctx) {
+                meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+            }
+        }
 
         let completion_rx = self.inject_event(data, Some(meta)).await?;
 
@@ -360,11 +405,12 @@ impl EventHandler {
                     progress = progress_rx.recv() => {
                         match progress {
                             Some(evt) => {
-                                let value = serde_json::to_value(&evt).unwrap_or_default();
-                                if let Some(msg) = format_data(&value) {
-                                    if sse_tx.send(Ok(msg)).await.is_err() {
-                                        registry.remove(&cid).await;
-                                        return;
+                                if let Ok(value) = serde_json::to_value(&evt) {
+                                    if let Some(msg) = format_data(&value) {
+                                        if sse_tx.send(Ok(msg)).await.is_err() {
+                                            registry.remove(&cid).await;
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -393,9 +439,10 @@ impl EventHandler {
 
                         // Drain remaining progress events.
                         while let Ok(evt) = progress_rx.try_recv() {
-                            let value = serde_json::to_value(&evt).unwrap_or_default();
-                            if let Some(msg) = format_data(&value) {
-                                let _ = sse_tx.send(Ok(msg)).await;
+                            if let Ok(value) = serde_json::to_value(&evt) {
+                                if let Some(msg) = format_data(&value) {
+                                    let _ = sse_tx.send(Ok(msg)).await;
+                                }
                             }
                         }
 
@@ -417,12 +464,15 @@ impl EventHandler {
 
         let stream = ReceiverStream::new(sse_rx);
 
-        Ok(axum::response::Response::builder()
+        axum::response::Response::builder()
             .status(StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
             .header(axum::http::header::CACHE_CONTROL, "no-cache")
             .body(Body::from_stream(stream))
-            .unwrap())
+            .map_err(|e| {
+                error!(error = %e, "Failed to build SSE response.");
+                Error::FlowCompletionFailed
+            })
     }
 }
 
@@ -455,18 +505,18 @@ impl flowgen_core::task::runner::Runner for Processor {
             .map_err(|source| Error::ConfigRender { source })?;
 
         // Resolve credentials: task-level overrides global.
-        let global_credentials_path = self
+        let server_credentials_path = self
             .task_context
             .http_server
             .as_ref()
             .and_then(|server| server.as_any().downcast_ref::<super::server::HttpServer>())
-            .and_then(|server| server.global_credentials_path())
+            .and_then(|server| server.credentials_path())
             .map(|p| p.to_path_buf());
 
         let credentials_path = init_config
             .credentials_path
             .as_ref()
-            .or(global_credentials_path.as_ref());
+            .or(server_credentials_path.as_ref());
 
         let credentials = match credentials_path {
             Some(path) => {
@@ -479,6 +529,13 @@ impl flowgen_core::task::runner::Runner for Processor {
             None => None,
         };
 
+        // Get auth provider from the worker-level HTTP server.
+        let auth_provider = self
+            .task_context
+            .http_server
+            .as_ref()
+            .and_then(|server| server.auth_provider());
+
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             tx: self.tx.clone(),
@@ -486,7 +543,11 @@ impl flowgen_core::task::runner::Runner for Processor {
             credentials,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-            response_registry: self.response_registry.clone(),
+            response_registry: self
+                .response_registry
+                .clone()
+                .or_else(|| self.task_context.response_registry.clone()),
+            auth_provider,
         };
 
         Ok(event_handler)
@@ -706,6 +767,7 @@ mod tests {
             credentials_path: None,
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         });
@@ -754,6 +816,7 @@ mod tests {
             task_type: "test",
             task_context: create_mock_task_context(),
             response_registry: None,
+            auth_provider: None,
         };
     }
 
@@ -772,6 +835,7 @@ mod tests {
             credentials_path: None,
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         });
@@ -786,6 +850,7 @@ mod tests {
             task_type: "test",
             task_context: create_mock_task_context(),
             response_registry: None,
+            auth_provider: None,
         };
 
         assert!(handler.config.headers.is_some());
@@ -806,6 +871,7 @@ mod tests {
             credentials_path: None,
             ack_timeout: None,
             stream: false,
+            auth: None,
             depends_on: None,
             retry: None,
         });
@@ -820,6 +886,7 @@ mod tests {
             task_type: "test",
             task_context: create_mock_task_context(),
             response_registry: None,
+            auth_provider: None,
         };
 
         assert!(handler.config.headers.is_none());

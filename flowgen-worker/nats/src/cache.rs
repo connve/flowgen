@@ -18,6 +18,7 @@ const DEFAULT_HISTORY: i64 = 10;
 const DEFAULT_TOMBSTONE_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("NATS client error: {source}")]
     ClientAuth {

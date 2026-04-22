@@ -79,6 +79,12 @@ pub enum Error {
     /// MCP server downcast error.
     #[error("Failed to downcast MCP server to concrete type.")]
     McpServerDowncast,
+    /// Auth provider initialization failed.
+    #[error("Failed to build auth provider: {source}")]
+    AuthProviderInit {
+        #[source]
+        source: flowgen_core::auth::AuthError,
+    },
     /// Failed to read MCP credentials file.
     #[error("Failed to read MCP credentials from {path}: {source}")]
     McpCredentialsRead {
@@ -292,8 +298,14 @@ impl App {
                     http_server_builder = http_server_builder.path(path.clone());
                 }
                 if let Some(ref creds_path) = http_config.credentials_path {
-                    http_server_builder =
-                        http_server_builder.global_credentials_path(creds_path.clone());
+                    http_server_builder = http_server_builder.credentials_path(creds_path.clone());
+                }
+                if let Some(auth_config) = http_config.auth.clone() {
+                    let provider = auth_config
+                        .build()
+                        .await
+                        .map_err(|source| Error::AuthProviderInit { source })?;
+                    http_server_builder = http_server_builder.auth_provider(provider);
                 }
                 Some(Arc::new(http_server_builder.build()))
             }
@@ -322,8 +334,8 @@ impl App {
         let mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>> = if mcp_enabled
             && has_mcp_tools
         {
-            // Load global MCP credentials if configured.
-            let global_credentials = app_config
+            // Load MCP credentials if configured.
+            let credentials = app_config
                 .worker
                 .as_ref()
                 .and_then(|w| w.mcp_server.as_ref())
@@ -352,10 +364,11 @@ impl App {
                     }
                 });
 
-            Some(
-                Arc::new(flowgen_mcp::server::McpServer::new(global_credentials))
-                    as Arc<dyn flowgen_core::mcp_server::McpServer>,
-            )
+            Some(Arc::new(flowgen_mcp::server::McpServer::new(
+                credentials,
+                http_server.as_ref().and_then(|s| s.auth_provider()),
+            ))
+                as Arc<dyn flowgen_core::mcp_server::McpServer>)
         } else {
             None
         };

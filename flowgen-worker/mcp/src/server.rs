@@ -80,6 +80,8 @@ pub struct ToolRegistration {
     pub credentials: Option<super::config::Credentials>,
     /// Optional timeout for waiting on flow completion.
     pub ack_timeout: Option<std::time::Duration>,
+    /// Whether user-level auth is required for this tool.
+    pub auth_required: bool,
 }
 
 /// MCP server with tool registry and response tracking.
@@ -89,8 +91,10 @@ pub struct McpServer {
     tool_registry: Arc<DashMap<String, ToolRegistration>>,
     /// Registry for correlating requests with pipeline results.
     response_registry: Arc<ResponseRegistry>,
-    /// Optional global credentials from worker configuration.
-    global_credentials: Arc<Option<super::config::Credentials>>,
+    /// Optional credentials from worker configuration.
+    credentials: Arc<Option<super::config::Credentials>>,
+    /// Optional auth provider for user identity resolution (JWT, OIDC, or session).
+    auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -108,12 +112,16 @@ impl flowgen_core::mcp_server::McpServer for McpServer {
 }
 
 impl McpServer {
-    /// Creates a new MCP server with optional global credentials.
-    pub fn new(global_credentials: Option<super::config::Credentials>) -> Self {
+    /// Creates a new MCP server with optional credentials and auth provider.
+    pub fn new(
+        credentials: Option<super::config::Credentials>,
+        auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
+    ) -> Self {
         Self {
             tool_registry: Arc::new(DashMap::new()),
             response_registry: Arc::new(ResponseRegistry::new()),
-            global_credentials: Arc::new(global_credentials),
+            credentials: Arc::new(credentials),
+            auth_provider,
         }
     }
 
@@ -168,6 +176,46 @@ impl McpServer {
     ///
     /// Checks tool-specific credentials first, then falls back to global credentials.
     /// If neither is configured, allows all requests.
+    /// Validate user-level authentication via the auth provider.
+    /// Returns the user context if valid, None if not required, or error if required but invalid.
+    async fn validate_user_auth(
+        &self,
+        headers: &HeaderMap,
+        auth_required: bool,
+    ) -> Result<Option<flowgen_core::auth::UserContext>, StatusCode> {
+        if !auth_required {
+            // Still try to extract if provider exists (opportunistic).
+            if let Some(provider) = &self.auth_provider {
+                if let Some(auth_header) = headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok())
+                {
+                    if let Some(token) = flowgen_core::auth::extract_bearer_token(auth_header) {
+                        return Ok(provider.validate(token).await.ok());
+                    }
+                }
+            }
+            return Ok(None);
+        }
+
+        let provider = self
+            .auth_provider
+            .as_ref()
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let auth_header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let token = flowgen_core::auth::extract_bearer_token(auth_header)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        provider
+            .validate(token)
+            .await
+            .map(Some)
+            .map_err(|_| StatusCode::UNAUTHORIZED)
+    }
+
+    /// Validate endpoint-level API key authentication.
     fn validate_auth(
         &self,
         headers: &HeaderMap,
@@ -181,9 +229,7 @@ impl McpServer {
         });
 
         // Use tool-specific credentials, falling back to global.
-        let credentials = tool_creds
-            .as_ref()
-            .or(self.global_credentials.as_ref().as_ref());
+        let credentials = tool_creds.as_ref().or(self.credentials.as_ref().as_ref());
 
         let credentials = match credentials {
             Some(creds) => creds,
@@ -195,12 +241,11 @@ impl McpServer {
         }
 
         let auth_header = headers
-            .get("authorization")
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .ok_or(StatusCode::UNAUTHORIZED)?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
+        let token = flowgen_core::auth::extract_bearer_token(auth_header)
             .ok_or(StatusCode::UNAUTHORIZED)?;
 
         if credentials.api_keys.iter().any(|k| k == token) {
@@ -376,14 +421,20 @@ async fn execute_tool_call(
         .validate_auth(headers, Some(&params.name))
         .map_err(|_| Error::Unauthorized)?;
 
-    // Look up tool in registry and extract sender and timeout.
-    let (tool_tx, ack_timeout) = server
+    // Look up tool in registry and extract sender, timeout, and auth requirement.
+    let (tool_tx, ack_timeout, auth_required) = server
         .tool_registry
         .get(&params.name)
-        .map(|entry| (entry.tx.clone(), entry.ack_timeout))
+        .map(|entry| (entry.tx.clone(), entry.ack_timeout, entry.auth_required))
         .ok_or_else(|| Error::UnknownTool {
             name: params.name.clone(),
         })?;
+
+    // Validate user-level auth based on tool configuration.
+    let user_context = server
+        .validate_user_auth(headers, auth_required)
+        .await
+        .map_err(|_| Error::Unauthorized)?;
 
     // Generate a unique correlation identifier for this request.
     let correlation_id = uuid::Uuid::new_v4().to_string();
@@ -403,12 +454,17 @@ async fn execute_tool_call(
         )
         .await;
 
-    // Build event with correlation_id in meta and inject into the pipeline.
+    // Build event with correlation_id and optional user context in meta.
     let mut meta = serde_json::Map::new();
     meta.insert(
-        "correlation_id".to_string(),
+        flowgen_core::registry::CORRELATION_ID.to_string(),
         serde_json::Value::String(correlation_id.clone()),
     );
+    if let Some(ctx) = user_context {
+        if let Ok(value) = serde_json::to_value(ctx) {
+            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+        }
+    }
 
     // Create completion channel to receive the pipeline result.
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<

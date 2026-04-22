@@ -8,6 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Event meta key for threading the correlation identifier through the pipeline.
+pub const CORRELATION_ID: &str = "correlation_id";
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
