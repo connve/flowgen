@@ -42,7 +42,7 @@ impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             otlp_endpoint: "http://localhost:4317".to_string(),
-            service_name: "flowgen-worker".to_string(),
+            service_name: "flowgen".to_string(),
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             metrics_export_interval_secs: 60,
         }
@@ -149,7 +149,7 @@ mod tests {
     fn test_telemetry_config_default() {
         let config = TelemetryConfig::default();
         assert_eq!(config.otlp_endpoint, "http://localhost:4317");
-        assert_eq!(config.service_name, "flowgen-worker");
+        assert_eq!(config.service_name, "flowgen");
         assert_eq!(config.metrics_export_interval_secs, 60);
     }
 

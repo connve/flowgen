@@ -1,6 +1,6 @@
 use config::Config;
-use flowgen_worker::app::App;
-use flowgen_worker::config::AppConfig;
+use flowgen::app::App;
+use flowgen::config::AppConfig;
 use std::env;
 use std::process;
 use tokio::sync::oneshot;

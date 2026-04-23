@@ -1,12 +1,12 @@
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if $worker.enabled }}
 {{- if and (not $worker.config.existingConfigMap) $worker.config.inline }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "flowgen-worker.fullname" . }}-config
+  name: {{ include "flowgen.fullname" . }}-config
   labels:
-    {{- include "flowgen-worker.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" . | nindent 4 }}
 data:
   config.yaml: |
 {{- $worker.config.inline | nindent 4 }}

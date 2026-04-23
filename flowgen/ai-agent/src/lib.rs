@@ -12,8 +12,8 @@ pub mod completion {
     pub mod processor;
 }
 
-/// OpenAI-compatible chat completions proxy endpoint.
-pub mod llm_proxy {
+/// OpenAI-compatible AI gateway endpoint.
+pub mod ai_gateway {
     pub mod config;
     pub mod processor;
 }

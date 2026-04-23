@@ -11,7 +11,6 @@ use std::fmt::Debug;
 
 /// Cache operation errors.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum CacheError {
     /// Key already exists during create operation.
     #[error("Key already exists")]
@@ -48,6 +47,10 @@ pub enum CacheError {
     /// Failed to put key in cache.
     #[error("Failed to put key: {0}")]
     PutFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Failed to list keys in cache.
+    #[error("Failed to list keys: {0}")]
+    ListKeysFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Type alias for cache errors.
@@ -180,6 +183,15 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Use Case
     /// Overwriting DELETE tombstones during lease acquisition.
     async fn get_revision(&self, key: &str) -> Result<Option<u64>, Error>;
+
+    /// Lists all keys matching the given prefix.
+    ///
+    /// # Arguments
+    /// * `prefix` - The prefix to filter keys by.
+    ///
+    /// # Returns
+    /// A vector of key names that start with the given prefix.
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, Error>;
 }
 
 #[cfg(test)]

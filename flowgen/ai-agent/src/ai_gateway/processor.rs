@@ -1,4 +1,4 @@
-//! LLM proxy processor — OpenAI-compatible chat completions endpoint.
+//! AI gateway processor — OpenAI-compatible chat completions endpoint.
 //!
 //! Thin HTTP layer that accepts OpenAI-format requests, translates them into
 //! pipeline events, and formats responses back to OpenAI format. The actual
@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
 
-/// Errors that can occur during LLM proxy processing.
+/// Errors that can occur during AI gateway processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -104,7 +104,7 @@ impl IntoResponse for Error {
     }
 }
 
-/// Shared state for the LLM proxy Axum handler.
+/// Shared state for the AI gateway Axum handler.
 #[derive(Clone)]
 struct ProxyState {
     /// Cancellation token for graceful shutdown.
@@ -367,7 +367,7 @@ async fn handle_streaming(
     info!(
         proxy = %state.config.name,
         correlation_id = %correlation_id,
-        "Streaming LLM proxy request accepted."
+        "Streaming AI gateway request accepted."
     );
 
     // Spawn background task to stream progress + final result as OpenAI SSE.
@@ -482,7 +482,7 @@ async fn handle_streaming(
         })
 }
 
-/// LLM proxy processor.
+/// AI gateway processor.
 #[derive(Debug)]
 pub struct Processor {
     /// Processor configuration.
@@ -569,7 +569,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
             info!(
                 path = %init_config.path,
-                "LLM proxy endpoint registered."
+                "AI gateway endpoint registered."
             );
         }
 
@@ -577,7 +577,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 }
 
-/// Builder for LLM proxy processor.
+/// Builder for AI gateway processor.
 #[derive(Debug, Default)]
 pub struct ProcessorBuilder {
     config: Option<Arc<config::Processor>>,

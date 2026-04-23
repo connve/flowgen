@@ -157,9 +157,12 @@ pub enum Error {
     /// Error in MCP tool processor task.
     #[error(transparent)]
     McpToolProcessor(#[from] flowgen_mcp::processor::Error),
-    /// Error in LLM proxy task.
+    /// Error in AI gateway task.
     #[error(transparent)]
-    LlmProxy(#[from] flowgen_ai_agent::llm_proxy::processor::Error),
+    AiGateway(#[from] flowgen_ai_agent::ai_gateway::processor::Error),
+    /// Error in Git sync task.
+    #[error(transparent)]
+    GitSync(#[from] flowgen_git::sync::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -278,7 +281,7 @@ impl TaskRegistryBuilder {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
             );
 
             let input_rx = if idx > 0 {
@@ -412,7 +415,7 @@ impl TaskRegistryBuilder {
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
             );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
@@ -469,14 +472,14 @@ impl Flow {
         let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
             matches!(
                 task,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
             )
         });
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook, mcp_tool, or llm_proxy); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook, mcp_tool, or ai_gateway); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -500,7 +503,7 @@ impl Flow {
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::llm_proxy(_)));
+            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::ai_gateway(_)));
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
@@ -1530,16 +1533,37 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::llm_proxy(config) => {
+        TaskType::ai_gateway(config) => {
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
                     let mut builder =
-                        flowgen_ai_agent::llm_proxy::processor::ProcessorBuilder::new()
+                        flowgen_ai_agent::ai_gateway::processor::ProcessorBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)
                             .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::git_sync(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_git::sync::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }

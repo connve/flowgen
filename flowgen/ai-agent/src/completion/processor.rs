@@ -246,7 +246,7 @@ impl EventHandler {
                         accumulated_text.push_str(&text);
 
                         // Push streaming progress to the response registry if a
-                        // correlation_id is present (webhook/llm_proxy SSE streaming).
+                        // correlation_id is present (webhook/ai_gateway SSE streaming).
                         if let (Some(cid), Some(registry)) =
                             (&correlation_id, &self.task_context.response_registry)
                         {

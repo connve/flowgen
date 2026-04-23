@@ -51,7 +51,7 @@ jobs:
         working-directory: flowgen
         run: |
           # Extract version from Cargo.toml
-          APP_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen_worker") | .version')
+          APP_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
 
           # Add or update Chart.yaml appVersion (after the version line)
           if grep -q '^appVersion:' charts/flowgen/Chart.yaml; then
