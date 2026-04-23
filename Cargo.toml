@@ -1,10 +1,10 @@
 [workspace]
-members = ["flowgen-worker/app"]
+members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.99.0"
+version = "0.100.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -94,3 +94,4 @@ rmcp = { version = "1", features = [
 schemars = { version = "1.2" }
 scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
+walkdir = { version = "2.5" }

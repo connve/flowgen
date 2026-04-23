@@ -1431,8 +1431,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowgen"
+version = "0.100.0"
+dependencies = [
+ "arrow",
+ "atty",
+ "config",
+ "flowgen_ai_agent",
+ "flowgen_core",
+ "flowgen_gcp",
+ "flowgen_git",
+ "flowgen_html",
+ "flowgen_http",
+ "flowgen_mcp",
+ "flowgen_mssql",
+ "flowgen_nats",
+ "flowgen_object_store",
+ "flowgen_salesforce",
+ "futures",
+ "futures-util",
+ "glob",
+ "humantime-serde",
+ "native-tls",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
 name = "flowgen_ai_agent"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1459,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1503,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1530,8 +1566,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowgen_git"
+version = "0.100.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "flowgen_core",
+ "humantime-serde",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-retry2",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "flowgen_html"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1547,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1571,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1594,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1616,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1643,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1666,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.99.0"
+version = "0.100.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1691,39 +1747,6 @@ dependencies = [
  "tonic 0.14.5",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "flowgen_worker"
-version = "0.99.0"
-dependencies = [
- "arrow",
- "atty",
- "config",
- "flowgen_ai_agent",
- "flowgen_core",
- "flowgen_gcp",
- "flowgen_html",
- "flowgen_http",
- "flowgen_mcp",
- "flowgen_mssql",
- "flowgen_nats",
- "flowgen_object_store",
- "flowgen_salesforce",
- "futures",
- "futures-util",
- "glob",
- "humantime-serde",
- "native-tls",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

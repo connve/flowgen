@@ -59,6 +59,11 @@ pub enum Error {
     MissingKVStore,
     #[error("Missing required value JetStream Context")]
     MissingJetStreamContext,
+    #[error("KV keys listing error: {source}")]
+    KVKeys {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
 }
@@ -367,6 +372,26 @@ impl flowgen_core::cache::Cache for Cache {
                 Error::KVEntry { source: e },
             ))),
         }
+    }
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, flowgen_core::cache::Error> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
+
+        use futures_util::StreamExt;
+        let mut keys = Vec::new();
+        let mut key_stream = store.keys().await.map_err(|e| {
+            flowgen_core::cache::CacheError::GetFailed(Box::new(Error::KVKeys { source: e }))
+        })?;
+        while let Some(result) = key_stream.next().await {
+            if let Ok(key) = result {
+                if key.starts_with(prefix) {
+                    keys.push(key);
+                }
+            }
+        }
+        Ok(keys)
     }
 }
 

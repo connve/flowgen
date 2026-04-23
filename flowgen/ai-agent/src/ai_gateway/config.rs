@@ -1,6 +1,6 @@
-//! LLM proxy configuration and OpenAI-compatible types.
+//! AI gateway configuration and OpenAI-compatible types.
 //!
-//! Provides task configuration for the LLM proxy endpoint and the OpenAI
+//! Provides task configuration for the AI gateway endpoint and the OpenAI
 //! request/response types used for protocol translation.
 
 use flowgen_core::config::ConfigExt;
@@ -24,7 +24,7 @@ pub const SSE_DONE: &str = "data: [DONE]\n\n";
 
 // --- Task configuration ---
 
-/// LLM proxy processor configuration.
+/// AI gateway processor configuration.
 ///
 /// Thin HTTP layer that accepts OpenAI-format chat completion requests,
 /// translates them into pipeline events, and streams back OpenAI-format
@@ -35,7 +35,7 @@ pub const SSE_DONE: &str = "data: [DONE]\n\n";
 ///
 /// ```yaml
 /// tasks:
-///   - llm_proxy:
+///   - ai_gateway:
 ///       name: proxy
 ///       path: /v1/chat/completions
 ///       credentials_path: /etc/proxy/credentials.json

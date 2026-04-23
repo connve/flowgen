@@ -1,5 +1,5 @@
 [package]
-name = "flowgen_worker"
+name = "flowgen"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ edition.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "flowgen_worker"
+name = "flowgen"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,6 +21,7 @@ flowgen_gcp = { path = "../gcp" }
 flowgen_mssql = { path = "../mssql" }
 flowgen_ai_agent = { path = "../ai-agent" }
 flowgen_mcp = { path = "../mcp" }
+flowgen_git = { path = "../git" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
@@ -37,6 +38,8 @@ native-tls = { workspace = true }
 humantime-serde = { workspace = true }
 rustls = { workspace = true }
 atty = { workspace = true }
+serde_yaml = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

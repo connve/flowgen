@@ -1,15 +1,15 @@
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if $worker.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "flowgen-worker.fullname" . }}-http-server
+  name: {{ include "flowgen.fullname" . }}-http-server
   labels:
-    {{- include "flowgen-worker.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" . | nindent 4 }}
 spec:
   type: {{ $worker.http_server.type }}
   selector:
-    {{- include "flowgen-worker.selectorLabels" . | nindent 4 }}
+    {{- include "flowgen.selectorLabels" . | nindent 4 }}
   ports:
   - port: {{ $worker.http_server.port }}
     targetPort: http
@@ -20,13 +20,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "flowgen-worker.fullname" . }}-mcp-server
+  name: {{ include "flowgen.fullname" . }}-mcp-server
   labels:
-    {{- include "flowgen-worker.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" . | nindent 4 }}
 spec:
   type: {{ $worker.mcp_server.type }}
   selector:
-    {{- include "flowgen-worker.selectorLabels" . | nindent 4 }}
+    {{- include "flowgen.selectorLabels" . | nindent 4 }}
   ports:
   - port: {{ $worker.mcp_server.port }}
     targetPort: mcp

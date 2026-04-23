@@ -17,7 +17,7 @@ global:
 ################################################################################
 # Flowgen Worker options
 ################################################################################
-flowgen-worker:
+flowgen:
   enabled: true
 
   nameOverride: ""
@@ -94,7 +94,7 @@ flowgen-worker:
     #     telemetry:
     #       enabled: true
     #       otlp_endpoint: "http://otel-collector:4317"
-    #       service_name: "flowgen-worker"
+    #       service_name: "flowgen"
     #       metrics_export_interval: "60s"
     inline: ""
 

@@ -1,16 +1,16 @@
-{{- $worker := index .Values "flowgen-worker" -}}
+{{- $worker := index .Values "flowgen" -}}
 {{- if and $worker.enabled $worker.autoscaling.enabled }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "flowgen-worker.fullname" . }}
+  name: {{ include "flowgen.fullname" . }}
   labels:
-    {{- include "flowgen-worker.labels" . | nindent 4 }}
+    {{- include "flowgen.labels" . | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "flowgen-worker.fullname" . }}
+    name: {{ include "flowgen.fullname" . }}
   minReplicas: {{ $worker.autoscaling.minReplicas }}
   maxReplicas: {{ $worker.autoscaling.maxReplicas }}
   metrics:

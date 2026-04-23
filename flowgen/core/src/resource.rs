@@ -2,9 +2,14 @@
 //!
 //! Provides support for loading external files (SQL queries, JSON templates, HTML, etc.)
 //! using resource keys instead of embedding content in configuration files.
+//!
+//! Resources can be loaded from two backends:
+//! - **Filesystem**: Base directory path, resource keys resolve to files (default).
+//! - **Cache**: Distributed cache, resource keys resolve to cache keys with a configured prefix.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
 
 /// Generic source for content that can be inline or loaded from external resource.
@@ -136,27 +141,92 @@ pub enum Error {
         #[source]
         source: crate::config::Error,
     },
+    #[error("Cache error loading resource '{key}': {source}")]
+    Cache {
+        key: String,
+        #[source]
+        source: crate::cache::CacheError,
+    },
+    #[error("Cache resource '{key}' is not valid UTF-8: {source}")]
+    CacheUtf8 {
+        key: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+}
+
+/// Backend for the `ResourceLoader`.
+///
+/// Resources can be loaded from either the local filesystem or the distributed cache.
+#[derive(Clone)]
+enum Backend {
+    /// Filesystem backend: resource keys resolve to files under `base_path`.
+    Filesystem { base_path: PathBuf },
+    /// Cache backend: resource keys resolve to cache keys under `prefix`.
+    Cache {
+        cache: Arc<dyn crate::cache::Cache>,
+        prefix: String,
+    },
+    /// Disabled backend: all loads fail with `ResourcePathNotConfigured`.
+    Disabled,
+}
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Filesystem { base_path } => f
+                .debug_struct("Filesystem")
+                .field("base_path", base_path)
+                .finish(),
+            Backend::Cache { prefix, .. } => {
+                f.debug_struct("Cache").field("prefix", prefix).finish()
+            }
+            Backend::Disabled => f.write_str("Disabled"),
+        }
+    }
 }
 
 /// Resource loader that resolves resource keys to file content.
 ///
-/// Maps resource keys to files in the configured resource directory.
-/// For example, with `path: "local/resources/"`:
+/// Maps resource keys to content using one of two backends:
+///
+/// **Filesystem** (with `path: "local/resources/"`):
 /// - Key `"query.sql"` → `"local/resources/query.sql"`
 /// - Key `"queries/orders.sql"` → `"local/resources/queries/orders.sql"`
+///
+/// **Cache** (with `prefix: "flowgen.resources"`):
+/// - Key `"query.sql"` → cache key `"flowgen.resources.query.sql"`
+/// - Key `"queries/orders.sql"` → cache key `"flowgen.resources.queries/orders.sql"`
 #[derive(Debug, Clone)]
 pub struct ResourceLoader {
-    /// Base path for resources. If None, resource loading is disabled.
-    base_path: Option<PathBuf>,
+    backend: Backend,
 }
 
 impl ResourceLoader {
-    /// Creates a new ResourceLoader with the given base path.
+    /// Creates a new filesystem-backed `ResourceLoader` with the given base path.
     ///
     /// # Arguments
     /// * `base_path` - Base directory for resources, or None to disable resource loading.
     pub fn new(base_path: Option<PathBuf>) -> Self {
-        Self { base_path }
+        let backend = match base_path {
+            Some(path) => Backend::Filesystem { base_path: path },
+            None => Backend::Disabled,
+        };
+        Self { backend }
+    }
+
+    /// Creates a new cache-backed `ResourceLoader`.
+    ///
+    /// Resources are loaded from the distributed cache using keys formed by
+    /// joining `prefix` with the resource key (e.g., `"flowgen.resources.query.sql"`).
+    ///
+    /// # Arguments
+    /// * `cache` - Cache backend for loading resources.
+    /// * `prefix` - Cache key prefix for resources (e.g., "flowgen.resources").
+    pub fn from_cache(cache: Arc<dyn crate::cache::Cache>, prefix: String) -> Self {
+        Self {
+            backend: Backend::Cache { cache, prefix },
+        }
     }
 
     /// Loads a resource by key.
@@ -165,26 +235,42 @@ impl ResourceLoader {
     /// * `key` - Resource key (e.g., "query.sql" or "queries/orders.sql").
     ///
     /// # Returns
-    /// The file content as a String.
+    /// The resource content as a String.
     pub async fn load(&self, key: &str) -> Result<String, Error> {
-        let base = self
-            .base_path
-            .as_ref()
-            .ok_or(Error::ResourcePathNotConfigured)?;
-
-        let full_path = base.join(key);
-
-        fs::read_to_string(&full_path)
-            .await
-            .map_err(|source| match source.kind() {
-                std::io::ErrorKind::NotFound => Error::ResourceNotFound {
-                    key: key.to_string(),
-                },
-                _ => Error::ReadResource {
+        match &self.backend {
+            Backend::Filesystem { base_path } => {
+                let full_path = base_path.join(key);
+                fs::read_to_string(&full_path)
+                    .await
+                    .map_err(|source| match source.kind() {
+                        std::io::ErrorKind::NotFound => Error::ResourceNotFound {
+                            key: key.to_string(),
+                        },
+                        _ => Error::ReadResource {
+                            key: key.to_string(),
+                            source,
+                        },
+                    })
+            }
+            Backend::Cache { cache, prefix } => {
+                let cache_key = format!("{prefix}.{key}");
+                let bytes = cache
+                    .get(&cache_key)
+                    .await
+                    .map_err(|source| Error::Cache {
+                        key: key.to_string(),
+                        source,
+                    })?
+                    .ok_or_else(|| Error::ResourceNotFound {
+                        key: key.to_string(),
+                    })?;
+                String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheUtf8 {
                     key: key.to_string(),
                     source,
-                },
-            })
+                })
+            }
+            Backend::Disabled => Err(Error::ResourcePathNotConfigured),
+        }
     }
 }
 
@@ -196,13 +282,13 @@ mod tests {
     #[test]
     fn test_new_with_path() {
         let loader = ResourceLoader::new(Some(PathBuf::from("local/resources")));
-        assert!(loader.base_path.is_some());
+        assert!(matches!(loader.backend, Backend::Filesystem { .. }));
     }
 
     #[test]
     fn test_new_without_path() {
         let loader = ResourceLoader::new(None);
-        assert!(loader.base_path.is_none());
+        assert!(matches!(loader.backend, Backend::Disabled));
     }
 
     #[tokio::test]
@@ -210,6 +296,33 @@ mod tests {
         let loader = ResourceLoader::new(None);
         let result = loader.load("test.sql").await;
         assert!(matches!(result, Err(Error::ResourcePathNotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_from_cache_load_existing() {
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        cache
+            .put(
+                "flowgen.resources.queries/orders.sql",
+                bytes::Bytes::from("SELECT * FROM orders"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loader = ResourceLoader::from_cache(cache, "flowgen.resources".to_string());
+        let result = loader.load("queries/orders.sql").await.unwrap();
+        assert_eq!(result, "SELECT * FROM orders");
+    }
+
+    #[tokio::test]
+    async fn test_from_cache_load_missing() {
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        let loader = ResourceLoader::from_cache(cache, "flowgen.resources".to_string());
+        let result = loader.load("nonexistent.sql").await;
+        assert!(matches!(result, Err(Error::ResourceNotFound { .. })));
     }
 
     #[test]

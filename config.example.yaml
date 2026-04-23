@@ -36,8 +36,8 @@ telemetry:
   enabled: false
   # Optional: OTLP endpoint (defaults to "http://localhost:4317").
   # otlp_endpoint: "http://localhost:4317"
-  # Optional: service name (defaults to "flowgen-worker").
-  # service_name: "flowgen-worker"
+  # Optional: service name (defaults to "flowgen").
+  # service_name: "flowgen"
   # Optional: metrics export interval using human-readable format (defaults to "60s").
   # metrics_export_interval: "60s"
 

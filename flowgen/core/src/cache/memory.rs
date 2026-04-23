@@ -135,6 +135,15 @@ impl super::Cache for MemoryCache {
     async fn get_revision(&self, key: &str) -> Result<Option<u64>, super::Error> {
         Ok(self.data.get(key).map(|entry| entry.revision))
     }
+
+    async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, super::Error> {
+        Ok(self
+            .data
+            .iter()
+            .filter(|entry| entry.key().starts_with(prefix))
+            .map(|entry| entry.key().clone())
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +195,34 @@ mod tests {
         let result = cache.get(key).await.unwrap();
 
         assert_eq!(result, Some(value2));
+    }
+
+    #[tokio::test]
+    async fn test_memory_cache_list_keys() {
+        let cache = MemoryCache::new();
+
+        cache
+            .put("flowgen.flows.a", Bytes::from("a"), None)
+            .await
+            .unwrap();
+        cache
+            .put("flowgen.flows.b", Bytes::from("b"), None)
+            .await
+            .unwrap();
+        cache
+            .put("flowgen.resources.tpl", Bytes::from("tpl"), None)
+            .await
+            .unwrap();
+
+        let mut flow_keys = cache.list_keys("flowgen.flows.").await.unwrap();
+        flow_keys.sort();
+        assert_eq!(flow_keys, vec!["flowgen.flows.a", "flowgen.flows.b"]);
+
+        let resource_keys = cache.list_keys("flowgen.resources.").await.unwrap();
+        assert_eq!(resource_keys, vec!["flowgen.resources.tpl"]);
+
+        let empty_keys = cache.list_keys("nonexistent.").await.unwrap();
+        assert!(empty_keys.is_empty());
     }
 
     #[tokio::test]
