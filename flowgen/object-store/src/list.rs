@@ -47,6 +47,8 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("Object store list operation requires a path.")]
+    MissingPath,
 }
 
 /// Result of a list operation containing file paths and metadata.
@@ -85,7 +87,7 @@ impl From<ObjectMeta> for FileInfo {
 /// Handles processing of individual events by listing files in object storage.
 pub struct EventHandler {
     /// List configuration settings.
-    config: Arc<super::config::ListProcessor>,
+    config: Arc<super::config::Processor>,
     /// Object store client for listing files.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events.
@@ -122,19 +124,15 @@ impl EventHandler {
 
             // Parse the rendered path to extract directory prefix.
             // Strip wildcard patterns if present.
-            let config_path_str = config.path.to_string_lossy();
+            let config_path = config.path.as_ref().ok_or(Error::MissingPath)?;
+            let config_path_str = config_path.to_string_lossy();
             let url =
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
 
             let url_path = url.path();
-            let prefix = if url_path.contains('*') {
-                url_path
-                    .split('*')
-                    .next()
-                    .unwrap_or(url_path)
-                    .trim_end_matches('/')
-            } else {
-                url_path
+            let prefix = match url_path.split_once('*') {
+                Some((before, _)) => before.trim_end_matches('/'),
+                None => url_path,
             };
 
             let path = object_store::path::Path::from(prefix);
@@ -228,7 +226,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct ListProcessor {
     /// List configuration settings.
-    config: Arc<super::config::ListProcessor>,
+    config: Arc<super::config::Processor>,
     /// Receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
@@ -257,12 +255,12 @@ impl Runner for ListProcessor {
         // parse_url_opts must be valid, and glob characters cause percent-encoding
         // that breaks bucket/container name extraction in the object store backend.
         let client_path = {
-            let path_str = init_config.path.to_string_lossy();
-            let stripped = path_str
-                .split('*')
-                .next()
-                .unwrap_or(&path_str)
-                .trim_end_matches('/');
+            let init_path = init_config.path.ok_or(Error::MissingPath)?;
+            let path_str = init_path.to_string_lossy();
+            let stripped = match path_str.split_once('*') {
+                Some((before, _)) => before.trim_end_matches('/'),
+                None => &path_str,
+            };
             std::path::PathBuf::from(stripped)
         };
 
@@ -360,7 +358,7 @@ impl Runner for ListProcessor {
 #[derive(Default)]
 pub struct ListProcessorBuilder {
     /// List configuration settings.
-    config: Option<Arc<super::config::ListProcessor>>,
+    config: Option<Arc<super::config::Processor>>,
     /// Receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -381,7 +379,7 @@ impl ListProcessorBuilder {
     }
 
     /// Sets the lister configuration.
-    pub fn config(mut self, config: Arc<super::config::ListProcessor>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
         self.config = Some(config);
         self
     }

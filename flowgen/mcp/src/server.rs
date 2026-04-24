@@ -437,7 +437,7 @@ async fn execute_tool_call(
         .map_err(|_| Error::Unauthorized)?;
 
     // Generate a unique correlation identifier for this request.
-    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let correlation_id = uuid::Uuid::now_v7().to_string();
 
     // Create progress channel for streaming intermediate updates to the client.
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);

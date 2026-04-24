@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.100.0"
+version = "0.101.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -61,7 +61,7 @@ prost-types = { version = "0.14" }
 glob = { version = "0.3" }
 apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v7"] }
 axum = { version = "0.8" }
 base64 = { version = "0.22" }
 bb8 = { version = "0.9" }

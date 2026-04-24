@@ -341,7 +341,7 @@ impl EventHandler {
             Err(e) => return Err(e),
         };
 
-        let correlation_id = uuid::Uuid::new_v4().to_string();
+        let correlation_id = uuid::Uuid::now_v7().to_string();
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 

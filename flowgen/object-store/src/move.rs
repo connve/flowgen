@@ -49,6 +49,10 @@ pub enum Error {
     InvalidSourceFiles { value: String },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("Object store move operation requires a source path or source_files.")]
+    MissingSource,
+    #[error("Object store move operation requires a destination.")]
+    MissingDestination,
 }
 
 /// Result of a move operation containing source, destination, and file count.
@@ -65,7 +69,7 @@ pub struct MoveResult {
 /// Handles processing of individual events by moving files in object storage.
 pub struct EventHandler {
     /// Move configuration settings.
-    config: Arc<super::config::MoveProcessor>,
+    config: Arc<super::config::Processor>,
     /// Object store client for moving files.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events.
@@ -98,7 +102,11 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Parse destination path.
-            let destination_str = config.destination.to_string_lossy();
+            let destination = config
+                .destination
+                .as_ref()
+                .ok_or(Error::MissingDestination)?;
+            let destination_str = destination.to_string_lossy();
             let destination_url =
                 url::Url::parse(&destination_str).map_err(|source| Error::ParseUrl { source })?;
             let destination_base = object_store::path::Path::from(destination_url.path());
@@ -136,20 +144,16 @@ impl EventHandler {
                     .collect()
             } else {
                 // List files matching wildcard source pattern.
-                let source_str = config.source.to_string_lossy();
+                let source_path = config.source.as_ref().ok_or(Error::MissingSource)?;
+                let source_str = source_path.to_string_lossy();
                 let source_url =
                     url::Url::parse(&source_str).map_err(|source| Error::ParseUrl { source })?;
 
                 // Strip wildcard patterns from source path.
                 let source_url_path = source_url.path();
-                let source_prefix = if source_url_path.contains('*') {
-                    source_url_path
-                        .split('*')
-                        .next()
-                        .unwrap_or(source_url_path)
-                        .trim_end_matches('/')
-                } else {
-                    source_url_path
+                let source_prefix = match source_url_path.split_once('*') {
+                    Some((before, _)) => before.trim_end_matches('/'),
+                    None => source_url_path,
                 };
 
                 let source_path = object_store::path::Path::from(source_prefix);
@@ -273,7 +277,12 @@ impl EventHandler {
                 source: if using_explicit_files {
                     format!("[{files_moved} files]")
                 } else {
-                    config.source.to_string_lossy().to_string()
+                    config
+                        .source
+                        .as_ref()
+                        .ok_or(Error::MissingSource)?
+                        .to_string_lossy()
+                        .to_string()
                 },
                 destination: destination_str.to_string(),
                 files_moved,
@@ -326,7 +335,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct MoveProcessor {
     /// Move configuration settings.
-    config: Arc<super::config::MoveProcessor>,
+    config: Arc<super::config::Processor>,
     /// Receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
@@ -355,14 +364,14 @@ impl Runner for MoveProcessor {
         // Glob characters cause invalid percent-encoding, so strip wildcards from source pattern.
         // When using explicit source_files, derive bucket from destination since both must share the same container.
         let client_path = if init_config.source_files.is_some() {
-            init_config.destination.clone()
+            init_config.destination.ok_or(Error::MissingDestination)?
         } else {
-            let path_str = init_config.source.to_string_lossy();
-            let stripped = path_str
-                .split('*')
-                .next()
-                .unwrap_or(&path_str)
-                .trim_end_matches('/');
+            let source = init_config.source.ok_or(Error::MissingSource)?;
+            let path_str = source.to_string_lossy();
+            let stripped = match path_str.split_once('*') {
+                Some((before, _)) => before.trim_end_matches('/'),
+                None => &path_str,
+            };
             std::path::PathBuf::from(stripped)
         };
 
@@ -460,7 +469,7 @@ impl Runner for MoveProcessor {
 #[derive(Default)]
 pub struct MoveProcessorBuilder {
     /// Move configuration settings.
-    config: Option<Arc<super::config::MoveProcessor>>,
+    config: Option<Arc<super::config::Processor>>,
     /// Receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -481,7 +490,7 @@ impl MoveProcessorBuilder {
     }
 
     /// Sets the mover configuration.
-    pub fn config(mut self, config: Arc<super::config::MoveProcessor>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
         self.config = Some(config);
         self
     }

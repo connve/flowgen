@@ -519,8 +519,8 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
-        // Register function to generate a random UUID v4 string.
-        engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
+        // Register function to generate a timestamp-ordered UUID v7 string.
+        engine.register_fn("uuid", || -> String { uuid::Uuid::now_v7().to_string() });
 
         // Register function to compute SHA-256 hash of a string.
         // Returns lowercase hexadecimal string. Useful for deterministic message identifiers

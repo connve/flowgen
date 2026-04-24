@@ -1,6 +1,10 @@
 # Why Flowgen
 
-Flowgen is an open-source data activation engine written in Rust. Define flows — event-driven, scheduled, or streaming — that connect systems, transform data, and activate it across your stack. Declarative YAML, distributed by design.
+Flowgen is an open-source data activation engine written in Rust. It compiles to a single binary that includes every connector and integration. Define flows — event-driven, scheduled, or streaming — that connect systems, transform data, and activate it across your stack. Declarative YAML, distributed by design.
+
+## Single binary
+
+One binary. Every connector built in. Nothing to install, nothing to configure at runtime. Deploy and run.
 
 ## The problem
 
@@ -16,7 +20,9 @@ Building data flows in distributed systems is hard.
 
 ## How Flowgen solves this
 
-**Written in Rust.** Memory safety, ultra performance, and a mature package ecosystem.
+**Single binary.** Every connector ships inside one executable. No plugins, no downloads, no version matrix.
+
+**Written in Rust.** Memory safety, performance, no garbage collector.
 
 **Fully open-source, MPL-2.0.** Built by [CONNVE](https://connve.com) and used in production for large-scale data activation. Every feature, every connector is available to everyone. No gated tiers, no enterprise-only modules.
 
@@ -66,10 +72,12 @@ flow:
 
 | Integration | Tasks |
 |---|---|
-| **NATS JetStream** | Subscriber, Publisher |
+| **NATS JetStream** | Subscriber, Publisher, KV Store |
 | **Salesforce** | PubSub API, REST API, Bulk API, Tooling API |
 | **Google Cloud** | BigQuery Query, Storage Read, Storage Write, Jobs |
-| **HTTP** | Webhook listener, HTTP request |
+| **HTTP** | Webhook, Request |
 | **Object Store** | Read, Write, List, Move (S3, GCS, Azure, local) |
 | **MSSQL** | Query |
+| **AI** | Completion (multi-provider), AI Gateway (OpenAI-compatible), MCP Tools |
+| **Git** | Git Sync |
 | **Core** | Script (Rhai), Convert, Iterate, Buffer, Generate, Log |

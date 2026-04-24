@@ -81,6 +81,8 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("Object store read operation requires a path.")]
+    MissingPath,
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -91,7 +93,7 @@ pub enum Error {
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     /// Writer configuration settings.
-    config: Arc<super::config::ReadProcessor>,
+    config: Arc<super::config::Processor>,
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events
@@ -124,7 +126,8 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
-            let config_path_str = config.path.to_string_lossy();
+            let config_path = config.path.as_ref().ok_or(Error::MissingPath)?;
+            let config_path_str = config_path.to_string_lossy();
             let url =
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
             let path = object_store::path::Path::from(url.path());
@@ -299,7 +302,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct ReadProcessor {
     /// Read configuration settings.
-    config: Arc<super::config::ReadProcessor>,
+    config: Arc<super::config::Processor>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
@@ -327,7 +330,8 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let mut client_builder = super::client::ClientBuilder::new().path(init_config.path);
+        let path = init_config.path.ok_or(Error::MissingPath)?;
+        let mut client_builder = super::client::ClientBuilder::new().path(path);
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
@@ -421,7 +425,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
 #[derive(Default)]
 pub struct ReadProcessorBuilder {
     /// Read configuration settings.
-    config: Option<Arc<super::config::ReadProcessor>>,
+    config: Option<Arc<super::config::Processor>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -442,7 +446,7 @@ impl ReadProcessorBuilder {
     }
 
     /// Sets the writer configuration.
-    pub fn config(mut self, config: Arc<super::config::ReadProcessor>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
         self.config = Some(config);
         self
     }
@@ -533,17 +537,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_builder() {
-        let config = Arc::new(crate::config::ReadProcessor {
+        let config = Arc::new(crate::config::Processor {
             name: "test_reader".to_string(),
-            path: PathBuf::from("s3://bucket/input/"),
-            credentials_path: None,
-            client_options: None,
+            operation: crate::config::Operation::Read,
+            path: Some(PathBuf::from("s3://bucket/input/")),
             batch_size: Some(500),
             has_header: Some(true),
-            delete_after_read: None,
-            delimiter: None,
-            depends_on: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, rx) = mpsc::channel::<Event>(10);
 

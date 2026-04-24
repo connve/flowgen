@@ -157,6 +157,9 @@ pub enum Error {
     /// Error in MCP tool processor task.
     #[error(transparent)]
     McpToolProcessor(#[from] flowgen_mcp::processor::Error),
+    /// Error in NATS KV store task.
+    #[error(transparent)]
+    NatsKvStore(#[from] flowgen_nats::jetstream::kv_store::Error),
     /// Error in AI gateway task.
     #[error(transparent)]
     AiGateway(#[from] flowgen_ai_agent::ai_gateway::processor::Error),
@@ -1304,89 +1307,83 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::object_store_read(config) => {
+        TaskType::object_store(config) => {
+            let operation = config.operation.clone();
             let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
+            match operation {
+                flowgen_object_store::config::Operation::Read => tokio::spawn(
+                    async move {
+                        let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                        if let Some(rx) = rx {
+                            builder = builder.receiver(rx);
+                        }
+                        if let Some(tx) = tx {
+                            builder = builder.sender(tx);
+                        }
+                        builder.build().await?.run().await?;
+                        Ok(())
                     }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
+                    .instrument(span),
+                ),
+                flowgen_object_store::config::Operation::Write => tokio::spawn(
+                    async move {
+                        let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                        if let Some(rx) = rx {
+                            builder = builder.receiver(rx);
+                        }
+                        if let Some(tx) = tx {
+                            builder = builder.sender(tx);
+                        }
+                        builder.build().await?.run().await?;
+                        Ok(())
                     }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::object_store_write(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
+                    .instrument(span),
+                ),
+                flowgen_object_store::config::Operation::List => tokio::spawn(
+                    async move {
+                        let mut builder = flowgen_object_store::list::ListProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                        if let Some(rx) = rx {
+                            builder = builder.receiver(rx);
+                        }
+                        if let Some(tx) = tx {
+                            builder = builder.sender(tx);
+                        }
+                        builder.build().await?.run().await?;
+                        Ok(())
                     }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
+                    .instrument(span),
+                ),
+                flowgen_object_store::config::Operation::Move => tokio::spawn(
+                    async move {
+                        let mut builder = flowgen_object_store::r#move::MoveProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                        if let Some(rx) = rx {
+                            builder = builder.receiver(rx);
+                        }
+                        if let Some(tx) = tx {
+                            builder = builder.sender(tx);
+                        }
+                        builder.build().await?.run().await?;
+                        Ok(())
                     }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::object_store_list(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_object_store::list::ListProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::object_store_move(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_object_store::r#move::MoveProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
+                    .instrument(span),
+                ),
+            }
         }
         TaskType::gcp_bigquery_query(config) => {
             let config = Arc::new(config);
@@ -1477,6 +1474,27 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_mssql::query::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::nats_kv_store(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_nats::jetstream::kv_store::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)

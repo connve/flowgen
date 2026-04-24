@@ -14,16 +14,9 @@ path = "src/lib.rs"
 flowgen_core = { path = "../core" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
-humantime-serde = { workspace = true }
 walkdir = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

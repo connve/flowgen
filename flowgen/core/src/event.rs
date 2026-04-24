@@ -408,11 +408,25 @@ pub struct EventBuilder {
 impl EventBuilder {
     /// Creates a new EventBuilder.
     /// Automatically preserves meta from the current event context (if set via with_event_context).
+    /// Generates a correlation_id in meta if one is not already present.
     pub fn new() -> Self {
-        let meta = CURRENT_EVENT_META
+        let mut meta = CURRENT_EVENT_META
             .try_with(|m| m.borrow().clone())
             .ok()
             .flatten();
+
+        // Ensure every event chain has a correlation_id for end-to-end tracing.
+        // Set once at the source, then preserved through all downstream tasks.
+        let has_correlation_id = match meta.as_ref() {
+            Some(m) => m.contains_key("correlation_id"),
+            None => false,
+        };
+        if !has_correlation_id {
+            let correlation_id = uuid::Uuid::now_v7().to_string();
+            meta.get_or_insert_with(Map::new)
+                .insert("correlation_id".to_string(), Value::String(correlation_id));
+        }
+
         EventBuilder {
             timestamp: Some(Utc::now().timestamp_micros()),
             meta,

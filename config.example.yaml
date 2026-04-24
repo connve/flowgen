@@ -27,7 +27,7 @@ flows:
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
-flow_resources:
+resources:
   path: "path_to_resources_folder"
 
 # OpenTelemetry configuration for metrics and distributed tracing (optional).

@@ -12,9 +12,12 @@
 
 		{#each navigation as section}
 			<div class="mb-4">
-				<h3 class="text-xs font-semibold uppercase tracking-wider text-base-content/50 mb-2 px-2">
+				<a href={section.items[0].href} class="text-xs font-semibold uppercase tracking-wider text-base-content/50 mb-2 px-2 flex items-center gap-1.5 hover:text-base-content transition-colors">
+					{#if section.icon}
+						<img src={section.icon} alt="" class="w-4 h-4" />
+					{/if}
 					{section.title}
-				</h3>
+				</a>
 				<ul class="menu menu-sm p-0">
 					{#each section.items as item}
 						<li>

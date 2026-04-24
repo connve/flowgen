@@ -235,7 +235,7 @@ async fn handle_chat_completion(
         .join("\n");
 
     let model = request.model.unwrap_or_default();
-    let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let request_id = format!("chatcmpl-{}", uuid::Uuid::now_v7());
     let created = chrono::Utc::now().timestamp();
     let is_stream = request.stream;
 
@@ -325,7 +325,7 @@ async fn handle_streaming(
     request_id: String,
     created: i64,
 ) -> Result<Response, Error> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let correlation_id = uuid::Uuid::now_v7().to_string();
 
     // Set up progress channel for streaming intermediate events.
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
