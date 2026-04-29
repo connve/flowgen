@@ -133,19 +133,19 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    /// Failed to initialize the metadata cache for flow/resource loading.
-    #[error("Failed to initialize metadata cache: {source}")]
-    MetadataCacheInit {
+    /// Failed to initialize the system cache for flow/resource loading.
+    #[error("Failed to initialize system cache: {source}")]
+    SystemCacheInit {
         #[source]
         source: flowgen_nats::cache::Error,
     },
-    /// Failed to list keys from the metadata cache.
+    /// Failed to list keys from the system cache.
     #[error("Failed to list flow keys from cache: {source}")]
     CacheListKeys {
         #[source]
         source: flowgen_core::cache::Error,
     },
-    /// Failed to read a flow from the metadata cache.
+    /// Failed to read a flow from the system cache.
     #[error("Failed to read flow {key:?} from cache: {source}")]
     CacheFlowRead {
         key: String,
@@ -174,9 +174,9 @@ pub struct App {
 }
 
 impl App {
-    /// Initializes a metadata cache connection for flow/resource loading.
+    /// Initializes a system cache connection for flow/resource loading.
     /// Separate from the runtime cache to avoid key collisions during list operations.
-    fn init_metadata_cache(
+    fn init_system_cache(
         app_config: &AppConfig,
         db_name: &str,
     ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
@@ -187,12 +187,12 @@ impl App {
             .url(cache_config.url.clone())
             .build()
             .and_then(|builder| futures::executor::block_on(async { builder.init(db_name).await }))
-            .map_err(|source| Error::MetadataCacheInit { source })?;
+            .map_err(|source| Error::SystemCacheInit { source })?;
 
         Ok(Arc::new(nats_cache))
     }
 
-    /// Loads flow configurations from a metadata cache bucket.
+    /// Loads flow configurations from a system cache bucket.
     /// Lists all keys under the given prefix, reads each value, and parses as FlowConfig.
     async fn load_flows_from_cache(
         cache: &dyn flowgen_core::cache::Cache,
@@ -259,12 +259,16 @@ impl App {
     }
 
     /// Loads flow configurations from the filesystem using the configured path.
+    ///
+    /// Returns an empty vector when `flows.path` is not configured. This allows
+    /// the worker to run cache-only (every flow loaded from the system cache)
+    /// or to mix sources (a few local flows mounted from disk, the rest pulled
+    /// from the system cache by a sync flow).
     fn load_flows_from_filesystem(app_config: &AppConfig) -> Result<Vec<FlowConfig>, Error> {
-        let flows_path = app_config
-            .flows
-            .path
-            .as_ref()
-            .ok_or(Error::InvalidFlowsPath)?;
+        let flows_path = match app_config.flows.path.as_ref() {
+            Some(path) => path,
+            None => return Ok(Vec::new()),
+        };
 
         let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
 
@@ -403,24 +407,56 @@ impl App {
             None
         };
 
-        // Load flows: cache-backed or filesystem-backed.
-        let (flow_configs, metadata_cache) = match app_config.flows.cache.as_ref() {
+        // Load flows from filesystem and (optionally) from the distributed cache.
+        // The two sources are merged so a worker can run any combination of:
+        //   - filesystem only (no cache section, classic mode);
+        //   - cache only (no `flows.path` set, every flow comes from the cache);
+        //   - hybrid (a small set of bootstrap flows mounted from disk while the
+        //     bulk of user flows lives in the cache, populated by a sync flow).
+        // On name collisions the filesystem entry wins, which keeps locally
+        // mounted bootstrap flows from being silently overridden by a stale
+        // cache entry with the same name.
+        let filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
+        info!(
+            count = filesystem_flows.len(),
+            "Loaded flows from filesystem."
+        );
+
+        let (cache_flows, system_cache) = match app_config.flows.cache.as_ref() {
             Some(cache_opts) if cache_opts.enabled => {
-                match Self::init_metadata_cache(&app_config, &cache_opts.db_name) {
+                match Self::init_system_cache(&app_config, &cache_opts.db_name) {
                     Ok(cache) => {
-                        info!(bucket = %cache_opts.db_name, "Metadata cache initialized for flow loading.");
+                        info!(bucket = %cache_opts.db_name, "System cache initialized for flow loading.");
                         let configs =
                             Self::load_flows_from_cache(cache.as_ref(), &cache_opts.prefix).await?;
+                        info!(count = configs.len(), "Loaded flows from cache.");
                         (configs, Some((cache, cache_opts.db_name.clone())))
                     }
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize metadata cache, falling back to filesystem.");
-                        (Self::load_flows_from_filesystem(&app_config)?, None)
+                        error!(
+                            error = %e,
+                            "Failed to initialize system cache. Continuing with filesystem flows only."
+                        );
+                        (Vec::new(), None)
                     }
                 }
             }
-            _ => (Self::load_flows_from_filesystem(&app_config)?, None),
+            _ => (Vec::new(), None),
         };
+
+        let mut flow_configs = filesystem_flows;
+        let mut seen_names: std::collections::HashSet<String> =
+            flow_configs.iter().map(|f| f.flow.name.clone()).collect();
+        for cache_flow in cache_flows {
+            if seen_names.insert(cache_flow.flow.name.clone()) {
+                flow_configs.push(cache_flow);
+            } else {
+                warn!(
+                    flow = %cache_flow.flow.name,
+                    "Cache flow shadowed by a filesystem flow with the same name. Skipping cache copy."
+                );
+            }
+        }
 
         // Create shared HTTP Server if enabled.
         let http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>> = match app_config
@@ -553,42 +589,57 @@ impl App {
                     as Arc<dyn flowgen_core::cache::Cache>
             };
 
-        // Create resource loader: cache-backed or filesystem-backed.
+        // Build the resource loader. Filesystem and cache sources are
+        // independent: configure either, both, or neither. When both are
+        // active, the loader tries the filesystem first and falls back to
+        // the cache on a miss, matching the gradual-migration semantics used
+        // for flow loading.
         let resource_loader = match app_config.resources.as_ref() {
-            Some(resource_options) => match resource_options.cache.as_ref() {
-                Some(rc) if rc.enabled => {
-                    // Reuse existing metadata cache if same bucket, otherwise init a new one.
-                    let resource_metadata = if metadata_cache.as_ref().map(|(_, db)| db.as_str())
-                        == Some(&rc.db_name)
-                    {
-                        metadata_cache.as_ref().map(|(c, _)| c.clone())
-                    } else {
-                        match Self::init_metadata_cache(&app_config, &rc.db_name) {
-                            Ok(cache) => {
-                                info!(bucket = %rc.db_name, "Metadata cache initialized for resource loading.");
-                                Some(cache)
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "Failed to init resource metadata cache, falling back to filesystem.");
-                                None
-                            }
-                        }
-                    };
+            Some(resource_options) => {
+                let base_path = resource_options.path.clone();
 
-                    match resource_metadata {
-                        Some(cache) => Some(flowgen_core::resource::ResourceLoader::from_cache(
-                            cache,
-                            rc.prefix.clone(),
-                        )),
-                        None => Some(flowgen_core::resource::ResourceLoader::new(Some(
-                            resource_options.path.clone(),
-                        ))),
+                let cache_source = match resource_options.cache.as_ref() {
+                    Some(rc) if rc.enabled => {
+                        // Reuse the system cache initialised for flow loading
+                        // when the bucket matches; otherwise spin up a fresh one.
+                        let cache = if system_cache.as_ref().map(|(_, db)| db.as_str())
+                            == Some(&rc.db_name)
+                        {
+                            system_cache.as_ref().map(|(c, _)| c.clone())
+                        } else {
+                            match Self::init_system_cache(&app_config, &rc.db_name) {
+                                Ok(cache) => {
+                                    info!(bucket = %rc.db_name, "System cache initialized for resource loading.");
+                                    Some(cache)
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        "Failed to init resource system cache. Continuing with filesystem only."
+                                    );
+                                    None
+                                }
+                            }
+                        };
+                        cache.map(|c| (c, rc.prefix.clone()))
                     }
+                    _ => None,
+                };
+
+                match (base_path, cache_source) {
+                    (Some(path), Some((cache, prefix))) => Some(
+                        flowgen_core::resource::ResourceLoader::new(Some(path))
+                            .with_cache(cache, prefix),
+                    ),
+                    (Some(path), None) => {
+                        Some(flowgen_core::resource::ResourceLoader::new(Some(path)))
+                    }
+                    (None, Some((cache, prefix))) => Some(
+                        flowgen_core::resource::ResourceLoader::from_cache(cache, prefix),
+                    ),
+                    (None, None) => None,
                 }
-                _ => Some(flowgen_core::resource::ResourceLoader::new(Some(
-                    resource_options.path.clone(),
-                ))),
-            },
+            }
             None => None,
         };
 

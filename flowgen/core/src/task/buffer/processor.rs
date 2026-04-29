@@ -177,13 +177,9 @@ impl Processor {
                         event.completion_tx = completion_tx;
                     }
                     None => {
-                        // Final task, signal completion.
+                        // Leaf task: signal completion.
                         if let Some(arc) = completion_tx.as_ref() {
-                            if let Ok(mut guard) = arc.lock() {
-                                if let Some(tx) = guard.take() {
-                                    tx.send(Ok(event.data_as_json().ok())).ok();
-                                }
-                            }
+                            arc.signal_completion(event.data_as_json().ok());
                         }
                     }
                 }

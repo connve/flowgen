@@ -1,5 +1,6 @@
 <script lang="ts">
 	import '../app.css';
+	import 'prismjs/themes/prism-tomorrow.css';
 
 	let { children } = $props();
 </script>

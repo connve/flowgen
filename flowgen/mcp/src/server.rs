@@ -82,6 +82,10 @@ pub struct ToolRegistration {
     pub ack_timeout: Option<std::time::Duration>,
     /// Whether user-level auth is required for this tool.
     pub auth_required: bool,
+    /// Number of leaf tasks reachable from the mcp_tool source. Used to size
+    /// the per-request completion channel so the response is delivered only
+    /// after every leaf has signalled.
+    pub leaf_count: usize,
 }
 
 /// MCP server with tool registry and response tracking.
@@ -421,11 +425,18 @@ async fn execute_tool_call(
         .validate_auth(headers, Some(&params.name))
         .map_err(|_| Error::Unauthorized)?;
 
-    // Look up tool in registry and extract sender, timeout, and auth requirement.
-    let (tool_tx, ack_timeout, auth_required) = server
+    // Look up tool in registry and extract sender, timeout, auth, and leaf count.
+    let (tool_tx, ack_timeout, auth_required, leaf_count) = server
         .tool_registry
         .get(&params.name)
-        .map(|entry| (entry.tx.clone(), entry.ack_timeout, entry.auth_required))
+        .map(|entry| {
+            (
+                entry.tx.clone(),
+                entry.ack_timeout,
+                entry.auth_required,
+                entry.leaf_count,
+            )
+        })
         .ok_or_else(|| Error::UnknownTool {
             name: params.name.clone(),
         })?;
@@ -466,10 +477,10 @@ async fn execute_tool_call(
         }
     }
 
-    // Create completion channel to receive the pipeline result.
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<
-        Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-    >();
+    // Size the completion channel to the number of leaves reachable from the
+    // tool's mcp_tool source. The MCP response is delivered only after every
+    // leaf has signalled completion.
+    let (completion_state, completion_rx) = flowgen_core::event::new_completion_channel(leaf_count);
 
     let event = flowgen_core::event::EventBuilder::new()
         .data(flowgen_core::event::EventData::Json(params.arguments))
@@ -477,7 +488,7 @@ async fn execute_tool_call(
         .task_id(0)
         .task_type("mcp_tool")
         .meta(meta)
-        .completion_tx(completion_tx)
+        .completion_tx(completion_state)
         .build()
         .map_err(|source| Error::EventBuild { source })?;
 

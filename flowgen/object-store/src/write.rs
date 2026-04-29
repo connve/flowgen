@@ -204,11 +204,7 @@ impl EventHandler {
                     // Skip writing empty batches but signal completion.
                     if batch.num_rows() == 0 {
                         if let Some(arc) = completion_tx_arc.as_ref() {
-                            if let Ok(mut guard) = arc.lock() {
-                                if let Some(tx) = guard.take() {
-                                    tx.send(Ok(event.data_as_json().ok())).ok();
-                                }
-                            }
+                            arc.signal_completion(event.data_as_json().ok());
                         }
                         return Ok(());
                     }
@@ -304,13 +300,9 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
-                    // Final task, signal completion.
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(e.data_as_json().ok())).ok();
-                            }
-                        }
+                        arc.signal_completion(e.data_as_json().ok());
                     }
                 }
                 Some(_) => {

@@ -172,13 +172,9 @@ impl EventHandler {
                 if idx == batch_len - 1 {
                     match self.tx {
                         None => {
-                            // Final task, signal completion after last batch.
+                            // Leaf task: signal completion after last batch.
                             if let Some(arc) = completion_tx_arc.as_ref() {
-                                if let Ok(mut guard) = arc.lock() {
-                                    if let Some(tx) = guard.take() {
-                                        tx.send(Ok(result_event.data_as_json().ok())).ok();
-                                    }
-                                }
+                                arc.signal_completion(result_event.data_as_json().ok());
                             }
                         }
                         Some(_) => {

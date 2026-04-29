@@ -214,36 +214,49 @@ impl EventHandler {
             // Process the script result based on its type.
             match result_json {
                 Value::Null => {
-                    // No events to emit, always signal completion.
-                    // When a script filters out an event (returns null), the pipeline stops processing it.
-                    // ends for that event, so we must signal completion to prevent timeout.
+                    // A script returning null filters out the event, so the
+                    // pipeline ends here. The upstream completion channel was
+                    // sized for every leaf reachable from this script's
+                    // subtree, so emit one signal per leaf to release the
+                    // source instead of leaving it waiting for completions
+                    // that will never arrive.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                let _ = tx.send(Ok(None));
-                            }
+                        let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                        for _ in 0..upstream_leaf_share {
+                            arc.signal_completion(None);
                         }
                     }
                     Ok(())
                 }
                 Value::Array(arr) => {
+                    // An empty array emits no downstream events. Release the
+                    // source by signalling once per leaf reachable from this
+                    // script's subtree, otherwise the source waits forever
+                    // for completions that will never come.
+                    if arr.is_empty() {
+                        if let Some(arc) = completion_tx_arc.as_ref() {
+                            let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                            for _ in 0..upstream_leaf_share {
+                                arc.signal_completion(None);
+                            }
+                        }
+                        return Ok(());
+                    }
+
                     // Emit multiple events, attach completion_tx to last one.
                     let arr_len = arr.len();
                     for (idx, value) in arr.into_iter().enumerate() {
                         let mut new_event =
                             self.generate_script_event(value, &original_event, meta_json.as_ref())?;
 
-                        // Attach completion_tx to last event only.
+                        // Attach completion_tx to the last event only.
                         if idx == arr_len - 1 {
                             match self.tx {
                                 None => {
-                                    // Final task, signal completion after last element.
+                                    // Leaf task: signal completion with the
+                                    // last element's payload.
                                     if let Some(arc) = completion_tx_arc.as_ref() {
-                                        if let Ok(mut guard) = arc.lock() {
-                                            if let Some(tx) = guard.take() {
-                                                tx.send(Ok(new_event.data_as_json().ok())).ok();
-                                            }
-                                        }
+                                        arc.signal_completion(new_event.data_as_json().ok());
                                     }
                                 }
                                 Some(_) => {
@@ -265,13 +278,9 @@ impl EventHandler {
                     // Signal completion or pass through to single event.
                     match self.tx {
                         None => {
-                            // Final task, signal completion.
+                            // Leaf task: signal completion with the event payload.
                             if let Some(arc) = completion_tx_arc.as_ref() {
-                                if let Ok(mut guard) = arc.lock() {
-                                    if let Some(tx) = guard.take() {
-                                        tx.send(Ok(new_event.data_as_json().ok())).ok();
-                                    }
-                                }
+                                arc.signal_completion(new_event.data_as_json().ok());
                             }
                         }
                         Some(_) => {
@@ -714,6 +723,44 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        // Register ctx.cache.put(key, value) -> bool for integer values without TTL.
+        // Stores a value in the distributed cache with no expiration.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn(
+            "put",
+            |handle: &mut CacheHandle, key: &str, value: i64| -> bool {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                let value_str = value.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let bytes = bytes::Bytes::from(value_str);
+                        cache.put(&namespaced_key, bytes, None).await.is_ok()
+                    })
+                })
+            },
+        );
+
+        // Register ctx.cache.put(key, value) -> bool for string values without TTL.
+        // Stores a string value in the distributed cache with no expiration.
+        // Returns true if the operation succeeded, false otherwise.
+        // Keys are automatically namespaced by flow name.
+        engine.register_fn(
+            "put",
+            |handle: &mut CacheHandle, key: &str, value: &str| -> bool {
+                let namespaced_key = format!("{}.{}", handle.flow_name, key);
+                let cache = handle.cache.clone();
+                let value_owned = value.to_string();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let bytes = bytes::Bytes::from(value_owned);
+                        cache.put(&namespaced_key, bytes, None).await.is_ok()
+                    })
+                })
+            },
+        );
+
         // Register ctx.cache.delete(key) -> bool.
         // Removes a value from the distributed cache.
         // Returns true if the operation succeeded, false otherwise.
@@ -726,6 +773,37 @@ impl crate::task::runner::Runner for Processor {
                     .block_on(async move { cache.delete(&namespaced_key).await.is_ok() })
             })
         });
+
+        // Register ctx.cache.list_keys(prefix) -> Array of strings.
+        // Lists every key under the given prefix. The flow-name namespace is
+        // applied to the prefix and stripped from each returned key so scripts
+        // see the same key shape they used in `put`/`get`/`delete`.
+        // Returns an empty array on cache errors so scripts can iterate safely.
+        engine.register_fn(
+            "list_keys",
+            |handle: &mut CacheHandle, prefix: &str| -> rhai::Array {
+                let namespace = format!("{}.", handle.flow_name);
+                let namespaced_prefix = format!("{namespace}{prefix}");
+                let cache = handle.cache.clone();
+                tokio::task::block_in_place(move || {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        match cache.list_keys(&namespaced_prefix).await {
+                            Ok(keys) => keys
+                                .into_iter()
+                                .map(|k| {
+                                    // Strip the flow-name namespace prefix so callers
+                                    // see the same key they passed to put/get.
+                                    let stripped =
+                                        k.strip_prefix(&namespace).unwrap_or(&k).to_string();
+                                    rhai::Dynamic::from(stripped)
+                                })
+                                .collect(),
+                            Err(_) => rhai::Array::new(),
+                        }
+                    })
+                })
+            },
+        );
 
         // Register resource methods on ResourceHandle type to enable loading static files from Rhai scripts.
         // This allows scripts to access mounted configmap files via ctx.resource.get("path/to/file.txt").
@@ -833,14 +911,12 @@ impl crate::task::runner::Runner for Processor {
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
-                                }
-                                // Ack the message so bad data does not block the pipeline.
-                                if let Some(arc) = event.completion_tx.as_ref() {
-                                    if let Ok(mut guard) = arc.lock() {
-                                        if let Some(tx) = guard.take() {
-                                            tx.send(Ok(event.data_as_json().ok())).ok();
-                                        }
-                                    }
+                                } else if let Some(arc) = event.completion_tx.as_ref() {
+                                    // No downstream task to forward the error
+                                    // event to: this script is itself a leaf,
+                                    // so ack the source directly to keep bad
+                                    // data from blocking the pipeline.
+                                    arc.signal_completion(event.data_as_json().ok());
                                 }
                             }
                         }
@@ -1495,6 +1571,138 @@ mod tests {
                 assert_eq!(
                     value["cached"].as_str().expect("Expected string."),
                     "holder_pod_1"
+                );
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    /// Verifies the two-arg `ctx.cache.put(key, value)` overload (no TTL).
+    /// Stored value must be readable on the next `get` call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_cache_put_no_ttl_string() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_cache_put_no_ttl".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"
+                    ctx.cache.put("persisted_key", "value_without_ttl");
+                    let cached = ctx.cache.get("persisted_key");
+                    #{ cached: cached }
+                    "#
+                    .to_string(),
+                ),
+                sandbox: None,
+                depends_on: None,
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(
+                    value["cached"].as_str().expect("Expected string."),
+                    "value_without_ttl"
+                );
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    /// Verifies `ctx.cache.list_keys(prefix)` returns previously-stored keys
+    /// with the flow-name namespace stripped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_script_cache_list_keys() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let processor = Processor {
+            config: Arc::new(crate::task::script::config::Processor {
+                name: "test_cache_list_keys".to_string(),
+                engine: crate::task::script::config::ScriptEngine::Rhai,
+                code: crate::resource::Source::Inline(
+                    r#"
+                    ctx.cache.put("orders.123", "open");
+                    ctx.cache.put("orders.456", "closed");
+                    ctx.cache.put("users.789", "alice");
+                    let order_keys = ctx.cache.list_keys("orders.");
+                    #{ count: order_keys.len, first: order_keys[0] }
+                    "#
+                    .to_string(),
+                ),
+                sandbox: None,
+                depends_on: None,
+                retry: None,
+            }),
+            tx: Some(tx),
+            rx: mpsc::channel(100).1,
+            task_id: 1,
+            task_context,
+            task_type: "test",
+        };
+
+        let event_handler = processor
+            .init()
+            .await
+            .expect("Failed to initialize processor.");
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        event_handler
+            .handle(input_event)
+            .await
+            .expect("Failed to handle event.");
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(value["count"].as_i64().expect("Expected int."), 2);
+                let first = value["first"].as_str().expect("Expected string.");
+                assert!(
+                    first == "orders.123" || first == "orders.456",
+                    "Expected one of the order keys, got {first}"
                 );
             }
             _ => panic!("Expected JSON output."),

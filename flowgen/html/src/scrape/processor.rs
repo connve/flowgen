@@ -195,12 +195,9 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(None)).ok();
-                            }
-                        }
+                        arc.signal_completion(None);
                     }
                 }
                 Some(_) => {

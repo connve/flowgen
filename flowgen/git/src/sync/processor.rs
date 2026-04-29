@@ -145,12 +145,9 @@ impl EventHandler {
                 if index == entries.len() - 1 {
                     match self.tx {
                         None => {
+                            // Leaf task: signal completion.
                             if let Some(arc) = completion_tx_arc.as_ref() {
-                                if let Ok(mut guard) = arc.lock() {
-                                    if let Some(tx) = guard.take() {
-                                        tx.send(Ok(e.data_as_json().ok())).ok();
-                                    }
-                                }
+                                arc.signal_completion(e.data_as_json().ok());
                             }
                         }
                         Some(_) => {
@@ -164,13 +161,15 @@ impl EventHandler {
                     .map_err(|source| Error::SendMessage { source })?;
             }
 
-            // If no files were found, still signal completion.
+            // If no files were found there is nothing to forward downstream.
+            // The upstream completion channel was sized for every leaf in
+            // git_sync's subtree, so emit one signal per leaf to satisfy that
+            // contract instead of leaving the source waiting forever.
             if entries.is_empty() {
                 if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(None)).ok();
-                        }
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(None);
                     }
                 }
             }

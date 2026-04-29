@@ -8,7 +8,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::credentials::HttpCredentials;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::event::{
+    new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
+};
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use reqwest::{
     header::{HeaderMap, AUTHORIZATION},
@@ -242,20 +244,18 @@ impl EventHandler {
         &self,
         data: Value,
         meta: Option<serde_json::Map<String, Value>>,
-    ) -> Result<
-        tokio::sync::oneshot::Receiver<
-            Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>>,
-        >,
-        Error,
-    > {
-        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    ) -> Result<CompletionRx, Error> {
+        // Size the completion channel to the number of leaves in this flow.
+        // The webhook responds only after every leaf has signalled completion.
+        let (completion_state, completion_rx) =
+            new_completion_channel(self.task_context.leaf_count);
 
         let mut builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
-            .completion_tx(completion_tx);
+            .completion_tx(completion_state);
 
         if let Some(meta) = meta {
             builder = builder.meta(meta);

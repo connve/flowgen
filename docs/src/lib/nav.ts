@@ -24,7 +24,15 @@ export const navigation: NavSection[] = [
 			{ title: 'Flows', href: '/docs/concepts/flows' },
 			{ title: 'Tasks', href: '/docs/concepts/tasks' },
 			{ title: 'Events', href: '/docs/concepts/events' },
-			{ title: 'Caching', href: '/docs/concepts/caching' }
+			{ title: 'Templating', href: '/docs/concepts/templating' },
+			{ title: 'Resources', href: '/docs/concepts/resources' },
+			{ title: 'Caching', href: '/docs/concepts/caching' },
+			{ title: 'Retry', href: '/docs/concepts/retry' },
+			{ title: 'Credentials', href: '/docs/concepts/credentials' },
+			{ title: 'Authentication', href: '/docs/concepts/auth' },
+			{ title: 'Sandboxing', href: '/docs/concepts/sandboxing' },
+			{ title: 'Telemetry', href: '/docs/concepts/telemetry' },
+			{ title: 'Configuration', href: '/docs/concepts/configuration' }
 		]
 	},
 	{

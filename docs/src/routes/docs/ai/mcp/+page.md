@@ -19,15 +19,15 @@ Individual flows register as MCP tools using the `mcp_tool` task:
 
 ```yaml
 - mcp_tool:
-    name: lookup_account
-    description: "Look up a Salesforce account by ID."
+    name: lookup_user
+    description: "Look up a user by ID."
     input_schema:
       type: object
       properties:
-        account_id:
+        user_id:
           type: string
       required:
-        - account_id
+        - user_id
 ```
 
 The MCP server listens on the configured port and exposes registered tools over the MCP Streamable HTTP transport.

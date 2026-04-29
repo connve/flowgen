@@ -196,6 +196,13 @@ struct TaskDescriptor {
     output_tx: Option<mpsc::Sender<Event>>,
     /// Whether this is a blocking setup task (e.g., webhook registration).
     is_blocking: bool,
+    /// Number of leaf tasks reachable through this task's output channel.
+    ///
+    /// Source tasks use this to size the per-flow completion channel so the
+    /// upstream message is acknowledged only after every leaf signals. Leaf
+    /// tasks have a value of one (the task itself). The flow builder computes
+    /// this from the wired topology.
+    downstream_leaves: usize,
 }
 
 /// Central registry for managing all tasks in a flow.
@@ -307,6 +314,9 @@ impl TaskRegistryBuilder {
                 input_rx,
                 output_tx,
                 is_blocking,
+                // Linear chains have a single terminal task, so every task
+                // sees exactly one leaf in its downstream subgraph.
+                downstream_leaves: 1,
             });
         }
 
@@ -377,28 +387,52 @@ impl TaskRegistryBuilder {
             }
         }
 
-        // Wire channels. Single-child parents get a direct channel. Multi-child
-        // parents get a dispatcher that reads from one channel and clones events
-        // into per-child channels, preserving backpressure on each branch.
+        // Each non-source task owns a single inbound mpsc channel.
+        // Multiple parents can therefore feed the same child by sharing
+        // clones of that channel's sender, which gives correct fan-in
+        // semantics: every event from every parent reaches the child in the
+        // order it was produced, with backpressure applied by the channel.
+        let mut inbound_tx: Vec<Option<mpsc::Sender<Event>>> =
+            (0..task_count).map(|_| None).collect();
         let mut child_rx: Vec<Option<mpsc::Receiver<Event>>> =
             (0..task_count).map(|_| None).collect();
+        for (idx, parents) in parent_indices.iter().enumerate() {
+            if !parents.is_empty() {
+                let (tx, rx) = mpsc::channel(self.buffer_size);
+                inbound_tx[idx] = Some(tx);
+                child_rx[idx] = Some(rx);
+            }
+        }
+
+        // Wire each parent's outbound sender to its children's inbound
+        // channels. A parent with a single child sends directly into that
+        // child's inbound channel. A parent with multiple children gets a
+        // dispatcher that clones every event into each child's inbound
+        // channel, preserving backpressure on each branch.
         let mut parent_tx: Vec<Option<mpsc::Sender<Event>>> =
             (0..task_count).map(|_| None).collect();
 
         for (&parent_idx, children) in &children_per_parent {
             if children.len() == 1 {
-                let (tx, rx) = mpsc::channel(self.buffer_size);
-                parent_tx[parent_idx] = Some(tx);
-                child_rx[children[0]] = Some(rx);
+                let child_inbound = inbound_tx[children[0]].clone().ok_or_else(|| {
+                    Error::ConfigError(format!(
+                        "Internal error: missing inbound channel for task index {}",
+                        children[0]
+                    ))
+                })?;
+                parent_tx[parent_idx] = Some(child_inbound);
             } else {
                 let (dispatcher_tx, dispatcher_rx) = mpsc::channel(self.buffer_size);
                 parent_tx[parent_idx] = Some(dispatcher_tx);
 
                 let mut child_senders = Vec::with_capacity(children.len());
                 for &child_idx in children {
-                    let (tx, rx) = mpsc::channel(self.buffer_size);
-                    child_senders.push(tx);
-                    child_rx[child_idx] = Some(rx);
+                    let child_inbound = inbound_tx[child_idx].clone().ok_or_else(|| {
+                        Error::ConfigError(format!(
+                            "Internal error: missing inbound channel for task index {child_idx}"
+                        ))
+                    })?;
+                    child_senders.push(child_inbound);
                 }
 
                 tokio::spawn(async move {
@@ -411,6 +445,27 @@ impl TaskRegistryBuilder {
                         }
                     }
                 });
+            }
+        }
+        // Drop the sender side of inbound channels held only by the wiring
+        // bookkeeping. Each child still holds clones via parent_tx, so the
+        // channel stays open until every parent has finished.
+        drop(inbound_tx);
+
+        // Compute the number of leaf tasks reachable from each task's output.
+        // Tasks are kept in topological order (parents always precede children)
+        // so a single reverse pass propagates leaf counts up the directed
+        // acyclic graph in linear time.
+        let mut downstream_leaves: Vec<usize> = vec![0; task_count];
+        for idx in (0..task_count).rev() {
+            match children_per_parent.get(&idx) {
+                None => {
+                    // No children means this task is a leaf.
+                    downstream_leaves[idx] = 1;
+                }
+                Some(children) => {
+                    downstream_leaves[idx] = children.iter().map(|&c| downstream_leaves[c]).sum();
+                }
             }
         }
 
@@ -426,6 +481,7 @@ impl TaskRegistryBuilder {
                 input_rx: child_rx[idx].take(),
                 output_tx: parent_tx[idx].take(),
                 is_blocking,
+                downstream_leaves: downstream_leaves[idx],
             });
         }
 
@@ -950,6 +1006,16 @@ async fn spawn_task(
     let tx = task_desc.output_tx;
     let task_type_str = task_desc.task_type.as_str();
     let span = tracing::Span::current();
+
+    // Each task receives a context whose `leaf_count` reflects the leaves
+    // reachable from this specific task's output. Source and intermediate
+    // tasks (such as iterate) read this value when constructing per-flow or
+    // per-element completion channels.
+    let task_context = {
+        let mut ctx = (*task_context).clone();
+        ctx.leaf_count = task_desc.downstream_leaves;
+        Arc::new(ctx)
+    };
 
     let handle = match task_desc.task_type {
         TaskType::convert(config) => {

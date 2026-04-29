@@ -51,43 +51,7 @@ Processors receive events, do something with them, and emit events to the next t
 
 ## Task wiring
 
-By default, tasks are wired sequentially — each task receives from the previous task and sends to the next:
-
-```
-[subscriber] → [script] → [publisher]
-```
-
-### DAG with depends_on
-
-Tasks can form a directed acyclic graph (DAG) using the `depends_on` field. A task with `depends_on` receives events only from the named upstream tasks instead of the previous task in the list.
-
-```yaml
-flow:
-  name: fan_out
-  tasks:
-    - generate:
-        name: source
-        interval: "5s"
-
-    - http_request:
-        name: enrich
-        endpoint: "https://api.example.com/lookup/{{event.data.id}}"
-        depends_on: [source]
-
-    - gcp_bigquery_storage_write:
-        name: write_to_bq
-        project_id: my-project
-        dataset_id: raw
-        table_id: events
-        depends_on: [source]
-
-    - nats_jetstream_publisher:
-        name: publish
-        subject: "events.enriched"
-        depends_on: [enrich]
-```
-
-In this flow, `enrich` and `write_to_bq` both receive from `source` in parallel. `publish` only receives from `enrich`.
+By default, tasks are wired sequentially — each task receives from the previous task and sends to the next. Linear chains, fan-out, fan-in, and end-to-end acknowledgement semantics are covered in [Flows](/docs/concepts/flows).
 
 ## Common configuration
 

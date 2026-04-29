@@ -217,13 +217,9 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
-                    // Final task, signal completion.
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(result_event.data_as_json().ok())).ok();
-                            }
-                        }
+                        arc.signal_completion(result_event.data_as_json().ok());
                     }
                 }
                 Some(_) => {
@@ -797,6 +793,7 @@ mod tests {
             http_server: None,
             mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            leaf_count: 1,
         });
 
         let result = ProcessorBuilder::new()
@@ -864,6 +861,7 @@ mod tests {
             http_server: None,
             mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
+            leaf_count: 1,
         });
 
         let result = ProcessorBuilder::new()

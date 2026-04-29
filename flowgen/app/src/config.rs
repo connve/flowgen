@@ -293,7 +293,12 @@ pub struct CacheOptions {
 }
 
 /// Flow loading configuration.
-/// If `cache.enabled` is true, flows are loaded from the cache and `path` is ignored.
+///
+/// Filesystem and cache sources are independent: the worker loads from each
+/// configured source and merges the results. Configure both for hybrid mode
+/// (a small set of bootstrap flows on disk plus user flows in the cache).
+/// On a name collision the filesystem entry wins so a locally mounted flow
+/// cannot be silently overridden by a stale cache entry.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowOptions {
     /// Path for discovering flow configuration files.
@@ -332,15 +337,22 @@ pub struct FlowCacheOptions {
 }
 
 /// Resource loading configuration.
+///
+/// Filesystem and cache sources are independent: configure either, both, or
+/// neither. When both are configured the loader tries the filesystem first
+/// and falls back to the cache on a miss, so a locally mounted resource
+/// always takes precedence over a cached copy with the same key.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct ResourceOptions {
-    /// Base path for loading external resource files (SQL, JSON, HTML, etc.).
+    /// Optional base path for loading external resource files (SQL, JSON, HTML, etc.).
     /// Resource keys are resolved relative to this path.
     /// Example: with path="local/resources/", key="queries/orders.sql" resolves to "local/resources/queries/orders.sql".
+    /// Omit to skip filesystem loading.
     #[serde(default)]
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     /// Optional cache-based resource loading configuration.
-    /// When enabled, resources are loaded from the distributed cache instead of the filesystem.
+    /// When enabled, resources are loaded from the distributed cache.
+    /// Combine with `path` for hybrid loading (filesystem first, cache fallback).
     #[serde(default)]
     pub cache: Option<ResourceCacheOptions>,
 }

@@ -219,47 +219,64 @@ impl EventHandler {
                 }
             };
 
-            // Send events.
-            for event_data in event_data_list {
-                let num_records = match &event_data {
-                    flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
-                        Some(batch.num_rows())
+            // If parsing produced no events there is nothing to forward
+            // downstream. Release the source by signalling once per leaf
+            // reachable from this read's subtree, otherwise the source waits
+            // forever for completions that will never come.
+            if event_data_list.is_empty() {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(None);
                     }
-                    _ => None,
-                };
+                }
+            } else {
+                // Send events. Only the last event carries the completion
+                // signal so the source receives exactly one signal per leaf
+                // (delivered when the last event reaches each leaf), rather
+                // than draining the leaf-counter prematurely on early events.
+                let total_events = event_data_list.len();
+                for (idx, event_data) in event_data_list.into_iter().enumerate() {
+                    let num_records = match &event_data {
+                        flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
+                            Some(batch.num_rows())
+                        }
+                        _ => None,
+                    };
 
-                let mut e = EventBuilder::new()
-                    .subject(self.config.name.to_owned())
-                    .data(event_data)
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
+                    let mut e = EventBuilder::new()
+                        .subject(self.config.name.to_owned())
+                        .data(event_data)
+                        .task_id(self.task_id)
+                        .task_type(self.task_type)
+                        .build()
+                        .map_err(|source| Error::EventBuilder { source })?;
 
-                // Signal completion or pass through to next task.
-                match self.tx {
-                    None => {
-                        // Final task, signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            if let Ok(mut guard) = arc.lock() {
-                                if let Some(tx) = guard.take() {
-                                    tx.send(Ok(e.data_as_json().ok())).ok();
+                    if idx == total_events - 1 {
+                        match self.tx {
+                            None => {
+                                // Leaf task: signal completion with the last
+                                // event's payload.
+                                if let Some(arc) = completion_tx_arc.as_ref() {
+                                    arc.signal_completion(e.data_as_json().ok());
                                 }
+                            }
+                            Some(_) => {
+                                // Pass through completion_tx on the last
+                                // event so downstream leaves signal exactly
+                                // once per branch.
+                                e.completion_tx = completion_tx_arc.clone();
                             }
                         }
                     }
-                    Some(_) => {
-                        // Pass through completion_tx to next task.
-                        e.completion_tx = completion_tx_arc.clone();
-                    }
-                }
 
-                let send = e.send_with_logging(self.tx.as_ref());
-                let send = match num_records {
-                    Some(n) => send.context("num_records", n),
-                    None => send,
-                };
-                send.await.map_err(|source| Error::SendMessage { source })?;
+                    let send = e.send_with_logging(self.tx.as_ref());
+                    let send = match num_records {
+                        Some(n) => send.context("num_records", n),
+                        None => send,
+                    };
+                    send.await.map_err(|source| Error::SendMessage { source })?;
+                }
             }
 
             // Delete file from object store if configured.

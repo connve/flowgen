@@ -36,20 +36,21 @@ cache:
 
 ## Operations
 
-| Operation | Description |
-|---|---|
-| `put(key, value)` | Store a value. |
-| `put(key, value, ttl)` | Store with TTL in seconds. |
-| `get(key)` | Read a value. Returns `()` if not found. |
-| `delete(key)` | Delete a key. |
-| `list_keys(prefix)` | List keys matching a prefix. |
-| `create(key, value)` | Atomic create — fails if key exists. |
-| `update(key, value, revision)` | Compare-and-swap update. |
+The cache is exposed to Rhai scripts via `ctx.cache`. Keys are namespaced by the flow name, so two flows can use the same logical key without colliding.
+
+| Operation | Returns | Description |
+|---|---|---|
+| `ctx.cache.get(key)` | `()` or string | Read a value. Returns `()` if not found. |
+| `ctx.cache.put(key, value)` | bool | Store a value (string or integer) with no expiration. |
+| `ctx.cache.put(key, value, ttl_secs)` | bool | Store with a time-to-live in seconds. |
+| `ctx.cache.delete(key)` | bool | Delete a key. |
+| `ctx.cache.list_keys(prefix)` | array of strings | List keys matching a prefix (with the flow-name namespace stripped from results). |
+
 
 ## Access in scripts
 
 ```rhai
-// Write.
+// Write without expiration.
 ctx.cache.put("order." + event.data.id, event.data.status);
 
 // Write with TTL (seconds).
@@ -60,6 +61,12 @@ let status = ctx.cache.get("order." + event.data.id);
 
 // Delete.
 ctx.cache.delete("order." + event.data.id);
+
+// List.
+let keys = ctx.cache.list_keys("order.");
+for key in keys {
+    print(key);
+}
 ```
 
 ## Use cases
