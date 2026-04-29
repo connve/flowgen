@@ -106,8 +106,6 @@
 }
 
 .prose pre {
-	background-color: oklch(20% 0 0);
-	color: oklch(90% 0 0);
 	padding: 1rem 1.25rem;
 	border-radius: 0.5rem;
 	overflow-x: auto;

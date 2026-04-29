@@ -4,9 +4,8 @@ This guide walks you through creating your first flowgen flow.
 
 ## Prerequisites
 
-- A Kubernetes cluster (or local setup with minikube/kind)
-- NATS JetStream running (for caching and messaging)
-- Flowgen binary or container image
+- Flowgen binary ([Installation](/docs/getting-started/installation))
+- NATS JetStream (optional — for distributed cache, messaging, leader election)
 
 ## Your first flow
 
@@ -70,7 +69,7 @@ flows:
   # cache:
   #   enabled: true
   #   prefix: "flows."
-  #   db_name: flowgen_metadata
+  #   db_name: flowgen_system
 
 # External resource files (SQL, templates, scripts).
 resources:
@@ -78,7 +77,7 @@ resources:
   # cache:
   #   enabled: true
   #   prefix: "resources."
-  #   db_name: flowgen_metadata
+  #   db_name: flowgen_system
 
 # OpenTelemetry metrics and tracing.
 # telemetry:

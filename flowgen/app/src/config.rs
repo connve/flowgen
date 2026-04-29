@@ -313,8 +313,8 @@ fn default_flows_cache_prefix() -> String {
 }
 
 /// Default metadata bucket name for flow/resource loading.
-fn default_metadata_db_name() -> String {
-    "flowgen_metadata".to_string()
+fn default_system_db_name() -> String {
+    "flowgen_system".to_string()
 }
 
 /// Cache-based flow loading options.
@@ -325,9 +325,9 @@ pub struct FlowCacheOptions {
     /// Optional cache key prefix (defaults to "flowgen.flows").
     #[serde(default = "default_flows_cache_prefix")]
     pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Metadata store bucket name (defaults to "flowgen_system").
     /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_metadata_db_name")]
+    #[serde(default = "default_system_db_name")]
     pub db_name: String,
 }
 
@@ -358,9 +358,9 @@ pub struct ResourceCacheOptions {
     /// Optional cache key prefix (defaults to "flowgen.resources").
     #[serde(default = "default_resources_cache_prefix")]
     pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Metadata store bucket name (defaults to "flowgen_system").
     /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_metadata_db_name")]
+    #[serde(default = "default_system_db_name")]
     pub db_name: String,
 }
 

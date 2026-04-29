@@ -6,7 +6,12 @@ import rehypeAutolinkHeadings from 'rehype-autolink-headings';
 /** @type {import('mdsvex').MdsvexOptions} */
 const mdsvexOptions = {
 	extensions: ['.svx', '.md'],
-	rehypePlugins: [rehypeSlug, [rehypeAutolinkHeadings, { behavior: 'wrap' }]]
+	rehypePlugins: [rehypeSlug, [rehypeAutolinkHeadings, { behavior: 'wrap' }]],
+	highlight: {
+		alias: {
+			rhai: 'rust'
+		}
+	}
 };
 
 /** @type {import('@sveltejs/kit').Config} */

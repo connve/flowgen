@@ -39,7 +39,7 @@ spec:
         {{- toYaml $worker.podSecurityContext | nindent 8 }}
       containers:
       - name: {{ .Chart.Name }}
-        command: ["/bin/flowgen"]
+        command: ["/bin/flowgen", "--config", "{{ $worker.config.path }}"]
         securityContext:
           {{- toYaml $worker.securityContext | nindent 12 }}
         image: "{{ .Values.global.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
@@ -49,8 +49,6 @@ spec:
           {{- toYaml . | nindent 12 }}
         {{- end }}
         env:
-        - name: CONFIG_PATH
-          value: {{ $worker.config.path }}
         - name: POD_NAME
           valueFrom:
             fieldRef:
