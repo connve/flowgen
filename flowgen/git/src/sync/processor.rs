@@ -4,12 +4,12 @@
 //! with `{path, content, commit}` data. Downstream tasks decide what to do
 //! with the files (parse as flows, write to cache, store in object store).
 
-use super::config::{GitAuth, GitAuthType, Processor as ProcessorConfig};
+use super::config::{GitAuthType, Processor as ProcessorConfig};
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task;
 use tracing::error;
 use walkdir::WalkDir;
 
@@ -28,16 +28,42 @@ pub struct FileEvent {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Git clone failed: {stderr}")]
-    GitClone { stderr: String },
-    #[error("Git pull failed: {stderr}")]
-    GitPull { stderr: String },
-    #[error("Git rev-parse failed: {stderr}")]
-    GitRevParse { stderr: String },
-    #[error("Git command failed: {source}")]
-    GitIo {
+    #[error("Git clone failed for {url}: {source}")]
+    Clone {
+        url: String,
         #[source]
-        source: std::io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Git fetch failed for {url}: {source}")]
+    Fetch {
+        url: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to open existing repository at {path}: {source}")]
+    OpenRepo {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to read HEAD commit: {source}")]
+    HeadCommit {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to checkout worktree: {source}")]
+    Checkout {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("SSH authentication is not supported. Use HTTPS with a token instead.")]
+    SshNotSupported,
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+    #[error("Git operation panicked or was cancelled: {source}")]
+    JoinError {
+        #[source]
+        source: tokio::task::JoinError,
     },
     #[error("Failed to read file '{path}': {source}")]
     FileRead {
@@ -77,6 +103,10 @@ pub enum Error {
 /// Event handler for git sync operations.
 pub struct EventHandler {
     config: Arc<ProcessorConfig>,
+    /// Resolved local path for the repository clone. Either the explicit
+    /// `clone_path` from config, or the derived default
+    /// `<temp>/<flow_name>/<task_name>`.
+    clone_path: PathBuf,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -95,12 +125,12 @@ impl EventHandler {
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
             // Clone or pull the repository.
-            let commit = clone_or_pull(&self.config).await?;
+            let commit = clone_or_pull(&self.config, &self.clone_path).await?;
 
             // Determine the scan base path.
             let scan_path = match &self.config.path {
-                Some(p) => self.config.clone_path.join(p),
-                None => self.config.clone_path.clone(),
+                Some(p) => self.clone_path.join(p),
+                None => self.clone_path.clone(),
             };
 
             // Walk files and emit one event per file.
@@ -180,122 +210,150 @@ impl EventHandler {
     }
 }
 
-// --- Git operations ---
+// --- Git operations (gix-backed) ---
+//
+// All gix calls are blocking and must run on a dedicated thread. We wrap the
+// whole clone/pull/head sequence in a single `spawn_blocking` to avoid
+// re-paying the thread-handoff cost per call.
 
 /// Clone or pull the repository and return the HEAD commit hash.
-async fn clone_or_pull(config: &ProcessorConfig) -> Result<String, Error> {
-    let clone_path = &config.clone_path;
+async fn clone_or_pull(config: &ProcessorConfig, clone_path: &Path) -> Result<String, Error> {
+    if matches!(config.auth.auth_type, GitAuthType::Ssh) {
+        return Err(Error::SshNotSupported);
+    }
 
-    if clone_path.join(".git").exists() {
-        pull(clone_path, &config.auth).await?;
+    let url = build_authenticated_url(config)?;
+    let clone_path = clone_path.to_path_buf();
+    let branch = config.branch.clone();
+    let original_url = config.repository_url.clone();
+
+    task::spawn_blocking(move || sync_blocking(&url, &original_url, &branch, &clone_path))
+        .await
+        .map_err(|source| Error::JoinError { source })?
+}
+
+/// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
+fn sync_blocking(
+    url: &str,
+    original_url: &str,
+    branch: &str,
+    path: &Path,
+) -> Result<String, Error> {
+    if path.join(".git").exists() {
+        fetch_existing(path, original_url)?;
     } else {
-        clone(
-            &config.repository_url,
-            &config.branch,
-            clone_path,
-            &config.auth,
-        )
-        .await?;
+        shallow_clone(url, branch, path, original_url)?;
     }
-
-    head_commit(clone_path, &config.auth).await
+    head_commit(path)
 }
 
-/// Shallow clone a repository.
-async fn clone(url: &str, branch: &str, path: &Path, auth: &GitAuth) -> Result<(), Error> {
-    let mut cmd = Command::new("git");
-    cmd.args([
-        "clone",
-        "--branch",
-        branch,
-        "--single-branch",
-        "--depth",
-        "1",
-    ]);
-    cmd.arg(url);
-    cmd.arg(path);
-    apply_auth_env(&mut cmd, auth);
-
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
-
-    if !output.status.success() {
-        return Err(Error::GitClone {
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
+/// Builds the URL used for network operations, embedding a token in the
+/// userinfo segment when token auth is configured. The `original_url` is
+/// preserved separately for error messages so tokens never appear in logs.
+fn build_authenticated_url(config: &ProcessorConfig) -> Result<String, Error> {
+    if let GitAuthType::Token = config.auth.auth_type {
+        if let Some(token) = config.auth.token.as_deref() {
+            // Inject the token as a basic-auth username (GitHub/GitLab convention).
+            // For URLs like `https://github.com/org/repo.git`, the result is
+            // `https://<token>@github.com/org/repo.git`.
+            if let Some(rest) = config.repository_url.strip_prefix("https://") {
+                return Ok(format!("https://{token}@{rest}"));
+            }
+            if let Some(rest) = config.repository_url.strip_prefix("http://") {
+                return Ok(format!("http://{token}@{rest}"));
+            }
+        }
     }
+    Ok(config.repository_url.clone())
+}
+
+/// Performs a shallow clone of a single branch.
+fn shallow_clone(url: &str, branch: &str, path: &Path, log_url: &str) -> Result<(), Error> {
+    let mut prepare = gix::prepare_clone(url, path)
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?
+        .with_ref_name(Some(branch))
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?
+        .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+            std::num::NonZeroU32::MIN,
+        ));
+
+    let (mut checkout, _outcome) = prepare
+        .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    checkout
+        .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Checkout {
+            source: Box::new(e),
+        })?;
+
     Ok(())
 }
 
-/// Fast-forward pull an existing clone.
-async fn pull(path: &Path, auth: &GitAuth) -> Result<(), Error> {
-    let mut cmd = Command::new("git");
-    cmd.args(["pull", "--ff-only"]);
-    cmd.current_dir(path);
-    apply_auth_env(&mut cmd, auth);
+/// Fetches the latest refs into an existing clone and resets HEAD to the
+/// remote tracking branch. Mirrors `git pull --ff-only` semantics.
+fn fetch_existing(path: &Path, log_url: &str) -> Result<(), Error> {
+    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
+    let remote = repo
+        .find_default_remote(gix::remote::Direction::Fetch)
+        .ok_or_else(|| Error::Fetch {
+            url: log_url.to_string(),
+            source: "no default remote configured".into(),
+        })?
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
 
-    if !output.status.success() {
-        return Err(Error::GitPull {
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
+    let connection = remote
+        .connect(gix::remote::Direction::Fetch)
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    let prepared = connection
+        .prepare_fetch(gix::progress::Discard, Default::default())
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    prepared
+        .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
     Ok(())
 }
 
-/// Read the HEAD commit hash.
-async fn head_commit(path: &Path, auth: &GitAuth) -> Result<String, Error> {
-    let mut cmd = Command::new("git");
-    cmd.args(["rev-parse", "HEAD"]);
-    cmd.current_dir(path);
-    apply_auth_env(&mut cmd, auth);
+/// Reads the HEAD commit object id.
+fn head_commit(path: &Path) -> Result<String, Error> {
+    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
+    let head_id = repo.head_id().map_err(|e| Error::HeadCommit {
+        source: Box::new(e),
+    })?;
 
-    if !output.status.success() {
-        return Err(Error::GitRevParse {
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Apply authentication environment variables to a git command.
-fn apply_auth_env(cmd: &mut Command, auth: &GitAuth) {
-    match auth.auth_type {
-        GitAuthType::Ssh => {
-            let mut ssh_cmd = "ssh".to_string();
-            if let Some(ref key) = auth.ssh_key_path {
-                ssh_cmd.push_str(&format!(" -i {}", key.display()));
-            }
-            match &auth.ssh_known_hosts_path {
-                Some(hosts) => {
-                    ssh_cmd.push_str(&format!(" -o UserKnownHostsFile={}", hosts.display()));
-                    ssh_cmd.push_str(" -o StrictHostKeyChecking=yes");
-                }
-                None => {
-                    ssh_cmd.push_str(" -o StrictHostKeyChecking=no");
-                }
-            }
-            cmd.env("GIT_SSH_COMMAND", ssh_cmd);
-        }
-        GitAuthType::Token => {
-            if let Some(ref token) = auth.token {
-                cmd.env("GIT_ASKPASS", "echo");
-                cmd.env("GIT_PASSWORD", token);
-            }
-        }
-        GitAuthType::None => {}
-    }
+    Ok(head_id.to_string())
 }
 
 // --- Processor / Runner ---
@@ -317,8 +375,29 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
+        // Reject unsupported auth at startup so the task fails fast rather
+        // than once per event under retry.
+        if matches!(self.config.auth.auth_type, GitAuthType::Ssh) {
+            return Err(Error::SshNotSupported);
+        }
+
+        let clone_path = match &self.config.clone_path {
+            Some(path) => {
+                flowgen_core::validate::validate_path(
+                    flowgen_core::validate::PathField::ClonePath,
+                    path,
+                )
+                .map_err(Error::InvalidConfig)?;
+                path.clone()
+            }
+            None => std::env::temp_dir()
+                .join(&self.task_context.flow.name)
+                .join(&self.config.name),
+        };
+
         Ok(EventHandler {
             config: Arc::clone(&self.config),
+            clone_path,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,

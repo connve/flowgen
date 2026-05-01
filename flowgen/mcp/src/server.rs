@@ -519,7 +519,6 @@ async fn execute_tool_call(
     );
 
     tokio::spawn(async move {
-        let start = std::time::Instant::now();
         // Formats a progress event as an SSE string.
         let format_progress = |evt: &ProgressEvent| -> Option<String> {
             serde_json::to_string(evt)
@@ -594,8 +593,8 @@ async fn execute_tool_call(
             }
         };
 
-        // Send the final result and record outcome.
-        let elapsed = start.elapsed();
+        // Record outcome on the current span; per-request latency is
+        // already captured by the span itself via OpenTelemetry.
         let outcome = match &result {
             Some(Ok(Ok(Some(_)))) => "success",
             Some(Ok(Ok(None))) => "success_no_data",
@@ -605,11 +604,7 @@ async fn execute_tool_call(
         };
 
         tracing::Span::current().record("outcome", outcome);
-        info!(
-            duration_ms = elapsed.as_millis() as u64,
-            outcome = outcome,
-            "MCP tool execution completed."
-        );
+        info!(outcome = outcome, "MCP tool execution completed.");
 
         if let Some(completion) = result {
             let final_event = completion_to_result_event(request_id, completion);

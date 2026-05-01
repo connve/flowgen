@@ -8,10 +8,6 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
-fn default_clone_path() -> PathBuf {
-    PathBuf::from("/tmp/flowgen-repo")
-}
-
 /// Git sync processor configuration.
 ///
 /// Clones or pulls a Git repository and emits one event per file found
@@ -43,9 +39,14 @@ pub struct Processor {
     /// All files under this path are emitted as events.
     #[serde(default)]
     pub path: Option<String>,
-    /// Local path to clone the repository into (defaults to "/tmp/flowgen-repo").
-    #[serde(default = "default_clone_path")]
-    pub clone_path: PathBuf,
+    /// Local path to clone the repository into.
+    ///
+    /// Defaults to `<system_temp>/<flow_name>/<task_name>` so that multiple
+    /// `git_sync` tasks in the same worker do not collide on the same
+    /// working tree. Override only when you need a stable path on a
+    /// persistent volume.
+    #[serde(default)]
+    pub clone_path: Option<PathBuf>,
     /// Authentication configuration.
     #[serde(default)]
     pub auth: GitAuth,
@@ -96,7 +97,7 @@ mod tests {
         let config: Processor = serde_json::from_str(json).unwrap();
         assert_eq!(config.branch, "main");
         assert!(config.path.is_none());
-        assert_eq!(config.clone_path, PathBuf::from("/tmp/flowgen-repo"));
+        assert!(config.clone_path.is_none());
     }
 
     #[test]

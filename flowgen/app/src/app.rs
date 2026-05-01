@@ -242,6 +242,14 @@ impl App {
 
             match config.try_deserialize::<FlowConfig>() {
                 Ok(flow_config) => {
+                    if let Err(reason) = flow_config.validate() {
+                        error!(
+                            key = %key,
+                            error = %reason,
+                            "Flow config from cache failed name validation. Skipping."
+                        );
+                        continue;
+                    }
                     info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache.");
                     flow_configs.push(flow_config);
                 }
@@ -342,6 +350,14 @@ impl App {
 
                         match config.try_deserialize::<FlowConfig>() {
                             Ok(flow_config) => {
+                                if let Err(reason) = flow_config.validate() {
+                                    error!(
+                                        path = %path.display(),
+                                        error = %reason,
+                                        "Flow config failed name validation. Skipping this flow."
+                                    );
+                                    return None;
+                                }
                                 info!(flow = %flow_config.flow.name, "Loaded flow.");
                                 Some(flow_config)
                             }
@@ -417,19 +433,19 @@ impl App {
         // mounted bootstrap flows from being silently overridden by a stale
         // cache entry with the same name.
         let filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
-        info!(
-            count = filesystem_flows.len(),
-            "Loaded flows from filesystem."
-        );
+        info!("Loaded {} flows from filesystem.", filesystem_flows.len());
 
         let (cache_flows, system_cache) = match app_config.flows.cache.as_ref() {
             Some(cache_opts) if cache_opts.enabled => {
                 match Self::init_system_cache(&app_config, &cache_opts.db_name) {
                     Ok(cache) => {
-                        info!(bucket = %cache_opts.db_name, "System cache initialized for flow loading.");
+                        info!(
+                            "Initialized system cache for flow loading on bucket '{}'.",
+                            cache_opts.db_name
+                        );
                         let configs =
                             Self::load_flows_from_cache(cache.as_ref(), &cache_opts.prefix).await?;
-                        info!(count = configs.len(), "Loaded flows from cache.");
+                        info!("Loaded {} flows from cache.", configs.len());
                         (configs, Some((cache, cache_opts.db_name.clone())))
                     }
                     Err(e) => {
@@ -609,7 +625,10 @@ impl App {
                         } else {
                             match Self::init_system_cache(&app_config, &rc.db_name) {
                                 Ok(cache) => {
-                                    info!(bucket = %rc.db_name, "System cache initialized for resource loading.");
+                                    info!(
+                                        "Initialized system cache for resource loading on bucket '{}'.",
+                                        rc.db_name
+                                    );
                                     Some(cache)
                                 }
                                 Err(e) => {

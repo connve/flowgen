@@ -26,6 +26,19 @@ pub struct FlowConfig {
     pub flow: Flow,
 }
 
+impl FlowConfig {
+    /// Validates flow and task names so they are safe to use as filesystem
+    /// path segments. Called by the loaders before a flow is accepted.
+    pub fn validate(&self) -> Result<(), String> {
+        use flowgen_core::validate::{validate_name, NameField};
+        validate_name(NameField::Flow, &self.flow.name)?;
+        for task in &self.flow.tasks {
+            validate_name(NameField::Task, task.name())?;
+        }
+        Ok(())
+    }
+}
+
 /// Default value for parallel_instances.
 fn default_parallel_instances() -> usize {
     1

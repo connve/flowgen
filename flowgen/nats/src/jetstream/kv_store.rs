@@ -207,11 +207,17 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            let event_data = event.data_as_json().unwrap_or_default();
+            // Render templates against the wrapped event so `{{event.data.x}}`
+            // and `{{event.meta.x}}` resolve as in every other processor.
+            let event_value = serde_json::Value::try_from(event.as_ref())
+                .map_err(|source| Error::EventBuilder { source })?;
             let rendered = self
                 .config
-                .render(&event_data)
+                .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
+
+            // Unwrapped data, used by `handle_put` to read `content`.
+            let event_data = event.data_as_json().unwrap_or_default();
 
             let result = match rendered.operation {
                 Operation::Put => self.handle_put(&rendered, &event_data).await?,
@@ -379,13 +385,20 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let jetstream = client.jetstream.ok_or(Error::MissingJetStream)?;
 
-        let store = jetstream
-            .create_key_value(async_nats::jetstream::kv::Config {
-                bucket: config.bucket.clone(),
-                ..Default::default()
-            })
-            .await
-            .map_err(|source| Error::KvBucketCreate { source })?;
+        // Open the bucket if it exists; only create it when missing.
+        // Avoids configuration collisions when another component (the
+        // worker's system cache, another flow, or `nats` CLI) created the
+        // bucket with different settings.
+        let store = match jetstream.get_key_value(&config.bucket).await {
+            Ok(store) => store,
+            Err(_) => jetstream
+                .create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: config.bucket.clone(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|source| Error::KvBucketCreate { source })?,
+        };
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),

@@ -53,6 +53,17 @@ reqwest = { version = "0.13.1", default-features = false, features = [
     "charset",
 ] }
 url = { version = "2.5" }
+# gitoxide — pure-Rust git implementation. HTTPS transport via reqwest with
+# rustls reuses the existing reqwest dep for a unified TLS stack. SSH
+# support is intentionally not enabled: gix relies on shelling out to the
+# `ssh` binary for SSH today, which defeats the single-binary goal.
+gix = { version = "0.83", default-features = false, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "worktree-mutation",
+    "sha1",
+    "max-performance-safe",
+] }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550
 async-nats = { git = "https://github.com/nats-io/nats.rs", rev = "7e6672c240a4a1bd7726d37ac7b52a290af6b690" }

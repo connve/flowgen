@@ -73,3 +73,19 @@ For nested data, either:
     payload:
       from_event: true
 ```
+
+## Response handling
+
+Response bodies are decoded into the next event's `event.data` after the
+HTTP client applies a few transparent transforms:
+
+- **Compression**: `Content-Encoding: gzip`, `br` (Brotli), and `deflate`
+  responses are decompressed automatically. The `Accept-Encoding` request
+  header is set on every outbound call.
+- **Character encoding**: when `Content-Type` declares a charset
+  (`text/html; charset=windows-1250`, `iso-8859-2`, etc.), the body is
+  decoded to UTF-8 before parsing. No special configuration needed.
+
+If the server returns 4xx/5xx, the task fails with the status code and
+body. 4xx (other than 429) is permanent and skips retries; 429, 5xx, and
+network errors are retriable per the task's [retry config](/docs/concepts/retry).

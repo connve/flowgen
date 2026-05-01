@@ -144,9 +144,10 @@ where
 
 /// Builder for sending events with structured logging context.
 ///
-/// Automatically computes `duration_ms` from `event.timestamp` to the time of sending.
-/// For accurate duration tracking, call `EventBuilder::new()` at the start of `handle()`
-/// so that `event.timestamp` reflects processing start time.
+/// Per-task processing time is exposed through the OpenTelemetry span
+/// `task.handle` rather than as a log field. Use this builder to attach
+/// task-specific structured fields (record counts, status codes, etc.) to
+/// the success log line.
 pub struct EventLogger<'a> {
     event: Event,
     tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
@@ -183,22 +184,14 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
             };
             let subject = self.event.subject.clone();
 
-            // Compute processing duration from event timestamp to now.
-            let duration_ms = {
-                let now_micros = Utc::now().timestamp_micros();
-                ((now_micros - self.event.timestamp) / 1000).max(0) as u64
-            };
-
             if let Some(tx) = self.tx {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
             }
 
-            // Build structured log with duration and context fields.
             if self.fields.is_empty() {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
-                    duration_ms = duration_ms,
                 );
             } else {
                 let field_str = self
@@ -211,7 +204,6 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
-                    duration_ms = duration_ms,
                     context = %field_str,
                 );
             }
