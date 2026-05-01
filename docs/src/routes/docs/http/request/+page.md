@@ -32,7 +32,19 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `object` | map | JSON payload with explicit fields. Supports templating. |
 | `input` | string | Raw JSON string. |
 | `from_event` | bool | Use incoming event data as the request body. |
-| `send_as` | string | Encoding: `json` (default), `url_encoded`, `query_params`. |
+| `send_as` | string | Encoding: `json` (default), `urlencoded`, `queryparams`. |
+
+### `urlencoded` and `queryparams` require flat scalar payloads
+
+`urlencoded` and `queryparams` go through `serde_urlencoded`, which only
+encodes flat objects of scalar values (strings, numbers, booleans). Nested
+objects or arrays produce a request build error.
+
+For nested data, either:
+- use `send_as: json` (POST body), or
+- flatten the payload in a `script` task before this one and choose a
+  per-API key convention (bracket notation, dotted keys, comma-separated,
+  etc.).
 
 ## Examples
 

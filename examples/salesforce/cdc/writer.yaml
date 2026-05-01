@@ -1,0 +1,75 @@
+# Fan-out writer for Salesforce change events.
+#
+# Consumes change events from the `pubsub.>` NATS subject populated by the
+# subscriber flows and fans each event out to two sinks in parallel:
+#   - object store: append-only archive on hive-partitioned paths.
+#   - BigQuery Storage Write API in CDC upsert mode: deduplicates by
+#     Salesforce Id, keeping each row at its latest state.
+#
+# Both sinks depend on the same `strip_subject_prefix` script, so flowgen
+# clones every event into both branches. The NATS message is acknowledged
+# only after every leaf (object store + BigQuery) has committed, matching
+# the `feedback_nats_first` reliability principle: persist in NATS, then
+# fan out to durable storage with end-to-end acknowledgement.
+#
+# Required:
+#   - /etc/nats/credentials.json
+#   - /etc/gcp/credentials.json
+#   - NATS_URL, GCP_PROJECT_ID, GCS_BUCKET_PATH env vars
+flow:
+  name: salesforce_writer
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: pubsub.>
+        stream:
+          create_or_update: true
+          name: salesforce
+          description: "Salesforce platform events, change events and query results."
+          subjects: ["pubsub.>"]
+          max_age: "24h"
+          retention: limits
+          discard: old
+        durable_name: salesforce_writer
+        max_messages: 100
+
+    # Strip the `pubsub.` prefix and turn the dotted topic into a path
+    # segment so downstream sinks can use the original topic shape
+    # (data/AccountChangeEvent) for partitioning and table routing.
+    - script:
+        name: strip_subject_prefix
+        code: |
+          let parts = event.subject.split(".");
+          if parts.len() >= 3 && parts[0] == "pubsub" && (parts[1] == "data" || parts[1] == "event") {
+              event.subject = parts[1] + "/" + parts[2];
+          }
+          event
+
+    # Branch A: write the raw event to object storage, partitioned by
+    # event date. Useful for replay, audit, and offline analytics.
+    - object_store:
+        name: write_to_object_store
+        operation: write
+        credentials_path: /etc/gcp/credentials.json
+        path: "{{env.GCS_BUCKET_PATH}}/salesforce/{{event.subject}}"
+        hive_partition_options:
+          enabled: true
+          partition_keys:
+            - EventDate
+        depends_on: [strip_subject_prefix]
+
+    # Branch B: stream into BigQuery in CDC upsert mode. Each row is
+    # keyed by the Salesforce Id, so updates and deletes converge to
+    # the latest state. The destination table must declare a primary
+    # key on `Id` for BigQuery to accept upserts.
+    - gcp_bigquery_storage_write:
+        name: write_to_bigquery
+        credentials_path: /etc/gcp/credentials.json
+        project_id: "{{env.GCP_PROJECT_ID}}"
+        dataset_id: salesforce
+        table_id: account
+        change_type: upsert
+        depends_on: [strip_subject_prefix]
