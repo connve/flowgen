@@ -39,21 +39,21 @@ pub enum Error {
     #[error("Flow build failed: {source}")]
     FlowBuild {
         #[source]
-        source: crate::flow::Error,
+        source: Box<crate::flow::Error>,
     },
     /// Flow initialization error.
     #[error("Flow initialization failed for {flow_name}: {source}")]
     FlowInit {
         flow_name: String,
         #[source]
-        source: crate::flow::Error,
+        source: Box<crate::flow::Error>,
     },
     /// HTTP handler startup error.
     #[error("Failed to run HTTP handlers for {flow_name}: {source}")]
     HttpHandlerStartup {
         flow_name: String,
         #[source]
-        source: crate::flow::Error,
+        source: Box<crate::flow::Error>,
     },
     /// HTTP handler setup completion error.
     #[error("Failed to complete HTTP handler setup: {source}")]
@@ -133,6 +133,39 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// Failed to initialize the system cache for flow/resource loading.
+    #[error("Failed to initialize system cache: {source}")]
+    SystemCacheInit {
+        #[source]
+        source: flowgen_nats::cache::Error,
+    },
+    /// Failed to list keys from the system cache.
+    #[error("Failed to list flow keys from cache: {source}")]
+    CacheListKeys {
+        #[source]
+        source: flowgen_core::cache::Error,
+    },
+    /// Failed to read a flow from the system cache.
+    #[error("Failed to read flow {key:?} from cache: {source}")]
+    CacheFlowRead {
+        key: String,
+        #[source]
+        source: flowgen_core::cache::Error,
+    },
+    /// Failed to parse flow content from cache as UTF-8.
+    #[error("Flow {key:?} from cache is not valid UTF-8: {source}")]
+    CacheFlowUtf8 {
+        key: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    /// Failed to parse flow config from cache.
+    #[error("Failed to parse flow config from cache key {key:?}: {source}")]
+    CacheFlowConfigParse {
+        key: String,
+        #[source]
+        source: config::ConfigError,
+    },
 }
 /// Main application that loads and runs flows concurrently.
 pub struct App {
@@ -141,6 +174,217 @@ pub struct App {
 }
 
 impl App {
+    /// Initializes a system cache connection for flow/resource loading.
+    /// Separate from the runtime cache to avoid key collisions during list operations.
+    fn init_system_cache(
+        app_config: &AppConfig,
+        db_name: &str,
+    ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
+        let cache_config = app_config.cache.as_ref().ok_or(Error::InvalidFlowsPath)?;
+
+        let nats_cache = flowgen_nats::cache::CacheBuilder::new()
+            .credentials_path(cache_config.credentials_path.clone())
+            .url(cache_config.url.clone())
+            .build()
+            .and_then(|builder| futures::executor::block_on(async { builder.init(db_name).await }))
+            .map_err(|source| Error::SystemCacheInit { source })?;
+
+        Ok(Arc::new(nats_cache))
+    }
+
+    /// Loads flow configurations from a system cache bucket.
+    /// Lists all keys under the given prefix, reads each value, and parses as FlowConfig.
+    async fn load_flows_from_cache(
+        cache: &dyn flowgen_core::cache::Cache,
+        prefix: &str,
+    ) -> Result<Vec<FlowConfig>, Error> {
+        let keys = cache
+            .list_keys(prefix)
+            .await
+            .map_err(|source| Error::CacheListKeys { source })?;
+
+        let mut flow_configs = Vec::new();
+        for key in keys {
+            let bytes = match cache
+                .get(&key)
+                .await
+                .map_err(|source| Error::CacheFlowRead {
+                    key: key.clone(),
+                    source,
+                })? {
+                Some(b) => b,
+                None => {
+                    warn!(key = %key, "Flow key listed but not found, skipping");
+                    continue;
+                }
+            };
+
+            let content =
+                String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheFlowUtf8 {
+                    key: key.clone(),
+                    source,
+                })?;
+
+            // Determine format from key extension, default to YAML.
+            let file_format = if key.ends_with(".json") {
+                config::FileFormat::Json
+            } else {
+                config::FileFormat::Yaml
+            };
+
+            let config = Config::builder()
+                .add_source(config::File::from_str(&content, file_format))
+                .build()
+                .map_err(|source| Error::CacheFlowConfigParse {
+                    key: key.clone(),
+                    source,
+                })?;
+
+            match config.try_deserialize::<FlowConfig>() {
+                Ok(flow_config) => {
+                    if let Err(reason) = flow_config.validate() {
+                        error!(
+                            key = %key,
+                            error = %reason,
+                            "Flow config from cache failed name validation. Skipping."
+                        );
+                        continue;
+                    }
+                    info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache");
+                    flow_configs.push(flow_config);
+                }
+                Err(source) => {
+                    error!(
+                        key = %key,
+                        error = %source,
+                        "Failed to deserialize flow config from cache. Skipping."
+                    );
+                }
+            }
+        }
+
+        Ok(flow_configs)
+    }
+
+    /// Loads flow configurations from the filesystem using the configured path.
+    ///
+    /// Returns an empty vector when `flows.path` is not configured. This allows
+    /// the worker to run cache-only (every flow loaded from the system cache)
+    /// or to mix sources (a few local flows mounted from disk, the rest pulled
+    /// from the system cache by a sync flow).
+    fn load_flows_from_filesystem(app_config: &AppConfig) -> Result<Vec<FlowConfig>, Error> {
+        let flows_path = match app_config.flows.path.as_ref() {
+            Some(path) => path,
+            None => return Ok(Vec::new()),
+        };
+
+        let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
+
+        // Check if path contains wildcards (backward compatibility).
+        let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
+            vec![flows_path_str.to_string()]
+        } else {
+            crate::config::FLOW_CONFIG_EXTENSIONS
+                .iter()
+                .map(|ext| format!("{}/**/*.{}", flows_path_str.trim_end_matches('/'), ext))
+                .collect()
+        };
+
+        let mut flow_configs: Vec<FlowConfig> = Vec::new();
+        let mut seen_paths = std::collections::HashSet::new();
+
+        for glob_pattern in glob_patterns {
+            let matched_flows: Vec<FlowConfig> = glob::glob(&glob_pattern)
+                .map_err(|e| Error::Pattern { source: e })?
+                .filter_map(|path| match path {
+                    Ok(path) => {
+                        let canonical_path = match std::fs::canonicalize(&path) {
+                            Ok(p) => p,
+                            Err(source) => {
+                                let err = Error::FlowFileCanonicalize {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{}. Skipping this flow.", err);
+                                return None;
+                            }
+                        };
+
+                        if seen_paths.contains(&canonical_path) {
+                            return None;
+                        }
+                        seen_paths.insert(canonical_path.clone());
+
+                        let contents = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(source) => {
+                                let err = Error::FlowFileRead {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{}. Skipping this flow.", err);
+                                return None;
+                            }
+                        };
+
+                        let file_format = match path.extension().and_then(|s| s.to_str()) {
+                            Some("yaml") | Some("yml") => config::FileFormat::Yaml,
+                            Some("json") => config::FileFormat::Json,
+                            _ => config::FileFormat::Json,
+                        };
+
+                        let config = match Config::builder()
+                            .add_source(config::File::from_str(&contents, file_format))
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(source) => {
+                                let err = Error::FlowConfigParse {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{}. Skipping this flow.", err);
+                                return None;
+                            }
+                        };
+
+                        match config.try_deserialize::<FlowConfig>() {
+                            Ok(flow_config) => {
+                                if let Err(reason) = flow_config.validate() {
+                                    error!(
+                                        path = %path.display(),
+                                        error = %reason,
+                                        "Flow config failed name validation. Skipping this flow."
+                                    );
+                                    return None;
+                                }
+                                info!(flow = %flow_config.flow.name, "Loaded flow");
+                                Some(flow_config)
+                            }
+                            Err(source) => {
+                                let err = Error::FlowConfigDeserialize {
+                                    path: path.clone(),
+                                    source,
+                                };
+                                error!("{}. Skipping this flow.", err);
+                                None
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        let err = Error::Glob { source };
+                        error!("{}. Skipping.", err);
+                        None
+                    }
+                })
+                .collect();
+
+            flow_configs.extend(matched_flows);
+        }
+
+        Ok(flow_configs)
+    }
+
     /// Loads flow configurations from disk, builds flows, starts HTTP server, and runs all tasks concurrently.
     ///
     /// This method discovers flow configuration files using the glob pattern specified in the app config,
@@ -179,111 +423,55 @@ impl App {
             None
         };
 
-        let flows_path = app_config
-            .flows
-            .path
-            .as_ref()
-            .ok_or(Error::InvalidFlowsPath)?;
+        // Load flows from filesystem and (optionally) from the distributed cache.
+        // The two sources are merged so a worker can run any combination of:
+        //   - filesystem only (no cache section, classic mode);
+        //   - cache only (no `flows.path` set, every flow comes from the cache);
+        //   - hybrid (a small set of bootstrap flows mounted from disk while the
+        //     bulk of user flows lives in the cache, populated by a sync flow).
+        // On name collisions the filesystem entry wins, which keeps locally
+        // mounted bootstrap flows from being silently overridden by a stale
+        // cache entry with the same name.
+        let filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
+        info!("Loaded {} flows from filesystem.", filesystem_flows.len());
 
-        let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
-
-        // Check if path contains wildcards (backward compatibility).
-        let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
-            // Use the path directly as a glob pattern (old behavior).
-            vec![flows_path_str.to_string()]
-        } else {
-            // Treat as base path and construct recursive glob patterns (new behavior).
-            crate::config::FLOW_CONFIG_EXTENSIONS
-                .iter()
-                .map(|ext| format!("{}/**/*.{}", flows_path_str.trim_end_matches('/'), ext))
-                .collect()
+        let (cache_flows, system_cache) = match app_config.flows.cache.as_ref() {
+            Some(cache_opts) if cache_opts.enabled => {
+                match Self::init_system_cache(&app_config, &cache_opts.db_name) {
+                    Ok(cache) => {
+                        info!(
+                            "Initialized system cache for flow loading on bucket '{}'.",
+                            cache_opts.db_name
+                        );
+                        let configs =
+                            Self::load_flows_from_cache(cache.as_ref(), &cache_opts.prefix).await?;
+                        info!("Loaded {} flows from cache.", configs.len());
+                        (configs, Some((cache, cache_opts.db_name.clone())))
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "Failed to initialize system cache. Continuing with filesystem flows only."
+                        );
+                        (Vec::new(), None)
+                    }
+                }
+            }
+            _ => (Vec::new(), None),
         };
 
-        let mut flow_configs: Vec<FlowConfig> = Vec::new();
-        let mut seen_paths = std::collections::HashSet::new();
-
-        for glob_pattern in glob_patterns {
-            let matched_flows: Vec<FlowConfig> = glob::glob(&glob_pattern)
-                .map_err(|e| Error::Pattern { source: e })?
-                .filter_map(|path| {
-                    match path {
-                        Ok(path) => {
-                            let canonical_path = match std::fs::canonicalize(&path) {
-                                Ok(p) => p,
-                                Err(source) => {
-                                    let err = Error::FlowFileCanonicalize {
-                                        path: path.clone(),
-                                        source,
-                                    };
-                                    error!("{}. Skipping this flow.", err);
-                                    return None;
-                                }
-                            };
-
-                            if seen_paths.contains(&canonical_path) {
-                                return None;
-                            }
-                            seen_paths.insert(canonical_path.clone());
-
-                            let contents = match std::fs::read_to_string(&path) {
-                                Ok(c) => c,
-                                Err(source) => {
-                                    let err = Error::FlowFileRead {
-                                        path: path.clone(),
-                                        source,
-                                    };
-                                    error!("{}. Skipping this flow.", err);
-                                    return None;
-                                }
-                            };
-
-                            // Determine file format from extension.
-                            let file_format = match path.extension().and_then(|s| s.to_str()) {
-                                Some("yaml") | Some("yml") => config::FileFormat::Yaml,
-                                Some("json") => config::FileFormat::Json,
-                                _ => config::FileFormat::Json,
-                            };
-
-                            let config = match Config::builder()
-                                .add_source(config::File::from_str(&contents, file_format))
-                                .build()
-                            {
-                                Ok(c) => c,
-                                Err(source) => {
-                                    let err = Error::FlowConfigParse {
-                                        path: path.clone(),
-                                        source,
-                                    };
-                                    error!("{}. Skipping this flow.", err);
-                                    return None;
-                                }
-                            };
-
-                            match config.try_deserialize::<FlowConfig>() {
-                                Ok(flow_config) => {
-                                    info!(flow = %flow_config.flow.name, "Loaded flow");
-                                    Some(flow_config)
-                                }
-                                Err(source) => {
-                                    let err = Error::FlowConfigDeserialize {
-                                        path: path.clone(),
-                                        source,
-                                    };
-                                    error!("{}. Skipping this flow.", err);
-                                    None
-                                }
-                            }
-                        }
-                        Err(source) => {
-                            let err = Error::Glob { source };
-                            error!("{}. Skipping.", err);
-                            None
-                        }
-                    }
-                })
-                .collect();
-
-            flow_configs.extend(matched_flows);
+        let mut flow_configs = filesystem_flows;
+        let mut seen_names: std::collections::HashSet<String> =
+            flow_configs.iter().map(|f| f.flow.name.clone()).collect();
+        for cache_flow in cache_flows {
+            if seen_names.insert(cache_flow.flow.name.clone()) {
+                flow_configs.push(cache_flow);
+            } else {
+                warn!(
+                    flow = %cache_flow.flow.name,
+                    "Cache flow shadowed by a filesystem flow with the same name. Skipping cache copy."
+                );
+            }
         }
 
         // Create shared HTTP Server if enabled.
@@ -417,10 +605,62 @@ impl App {
                     as Arc<dyn flowgen_core::cache::Cache>
             };
 
-        // Create resource loader from app config if configured.
-        let resource_loader = app_config.flow_resources.as_ref().map(|resource_options| {
-            flowgen_core::resource::ResourceLoader::new(Some(resource_options.path.clone()))
-        });
+        // Build the resource loader. Filesystem and cache sources are
+        // independent: configure either, both, or neither. When both are
+        // active, the loader tries the filesystem first and falls back to
+        // the cache on a miss, matching the gradual-migration semantics used
+        // for flow loading.
+        let resource_loader = match app_config.resources.as_ref() {
+            Some(resource_options) => {
+                let base_path = resource_options.path.clone();
+
+                let cache_source = match resource_options.cache.as_ref() {
+                    Some(rc) if rc.enabled => {
+                        // Reuse the system cache initialised for flow loading
+                        // when the bucket matches; otherwise spin up a fresh one.
+                        let cache = if system_cache.as_ref().map(|(_, db)| db.as_str())
+                            == Some(&rc.db_name)
+                        {
+                            system_cache.as_ref().map(|(c, _)| c.clone())
+                        } else {
+                            match Self::init_system_cache(&app_config, &rc.db_name) {
+                                Ok(cache) => {
+                                    info!(
+                                        "Initialized system cache for resource loading on bucket '{}'.",
+                                        rc.db_name
+                                    );
+                                    Some(cache)
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        "Failed to init resource system cache. Continuing with filesystem only."
+                                    );
+                                    None
+                                }
+                            }
+                        };
+                        cache.map(|c| (c, rc.prefix.clone()))
+                    }
+                    _ => None,
+                };
+
+                match (base_path, cache_source) {
+                    (Some(path), Some((cache, prefix))) => Some(
+                        flowgen_core::resource::ResourceLoader::new(Some(path))
+                            .with_cache(cache, prefix),
+                    ),
+                    (Some(path), None) => {
+                        Some(flowgen_core::resource::ResourceLoader::new(Some(path)))
+                    }
+                    (None, Some((cache, prefix))) => Some(
+                        flowgen_core::resource::ResourceLoader::from_cache(cache, prefix),
+                    ),
+                    (None, None) => None,
+                }
+            }
+            None => None,
+        };
 
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
@@ -455,7 +695,9 @@ impl App {
             match flow_builder.build() {
                 Ok(flow) => flows.push(flow),
                 Err(source) => {
-                    let err = Error::FlowBuild { source };
+                    let err = Error::FlowBuild {
+                        source: Box::new(source),
+                    };
                     error!("{}", err);
                     continue;
                 }
@@ -467,7 +709,7 @@ impl App {
             if let Err(source) = flow.init().await {
                 let err = Error::FlowInit {
                     flow_name: flow.name().to_string(),
-                    source,
+                    source: Box::new(source),
                 };
                 error!("{}", err);
             }
@@ -480,7 +722,7 @@ impl App {
                 Err(source) => {
                     let err = Error::HttpHandlerStartup {
                         flow_name: flow.name().to_string(),
-                        source,
+                        source: Box::new(source),
                     };
                     error!("{}", err);
                 }

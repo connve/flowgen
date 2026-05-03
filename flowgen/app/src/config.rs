@@ -26,6 +26,19 @@ pub struct FlowConfig {
     pub flow: Flow,
 }
 
+impl FlowConfig {
+    /// Validates flow and task names so they are safe to use as filesystem
+    /// path segments. Called by the loaders before a flow is accepted.
+    pub fn validate(&self) -> Result<(), flowgen_core::validate::Error> {
+        use flowgen_core::validate::{validate_name, NameField};
+        validate_name(NameField::Flow, &self.flow.name)?;
+        for task in &self.flow.tasks {
+            validate_name(NameField::Task, task.name())?;
+        }
+        Ok(())
+    }
+}
+
 /// Default value for parallel_instances.
 fn default_parallel_instances() -> usize {
     1
@@ -68,14 +81,8 @@ pub enum TaskType {
     script(flowgen_core::task::script::config::Processor),
     /// Buffer task for accumulating events into batches.
     buffer(flowgen_core::task::buffer::config::Processor),
-    /// Object store read task.
-    object_store_read(flowgen_object_store::config::ReadProcessor),
-    /// Object store write task.
-    object_store_write(flowgen_object_store::config::WriteProcessor),
-    /// Object store list task.
-    object_store_list(flowgen_object_store::config::ListProcessor),
-    /// Object store move task.
-    object_store_move(flowgen_object_store::config::MoveProcessor),
+    /// Object store operations (read, write, list, move).
+    object_store(flowgen_object_store::config::Processor),
     /// Data generation task.
     generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
@@ -110,6 +117,8 @@ pub enum TaskType {
     gcp_bigquery_storage_write(flowgen_gcp::bigquery::config::StorageWrite),
     /// Microsoft SQL Server query task.
     mssql_query(flowgen_mssql::config::Query),
+    /// NATS Key-Value store operations (get, put, list, delete).
+    nats_kv_store(flowgen_nats::jetstream::kv_store::Config),
     /// AI completion task for generating responses using LLMs.
     ai_completion(flowgen_ai_agent::completion::config::Processor),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
@@ -129,10 +138,7 @@ impl TaskType {
             TaskType::log(_) => "log",
             TaskType::script(_) => "script",
             TaskType::buffer(_) => "buffer",
-            TaskType::object_store_read(_) => "object_store_read",
-            TaskType::object_store_write(_) => "object_store_write",
-            TaskType::object_store_list(_) => "object_store_list",
-            TaskType::object_store_move(_) => "object_store_move",
+            TaskType::object_store(_) => "object_store",
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
             TaskType::http_webhook(_) => "http_webhook",
@@ -150,6 +156,7 @@ impl TaskType {
             TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
             TaskType::gcp_bigquery_storage_write(_) => "gcp_bigquery_storage_write",
             TaskType::mssql_query(_) => "mssql_query",
+            TaskType::nats_kv_store(_) => "nats_kv_store",
             TaskType::ai_completion(_) => "ai_completion",
             TaskType::mcp_tool(_) => "mcp_tool",
             TaskType::ai_gateway(_) => "ai_gateway",
@@ -165,10 +172,7 @@ impl TaskType {
             TaskType::log(c) => &c.name,
             TaskType::script(c) => &c.name,
             TaskType::buffer(c) => &c.name,
-            TaskType::object_store_read(c) => &c.name,
-            TaskType::object_store_write(c) => &c.name,
-            TaskType::object_store_list(c) => &c.name,
-            TaskType::object_store_move(c) => &c.name,
+            TaskType::object_store(c) => &c.name,
             TaskType::generate(c) => &c.name,
             TaskType::http_request(c) => &c.name,
             TaskType::http_webhook(c) => &c.name,
@@ -186,6 +190,7 @@ impl TaskType {
             TaskType::gcp_bigquery_job(c) => &c.name,
             TaskType::gcp_bigquery_storage_write(c) => &c.name,
             TaskType::mssql_query(c) => &c.name,
+            TaskType::nats_kv_store(c) => &c.name,
             TaskType::ai_completion(c) => &c.name,
             TaskType::mcp_tool(c) => &c.name,
             TaskType::ai_gateway(c) => &c.name,
@@ -201,10 +206,7 @@ impl TaskType {
             TaskType::log(c) => c.depends_on.as_ref(),
             TaskType::script(c) => c.depends_on.as_ref(),
             TaskType::buffer(c) => c.depends_on.as_ref(),
-            TaskType::object_store_read(c) => c.depends_on.as_ref(),
-            TaskType::object_store_write(c) => c.depends_on.as_ref(),
-            TaskType::object_store_list(c) => c.depends_on.as_ref(),
-            TaskType::object_store_move(c) => c.depends_on.as_ref(),
+            TaskType::object_store(c) => c.depends_on.as_ref(),
             TaskType::generate(c) => c.depends_on.as_ref(),
             TaskType::http_request(c) => c.depends_on.as_ref(),
             TaskType::http_webhook(c) => c.depends_on.as_ref(),
@@ -222,6 +224,7 @@ impl TaskType {
             TaskType::gcp_bigquery_job(c) => c.depends_on.as_ref(),
             TaskType::gcp_bigquery_storage_write(c) => c.depends_on.as_ref(),
             TaskType::mssql_query(c) => c.depends_on.as_ref(),
+            TaskType::nats_kv_store(c) => c.depends_on.as_ref(),
             TaskType::ai_completion(c) => c.depends_on.as_ref(),
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
             TaskType::ai_gateway(c) => c.depends_on.as_ref(),
@@ -244,7 +247,7 @@ pub struct AppConfig {
     /// Flow discovery options (shared across components).
     pub flows: FlowOptions,
     /// Optional resource loading configuration (shared across components).
-    pub flow_resources: Option<ResourceOptions>,
+    pub resources: Option<ResourceOptions>,
     /// Optional worker component configuration.
     pub worker: Option<WorkerConfig>,
     /// Optional OpenTelemetry configuration for metrics and tracing.
@@ -303,7 +306,12 @@ pub struct CacheOptions {
 }
 
 /// Flow loading configuration.
-/// If `cache.enabled` is true, flows are loaded from the cache and `path` is ignored.
+///
+/// Filesystem and cache sources are independent: the worker loads from each
+/// configured source and merges the results. Configure both for hybrid mode
+/// (a small set of bootstrap flows on disk plus user flows in the cache).
+/// On a name collision the filesystem entry wins so a locally mounted flow
+/// cannot be silently overridden by a stale cache entry.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowOptions {
     /// Path for discovering flow configuration files.
@@ -323,8 +331,8 @@ fn default_flows_cache_prefix() -> String {
 }
 
 /// Default metadata bucket name for flow/resource loading.
-fn default_metadata_db_name() -> String {
-    "flowgen_metadata".to_string()
+fn default_system_db_name() -> String {
+    "flowgen_system".to_string()
 }
 
 /// Cache-based flow loading options.
@@ -335,22 +343,29 @@ pub struct FlowCacheOptions {
     /// Optional cache key prefix (defaults to "flowgen.flows").
     #[serde(default = "default_flows_cache_prefix")]
     pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Metadata store bucket name (defaults to "flowgen_system").
     /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_metadata_db_name")]
+    #[serde(default = "default_system_db_name")]
     pub db_name: String,
 }
 
 /// Resource loading configuration.
+///
+/// Filesystem and cache sources are independent: configure either, both, or
+/// neither. When both are configured the loader tries the filesystem first
+/// and falls back to the cache on a miss, so a locally mounted resource
+/// always takes precedence over a cached copy with the same key.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct ResourceOptions {
-    /// Base path for loading external resource files (SQL, JSON, HTML, etc.).
+    /// Optional base path for loading external resource files (SQL, JSON, HTML, etc.).
     /// Resource keys are resolved relative to this path.
     /// Example: with path="local/resources/", key="queries/orders.sql" resolves to "local/resources/queries/orders.sql".
+    /// Omit to skip filesystem loading.
     #[serde(default)]
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     /// Optional cache-based resource loading configuration.
-    /// When enabled, resources are loaded from the distributed cache instead of the filesystem.
+    /// When enabled, resources are loaded from the distributed cache.
+    /// Combine with `path` for hybrid loading (filesystem first, cache fallback).
     #[serde(default)]
     pub cache: Option<ResourceCacheOptions>,
 }
@@ -368,9 +383,9 @@ pub struct ResourceCacheOptions {
     /// Optional cache key prefix (defaults to "flowgen.resources").
     #[serde(default = "default_resources_cache_prefix")]
     pub prefix: String,
-    /// Metadata store bucket name (defaults to "flowgen_metadata").
+    /// Metadata store bucket name (defaults to "flowgen_system").
     /// Separate from the runtime cache bucket to avoid key collisions.
-    #[serde(default = "default_metadata_db_name")]
+    #[serde(default = "default_system_db_name")]
     pub db_name: String,
 }
 
@@ -589,7 +604,7 @@ mod tests {
                 path: Some(PathBuf::from("/test/flows/*")),
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
@@ -611,7 +626,7 @@ mod tests {
             .unwrap()
             .event_buffer_size
             .is_none());
-        assert!(app_config.flow_resources.is_none());
+        assert!(app_config.resources.is_none());
     }
 
     #[test]
@@ -622,7 +637,7 @@ mod tests {
                 path: Some(PathBuf::from("/flows/*")),
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
@@ -652,7 +667,7 @@ mod tests {
                 path: Some(PathBuf::from("/serialize/flows/*")),
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
@@ -683,7 +698,7 @@ mod tests {
                 path: None,
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: None,
@@ -856,7 +871,7 @@ mod tests {
                 path: None,
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: None,
             worker: Some(WorkerConfig {
                 http_server: Some(HttpServerOptions {
@@ -945,7 +960,7 @@ mod tests {
                 path: None,
                 cache: None,
             },
-            flow_resources: None,
+            resources: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
                 otlp_endpoint: "http://otel-collector:4317".to_string(),

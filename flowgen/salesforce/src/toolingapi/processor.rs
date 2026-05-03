@@ -61,7 +61,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.current_task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -145,12 +145,9 @@ impl EventHandler {
                 e.completion_tx = completion_tx_arc.clone();
             }
             None => {
+                // Leaf task: signal completion.
                 if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(e.data_as_json().ok())).ok();
-                        }
-                    }
+                    arc.signal_completion(e.data_as_json().ok());
                 }
             }
         }

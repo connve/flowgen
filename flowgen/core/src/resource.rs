@@ -155,64 +155,51 @@ pub enum Error {
     },
 }
 
-/// Backend for the `ResourceLoader`.
-///
-/// Resources can be loaded from either the local filesystem or the distributed cache.
+/// Optional cache configuration for a resource loader.
 #[derive(Clone)]
-enum Backend {
-    /// Filesystem backend: resource keys resolve to files under `base_path`.
-    Filesystem { base_path: PathBuf },
-    /// Cache backend: resource keys resolve to cache keys under `prefix`.
-    Cache {
-        cache: Arc<dyn crate::cache::Cache>,
-        prefix: String,
-    },
-    /// Disabled backend: all loads fail with `ResourcePathNotConfigured`.
-    Disabled,
+struct CacheSource {
+    cache: Arc<dyn crate::cache::Cache>,
+    prefix: String,
 }
 
-impl std::fmt::Debug for Backend {
+impl std::fmt::Debug for CacheSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Backend::Filesystem { base_path } => f
-                .debug_struct("Filesystem")
-                .field("base_path", base_path)
-                .finish(),
-            Backend::Cache { prefix, .. } => {
-                f.debug_struct("Cache").field("prefix", prefix).finish()
-            }
-            Backend::Disabled => f.write_str("Disabled"),
-        }
+        f.debug_struct("CacheSource")
+            .field("prefix", &self.prefix)
+            .finish()
     }
 }
 
 /// Resource loader that resolves resource keys to file content.
 ///
-/// Maps resource keys to content using one of two backends:
+/// Filesystem and cache sources are independent: configure either, both, or
+/// neither. When both are configured the loader tries the filesystem first
+/// and falls back to the cache on a miss, so a locally mounted resource
+/// always takes precedence over a cached copy with the same key.
 ///
-/// **Filesystem** (with `path: "local/resources/"`):
-/// - Key `"query.sql"` → `"local/resources/query.sql"`
-/// - Key `"queries/orders.sql"` → `"local/resources/queries/orders.sql"`
+/// Filesystem keys resolve to files under `base_path`:
+/// - Key `"query.sql"` → `"<base_path>/query.sql"`
+/// - Key `"queries/orders.sql"` → `"<base_path>/queries/orders.sql"`
 ///
-/// **Cache** (with `prefix: "flowgen.resources"`):
-/// - Key `"query.sql"` → cache key `"flowgen.resources.query.sql"`
-/// - Key `"queries/orders.sql"` → cache key `"flowgen.resources.queries/orders.sql"`
+/// Cache keys resolve under `prefix`:
+/// - Key `"query.sql"` → `"<prefix>.query.sql"`
+/// - Key `"queries/orders.sql"` → `"<prefix>.queries/orders.sql"`
 #[derive(Debug, Clone)]
 pub struct ResourceLoader {
-    backend: Backend,
+    base_path: Option<PathBuf>,
+    cache: Option<CacheSource>,
 }
 
 impl ResourceLoader {
     /// Creates a new filesystem-backed `ResourceLoader` with the given base path.
     ///
     /// # Arguments
-    /// * `base_path` - Base directory for resources, or None to disable resource loading.
+    /// * `base_path` - Base directory for resources, or None to skip filesystem loading.
     pub fn new(base_path: Option<PathBuf>) -> Self {
-        let backend = match base_path {
-            Some(path) => Backend::Filesystem { base_path: path },
-            None => Backend::Disabled,
-        };
-        Self { backend }
+        Self {
+            base_path,
+            cache: None,
+        }
     }
 
     /// Creates a new cache-backed `ResourceLoader`.
@@ -225,11 +212,27 @@ impl ResourceLoader {
     /// * `prefix` - Cache key prefix for resources (e.g., "flowgen.resources").
     pub fn from_cache(cache: Arc<dyn crate::cache::Cache>, prefix: String) -> Self {
         Self {
-            backend: Backend::Cache { cache, prefix },
+            base_path: None,
+            cache: Some(CacheSource { cache, prefix }),
         }
     }
 
+    /// Adds a cache fallback to a filesystem-backed loader.
+    ///
+    /// The loader will try the filesystem first and fall back to the cache
+    /// on `ResourceNotFound`. Use this for gradual migration where some
+    /// resources are mounted locally and the rest live in the cache.
+    pub fn with_cache(mut self, cache: Arc<dyn crate::cache::Cache>, prefix: String) -> Self {
+        self.cache = Some(CacheSource { cache, prefix });
+        self
+    }
+
     /// Loads a resource by key.
+    ///
+    /// Tries the filesystem first (when configured). On a miss, falls back
+    /// to the cache (when configured). Returns `ResourceNotFound` only when
+    /// every configured source is missing the key, and
+    /// `ResourcePathNotConfigured` when neither source is configured.
     ///
     /// # Arguments
     /// * `key` - Resource key (e.g., "query.sql" or "queries/orders.sql").
@@ -237,40 +240,50 @@ impl ResourceLoader {
     /// # Returns
     /// The resource content as a String.
     pub async fn load(&self, key: &str) -> Result<String, Error> {
-        match &self.backend {
-            Backend::Filesystem { base_path } => {
-                let full_path = base_path.join(key);
-                fs::read_to_string(&full_path)
-                    .await
-                    .map_err(|source| match source.kind() {
-                        std::io::ErrorKind::NotFound => Error::ResourceNotFound {
-                            key: key.to_string(),
-                        },
-                        _ => Error::ReadResource {
-                            key: key.to_string(),
-                            source,
-                        },
-                    })
-            }
-            Backend::Cache { cache, prefix } => {
-                let cache_key = format!("{prefix}.{key}");
-                let bytes = cache
-                    .get(&cache_key)
-                    .await
-                    .map_err(|source| Error::Cache {
+        // Filesystem first when configured.
+        if let Some(base_path) = &self.base_path {
+            let full_path = base_path.join(key);
+            match fs::read_to_string(&full_path).await {
+                Ok(content) => return Ok(content),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    // Fall through to cache.
+                }
+                Err(source) => {
+                    return Err(Error::ReadResource {
                         key: key.to_string(),
                         source,
-                    })?
-                    .ok_or_else(|| Error::ResourceNotFound {
-                        key: key.to_string(),
-                    })?;
-                String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheUtf8 {
+                    });
+                }
+            }
+        }
+
+        // Cache as primary or fallback when configured.
+        if let Some(cache_source) = &self.cache {
+            let cache_key = format!("{}.{}", cache_source.prefix, key);
+            let bytes = cache_source
+                .cache
+                .get(&cache_key)
+                .await
+                .map_err(|source| Error::Cache {
                     key: key.to_string(),
                     source,
-                })
-            }
-            Backend::Disabled => Err(Error::ResourcePathNotConfigured),
+                })?
+                .ok_or_else(|| Error::ResourceNotFound {
+                    key: key.to_string(),
+                })?;
+            return String::from_utf8(bytes.to_vec()).map_err(|source| Error::CacheUtf8 {
+                key: key.to_string(),
+                source,
+            });
         }
+
+        if self.base_path.is_none() {
+            return Err(Error::ResourcePathNotConfigured);
+        }
+
+        Err(Error::ResourceNotFound {
+            key: key.to_string(),
+        })
     }
 }
 
@@ -282,13 +295,72 @@ mod tests {
     #[test]
     fn test_new_with_path() {
         let loader = ResourceLoader::new(Some(PathBuf::from("local/resources")));
-        assert!(matches!(loader.backend, Backend::Filesystem { .. }));
+        assert!(loader.base_path.is_some());
+        assert!(loader.cache.is_none());
     }
 
     #[test]
     fn test_new_without_path() {
         let loader = ResourceLoader::new(None);
-        assert!(matches!(loader.backend, Backend::Disabled));
+        assert!(loader.base_path.is_none());
+        assert!(loader.cache.is_none());
+    }
+
+    /// Hybrid configuration: filesystem first, cache fallback. The filesystem
+    /// hit must take precedence even when the cache also has a value.
+    #[tokio::test]
+    async fn test_filesystem_wins_when_both_have_key() {
+        let tmp = std::env::temp_dir().join(format!("flowgen_test_{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&tmp).await.unwrap();
+        let key = "shared.sql";
+        let local_path = tmp.join(key);
+        tokio::fs::write(&local_path, "from filesystem")
+            .await
+            .unwrap();
+
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        cache
+            .put(
+                &format!("flowgen.resources.{key}"),
+                bytes::Bytes::from("from cache"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loader = ResourceLoader::new(Some(tmp.clone()))
+            .with_cache(cache, "flowgen.resources".to_string());
+        let result = loader.load(key).await.unwrap();
+        assert_eq!(result, "from filesystem");
+
+        tokio::fs::remove_dir_all(&tmp).await.ok();
+    }
+
+    /// Hybrid configuration: cache fallback fires only when the filesystem
+    /// has no entry for the key.
+    #[tokio::test]
+    async fn test_cache_fallback_on_filesystem_miss() {
+        let tmp = std::env::temp_dir().join(format!("flowgen_test_{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&tmp).await.unwrap();
+
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        cache
+            .put(
+                "flowgen.resources.cache_only.sql",
+                bytes::Bytes::from("from cache"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let loader = ResourceLoader::new(Some(tmp.clone()))
+            .with_cache(cache, "flowgen.resources".to_string());
+        let result = loader.load("cache_only.sql").await.unwrap();
+        assert_eq!(result, "from cache");
+
+        tokio::fs::remove_dir_all(&tmp).await.ok();
     }
 
     #[tokio::test]

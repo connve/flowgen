@@ -8,27 +8,24 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
-fn default_flows_path() -> String {
-    "flows".to_string()
-}
-
-fn default_clone_path() -> PathBuf {
-    PathBuf::from("/tmp/flowgen-repo")
-}
-
-fn default_flows_prefix() -> String {
-    "flowgen.flows".to_string()
-}
-
-fn default_resources_prefix() -> String {
-    "flowgen.resources".to_string()
-}
-
-fn default_metadata_db_name() -> String {
-    "flowgen_metadata".to_string()
-}
-
 /// Git sync processor configuration.
+///
+/// Clones or pulls a Git repository and emits one event per file found
+/// under the configured `path` within the repository. Downstream tasks
+/// decide what to do with the files (parse, store, transform).
+///
+/// # Example
+///
+/// ```yaml
+/// - git_sync:
+///     name: sync_flows
+///     repository_url: "git@github.com:org/configs.git"
+///     branch: main
+///     path: "flows/"
+///     auth:
+///       type: ssh
+///       ssh_key_path: /etc/git/deploy-key
+/// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
     /// Task name.
@@ -38,26 +35,21 @@ pub struct Processor {
     /// Branch to track (defaults to "main").
     #[serde(default = "default_branch")]
     pub branch: String,
-    /// Path within the repository to scan for flow YAML files (defaults to "flows").
-    #[serde(default = "default_flows_path")]
-    pub flows_path: String,
-    /// Path within the repository to scan for resource files (optional).
-    pub resources_path: Option<String>,
-    /// Local path to clone the repository into (defaults to "/tmp/flowgen-repo").
-    #[serde(default = "default_clone_path")]
-    pub clone_path: PathBuf,
+    /// Path within the repository to scan for files.
+    /// All files under this path are emitted as events.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Local path to clone the repository into.
+    ///
+    /// Defaults to `<system_temp>/<flow_name>/<task_name>` so that multiple
+    /// `git_sync` tasks in the same worker do not collide on the same
+    /// working tree. Override only when you need a stable path on a
+    /// persistent volume.
+    #[serde(default)]
+    pub clone_path: Option<PathBuf>,
     /// Authentication configuration.
     #[serde(default)]
     pub auth: GitAuth,
-    /// Cache key prefix for flows (defaults to "flowgen.flows").
-    #[serde(default = "default_flows_prefix")]
-    pub flows_prefix: String,
-    /// Cache key prefix for resources (defaults to "flowgen.resources").
-    #[serde(default = "default_resources_prefix")]
-    pub resources_prefix: String,
-    /// Metadata cache bucket name (defaults to "flowgen_metadata").
-    #[serde(default = "default_metadata_db_name")]
-    pub db_name: String,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -104,10 +96,8 @@ mod tests {
         }"#;
         let config: Processor = serde_json::from_str(json).unwrap();
         assert_eq!(config.branch, "main");
-        assert_eq!(config.flows_path, "flows");
-        assert_eq!(config.flows_prefix, "flowgen.flows");
-        assert_eq!(config.db_name, "flowgen_metadata");
-        assert!(config.resources_path.is_none());
+        assert!(config.path.is_none());
+        assert!(config.clone_path.is_none());
     }
 
     #[test]

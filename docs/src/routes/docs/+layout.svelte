@@ -1,7 +1,33 @@
 <script lang="ts">
 	import Sidebar from '$lib/components/Sidebar.svelte';
+	import { onMount } from 'svelte';
 
 	let { children } = $props();
+
+	onMount(() => {
+		// Add copy buttons to all code blocks.
+		document.querySelectorAll('pre').forEach((pre) => {
+			if (pre.querySelector('.copy-btn')) return;
+
+			const wrapper = document.createElement('div');
+			wrapper.style.position = 'relative';
+			pre.parentNode?.insertBefore(wrapper, pre);
+			wrapper.appendChild(pre);
+
+			const btn = document.createElement('button');
+			btn.className = 'copy-btn';
+			btn.textContent = 'Copy';
+			btn.addEventListener('click', () => {
+				const code = pre.querySelector('code');
+				if (code) {
+					navigator.clipboard.writeText(code.textContent || '');
+					btn.textContent = 'Copied';
+					setTimeout(() => (btn.textContent = 'Copy'), 2000);
+				}
+			});
+			wrapper.appendChild(btn);
+		});
+	});
 </script>
 
 <div class="flex min-h-screen">

@@ -39,7 +39,7 @@ spec:
         {{- toYaml $worker.podSecurityContext | nindent 8 }}
       containers:
       - name: {{ .Chart.Name }}
-        command: ["/bin/flowgen"]
+        command: ["/bin/flowgen", "--config", "{{ $worker.config.path }}"]
         securityContext:
           {{- toYaml $worker.securityContext | nindent 12 }}
         image: "{{ .Values.global.image.repository }}:{{ .Values.global.image.tag | default .Chart.AppVersion }}"
@@ -49,8 +49,6 @@ spec:
           {{- toYaml . | nindent 12 }}
         {{- end }}
         env:
-        - name: CONFIG_PATH
-          value: {{ $worker.config.path }}
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -70,6 +68,11 @@ spec:
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:
+        # Writable /tmp for tasks that need scratch space (e.g. git_sync
+        # cloning into /tmp/flowgen-repo). Required because the container
+        # runs with readOnlyRootFilesystem: true.
+        - name: tmp
+          mountPath: /tmp
         {{- range $key, $volume := $worker.volumes }}
         {{- if and (hasKey $volume "enabled") $volume.enabled }}
         {{- if eq $key "flows" }}
@@ -165,6 +168,12 @@ spec:
           {{- toYaml $worker.wireguard.resources | nindent 12 }}
       {{- end }}
       volumes:
+      # Ephemeral writable /tmp paired with the volumeMount above. Cleared
+      # on pod restart, which doubles as a guarantee that git_sync re-clones
+      # the repository on every restart instead of trying to pull a stale
+      # working tree from a previous pod.
+      - name: tmp
+        emptyDir: {}
       {{- range $key, $volume := $worker.volumes }}
       {{- if and (hasKey $volume "enabled") $volume.enabled }}
       {{- if $volume.secretName }}

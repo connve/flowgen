@@ -1,3 +1,4 @@
+use clap::Parser;
 use config::Config;
 use flowgen::app::App;
 use flowgen::config::AppConfig;
@@ -6,21 +7,21 @@ use std::process;
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
-/// Logging format for structured output.
+#[derive(Parser)]
+#[command(name = "flowgen", version, about = "Data activation with a blast 💥")]
+struct Cli {
+    /// Path to configuration file.
+    #[arg(short, long, env = "CONFIG_PATH")]
+    config: String,
+}
+
 enum LogFormat {
-    /// Human-readable compact format for development.
     Compact,
-    /// Structured JSON format for production.
     Json,
 }
 
-/// Determines the appropriate log format based on LOG_FORMAT variable and TTY detection.
-///
-/// Priority order:
-/// 1. LOG_FORMAT environment variable (explicit override)
-/// 2. TTY detection (terminal → compact, no TTY → json)
+/// Determines the log format from LOG_FORMAT env var or TTY detection.
 fn determine_log_format() -> LogFormat {
-    // Check explicit LOG_FORMAT override.
     if let Ok(format) = env::var("LOG_FORMAT") {
         return match format.to_lowercase().as_str() {
             "compact" => LogFormat::Compact,
@@ -28,14 +29,12 @@ fn determine_log_format() -> LogFormat {
         };
     }
 
-    // Auto-detect based on TTY (terminal = compact, pipe/Docker = json).
     match atty::is(atty::Stream::Stdout) {
         true => LogFormat::Compact,
         false => LogFormat::Json,
     }
 }
 
-/// Initializes the tracing subscriber with the determined log format.
 fn init_tracing() {
     let format = determine_log_format();
 
@@ -55,33 +54,22 @@ fn init_tracing() {
     }
 }
 
-/// Main entry point for the flowgen application.
-///
-/// Initializes tracing, loads configuration from environment variables and files,
-/// creates the application instance, and runs it. Exits with code 1 on any error.
 #[tokio::main]
 async fn main() {
-    // Install rustls crypto provider (ring) as process-level default.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     init_tracing();
 
-    let config_path = match env::var("CONFIG_PATH") {
-        Ok(path) => path,
-        Err(e) => {
-            error!("Environment variable CONFIG_PATH should be set: {}", e);
-            process::exit(1);
-        }
-    };
+    let cli = Cli::parse();
 
     let config = match Config::builder()
-        .add_source(config::File::with_name(&config_path))
+        .add_source(config::File::with_name(&cli.config))
         .add_source(config::Environment::with_prefix("APP"))
         .build()
     {
         Ok(config) => config,
         Err(e) => {
-            error!("Failed to build config: {}", e);
+            error!("Failed to build config from {}: {}", cli.config, e);
             process::exit(1);
         }
     };
@@ -96,7 +84,6 @@ async fn main() {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-    // Listen for Unix SIGTERM signal (sent by Kubernetes on pod termination)
     tokio::spawn(async move {
         #[cfg(unix)]
         {

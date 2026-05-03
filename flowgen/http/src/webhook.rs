@@ -8,7 +8,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::credentials::HttpCredentials;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::event::{
+    new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
+};
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use reqwest::{
     header::{HeaderMap, AUTHORIZATION},
@@ -81,12 +83,15 @@ pub enum Error {
     },
     #[error("Flow completion failed or timed out for webhook request")]
     FlowCompletionFailed,
+    #[error("Request body exceeds configured max_body_bytes limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = match &self {
             Error::SerdeJson { .. } | Error::Axum { .. } => StatusCode::BAD_REQUEST,
+            Error::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         status.into_response()
@@ -207,9 +212,14 @@ impl EventHandler {
 
         let user_context = self.validate_user_auth(headers).await?;
 
-        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+        // Bound body size to prevent oversized POSTs from exhausting
+        // worker memory. Axum returns an error if the body exceeds the
+        // limit; we map that to a typed BodyTooLarge so the response is
+        // a proper 413 instead of a generic 400.
+        let limit = self.config.max_body_bytes;
+        let body = axum::body::to_bytes(request.into_body(), limit)
             .await
-            .map_err(|e| Error::Axum { source: e })?;
+            .map_err(|_| Error::BodyTooLarge { limit })?;
 
         let json_body = match body.is_empty() {
             true => Value::Null,
@@ -242,20 +252,18 @@ impl EventHandler {
         &self,
         data: Value,
         meta: Option<serde_json::Map<String, Value>>,
-    ) -> Result<
-        tokio::sync::oneshot::Receiver<
-            Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>>,
-        >,
-        Error,
-    > {
-        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    ) -> Result<CompletionRx, Error> {
+        // Size the completion channel to the number of leaves in this flow.
+        // The webhook responds only after every leaf has signalled completion.
+        let (completion_state, completion_rx) =
+            new_completion_channel(self.task_context.leaf_count);
 
         let mut builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(self.config.name.to_owned())
             .task_id(self.task_id)
             .task_type(self.task_type)
-            .completion_tx(completion_tx);
+            .completion_tx(completion_state);
 
         if let Some(meta) = meta {
             builder = builder.meta(meta);
@@ -341,7 +349,7 @@ impl EventHandler {
             Err(e) => return Err(e),
         };
 
-        let correlation_id = uuid::Uuid::new_v4().to_string();
+        let correlation_id = uuid::Uuid::now_v7().to_string();
 
         let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
@@ -766,6 +774,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -834,6 +845,9 @@ mod tests {
             headers: Some(configured_headers),
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -870,6 +884,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,

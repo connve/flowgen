@@ -81,6 +81,8 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("Object store read operation requires a path.")]
+    MissingPath,
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -91,7 +93,7 @@ pub enum Error {
 /// Handles processing of individual events by writing them to object storage.
 pub struct EventHandler {
     /// Writer configuration settings.
-    config: Arc<super::config::ReadProcessor>,
+    config: Arc<super::config::Processor>,
     /// Object store client for writing data.
     client: Arc<Mutex<super::client::Client>>,
     /// Channel sender for processed events
@@ -106,7 +108,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event and writes it to the configured object store.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -124,7 +126,8 @@ impl EventHandler {
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
-            let config_path_str = config.path.to_string_lossy();
+            let config_path = config.path.as_ref().ok_or(Error::MissingPath)?;
+            let config_path_str = config_path.to_string_lossy();
             let url =
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
             let path = object_store::path::Path::from(url.path());
@@ -216,47 +219,64 @@ impl EventHandler {
                 }
             };
 
-            // Send events.
-            for event_data in event_data_list {
-                let num_records = match &event_data {
-                    flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
-                        Some(batch.num_rows())
+            // If parsing produced no events there is nothing to forward
+            // downstream. Release the source by signalling once per leaf
+            // reachable from this read's subtree, otherwise the source waits
+            // forever for completions that will never come.
+            if event_data_list.is_empty() {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(None);
                     }
-                    _ => None,
-                };
+                }
+            } else {
+                // Send events. Only the last event carries the completion
+                // signal so the source receives exactly one signal per leaf
+                // (delivered when the last event reaches each leaf), rather
+                // than draining the leaf-counter prematurely on early events.
+                let total_events = event_data_list.len();
+                for (idx, event_data) in event_data_list.into_iter().enumerate() {
+                    let num_records = match &event_data {
+                        flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
+                            Some(batch.num_rows())
+                        }
+                        _ => None,
+                    };
 
-                let mut e = EventBuilder::new()
-                    .subject(self.config.name.to_owned())
-                    .data(event_data)
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
+                    let mut e = EventBuilder::new()
+                        .subject(self.config.name.to_owned())
+                        .data(event_data)
+                        .task_id(self.task_id)
+                        .task_type(self.task_type)
+                        .build()
+                        .map_err(|source| Error::EventBuilder { source })?;
 
-                // Signal completion or pass through to next task.
-                match self.tx {
-                    None => {
-                        // Final task, signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            if let Ok(mut guard) = arc.lock() {
-                                if let Some(tx) = guard.take() {
-                                    tx.send(Ok(e.data_as_json().ok())).ok();
+                    if idx == total_events - 1 {
+                        match self.tx {
+                            None => {
+                                // Leaf task: signal completion with the last
+                                // event's payload.
+                                if let Some(arc) = completion_tx_arc.as_ref() {
+                                    arc.signal_completion(e.data_as_json().ok());
                                 }
+                            }
+                            Some(_) => {
+                                // Pass through completion_tx on the last
+                                // event so downstream leaves signal exactly
+                                // once per branch.
+                                e.completion_tx = completion_tx_arc.clone();
                             }
                         }
                     }
-                    Some(_) => {
-                        // Pass through completion_tx to next task.
-                        e.completion_tx = completion_tx_arc.clone();
-                    }
-                }
 
-                let send = e.send_with_logging(self.tx.as_ref());
-                let send = match num_records {
-                    Some(n) => send.context("num_records", n),
-                    None => send,
-                };
-                send.await.map_err(|source| Error::SendMessage { source })?;
+                    let send = e.send_with_logging(self.tx.as_ref());
+                    let send = match num_records {
+                        Some(n) => send.context("num_records", n),
+                        None => send,
+                    };
+                    send.await.map_err(|source| Error::SendMessage { source })?;
+                }
             }
 
             // Delete file from object store if configured.
@@ -299,7 +319,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct ReadProcessor {
     /// Read configuration settings.
-    config: Arc<super::config::ReadProcessor>,
+    config: Arc<super::config::Processor>,
     /// Broadcast receiver for incoming events.
     rx: Receiver<Event>,
     /// Channel sender for processed events
@@ -327,7 +347,8 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let mut client_builder = super::client::ClientBuilder::new().path(init_config.path);
+        let path = init_config.path.ok_or(Error::MissingPath)?;
+        let mut client_builder = super::client::ClientBuilder::new().path(path);
 
         if let Some(options) = &self.config.client_options {
             client_builder = client_builder.options(options.clone());
@@ -421,7 +442,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
 #[derive(Default)]
 pub struct ReadProcessorBuilder {
     /// Read configuration settings.
-    config: Option<Arc<super::config::ReadProcessor>>,
+    config: Option<Arc<super::config::Processor>>,
     /// Broadcast receiver for incoming events.
     rx: Option<Receiver<Event>>,
     /// Event channel sender
@@ -442,7 +463,7 @@ impl ReadProcessorBuilder {
     }
 
     /// Sets the writer configuration.
-    pub fn config(mut self, config: Arc<super::config::ReadProcessor>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Processor>) -> Self {
         self.config = Some(config);
         self
     }
@@ -533,17 +554,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_reader_builder() {
-        let config = Arc::new(crate::config::ReadProcessor {
+        let config = Arc::new(crate::config::Processor {
             name: "test_reader".to_string(),
-            path: PathBuf::from("s3://bucket/input/"),
-            credentials_path: None,
-            client_options: None,
+            operation: crate::config::Operation::Read,
+            path: Some(PathBuf::from("s3://bucket/input/")),
             batch_size: Some(500),
             has_header: Some(true),
-            delete_after_read: None,
-            delimiter: None,
-            depends_on: None,
-            retry: None,
+            ..Default::default()
         });
         let (tx, rx) = mpsc::channel::<Event>(10);
 

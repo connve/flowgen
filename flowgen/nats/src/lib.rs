@@ -15,6 +15,8 @@ pub mod client;
 pub mod jetstream {
     /// Configuration structures for JetStream publishers and subscribers.
     pub mod config;
+    /// JetStream Key-Value store operations (get, put, list, delete).
+    pub mod kv_store;
     /// Message conversion utilities for JetStream integration.
     pub mod message;
     /// JetStream publisher implementation for reliable message publishing.

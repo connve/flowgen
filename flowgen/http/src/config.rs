@@ -6,10 +6,20 @@
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
+
+pub(crate) fn default_max_body_bytes() -> usize {
+    10 * 1024 * 1024
+}
+pub(crate) fn default_request_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(30))
+}
+pub(crate) fn default_connect_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(10))
+}
 
 /// HTTP processor configuration.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -26,7 +36,22 @@ pub struct Processor {
     /// Timeout for waiting on flow completion before responding to webhook (webhook only).
     /// If not specified, waits indefinitely for flow completion.
     #[serde(default, with = "humantime_serde")]
-    pub ack_timeout: Option<std::time::Duration>,
+    pub ack_timeout: Option<Duration>,
+    /// Outbound request timeout (http_request only). Total time budget
+    /// from request start to response body received. Defaults to 30s
+    /// to keep slow upstreams from pinning worker tasks.
+    #[serde(default = "default_request_timeout", with = "humantime_serde")]
+    pub timeout: Option<Duration>,
+    /// Outbound TCP/TLS connect timeout (http_request only). Defaults
+    /// to 10s.
+    #[serde(default = "default_connect_timeout", with = "humantime_serde")]
+    pub connect_timeout: Option<Duration>,
+    /// Maximum accepted request body size in bytes (webhook only).
+    /// Defaults to 10 MiB. Requests larger than this are rejected
+    /// with HTTP 413 before being read into memory, preventing a
+    /// trivial denial-of-service via oversized POSTs.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
     /// Enable SSE streaming responses.
     /// When true, the webhook returns an SSE stream instead of blocking for a single result.
     /// Intermediate events from downstream tasks are streamed as they arrive.
@@ -49,6 +74,27 @@ pub struct Processor {
 }
 
 impl ConfigExt for Processor {}
+
+impl Default for Processor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            endpoint: String::new(),
+            method: Method::default(),
+            payload: None,
+            headers: None,
+            credentials_path: None,
+            ack_timeout: None,
+            timeout: default_request_timeout(),
+            connect_timeout: default_connect_timeout(),
+            max_body_bytes: default_max_body_bytes(),
+            stream: false,
+            auth: None,
+            depends_on: None,
+            retry: None,
+        }
+    }
+}
 
 /// HTTP request payload configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -139,6 +185,9 @@ mod tests {
             headers: Some(headers.clone()),
             credentials_path: Some(PathBuf::from("/path/to/creds.json")),
             ack_timeout: None,
+            timeout: default_request_timeout(),
+            connect_timeout: default_connect_timeout(),
+            max_body_bytes: default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -166,6 +215,9 @@ mod tests {
             headers: None,
             credentials_path: Some(PathBuf::from("/test/credentials.json")),
             ack_timeout: None,
+            timeout: default_request_timeout(),
+            connect_timeout: default_connect_timeout(),
+            max_body_bytes: default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -187,6 +239,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: default_request_timeout(),
+            connect_timeout: default_connect_timeout(),
+            max_body_bytes: default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -344,6 +399,9 @@ mod tests {
             headers: Some(headers),
             credentials_path: Some(PathBuf::from("/secure/path/to/creds.json")),
             ack_timeout: None,
+            timeout: default_request_timeout(),
+            connect_timeout: default_connect_timeout(),
+            max_body_bytes: default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,

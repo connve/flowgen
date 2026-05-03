@@ -15,7 +15,7 @@ global:
   imagePullSecrets: []
 
 ################################################################################
-# Flowgen Worker options
+# Flowgen options
 ################################################################################
 flowgen:
   enabled: true
@@ -89,7 +89,7 @@ flowgen:
     #   inline: |
     #     flows:
     #       path: "/etc/app/flows"
-    #     flow_resources:
+    #     resources:
     #       path: "/etc/app/resources"
     #     telemetry:
     #       enabled: true

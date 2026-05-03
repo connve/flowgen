@@ -4,9 +4,8 @@ This guide walks you through creating your first flowgen flow.
 
 ## Prerequisites
 
-- A Kubernetes cluster (or local setup with minikube/kind)
-- NATS JetStream running (for caching and messaging)
-- Flowgen binary or container image
+- Flowgen binary ([Installation](/docs/getting-started/installation))
+- NATS JetStream (optional — for distributed cache, messaging, leader election)
 
 ## Your first flow
 
@@ -43,21 +42,68 @@ This flow generates an event every 5 seconds, transforms it with a Rhai script, 
 
 ## Configuration
 
-Flowgen reads its configuration from a YAML file. Here is a minimal example:
+Flowgen reads its configuration from a YAML file (`config.yaml`). A minimal setup only needs `flows.path`:
 
 ```yaml
-cache:
-  enabled: true
-  cache_type: nats
-  credentials_path: /etc/nats/credentials.json
-  url: nats://localhost:4222
-
 flows:
   path: /etc/flowgen/flows/
+```
+
+Full configuration with all sections:
+
+```yaml
+# Distributed cache (NATS KV). Falls back to in-memory if disabled or unavailable.
+cache:
+  enabled: true
+  type: nats
+  credentials_path: /etc/nats/credentials.json
+  url: nats://localhost:4222
+  db_name: flowgen_cache
+  # history: 10
+  # tombstone_ttl: "1h"
+
+# Flow discovery. Recursively loads all .yaml/.yml/.json files.
+flows:
+  path: /etc/flowgen/flows/
+  # Cache-backed flow loading (for git-synced flows):
+  # cache:
+  #   enabled: true
+  #   prefix: "flows."
+  #   db_name: flowgen_system
+
+# External resource files (SQL, templates, scripts).
+resources:
+  path: /etc/flowgen/resources/
+  # cache:
+  #   enabled: true
+  #   prefix: "resources."
+  #   db_name: flowgen_system
+
+# OpenTelemetry metrics and tracing.
+# telemetry:
+#   enabled: true
+#   otlp_endpoint: "http://localhost:4317"
+#   service_name: flowgen
+#   metrics_export_interval: "60s"
 
 worker:
-  event_buffer_size: 1000
+  # HTTP server for webhooks, AI gateway, health checks.
+  http_server:
+    enabled: true
+    port: 3000
+    # path: "/api/flowgen/workers"
+    # credentials_path: /etc/http/credentials.json
+
+  # MCP server for exposing flows as LLM tools.
+  # mcp_server:
+  #   enabled: true
+  #   port: 3001
+  #   path: "/mcp"
+
+  # event_buffer_size: 10000000
 ```
+
+Without cache configured, flowgen uses an in-memory cache (single-node). See [Caching](/docs/concepts/caching) for details.
 
 ## Running
 

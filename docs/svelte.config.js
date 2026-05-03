@@ -1,9 +1,17 @@
 import adapter from '@sveltejs/adapter-static';
 import { mdsvex } from 'mdsvex';
+import rehypeSlug from 'rehype-slug';
+import rehypeAutolinkHeadings from 'rehype-autolink-headings';
 
 /** @type {import('mdsvex').MdsvexOptions} */
 const mdsvexOptions = {
-	extensions: ['.svx', '.md']
+	extensions: ['.svx', '.md'],
+	rehypePlugins: [rehypeSlug, [rehypeAutolinkHeadings, { behavior: 'wrap' }]],
+	highlight: {
+		alias: {
+			rhai: 'rust'
+		}
+	}
 };
 
 /** @type {import('@sveltejs/kit').Config} */

@@ -43,6 +43,13 @@ pub struct TaskContext {
     pub retry: Option<crate::retry::RetryConfig>,
     /// Cancellation token for graceful shutdown coordination.
     pub cancellation_token: tokio_util::sync::CancellationToken,
+    /// Number of leaf tasks in this flow's directed acyclic graph.
+    ///
+    /// Source tasks use this when constructing the completion channel so the
+    /// upstream message is acknowledged only after every leaf has signalled.
+    /// Defaults to one for linear flows where a single terminal task signals
+    /// completion.
+    pub leaf_count: usize,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -96,6 +103,8 @@ pub struct TaskContextBuilder {
     retry: Option<crate::retry::RetryConfig>,
     /// Cancellation token for graceful shutdown coordination.
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    /// Number of leaf tasks in the flow. Defaults to one when not set.
+    leaf_count: Option<usize>,
 }
 
 impl TaskContextBuilder {
@@ -209,6 +218,16 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the number of leaf tasks in the flow's directed acyclic graph.
+    ///
+    /// The flow builder computes this from the wired task topology and passes
+    /// it here so source tasks can construct a completion channel that waits
+    /// for every leaf to signal before acknowledging the upstream message.
+    pub fn leaf_count(mut self, leaf_count: usize) -> Self {
+        self.leaf_count = Some(leaf_count);
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -233,6 +252,7 @@ impl TaskContextBuilder {
             resource_loader: self.resource_loader,
             retry: self.retry,
             cancellation_token: self.cancellation_token.unwrap_or_default(),
+            leaf_count: self.leaf_count.unwrap_or(1),
         })
     }
 }

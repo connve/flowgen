@@ -1,32 +1,72 @@
-//! Git sync processor that clones/pulls a Git repository and syncs
-//! flows and resources to the distributed cache.
+//! Git sync processor — clones or pulls a repository and emits file contents as events.
+//!
+//! Each file found under the configured path is emitted as a separate event
+//! with `{path, content, commit}` data. Downstream tasks decide what to do
+//! with the files (parse as flows, write to cache, store in object store).
 
-use super::config::{GitAuth, GitAuthType, Processor as ProcessorConfig};
-use flowgen_core::cache::Cache;
+use super::config::{GitAuthType, Processor as ProcessorConfig};
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{debug, error, info};
+use tokio::task;
+use tracing::error;
 use walkdir::WalkDir;
 
-/// Supported flow file extensions.
-const FLOW_EXTENSIONS: &[&str] = &["yaml", "yml"];
+/// File event emitted for each file found in the repository.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileEvent {
+    /// Relative path of the file within the scanned directory.
+    pub path: String,
+    /// File content as a string.
+    pub content: String,
+    /// Git commit hash at HEAD.
+    pub commit: String,
+}
 
+/// Errors that can occur during git sync processing.
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
-    #[error("Git clone failed: {0}")]
-    GitClone(String),
-    #[error("Git pull failed: {0}")]
-    GitPull(String),
-    #[error("Git HEAD commit read failed: {0}")]
-    GitHead(String),
-    #[error("Git command IO error: {source}")]
-    GitIo {
+    #[error("Git clone failed for {url}: {source}")]
+    Clone {
+        url: String,
         #[source]
-        source: std::io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Git fetch failed for {url}: {source}")]
+    Fetch {
+        url: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to open existing repository at {path}: {source}")]
+    OpenRepo {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to read HEAD commit: {source}")]
+    HeadCommit {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to checkout worktree: {source}")]
+    Checkout {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("SSH authentication is not supported. Use HTTPS with a token instead.")]
+    SshNotSupported,
+    #[error("Invalid clone_path configuration: {source}")]
+    InvalidClonePath {
+        #[source]
+        source: flowgen_core::validate::Error,
+    },
+    #[error("Git operation panicked or was cancelled: {source}")]
+    JoinError {
+        #[source]
+        source: tokio::task::JoinError,
     },
     #[error("Failed to read file '{path}': {source}")]
     FileRead {
@@ -34,87 +74,42 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    #[error("Failed to parse YAML in '{path}': {source}")]
-    YamlParse {
-        path: String,
-        #[source]
-        source: serde_yaml::Error,
-    },
-    #[error("Missing 'flow.name' in '{path}'")]
-    MissingFlowName { path: String },
-    #[error("Flow path not relative: '{path}'")]
-    PathNotRelative { path: String },
-    #[error("Cache error: {source}")]
-    Cache {
-        #[source]
-        source: flowgen_core::cache::CacheError,
-    },
-    #[error("Discovery error: {source}")]
-    Discovery {
+    #[error("File walk error: {source}")]
+    WalkDir {
         #[source]
         source: walkdir::Error,
     },
-    #[error("JSON serialization error: {source}")]
-    Json {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("Missing required builder attribute: {0}")]
-    MissingBuilderAttribute(String),
     #[error("Error sending event: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
+    },
+    #[error("JSON serialization error: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
     },
     #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
         source: flowgen_core::event::Error,
     },
+    #[error("Missing required builder attribute: {0}")]
+    MissingBuilderAttribute(String),
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
         source: Box<Error>,
     },
-    #[error("Cache initialization failed: {source}")]
-    CacheInit {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-}
-
-/// Sync statistics.
-#[derive(Debug, Default, serde::Serialize)]
-struct SyncStats {
-    commit: String,
-    flows_added: usize,
-    flows_updated: usize,
-    flows_deleted: usize,
-    flows_unchanged: usize,
-    resources_synced: usize,
-}
-
-/// Lightweight struct for extracting flow.name without full FlowConfig.
-#[derive(serde::Deserialize)]
-struct FlowNameCheck {
-    flow: FlowNameOnly,
-}
-
-#[derive(serde::Deserialize)]
-struct FlowNameOnly {
-    name: Option<String>,
-}
-
-/// Validated flow with display name and content.
-struct ValidatedFlow {
-    display_name: String,
-    content: String,
 }
 
 /// Event handler for git sync operations.
 pub struct EventHandler {
     config: Arc<ProcessorConfig>,
-    metadata_cache: Arc<dyn Cache>,
+    /// Resolved local path for the repository clone. Either the explicit
+    /// `clone_path` from config, or the derived default
+    /// `<temp>/<flow_name>/<task_name>`.
+    clone_path: PathBuf,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -122,6 +117,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Handles a trigger event by syncing the repository and emitting file events.
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -131,387 +127,251 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            let stats = self.run_sync().await?;
+            // Clone or pull the repository.
+            let commit = clone_or_pull(&self.config, &self.clone_path).await?;
 
-            info!(
-                commit = %stats.commit,
-                added = stats.flows_added,
-                updated = stats.flows_updated,
-                deleted = stats.flows_deleted,
-                unchanged = stats.flows_unchanged,
-                resources = stats.resources_synced,
-                "Sync completed"
-            );
+            // Determine the scan base path.
+            let scan_path = match &self.config.path {
+                Some(p) => self.clone_path.join(p),
+                None => self.clone_path.clone(),
+            };
 
-            // Emit sync result as event.
-            let result_json =
-                serde_json::to_value(&stats).map_err(|source| Error::Json { source })?;
+            // Walk files and emit one event per file.
+            let entries: Vec<_> = WalkDir::new(&scan_path)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .collect();
 
-            let mut e = EventBuilder::new()
-                .data(EventData::Json(result_json))
-                .subject(self.config.name.clone())
-                .task_id(self.task_id)
-                .task_type(self.task_type)
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
+            for (index, entry) in entries.iter().enumerate() {
+                let file_path = entry.path();
+                let content =
+                    std::fs::read_to_string(file_path).map_err(|source| Error::FileRead {
+                        path: file_path.display().to_string(),
+                        source,
+                    })?;
 
-            match self.tx {
-                Some(_) => {
-                    e.completion_tx = completion_tx_arc.clone();
-                }
-                None => {
-                    if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(None)).ok();
+                let relative_path = file_path
+                    .strip_prefix(&scan_path)
+                    .unwrap_or(file_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                let file_event = FileEvent {
+                    path: relative_path,
+                    content,
+                    commit: commit.clone(),
+                };
+                let data = serde_json::to_value(&file_event)
+                    .map_err(|source| Error::SerdeJson { source })?;
+
+                let mut e = EventBuilder::new()
+                    .data(EventData::Json(data))
+                    .subject(self.config.name.clone())
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
+
+                // Only the last file carries the completion signal.
+                if index == entries.len() - 1 {
+                    match self.tx {
+                        None => {
+                            // Leaf task: signal completion.
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                arc.signal_completion(e.data_as_json().ok());
                             }
+                        }
+                        Some(_) => {
+                            e.completion_tx = completion_tx_arc.clone();
                         }
                     }
                 }
+
+                e.send_with_logging(self.tx.as_ref())
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
             }
 
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            // If no files were found there is nothing to forward downstream.
+            // The upstream completion channel was sized for every leaf in
+            // git_sync's subtree, so emit one signal per leaf to satisfy that
+            // contract instead of leaving the source waiting forever.
+            if entries.is_empty() {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(None);
+                    }
+                }
+            }
 
             Ok(())
         })
         .await
     }
-
-    /// Runs the full sync cycle: git pull, discover, validate, sync to cache.
-    async fn run_sync(&self) -> Result<SyncStats, Error> {
-        let commit = clone_or_pull(&self.config).await?;
-        let flows_base = self.config.clone_path.join(&self.config.flows_path);
-
-        let flow_files =
-            discover_flows(&flows_base).map_err(|source| Error::Discovery { source })?;
-
-        let flows = validate_flows(&flows_base, &flow_files)?;
-
-        let mut stats = sync_flows(
-            self.metadata_cache.as_ref(),
-            &self.config.flows_prefix,
-            &flows,
-        )
-        .await?;
-        stats.commit = commit;
-
-        if let Some(ref resources_path) = self.config.resources_path {
-            let resources_base = self.config.clone_path.join(resources_path);
-            if resources_base.exists() {
-                stats.resources_synced = sync_resources(
-                    self.metadata_cache.as_ref(),
-                    &self.config.resources_prefix,
-                    &resources_base,
-                )
-                .await?;
-            }
-        }
-
-        // Write sync metadata.
-        let metadata = serde_json::to_vec(&serde_json::json!({
-            "last_sync_at": chrono::Utc::now().timestamp(),
-            "last_commit": stats.commit,
-            "flows_added": stats.flows_added,
-            "flows_updated": stats.flows_updated,
-            "flows_deleted": stats.flows_deleted,
-            "resources_synced": stats.resources_synced,
-        }))
-        .map_err(|source| Error::Json { source })?;
-
-        self.metadata_cache
-            .put(
-                "flowgen.metadata.sync_status",
-                bytes::Bytes::from(metadata),
-                None,
-            )
-            .await
-            .map_err(|source| Error::Cache { source })?;
-
-        Ok(stats)
-    }
 }
 
-// --- Git operations ---
+// --- Git operations (gix-backed) ---
+//
+// All gix calls are blocking and must run on a dedicated thread. We wrap the
+// whole clone/pull/head sequence in a single `spawn_blocking` to avoid
+// re-paying the thread-handoff cost per call.
 
-async fn clone_or_pull(config: &ProcessorConfig) -> Result<String, Error> {
-    let clone_path = &config.clone_path;
+/// Clone or pull the repository and return the HEAD commit hash.
+async fn clone_or_pull(config: &ProcessorConfig, clone_path: &Path) -> Result<String, Error> {
+    if matches!(config.auth.auth_type, GitAuthType::Ssh) {
+        return Err(Error::SshNotSupported);
+    }
 
-    if clone_path.join(".git").exists() {
-        pull(clone_path, &config.auth).await?;
+    let url = build_authenticated_url(config)?;
+    let clone_path = clone_path.to_path_buf();
+    let branch = config.branch.clone();
+    let original_url = config.repository_url.clone();
+
+    // Capture the current tracing span so log lines emitted from the gix
+    // worker thread inherit the flow/task context. Without this the
+    // `pull_repo` events show up bare with no `flow=…` / `task=…` fields.
+    let span = tracing::Span::current();
+    task::spawn_blocking(move || {
+        let _enter = span.enter();
+        sync_blocking(&url, &original_url, &branch, &clone_path)
+    })
+    .await
+    .map_err(|source| Error::JoinError { source })?
+}
+
+/// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
+fn sync_blocking(
+    url: &str,
+    original_url: &str,
+    branch: &str,
+    path: &Path,
+) -> Result<String, Error> {
+    // gix expects the clone target's parent to exist. The derived default
+    // path includes per-flow and per-task segments that are not pre-created
+    // by the volume mount, so ensure the full path exists up front.
+    std::fs::create_dir_all(path).map_err(|e| Error::Clone {
+        url: original_url.to_string(),
+        source: Box::new(e),
+    })?;
+
+    if path.join(".git").exists() {
+        fetch_existing(path, original_url)?;
     } else {
-        clone(
-            &config.repository_url,
-            &config.branch,
-            clone_path,
-            &config.auth,
-        )
-        .await?;
+        shallow_clone(url, branch, path, original_url)?;
     }
-
-    head_commit(clone_path, &config.auth).await
+    head_commit(path)
 }
 
-async fn clone(url: &str, branch: &str, path: &Path, auth: &GitAuth) -> Result<(), Error> {
-    let mut cmd = Command::new("git");
-    cmd.args([
-        "clone",
-        "--branch",
-        branch,
-        "--single-branch",
-        "--depth",
-        "1",
-    ]);
-    cmd.arg(url);
-    cmd.arg(path);
-    apply_auth_env(&mut cmd, auth);
-
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
-    if !output.status.success() {
-        return Err(Error::GitClone(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
+/// Builds the URL used for network operations, embedding a token in the
+/// userinfo segment when token auth is configured. The `original_url` is
+/// preserved separately for error messages so tokens never appear in logs.
+fn build_authenticated_url(config: &ProcessorConfig) -> Result<String, Error> {
+    if let GitAuthType::Token = config.auth.auth_type {
+        if let Some(token) = config.auth.token.as_deref() {
+            // Inject the token as a basic-auth username (GitHub/GitLab convention).
+            // For URLs like `https://github.com/org/repo.git`, the result is
+            // `https://<token>@github.com/org/repo.git`.
+            if let Some(rest) = config.repository_url.strip_prefix("https://") {
+                return Ok(format!("https://{token}@{rest}"));
+            }
+            if let Some(rest) = config.repository_url.strip_prefix("http://") {
+                return Ok(format!("http://{token}@{rest}"));
+            }
+        }
     }
+    Ok(config.repository_url.clone())
+}
+
+/// Performs a shallow clone of a single branch.
+fn shallow_clone(url: &str, branch: &str, path: &Path, log_url: &str) -> Result<(), Error> {
+    let mut prepare = gix::prepare_clone(url, path)
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?
+        .with_ref_name(Some(branch))
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?
+        .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+            std::num::NonZeroU32::MIN,
+        ));
+
+    let (mut checkout, _outcome) = prepare
+        .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Clone {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    checkout
+        .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Checkout {
+            source: Box::new(e),
+        })?;
+
     Ok(())
 }
 
-async fn pull(path: &Path, auth: &GitAuth) -> Result<(), Error> {
-    let mut cmd = Command::new("git");
-    cmd.args(["pull", "--ff-only"]);
-    cmd.current_dir(path);
-    apply_auth_env(&mut cmd, auth);
+/// Fetches the latest refs into an existing clone and resets HEAD to the
+/// remote tracking branch. Mirrors `git pull --ff-only` semantics.
+fn fetch_existing(path: &Path, log_url: &str) -> Result<(), Error> {
+    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
-    if !output.status.success() {
-        return Err(Error::GitPull(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
+    let remote = repo
+        .find_default_remote(gix::remote::Direction::Fetch)
+        .ok_or_else(|| Error::Fetch {
+            url: log_url.to_string(),
+            source: "no default remote configured".into(),
+        })?
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    let connection = remote
+        .connect(gix::remote::Direction::Fetch)
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    let prepared = connection
+        .prepare_fetch(gix::progress::Discard, Default::default())
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
+    prepared
+        .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+        .map_err(|e| Error::Fetch {
+            url: log_url.to_string(),
+            source: Box::new(e),
+        })?;
+
     Ok(())
 }
 
-async fn head_commit(path: &Path, auth: &GitAuth) -> Result<String, Error> {
-    let mut cmd = Command::new("git");
-    cmd.args(["rev-parse", "HEAD"]);
-    cmd.current_dir(path);
-    apply_auth_env(&mut cmd, auth);
+/// Reads the HEAD commit object id.
+fn head_commit(path: &Path) -> Result<String, Error> {
+    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
+        path: path.to_path_buf(),
+        source: Box::new(e),
+    })?;
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|source| Error::GitIo { source })?;
-    if !output.status.success() {
-        return Err(Error::GitHead(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
+    let head_id = repo.head_id().map_err(|e| Error::HeadCommit {
+        source: Box::new(e),
+    })?;
 
-fn apply_auth_env(cmd: &mut Command, auth: &GitAuth) {
-    match auth.auth_type {
-        GitAuthType::Ssh => {
-            let mut ssh_cmd = "ssh".to_string();
-            if let Some(ref key) = auth.ssh_key_path {
-                ssh_cmd.push_str(&format!(" -i {}", key.display()));
-            }
-            if let Some(ref hosts) = auth.ssh_known_hosts_path {
-                ssh_cmd.push_str(&format!(" -o UserKnownHostsFile={}", hosts.display()));
-                ssh_cmd.push_str(" -o StrictHostKeyChecking=yes");
-            } else {
-                ssh_cmd.push_str(" -o StrictHostKeyChecking=no");
-            }
-            cmd.env("GIT_SSH_COMMAND", ssh_cmd);
-        }
-        GitAuthType::Token => {
-            if let Some(ref token) = auth.token {
-                cmd.env("GIT_ASKPASS", "echo");
-                cmd.env("GIT_PASSWORD", token);
-            }
-        }
-        GitAuthType::None => {}
-    }
-}
-
-// --- Discovery ---
-
-fn discover_flows(base_path: &Path) -> Result<Vec<PathBuf>, walkdir::Error> {
-    let mut files = Vec::new();
-    for entry in WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if FLOW_EXTENSIONS.contains(&ext) {
-                    files.push(path.to_path_buf());
-                }
-            }
-        }
-    }
-    Ok(files)
-}
-
-fn discover_resources(base_path: &Path) -> Result<Vec<PathBuf>, walkdir::Error> {
-    let mut files = Vec::new();
-    for entry in WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.path().is_file() {
-            files.push(entry.path().to_path_buf());
-        }
-    }
-    Ok(files)
-}
-
-// --- Validation ---
-
-fn validate_flows(
-    base_path: &Path,
-    flow_files: &[PathBuf],
-) -> Result<HashMap<String, ValidatedFlow>, Error> {
-    let mut flows = HashMap::new();
-
-    for file_path in flow_files {
-        let content = std::fs::read_to_string(file_path).map_err(|source| Error::FileRead {
-            path: file_path.display().to_string(),
-            source,
-        })?;
-
-        let parsed: FlowNameCheck =
-            serde_yaml::from_str(&content).map_err(|source| Error::YamlParse {
-                path: file_path.display().to_string(),
-                source,
-            })?;
-
-        let display_name = parsed.flow.name.ok_or_else(|| Error::MissingFlowName {
-            path: file_path.display().to_string(),
-        })?;
-
-        let rel = file_path
-            .strip_prefix(base_path)
-            .map_err(|_| Error::PathNotRelative {
-                path: file_path.display().to_string(),
-            })?;
-
-        let relative_key = rel.with_extension("").to_string_lossy().replace('\\', "/");
-
-        flows.insert(
-            relative_key,
-            ValidatedFlow {
-                display_name,
-                content,
-            },
-        );
-    }
-
-    Ok(flows)
-}
-
-// --- Cache sync ---
-
-async fn sync_flows(
-    cache: &dyn Cache,
-    prefix: &str,
-    flows: &HashMap<String, ValidatedFlow>,
-) -> Result<SyncStats, Error> {
-    let mut stats = SyncStats::default();
-
-    let current_keys = cache
-        .list_keys(prefix)
-        .await
-        .map_err(|source| Error::Cache { source })?;
-
-    for (relative_key, validated) in flows {
-        let key = format!("{prefix}.{relative_key}");
-
-        match cache
-            .get(&key)
-            .await
-            .map_err(|source| Error::Cache { source })?
-        {
-            Some(existing) => {
-                if String::from_utf8_lossy(&existing) == validated.content {
-                    stats.flows_unchanged += 1;
-                    continue;
-                }
-                debug!(flow = %validated.display_name, key = %relative_key, "Updating flow in cache.");
-                stats.flows_updated += 1;
-            }
-            None => {
-                debug!(flow = %validated.display_name, key = %relative_key, "Adding flow to cache.");
-                stats.flows_added += 1;
-            }
-        }
-
-        cache
-            .put(&key, bytes::Bytes::from(validated.content.clone()), None)
-            .await
-            .map_err(|source| Error::Cache { source })?;
-    }
-
-    let git_keys: HashSet<String> = flows.keys().map(|k| format!("{prefix}.{k}")).collect();
-
-    for key in &current_keys {
-        if !git_keys.contains(key) {
-            let stripped = key.strip_prefix(&format!("{prefix}.")).unwrap_or(key);
-            debug!(key = %stripped, "Deleting flow from cache.");
-            cache
-                .delete(key)
-                .await
-                .map_err(|source| Error::Cache { source })?;
-            stats.flows_deleted += 1;
-        }
-    }
-
-    Ok(stats)
-}
-
-async fn sync_resources(cache: &dyn Cache, prefix: &str, base_path: &Path) -> Result<usize, Error> {
-    let files = discover_resources(base_path).map_err(|source| Error::Discovery { source })?;
-    let mut count = 0;
-
-    for file_path in &files {
-        let content = std::fs::read(file_path).map_err(|source| Error::FileRead {
-            path: file_path.display().to_string(),
-            source,
-        })?;
-
-        let rel = file_path
-            .strip_prefix(base_path)
-            .unwrap_or(file_path.as_path());
-        let key = format!("{prefix}.{}", rel.display());
-
-        let should_put = match cache
-            .get(&key)
-            .await
-            .map_err(|source| Error::Cache { source })?
-        {
-            Some(existing) => existing.as_ref() != content.as_slice(),
-            None => true,
-        };
-
-        if should_put {
-            cache
-                .put(&key, bytes::Bytes::from(content), None)
-                .await
-                .map_err(|source| Error::Cache { source })?;
-        }
-        count += 1;
-    }
-
-    Ok(count)
+    Ok(head_id.to_string())
 }
 
 // --- Processor / Runner ---
@@ -533,12 +393,29 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Use the task context cache as the metadata store.
-        let metadata_cache = Arc::clone(&self.task_context.cache);
+        // Reject unsupported auth at startup so the task fails fast rather
+        // than once per event under retry.
+        if matches!(self.config.auth.auth_type, GitAuthType::Ssh) {
+            return Err(Error::SshNotSupported);
+        }
+
+        let clone_path = match &self.config.clone_path {
+            Some(path) => {
+                flowgen_core::validate::validate_path(
+                    flowgen_core::validate::PathField("clone_path"),
+                    path,
+                )
+                .map_err(|source| Error::InvalidClonePath { source })?;
+                path.clone()
+            }
+            None => std::env::temp_dir()
+                .join(&self.task_context.flow.name)
+                .join(&self.config.name),
+        };
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),
-            metadata_cache,
+            clone_path,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -555,7 +432,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             match self.init().await {
                 Ok(handler) => Ok(handler),
                 Err(e) => {
-                    error!(error = %e, "Failed to initialize git sync processor");
+                    error!(error = %e, "Failed to initialize git sync processor.");
                     Err(tokio_retry::RetryError::transient(e))
                 }
             }
@@ -576,7 +453,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                             match handler.handle(event.clone()).await {
                                 Ok(()) => Ok(()),
                                 Err(e) => {
-                                    error!(error = %e, "Git sync failed, retrying");
+                                    error!(error = %e, "Git sync failed.");
                                     Err(tokio_retry::RetryError::transient(e))
                                 }
                             }
@@ -584,7 +461,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .await;
 
                         if let Err(e) = result {
-                            error!(error = %e, "Git sync exhausted retries");
+                            error!(error = %e, "Git sync exhausted all retry attempts.");
                         }
                     });
                 }
@@ -594,7 +471,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 }
 
-/// Builder for `Processor`.
+/// Builder for git sync processor.
 #[derive(Default)]
 pub struct ProcessorBuilder {
     config: Option<Arc<ProcessorConfig>>,

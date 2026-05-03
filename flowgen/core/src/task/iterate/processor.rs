@@ -3,17 +3,16 @@
 //! Processes events containing JSON arrays and emits individual events
 //! for each array element, enabling fan-out processing patterns.
 
-use crate::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
+use crate::event::{
+    new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
+    SharedCompletionTx,
+};
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tracing::{error, Instrument};
-
-/// Receiver for a per-event completion signal carrying an optional JSON value.
-type PerEventCompletionRx =
-    oneshot::Receiver<Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>>;
 
 /// Errors that can occur during loop processing operations.
 #[derive(thiserror::Error, Debug)]
@@ -46,47 +45,45 @@ pub enum Error {
     },
 }
 
-/// Coordinates completion signaling across all events emitted for a single
+/// Coordinates completion signalling across all events emitted for a single
 /// iterated array.
 ///
-/// Each emitted event gets its own per-event `SharedCompletionTx`. The
-/// associated receivers are joined into a "fan-in" task which awaits all of
-/// them and only then forwards a single completion signal to the upstream
-/// source. This is required because downstream processors (storage_write,
-/// http_request, script, etc.) spawn a `tokio::task` per incoming event —
+/// Each emitted event carries its own per-element completion channel. The
+/// associated receivers are joined into a fan-in task which awaits all of
+/// them and only then signals the upstream source. This is required because
+/// downstream processors spawn a `tokio::task` per incoming event —
 /// attaching the upstream completion to only the last emitted event would
-/// signal completion while the other emissions are still in flight, which
-/// leads to premature NATS acks and silent data loss.
+/// signal completion while other elements are still in flight, leading to
+/// premature acknowledgements and silent data loss.
 ///
-/// If any per-event completion reports an error, the first such error wins
-/// and is forwarded upstream. Missing per-event signals (handler dropped
-/// the sender without completing) are treated as success to avoid
-/// deadlocking the source on buggy downstream handlers.
+/// The upstream `CompletionState` was sized at flow build time to expect one
+/// signal per leaf reachable from iterate's subtree. Once every element
+/// finishes, the fan-in emits exactly that many upstream signals so the
+/// original source's leaf-count contract is satisfied.
+///
+/// Per-element errors are not propagated upstream: failed downstream tasks
+/// emit error events of their own, and the source falls back to its
+/// acknowledgement timeout when no completion arrives. Missing per-element
+/// signals are treated as success to avoid deadlocking the source on buggy
+/// downstream handlers.
 fn spawn_fan_in_completion(
     upstream: SharedCompletionTx,
-    per_event_receivers: Vec<PerEventCompletionRx>,
+    per_event_receivers: Vec<CompletionRx>,
+    upstream_leaf_share: usize,
 ) {
     tokio::spawn(async move {
         let total = per_event_receivers.len();
         let remaining = Arc::new(AtomicUsize::new(total));
-        let first_error: Arc<Mutex<Option<Box<dyn std::error::Error + Send + Sync>>>> =
-            Arc::new(Mutex::new(None));
         let (done_tx, done_rx) = oneshot::channel::<()>();
-        let done_tx = Arc::new(Mutex::new(Some(done_tx)));
+        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
 
         for rx in per_event_receivers {
             let remaining = Arc::clone(&remaining);
-            let first_error = Arc::clone(&first_error);
             let done_tx = Arc::clone(&done_tx);
             tokio::spawn(async move {
-                let outcome = rx.await;
-                if let Ok(Err(e)) = outcome {
-                    if let Ok(mut guard) = first_error.lock() {
-                        if guard.is_none() {
-                            *guard = Some(e);
-                        }
-                    }
-                }
+                // Drop the result regardless of outcome; errors flow as
+                // downstream events, not through completion channels.
+                let _ = rx.await;
                 if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
                     if let Ok(mut guard) = done_tx.lock() {
                         if let Some(tx) = guard.take() {
@@ -100,15 +97,12 @@ fn spawn_fan_in_completion(
         // Wait for all per-event completions to report in.
         done_rx.await.ok();
 
-        // Forward the aggregated result to the upstream completion signal.
-        if let Ok(mut guard) = upstream.lock() {
-            if let Some(tx) = guard.take() {
-                let result = match first_error.lock().ok().and_then(|mut g| g.take()) {
-                    Some(err) => Err(err),
-                    None => Ok(None),
-                };
-                tx.send(result).ok();
-            }
+        // Emit one upstream signal per leaf in iterate's subtree. The source
+        // sized its completion channel for the full leaf set; collapsing the
+        // entire subtree into a single signal would leave the source waiting
+        // for the rest forever.
+        for _ in 0..upstream_leaf_share.max(1) {
+            upstream.signal_completion(None);
         }
     });
 }
@@ -129,7 +123,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by iterating over a JSON array and emitting individual events.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -174,36 +168,43 @@ impl EventHandler {
 
             let array_len = array.len();
 
-            // Handle empty arrays by signaling completion immediately.
+            // Handle empty arrays by signalling completion immediately. The
+            // upstream channel was sized for every leaf reachable from
+            // iterate's subtree, so emit one signal per leaf to satisfy that
+            // contract even though no downstream work runs.
             if array_len == 0 {
                 if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(event.data_as_json().ok())).ok();
-                        }
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    let payload = event.data_as_json().ok();
+                    // Send the payload on the first signal; remaining signals
+                    // carry no payload since only the last one delivered to
+                    // the source survives anyway.
+                    arc.signal_completion(payload);
+                    for _ in 1..upstream_leaf_share {
+                        arc.signal_completion(None);
                     }
                 }
                 return Ok(());
             }
 
-            // If this is the final task in the flow there is nothing
-            // downstream to wait for — the emitted events go nowhere. Signal
-            // upstream immediately so the source is not blocked.
+            // If iterate is the final task in the flow, the emitted events
+            // have nowhere to go. Iterate is itself the only leaf in its
+            // subtree (leaf_count == 1), so a single signal completes the
+            // upstream contract.
             if self.tx.is_none() {
                 if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(None)).ok();
-                        }
-                    }
+                    arc.signal_completion(None);
                 }
                 return Ok(());
             }
 
-            // For intermediate iterate tasks, attach a per-event completion
-            // sender to every emitted event and fan-in their signals so the
-            // upstream source only sees completion after ALL events finish.
-            // See spawn_fan_in_completion for details.
+            // For intermediate iterate tasks, attach a per-element completion
+            // channel to every emitted event and fan-in their signals so the
+            // upstream source sees completion only after every element
+            // finishes. Each per-element channel is sized to the number of
+            // leaves reachable downstream of iterate so multi-leaf subgraphs
+            // are handled correctly. See spawn_fan_in_completion for details.
+            let downstream_leaves = self.task_context.leaf_count.max(1);
             let mut per_event_receivers = Vec::with_capacity(array_len);
 
             for element in array.iter() {
@@ -219,8 +220,8 @@ impl EventHandler {
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
-                let (per_tx, per_rx) = oneshot::channel();
-                e.completion_tx = Some(Arc::new(Mutex::new(Some(per_tx))));
+                let (per_state, per_rx) = new_completion_channel(downstream_leaves);
+                e.completion_tx = Some(per_state);
                 per_event_receivers.push(per_rx);
 
                 e.send_with_logging(self.tx.as_ref())
@@ -229,7 +230,11 @@ impl EventHandler {
             }
 
             if let Some(upstream) = completion_tx_arc.as_ref() {
-                spawn_fan_in_completion(Arc::clone(upstream), per_event_receivers);
+                spawn_fan_in_completion(
+                    Arc::clone(upstream),
+                    per_event_receivers,
+                    downstream_leaves,
+                );
             }
 
             Ok(())
@@ -638,8 +643,7 @@ mod tests {
             task_context: create_mock_task_context(),
         };
 
-        let (upstream_tx, upstream_rx) = oneshot::channel();
-        let upstream_shared: SharedCompletionTx = Arc::new(Mutex::new(Some(upstream_tx)));
+        let (upstream_state, mut upstream_rx) = new_completion_channel(1);
 
         let input_event = Event {
             data: EventData::Json(json!([{"id": 1}, {"id": 2}, {"id": 3}])),
@@ -650,7 +654,7 @@ mod tests {
             task_type: "test",
             meta: None,
             error: None,
-            completion_tx: Some(Arc::clone(&upstream_shared)),
+            completion_tx: Some(Arc::clone(&upstream_state)),
         };
 
         tokio::spawn(async move {
@@ -667,22 +671,9 @@ mod tests {
             );
         }
 
-        // Upstream must still be pending — nothing acked yet.
-        let pending = tokio::time::timeout(std::time::Duration::from_millis(50), async {
-            let arc = Arc::clone(&upstream_shared);
-            loop {
-                let is_done = arc
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|_| ()))
-                    .is_none();
-                if is_done {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
+        // Upstream must still be pending — no per-event signals yet.
+        let pending =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut upstream_rx).await;
         assert!(
             pending.is_err(),
             "upstream completed before any per-event signal"
@@ -690,38 +681,17 @@ mod tests {
 
         // Signal two of three — upstream still pending.
         for arc in per_event_completions.iter().take(2) {
-            if let Ok(mut guard) = arc.lock() {
-                if let Some(tx) = guard.take() {
-                    tx.send(Ok(None)).unwrap();
-                }
-            }
+            arc.signal_completion(None);
         }
-        let still_pending = tokio::time::timeout(std::time::Duration::from_millis(50), async {
-            let arc = Arc::clone(&upstream_shared);
-            loop {
-                let is_done = arc
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|_| ()))
-                    .is_none();
-                if is_done {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
+        let still_pending =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut upstream_rx).await;
         assert!(
             still_pending.is_err(),
             "upstream completed before final per-event signal"
         );
 
         // Signal the last one — upstream should now fire.
-        if let Ok(mut guard) = per_event_completions[2].lock() {
-            if let Some(tx) = guard.take() {
-                tx.send(Ok(None)).unwrap();
-            }
-        }
+        per_event_completions[2].signal_completion(None);
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), upstream_rx)
             .await
@@ -753,8 +723,7 @@ mod tests {
             task_context: create_mock_task_context(),
         };
 
-        let (upstream_tx, upstream_rx) = oneshot::channel();
-        let upstream_shared: SharedCompletionTx = Arc::new(Mutex::new(Some(upstream_tx)));
+        let (upstream_state, upstream_rx) = new_completion_channel(1);
 
         let input_event = Event {
             data: EventData::Json(json!([{"id": 1}, {"id": 2}])),
@@ -765,7 +734,7 @@ mod tests {
             task_type: "test",
             meta: None,
             error: None,
-            completion_tx: Some(upstream_shared),
+            completion_tx: Some(upstream_state),
         };
 
         event_handler.handle(input_event).await.unwrap();

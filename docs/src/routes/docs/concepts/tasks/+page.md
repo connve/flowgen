@@ -15,45 +15,52 @@ Subscribers are source tasks that ingest data into the flow. They connect to ext
 | `nats_jetstream_subscriber` | Consumes messages from a NATS JetStream stream with durable consumers. |
 | `salesforce_pubsubapi_subscriber` | Subscribes to Salesforce Platform Events via gRPC. |
 | `http_webhook` | Listens for incoming HTTP requests and converts them to events. |
-| `generate` | Produces events on a schedule (cron or interval) using inline scripts. |
+| `generate` | Produces events on a schedule (cron or interval). |
 
 Subscribers appear as the first task in a flow. They manage acknowledgment — a message is only acked when the entire downstream flow completes successfully.
 
 ### Processors
 
-Processors receive events, do something with them, and emit events to the next task. They can transform, enrich, query, write, publish — any operation. A processor can appear anywhere in the flow, including as the last task.
+Processors receive events, do something with them, and emit events to the next task.
 
 | Task | Description |
 |---|---|
-| `script` | Executes [Rhai](https://rhai.rs) scripts for data transformation, filtering, and routing. |
-| `convert` | Converts between data formats (JSON, Arrow, Avro, CSV). |
+| `script` | Executes [Rhai](https://rhai.rs) scripts for transformation, filtering, and routing. |
+| `convert` | Converts between data formats (JSON, Arrow, Avro). |
 | `iterate` | Fans out array data into individual events. |
 | `buffer` | Accumulates events into batches before forwarding. |
-| `log` | Logs event data for debugging and observability. |
-| `http_request` | Makes HTTP calls for enrichment or side effects. |
+| `log` | Logs event data for debugging. |
+| `http_request` | Makes outbound HTTP calls. |
 | `nats_jetstream_publisher` | Publishes events to a NATS JetStream subject. |
+| `nats_kv_store` | Read, write, list, and delete keys in a NATS KV bucket. |
 | `salesforce_pubsubapi_publisher` | Publishes Salesforce Platform Events. |
-| `salesforce_restapi_sobject` | Performs Salesforce CRUD operations. |
-| `salesforce_restapi_composite` | Executes batch Salesforce operations. |
-| `salesforce_bulkapi_query_job` | Manages Salesforce Bulk API query jobs. |
-| `salesforce_toolingapi` | Manages Salesforce metadata. |
-| `gcp_bigquery_query` | Executes BigQuery SQL queries. |
-| `gcp_bigquery_storage_read` | Reads data from BigQuery via the Storage Read API. |
-| `gcp_bigquery_storage_write` | Writes data to BigQuery via the Storage Write API. |
-| `gcp_bigquery_job` | Manages BigQuery async jobs (create, monitor, cancel). |
-| `mssql_query` | Executes MSSQL queries. |
-| `object_store_read` | Reads files from object storage (S3, GCS, Azure, local). |
-| `object_store_write` | Writes event data to files in object storage. |
-| `object_store_list` | Lists files in object storage. |
-| `object_store_move` | Moves files between object storage locations. |
+| `salesforce_restapi_sobject` | Salesforce CRUD operations (create, get, update, upsert, delete). |
+| `salesforce_restapi_composite` | Batch Salesforce operations. |
+| `salesforce_bulkapi_query_job` | Salesforce Bulk API query jobs. |
+| `salesforce_toolingapi` | Salesforce metadata management. |
+| `gcp_bigquery_query` | BigQuery SQL queries. |
+| `gcp_bigquery_storage_read` | BigQuery Storage Read API. |
+| `gcp_bigquery_storage_write` | BigQuery Storage Write API. |
+| `gcp_bigquery_job` | BigQuery async jobs (load, monitor, cancel). |
+| `mssql_query` | Microsoft SQL Server queries. |
+| `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
+| `git_sync` | Clone/pull a Git repository and emit one event per file. |
+| `ai_completion` | LLM completions from multiple providers. |
+| `ai_gateway` | OpenAI-compatible chat completions endpoint. |
+| `mcp_tool` | Expose flows as MCP tools for LLM agents. |
+
+## Task wiring
+
+By default, tasks are wired sequentially — each task receives from the previous task and sends to the next. Linear chains, fan-out, fan-in, and end-to-end acknowledgement semantics are covered in [Flows](/docs/concepts/flows).
 
 ## Common configuration
 
-All tasks share a `name` field and an optional `retry` configuration:
+All tasks share these optional fields:
 
 ```yaml
 - script:
     name: my_transform        # required: unique within the flow
+    depends_on: [source]       # optional: receive from named tasks instead of previous
     retry:                     # optional: overrides app-level retry
       max_attempts: 5
       initial_backoff: "2s"
@@ -66,7 +73,7 @@ All tasks share a `name` field and an optional `retry` configuration:
 Tasks can produce and consume three event data formats:
 
 - **JSON** — Default for REST APIs, webhooks, and script output.
-- **Arrow RecordBatch** — Preferred for columnar data (BigQuery, Parquet). Zero-copy through the flow.
-- **Avro** — Preferred for gRPC and Pub/Sub (Salesforce Platform Events).
+- **Arrow RecordBatch** — Columnar data (BigQuery, Parquet). Zero-copy through the flow.
+- **Avro** — Binary format for gRPC and Pub/Sub (Salesforce Platform Events).
 
 The `convert` task translates between formats when needed.

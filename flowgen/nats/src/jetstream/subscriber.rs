@@ -3,7 +3,7 @@ use async_nats::jetstream::{self};
 use flowgen_core::{
     client::Client,
     config::ConfigExt,
-    event::{Event, EventExt},
+    event::{new_completion_channel, Event, EventExt},
 };
 use std::sync::Arc;
 use tokio::pin;
@@ -111,15 +111,17 @@ impl EventHandler {
     ) -> Result<(), Error> {
         match message_result {
             Ok(message) => {
-                let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+                // Size the completion channel to the number of leaves in this
+                // flow's directed acyclic graph. The NATS message is acked
+                // only after every leaf has signalled completion.
+                let (completion_state, completion_rx) =
+                    new_completion_channel(self.task_context.leaf_count);
 
                 let mut e = message
                     .to_event(self.task_type, self.task_id)
                     .map_err(|source| Error::MessageConversion { source })?;
 
-                e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-                    completion_tx,
-                ))));
+                e.completion_tx = Some(completion_state);
 
                 e.send_with_logging(self.tx.as_ref())
                     .await

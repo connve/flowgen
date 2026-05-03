@@ -1,0 +1,42 @@
+# Salesforce Account change events → NATS JetStream.
+#
+# Subscribes to AccountChangeEvent via Salesforce Pub/Sub API and republishes
+# every event to a NATS JetStream subject under `pubsub.data.<topic>`. The
+# writer flow consumes from this stream and fans the events out to object
+# storage and BigQuery.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - /etc/nats/credentials.json
+#   - NATS_URL env var (e.g. nats://localhost:4222)
+flow:
+  name: salesforce_account_subscriber
+  require_leader_election: true
+  tasks:
+
+    - salesforce_pubsubapi_subscriber:
+        name: start_subscription
+        credentials_path: /etc/sfdc/credentials.json
+        url: "{{env.NATS_URL}}"
+        topic:
+          name: /data/AccountChangeEvent
+          durable_consumer_options:
+            enabled: true
+            managed_subscription: false
+            name: salesforce_account_subscriber
+            # Uncomment to backfill from the start of the retention window.
+            # replay_preset: EARLIEST
+
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: pubsub.data.{{event.subject}}
+        stream:
+          create_or_update: true
+          name: salesforce
+          description: "Salesforce platform events, change events and query results."
+          subjects: ["pubsub.>"]
+          max_age: "24h"
+          retention: limits
+          discard: old

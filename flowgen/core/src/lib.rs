@@ -47,6 +47,8 @@ pub mod serde;
 pub mod service;
 /// OpenTelemetry integration for metrics and distributed tracing.
 pub mod telemetry;
+/// Validation helpers for config-supplied identifiers and paths.
+pub mod validate;
 /// Task execution framework with runner trait, context, and manager.
 pub mod task {
     /// Task execution context providing metadata and runtime configuration.

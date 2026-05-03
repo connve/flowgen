@@ -3,7 +3,7 @@
 //! Implements a timer-based event generator that creates events at regular intervals
 //! with optional structured data payloads and count limits for testing and simulation workflows.
 
-use crate::event::{Event, EventBuilder, EventData, EventExt};
+use crate::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
 use chrono::DateTime;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
@@ -226,8 +226,11 @@ impl EventHandler {
                 );
             }
 
-            // Create completion channel for flow completion tracking.
-            let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+            // Create a completion channel sized to the number of leaves in
+            // this flow's directed acyclic graph. The source acks the
+            // generated event only after every leaf has signalled.
+            let (completion_state, completion_rx) =
+                new_completion_channel(self.task_context.leaf_count);
 
             // Build and send event with completion channel.
             let e = EventBuilder::new()
@@ -235,7 +238,7 @@ impl EventHandler {
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
-                .completion_tx(completion_tx)
+                .completion_tx(completion_state)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
             e.send_with_logging(self.tx.as_ref())
@@ -528,17 +531,13 @@ mod tests {
         let event1 = rx.recv().await.unwrap();
         // Complete first flow.
         if let Some(shared_tx) = &event1.completion_tx {
-            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(None));
-            }
+            shared_tx.signal_completion(None);
         }
 
         let event2 = rx.recv().await.unwrap();
         // Complete second flow.
         if let Some(shared_tx) = &event2.completion_tx {
-            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(None));
-            }
+            shared_tx.signal_completion(None);
         }
 
         assert_eq!(event1.subject, "test");
@@ -644,9 +643,7 @@ mod tests {
         // Receive event and complete the flow.
         if let Some(event) = rx.recv().await {
             if let Some(shared_tx) = event.completion_tx {
-                if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                    let _ = completion_tx.send(Ok(None));
-                }
+                shared_tx.signal_completion(None);
             }
         }
 
@@ -723,9 +720,7 @@ mod tests {
         // Should only receive 1 event (not 2), since counter resumes from 1.
         let event = rx.recv().await.unwrap();
         if let Some(shared_tx) = &event.completion_tx {
-            if let Some(completion_tx) = shared_tx.lock().unwrap().take() {
-                let _ = completion_tx.send(Ok(None));
-            }
+            shared_tx.signal_completion(None);
         }
 
         let _ = handle.await;

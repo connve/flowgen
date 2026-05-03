@@ -1,7 +1,7 @@
 use flowgen_core::{
     client::Client,
     config::ConfigExt,
-    event::{AvroData, Event, EventBuilder, EventData, EventExt},
+    event::{new_completion_channel, AvroData, Event, EventBuilder, EventData, EventExt},
 };
 use salesforce_core::pubsubapi::{
     eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
@@ -167,6 +167,7 @@ impl EventHandler {
 
                 let config = Arc::clone(&self.config);
                 let cancellation_token = self.task_context.cancellation_token.clone();
+                let leaf_count = self.task_context.leaf_count;
 
                 // Spawn a task for each event to process them concurrently.
                 let handle = tokio::spawn(
@@ -176,7 +177,10 @@ impl EventHandler {
                             return Ok(());
                         }
 
-                        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+                        // Size the completion channel to the number of leaves
+                        // in this flow. The Pub/Sub event is acked only after
+                        // every leaf has signalled completion.
+                        let (completion_state, completion_rx) = new_completion_channel(leaf_count);
 
                         // Setup event data payload.
                         let data = AvroData {
@@ -194,9 +198,7 @@ impl EventHandler {
                             .build()
                             .map_err(|e| Error::Event { source: e })?;
 
-                        e.completion_tx = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
-                            completion_tx,
-                        ))));
+                        e.completion_tx = Some(completion_state);
 
                         // Check cancellation before sending to prevent "receiver dropped" errors.
                         if cancellation_token.is_cancelled() {

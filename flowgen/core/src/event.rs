@@ -11,18 +11,100 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
-/// Type alias for completion channel sender.
-/// Carries an optional result payload for request-response flows (MCP, future HTTP streaming).
-/// Source tasks that need the response data send `Ok(Some(value))`, others send `Ok(None)`.
+/// One-shot channel used by a flow source to wait for end-to-end completion.
+/// Carries an optional result payload for request-response flows (HTTP webhook, MCP).
+/// Leaves that produce the response payload send `Ok(Some(value))`, others send `Ok(None)`.
 pub type CompletionTx = tokio::sync::oneshot::Sender<
     Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
 >;
 
-/// Type alias for shared completion channel sender (used in Event struct for cloning support).
-pub type SharedCompletionTx = Arc<std::sync::Mutex<Option<CompletionTx>>>;
+/// Tracks leaf-task completion so the source acks only after all leaves in the
+/// directed acyclic graph have committed.
+///
+/// In a linear flow there is one leaf, so completion fires as soon as that leaf
+/// signals. In a fan-out flow there are multiple leaves; the source is notified
+/// only when the last one signals. The payload delivered to the source is the
+/// last leaf's payload — earlier leaves' payloads are dropped.
+///
+/// Leaves never call this with an error: failed tasks emit error events
+/// downstream instead, and the source falls back to its acknowledgement timeout
+/// when no completion arrives.
+#[derive(Debug)]
+pub struct CompletionState {
+    /// Number of leaves still expected to signal completion.
+    remaining: AtomicUsize,
+    /// One-shot sender to the source. `None` once completion has been delivered.
+    sender: Mutex<Option<CompletionTx>>,
+}
+
+impl CompletionState {
+    /// Creates a new completion state for a flow with the given number of leaves.
+    ///
+    /// A `leaf_count` of zero is treated as one to avoid a flow that can never
+    /// signal completion. This should not happen in practice — every flow has
+    /// at least one terminal task — but the guard prevents a stuck source if a
+    /// future flow shape produces an empty leaf set.
+    pub fn new(leaf_count: usize, sender: CompletionTx) -> Self {
+        Self {
+            remaining: AtomicUsize::new(leaf_count.max(1)),
+            sender: Mutex::new(Some(sender)),
+        }
+    }
+
+    /// Signals completion from a leaf task with its result payload.
+    ///
+    /// Decrements the outstanding-leaf counter; the leaf that brings it to zero
+    /// delivers its payload to the source via the one-shot channel. Earlier
+    /// leaves' payloads are dropped. Subsequent calls after delivery are no-ops.
+    pub fn signal_completion(&self, payload: Option<serde_json::Value>) {
+        // Saturating decrement protects against accidental double-signal from
+        // a single leaf (which would otherwise underflow `remaining` and
+        // eventually re-trigger the delivery branch).
+        let previous = self.remaining.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| match current {
+                0 => None,
+                n => Some(n - 1),
+            },
+        );
+        // We are the last leaf when the previous value was 1; otherwise
+        // either more leaves are still outstanding or completion already
+        // fired and the counter is saturated at zero.
+        if !matches!(previous, Ok(1)) {
+            return;
+        }
+        if let Ok(mut guard) = self.sender.lock() {
+            if let Some(tx) = guard.take() {
+                tx.send(Ok(payload)).ok();
+            }
+        }
+    }
+}
+
+/// Shared handle to the per-flow completion state, attached to events so leaf
+/// tasks can signal end-to-end acknowledgement back to the source.
+pub type SharedCompletionTx = Arc<CompletionState>;
+
+/// Receiver side of the source-to-leaves completion channel.
+pub type CompletionRx = tokio::sync::oneshot::Receiver<
+    Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
+>;
+
+/// Creates a completion channel for a flow with the given number of leaves.
+///
+/// The returned `SharedCompletionTx` is attached to the source event and travels
+/// with every cloned/derived event through the directed acyclic graph. The
+/// `CompletionRx` is held by the source task, which awaits it before
+/// acknowledging the upstream message.
+pub fn new_completion_channel(leaf_count: usize) -> (SharedCompletionTx, CompletionRx) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (Arc::new(CompletionState::new(leaf_count, tx)), rx)
+}
 
 tokio::task_local! {
     /// Task-local storage for the current event context.
@@ -62,9 +144,10 @@ where
 
 /// Builder for sending events with structured logging context.
 ///
-/// Automatically computes `duration_ms` from `event.timestamp` to the time of sending.
-/// For accurate duration tracking, call `EventBuilder::new()` at the start of `handle()`
-/// so that `event.timestamp` reflects processing start time.
+/// Per-task processing time is exposed through the OpenTelemetry span
+/// `task.handle` rather than as a log field. Use this builder to attach
+/// task-specific structured fields (record counts, status codes, etc.) to
+/// the success log line.
 pub struct EventLogger<'a> {
     event: Event,
     tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
@@ -101,22 +184,14 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
             };
             let subject = self.event.subject.clone();
 
-            // Compute processing duration from event timestamp to now.
-            let duration_ms = {
-                let now_micros = Utc::now().timestamp_micros();
-                ((now_micros - self.event.timestamp) / 1000).max(0) as u64
-            };
-
             if let Some(tx) = self.tx {
                 tx.send(self.event).await.map_err(|_| Error::SendMessage)?;
             }
 
-            // Build structured log with duration and context fields.
             if self.fields.is_empty() {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
-                    duration_ms = duration_ms,
                 );
             } else {
                 let field_str = self
@@ -129,7 +204,6 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
-                    duration_ms = duration_ms,
                     context = %field_str,
                 );
             }
@@ -256,10 +330,12 @@ pub struct Event {
     /// When present, the event flows downstream as an error event so scripts
     /// can inspect it and route to DLQ, audit tables, or other error handlers.
     pub error: Option<String>,
-    /// Completion notifier for end-to-end pipeline acknowledgment.
-    /// Present only for events from replayable sources (NATS, Kafka, Pub/Sub).
-    /// Intermediate tasks pass this through unchanged, final tasks signal completion.
-    /// Wrapped in Arc<Mutex> to allow sharing across event clones during retries.
+    /// Completion notifier for end-to-end pipeline acknowledgement.
+    /// Present only for events from replayable sources (NATS, Salesforce Pub/Sub,
+    /// HTTP webhook, MCP server, scheduled generators).
+    /// Intermediate tasks pass this through unchanged on each emitted event.
+    /// Leaf tasks call `signal_completion` on the shared state; the source is
+    /// notified once every leaf has signalled.
     pub completion_tx: Option<SharedCompletionTx>,
 }
 
@@ -402,17 +478,31 @@ pub struct EventBuilder {
     /// Optional metadata for contextual information.
     pub meta: Option<Map<String, Value>>,
     /// Completion notifier for end-to-end acknowledgment.
-    pub completion_tx: Option<CompletionTx>,
+    pub completion_tx: Option<SharedCompletionTx>,
 }
 
 impl EventBuilder {
     /// Creates a new EventBuilder.
     /// Automatically preserves meta from the current event context (if set via with_event_context).
+    /// Generates a correlation_id in meta if one is not already present.
     pub fn new() -> Self {
-        let meta = CURRENT_EVENT_META
+        let mut meta = CURRENT_EVENT_META
             .try_with(|m| m.borrow().clone())
             .ok()
             .flatten();
+
+        // Ensure every event chain has a correlation_id for end-to-end tracing.
+        // Set once at the source, then preserved through all downstream tasks.
+        let has_correlation_id = match meta.as_ref() {
+            Some(m) => m.contains_key("correlation_id"),
+            None => false,
+        };
+        if !has_correlation_id {
+            let correlation_id = uuid::Uuid::now_v7().to_string();
+            meta.get_or_insert_with(Map::new)
+                .insert("correlation_id".to_string(), Value::String(correlation_id));
+        }
+
         EventBuilder {
             timestamp: Some(Utc::now().timestamp_micros()),
             meta,
@@ -449,7 +539,7 @@ impl EventBuilder {
         self
     }
 
-    pub fn completion_tx(mut self, completion_tx: CompletionTx) -> Self {
+    pub fn completion_tx(mut self, completion_tx: SharedCompletionTx) -> Self {
         self.completion_tx = Some(completion_tx);
         self
     }
@@ -474,9 +564,7 @@ impl EventBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
             meta: self.meta,
             error: None,
-            completion_tx: self
-                .completion_tx
-                .map(|tx| std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
+            completion_tx: self.completion_tx,
         })
     }
 }

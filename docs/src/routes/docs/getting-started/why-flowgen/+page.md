@@ -1,34 +1,29 @@
 # Why Flowgen
 
-Flowgen is an open-source data activation engine written in Rust. Define flows — event-driven, scheduled, or streaming — that connect systems, transform data, and activate it across your stack. Declarative YAML, distributed by design.
+## Capture the change. Stream it anywhere, in milliseconds.
 
-## The problem
+Flowgen is an open-source data activation engine. You define flows in YAML or code, run them on one node or many, and data moves between systems in milliseconds. Retries, leader election, backpressure, and circuit breakers are part of the runtime — not something you wire up per pipeline.
 
-Building data flows in distributed systems is hard.
+## The problem we kept hitting
 
-**It is expensive.** Enterprise integration platforms charge per connector, per row, per execution. At scale, the integration layer becomes one of the largest line items in your cloud budget.
+We started Flowgen while running data pipelines at a consumer business with hundreds of millions of customer profiles. Three things kept getting in our way:
 
-**It is not truly open.** Many tools call themselves open-source but gate connectors and features behind commercial licenses. After an acquisition, features you depend on become "enterprise only." Your flows run on someone else's terms.
+**Everything was batch.** Schedulers fired jobs once a day. Activation systems saw data that was already stale by the time it arrived. The business felt it; we couldn't fix it without rewriting the foundations.
 
-**It is not built for distributed deployment.** Most integration tools were designed as single-node applications. Running them across multiple nodes means building your own orchestration — leader election, state coordination, scaling.
+**Reliability was DIY.** Retry with backoff, dead-letter paths, idempotency, deduplication, coordination across replicas — all hand-rolled, all slightly different per pipeline. The team spent more time rebuilding the same primitives than shipping flows.
 
-**It compromises on flexibility.** Proprietary query languages work for simple cases but break down when you need real logic — conditional processing, stateful deduplication, dynamic routing.
+**The modern alternatives weren't actually open.** The features we needed lived behind commercial licenses, and multi-node deployment was either an afterthought or a paid tier.
 
-## How Flowgen solves this
+## What Flowgen does
 
-**Written in Rust.** Memory safety, ultra performance, and a mature package ecosystem.
-
-**Fully open-source, MPL-2.0.** Built by [CONNVE](https://connve.com) and used in production for large-scale data activation. Every feature, every connector is available to everyone. No gated tiers, no enterprise-only modules.
-
-**Run it on your infrastructure.** No per-connector fees, no per-row pricing. Teams switching from managed platforms reduce their integration spend by 50% or more.
-
-**Distributed by design.** Leader election, multi-node scaling, and distributed caching are part of the runtime. Deploy multiple replicas and they coordinate automatically. The cache layer is pluggable — currently backed by NATS JetStream.
-
-**Real scripting.** Flowgen uses [Rhai](https://rhai.rs) — a lightweight, sandboxed scripting language with familiar syntax. Scripts access distributed cache, event metadata, and resource files directly. No proprietary DSL.
-
-**Efficient data formats.** Arrow RecordBatch and Avro are first-class event types. Columnar data stays in Arrow format through the entire flow — no serialization overhead.
-
-**Declarative YAML.** Each flow is a YAML file. Version-controlled, reviewed in pull requests, deployed as Kubernetes ConfigMaps. Event-driven, scheduled, or streaming — same model.
+- **Streams by default, batches when you want.** Event-driven, scheduled, and streaming flows use the same model.
+- **Distributed from day one.** Run one replica or many. Leader election, distributed cache, and coordination are built into the runtime.
+- **Resiliency you don't write.** Retries with jitter, circuit breakers, backpressure, dead-letter routing, leader election — configured in YAML, applied uniformly.
+- **Real scripting, not a DSL.** Embedded [Rhai](https://rhai.rs) with direct access to the distributed cache, event metadata, and resource files.
+- **Columnar data stays columnar.** Arrow RecordBatch and Avro are first-class event payloads alongside JSON — no per-task serialization tax.
+- **Rust under the hood.** Memory safety, predictable performance, single binary to deploy.
+- **OpenTelemetry ready.** Traces, metrics, and logs flow into whatever you already run.
+- **Open source, no tiers.** MPL-2.0, built and maintained by [CONNVE](https://connve.com). Every connector, every feature, open. No paid edition.
 
 ## Architecture
 
@@ -39,37 +34,48 @@ Building data flows in distributed systems is hard.
 
 ```yaml
 flow:
-  name: salesforce_to_bigquery
+  name: webhook_to_nats
   tasks:
-    - salesforce_pubsubapi_subscriber:
-        name: account_changes
-        topic: /data/AccountChangeEvent
+    - http_webhook:
+        name: ingest
+        endpoint: /events
+        method: POST
+        credentials_path: /etc/http/credentials.json
 
     - script:
         name: transform
         code: |
-          let record = event.data;
+          let body = event.data;
           #{
-            account_id: record.Id,
-            name: record.Name,
-            updated_at: timestamp_now()
+            id: body.id,
+            type: body.event_type,
+            received_at: timestamp_now()
           }
 
-    - gcp_bigquery_storage_write:
-        name: write_accounts
-        project: my-project
-        dataset: salesforce
-        table: accounts
+    - nats_jetstream_publisher:
+        name: publish
+        credentials_path: /etc/nats/credentials.json
+        url: nats://localhost:4222
+        subject: events.normalized
+        stream:
+          name: events
+          subjects:
+            - events.>
+          create_or_update: true
 ```
 
 ## Integrations
 
 | Integration | Tasks |
 |---|---|
-| **NATS JetStream** | Subscriber, Publisher |
+| **NATS JetStream** | Subscriber, Publisher, KV Store |
 | **Salesforce** | PubSub API, REST API, Bulk API, Tooling API |
 | **Google Cloud** | BigQuery Query, Storage Read, Storage Write, Jobs |
-| **HTTP** | Webhook listener, HTTP request |
+| **HTTP** | Webhook, Request |
 | **Object Store** | Read, Write, List, Move (S3, GCS, Azure, local) |
 | **MSSQL** | Query |
+| **AI** | Completion (multi-provider), AI Gateway (OpenAI-compatible), MCP Tools |
+| **Git** | Git Sync |
 | **Core** | Script (Rhai), Convert, Iterate, Buffer, Generate, Log |
+
+Enjoy :)

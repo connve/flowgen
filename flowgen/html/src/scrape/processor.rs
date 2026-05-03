@@ -162,7 +162,7 @@ impl EventHandler {
     }
 
     /// Processes a single event: extract HTML, scrape, and emit results.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -195,12 +195,9 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(None)).ok();
-                            }
-                        }
+                        arc.signal_completion(None);
                     }
                 }
                 Some(_) => {

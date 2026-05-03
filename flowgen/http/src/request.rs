@@ -19,6 +19,25 @@ use tokio::{
 };
 use tracing::{error, Instrument};
 
+/// Formats an error and every entry in its `source()` chain into a single
+/// colon-separated string.
+///
+/// Reqwest's top-level `Display` for builder errors is the literal string
+/// `"builder error"`; the actual cause (`url::ParseError`,
+/// `serde_urlencoded::ser::Error`, `InvalidHeaderValue`, etc.) lives only
+/// in the source chain. Walking it surfaces the underlying cause to
+/// operators without having to inspect logs at debug level.
+fn error_chain<E: std::error::Error + ?Sized>(err: &E) -> String {
+    let mut out = err.to_string();
+    let mut current: Option<&dyn std::error::Error> = err.source();
+    while let Some(cause) = current {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        current = cause.source();
+    }
+    out
+}
+
 /// Errors that can occur during HTTP request processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -49,8 +68,18 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("HTTP request error: {source}")]
+    #[error("HTTP client init failed: {}", error_chain(.source))]
+    ClientInit {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error(
+        "HTTP request error for {method} {endpoint}: {}",
+        error_chain(.source)
+    )]
     Reqwest {
+        endpoint: String,
+        method: String,
         #[source]
         source: reqwest::Error,
     },
@@ -75,8 +104,13 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
-    #[error("HTTP request failed with status {status}: {body}")]
-    HttpError { status: u16, body: String },
+    #[error("HTTP request to {method} {endpoint} failed with status {status}: {body}")]
+    HttpError {
+        endpoint: String,
+        method: String,
+        status: u16,
+        body: String,
+    },
 }
 
 /// Event handler for processing HTTP requests.
@@ -98,7 +132,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by making an HTTP request.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -118,6 +152,14 @@ impl EventHandler {
                 .config
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
+
+            // Capture the rendered endpoint and method as plain strings so
+            // every error and the success log carry enough context to identify
+            // which request was being attempted. Reqwest builder errors only
+            // surface the underlying cause via the source chain, never the
+            // request that triggered them.
+            let endpoint = config.endpoint.clone();
+            let method = format!("{:?}", config.method).to_uppercase();
 
             let mut client = match config.method {
                 crate::config::Method::Get => self.client.get(config.endpoint),
@@ -186,19 +228,23 @@ impl EventHandler {
                 }
             };
 
-            let response = client
-                .send()
-                .await
-                .map_err(|source| Error::Reqwest { source })?;
+            let response = client.send().await.map_err(|source| Error::Reqwest {
+                endpoint: endpoint.clone(),
+                method: method.clone(),
+                source,
+            })?;
 
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|source| Error::Reqwest { source })?;
+            let body = response.text().await.map_err(|source| Error::Reqwest {
+                endpoint: endpoint.clone(),
+                method: method.clone(),
+                source,
+            })?;
 
             if status.is_client_error() || status.is_server_error() {
                 return Err(Error::HttpError {
+                    endpoint: endpoint.clone(),
+                    method: method.clone(),
                     status: status.as_u16(),
                     body,
                 });
@@ -217,13 +263,9 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
-                    // Final task, signal completion.
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(e.data_as_json().ok())).ok();
-                            }
-                        }
+                        arc.signal_completion(e.data_as_json().ok());
                     }
                 }
                 Some(_) => {
@@ -233,6 +275,9 @@ impl EventHandler {
             }
 
             e.send_with_logging(self.tx.as_ref())
+                .context("endpoint", &endpoint)
+                .context("method", &method)
+                .context("status", status.as_u16())
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
             Ok(())
@@ -265,10 +310,19 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     /// Initializes the processor by building the HTTP client.
     async fn init(&self) -> Result<EventHandler, Error> {
-        let client = reqwest::ClientBuilder::new()
-            .https_only(true)
+        let mut builder = reqwest::ClientBuilder::new().https_only(true);
+        // Apply outbound timeouts so a slow or hung upstream cannot
+        // pin a worker task indefinitely. Both fields default in config
+        // (30s total / 10s connect); explicit None disables.
+        if let Some(timeout) = self.config.timeout {
+            builder = builder.timeout(timeout);
+        }
+        if let Some(connect_timeout) = self.config.connect_timeout {
+            builder = builder.connect_timeout(connect_timeout);
+        }
+        let client = builder
             .build()
-            .map_err(|e| Error::Reqwest { source: e })?;
+            .map_err(|source| Error::ClientInit { source })?;
         let client = Arc::new(client);
 
         let event_handler = EventHandler {
@@ -570,6 +624,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,

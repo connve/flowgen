@@ -19,7 +19,7 @@ use base64::Engine;
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::credentials::HttpCredentials;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use std::{fs, sync::Arc};
 use tokio::sync::mpsc;
@@ -123,6 +123,10 @@ struct ProxyState {
     auth_provider: Option<Arc<dyn AuthProvider>>,
     /// Response registry for streaming responses.
     response_registry: Arc<ResponseRegistry>,
+    /// Number of leaf tasks reachable from this gateway. Used to size the
+    /// per-request completion channel so the response is delivered only
+    /// after every leaf has signalled.
+    leaf_count: usize,
 }
 
 impl ProxyState {
@@ -235,7 +239,7 @@ async fn handle_chat_completion(
         .join("\n");
 
     let model = request.model.unwrap_or_default();
-    let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let request_id = format!("chatcmpl-{}", uuid::Uuid::now_v7());
     let created = chrono::Utc::now().timestamp();
     let is_stream = request.stream;
 
@@ -273,14 +277,14 @@ async fn handle_non_streaming(
     request_id: String,
     created: i64,
 ) -> Result<Response, Error> {
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let (completion_state, completion_rx) = new_completion_channel(state.leaf_count);
 
     let mut builder = EventBuilder::new()
         .data(EventData::Json(data))
         .subject(state.config.name.to_owned())
         .task_id(state.task_id)
         .task_type(state.task_type)
-        .completion_tx(completion_tx);
+        .completion_tx(completion_state);
 
     if !meta.is_empty() {
         builder = builder.meta(meta);
@@ -325,7 +329,7 @@ async fn handle_streaming(
     request_id: String,
     created: i64,
 ) -> Result<Response, Error> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let correlation_id = uuid::Uuid::now_v7().to_string();
 
     // Set up progress channel for streaming intermediate events.
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
@@ -348,7 +352,7 @@ async fn handle_streaming(
         serde_json::Value::String(correlation_id.clone()),
     );
 
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let (completion_state_tx, completion_rx) = new_completion_channel(state.leaf_count);
 
     let e = EventBuilder::new()
         .data(EventData::Json(data))
@@ -356,7 +360,7 @@ async fn handle_streaming(
         .task_id(state.task_id)
         .task_type(state.task_type)
         .meta(meta)
-        .completion_tx(completion_tx)
+        .completion_tx(completion_state_tx)
         .build()
         .map_err(|source| Error::EventBuilder { source })?;
 
@@ -550,6 +554,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             credentials,
             auth_provider,
             response_registry,
+            leaf_count: self.task_context.leaf_count,
         };
 
         let span = tracing::Span::current();

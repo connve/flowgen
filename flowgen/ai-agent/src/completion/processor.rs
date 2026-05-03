@@ -181,7 +181,7 @@ impl EventHandler {
     }
 
     /// Non-streaming completion: waits for the full response and emits a single event.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -212,7 +212,7 @@ impl EventHandler {
     /// then a final chunk with `is_final: true`. Only the final event carries
     /// the completion signal so downstream tasks see all chunks before the
     /// source considers the request complete.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle_streaming(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -310,12 +310,9 @@ impl EventHandler {
             // Only the final event carries the completion signal.
             match self.tx {
                 None => {
+                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
-                        if let Ok(mut guard) = arc.lock() {
-                            if let Some(tx) = guard.take() {
-                                tx.send(Ok(e.data_as_json().ok())).ok();
-                            }
-                        }
+                        arc.signal_completion(e.data_as_json().ok());
                     }
                 }
                 Some(_) => {
@@ -377,13 +374,9 @@ impl EventHandler {
         // Signal completion or pass through to next task.
         match self.tx {
             None => {
-                // Final task, signal completion.
+                // Leaf task: signal completion.
                 if let Some(arc) = completion_tx_arc.as_ref() {
-                    if let Ok(mut guard) = arc.lock() {
-                        if let Some(tx) = guard.take() {
-                            tx.send(Ok(event.data_as_json().ok())).ok();
-                        }
-                    }
+                    arc.signal_completion(event.data_as_json().ok());
                 }
             }
             Some(_) => {
