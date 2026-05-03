@@ -6,11 +6,11 @@
 //! path handling, and are reused by both the flow loader and individual
 //! processor configs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Identifies which config field a name belongs to so error messages
 /// can point at the offending source without stringly-typed labels.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NameField {
     Flow,
     Task,
@@ -28,17 +28,33 @@ impl NameField {
 }
 
 /// Identifies which config field a filesystem path belongs to.
-#[derive(Clone, Copy, Debug)]
-pub enum PathField {
-    ClonePath,
-}
+///
+/// Carries the field name as a static string so callers (e.g. `clone_path`,
+/// `credentials_path`) can reuse the same validator without this enum
+/// growing a variant per call site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PathField(pub &'static str);
 
 impl PathField {
     const fn as_str(self) -> &'static str {
-        match self {
-            PathField::ClonePath => "clone_path",
-        }
+        self.0
     }
+}
+
+/// Errors produced by the validation helpers.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("{} name is empty", field.as_str())]
+    EmptyName { field: NameField },
+    #[error(
+        "{} name '{name}' contains invalid characters \
+         (only ASCII alphanumerics, '_', and '-' are allowed)",
+        field.as_str()
+    )]
+    InvalidNameChars { field: NameField, name: String },
+    #[error("{} '{}' contains a '..' segment which is not allowed", field.as_str(), path.display())]
+    PathTraversal { field: PathField, path: PathBuf },
 }
 
 /// Validates that a name is safe to use as a filesystem path segment.
@@ -46,19 +62,18 @@ impl PathField {
 /// Only ASCII alphanumerics, `_`, and `-` are accepted. Rejects empty
 /// strings and anything that could escape a parent directory (`/`, `\`,
 /// `..`, leading-slash absolutes, NUL, whitespace, Unicode look-alikes).
-pub fn validate_name(field: NameField, name: &str) -> Result<(), String> {
-    let label = field.as_str();
+pub fn validate_name(field: NameField, name: &str) -> Result<(), Error> {
     if name.is_empty() {
-        return Err(format!("{label} name is empty"));
+        return Err(Error::EmptyName { field });
     }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!(
-            "{label} name '{name}' contains invalid characters \
-             (only ASCII alphanumerics, '_', and '-' are allowed)"
-        ));
+        return Err(Error::InvalidNameChars {
+            field,
+            name: name.to_string(),
+        });
     }
     Ok(())
 }
@@ -69,15 +84,14 @@ pub fn validate_name(field: NameField, name: &str) -> Result<(), String> {
 /// Rejects paths containing `..` segments. Absolute paths are accepted
 /// because overriding to a stable persistent volume is a legitimate use
 /// case; traversal segments never are.
-pub fn validate_path(field: PathField, path: &Path) -> Result<(), String> {
+pub fn validate_path(field: PathField, path: &Path) -> Result<(), Error> {
     use std::path::Component;
-    let label = field.as_str();
     for component in path.components() {
         if matches!(component, Component::ParentDir) {
-            return Err(format!(
-                "{label} '{}' contains a '..' segment which is not allowed",
-                path.display()
-            ));
+            return Err(Error::PathTraversal {
+                field,
+                path: path.to_path_buf(),
+            });
         }
     }
     Ok(())
@@ -86,7 +100,6 @@ pub fn validate_path(field: PathField, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn name_accepts_valid() {
@@ -96,12 +109,20 @@ mod tests {
 
     #[test]
     fn name_rejects_empty() {
-        assert!(validate_name(NameField::Flow, "").is_err());
+        assert!(matches!(
+            validate_name(NameField::Flow, ""),
+            Err(Error::EmptyName {
+                field: NameField::Flow
+            })
+        ));
     }
 
     #[test]
     fn name_rejects_traversal() {
-        assert!(validate_name(NameField::Flow, "..").is_err());
+        assert!(matches!(
+            validate_name(NameField::Flow, ".."),
+            Err(Error::InvalidNameChars { .. })
+        ));
         assert!(validate_name(NameField::Flow, "../etc").is_err());
     }
 
@@ -113,21 +134,25 @@ mod tests {
 
     #[test]
     fn name_rejects_dot_segment() {
-        // '.' is not in the allowed set, so it gets rejected. This also
-        // prevents disguised-traversal names like ".env" or "a.b".
         assert!(validate_name(NameField::Flow, ".").is_err());
         assert!(validate_name(NameField::Flow, "a.b").is_err());
     }
 
     #[test]
     fn path_accepts_normal() {
-        assert!(validate_path(PathField::ClonePath, &PathBuf::from("/var/tmp/repo")).is_ok());
-        assert!(validate_path(PathField::ClonePath, &PathBuf::from("repos/x")).is_ok());
+        assert!(validate_path(PathField("clone_path"), &PathBuf::from("/var/tmp/repo")).is_ok());
+        assert!(validate_path(PathField("clone_path"), &PathBuf::from("repos/x")).is_ok());
     }
 
     #[test]
     fn path_rejects_traversal() {
-        assert!(validate_path(PathField::ClonePath, &PathBuf::from("/tmp/../etc")).is_err());
-        assert!(validate_path(PathField::ClonePath, &PathBuf::from("../escape")).is_err());
+        assert!(matches!(
+            validate_path(PathField("clone_path"), &PathBuf::from("/tmp/../etc")),
+            Err(Error::PathTraversal {
+                field: PathField("clone_path"),
+                ..
+            })
+        ));
+        assert!(validate_path(PathField("clone_path"), &PathBuf::from("../escape")).is_err());
     }
 }

@@ -214,7 +214,7 @@ impl App {
                 })? {
                 Some(b) => b,
                 None => {
-                    warn!(key = %key, "Flow key listed but not found, skipping.");
+                    warn!(key = %key, "Flow key listed but not found, skipping");
                     continue;
                 }
             };
@@ -250,7 +250,7 @@ impl App {
                         );
                         continue;
                     }
-                    info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache.");
+                    info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache");
                     flow_configs.push(flow_config);
                 }
                 Err(source) => {
@@ -358,7 +358,7 @@ impl App {
                                     );
                                     return None;
                                 }
-                                info!(flow = %flow_config.flow.name, "Loaded flow.");
+                                info!(flow = %flow_config.flow.name, "Loaded flow");
                                 Some(flow_config)
                             }
                             Err(source) => {

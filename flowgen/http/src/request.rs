@@ -132,7 +132,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by making an HTTP request.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -310,8 +310,17 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     /// Initializes the processor by building the HTTP client.
     async fn init(&self) -> Result<EventHandler, Error> {
-        let client = reqwest::ClientBuilder::new()
-            .https_only(true)
+        let mut builder = reqwest::ClientBuilder::new().https_only(true);
+        // Apply outbound timeouts so a slow or hung upstream cannot
+        // pin a worker task indefinitely. Both fields default in config
+        // (30s total / 10s connect); explicit None disables.
+        if let Some(timeout) = self.config.timeout {
+            builder = builder.timeout(timeout);
+        }
+        if let Some(connect_timeout) = self.config.connect_timeout {
+            builder = builder.connect_timeout(connect_timeout);
+        }
+        let client = builder
             .build()
             .map_err(|source| Error::ClientInit { source })?;
         let client = Arc::new(client);
@@ -615,6 +624,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,

@@ -112,22 +112,23 @@ fn render_json_value(
     Ok(())
 }
 
-/// Renders a string template with provided data context.
+/// Renders a string template with provided data context, injecting process
+/// environment variables under the `env` key.
 ///
-/// # Arguments
-/// * `template` - The template string containing Handlebars syntax
-/// * `data` - Template variables for substitution
+/// Use this for **operator-controlled** templates such as flow YAML
+/// configuration values, where surfacing environment variables via
+/// `{{env.VAR_NAME}}` is the documented mechanism.
 ///
-/// # Returns
-/// The rendered string with all template variables resolved
+/// Do NOT use this for templates that originate from flow-author content
+/// (e.g. Rhai scripts loaded from the cache or git): such callers must
+/// use [`render_template_no_env`] to avoid leaking pod environment
+/// variables to untrusted code.
 pub fn render_template<T>(template: &str, data: &T) -> Result<String, Error>
 where
     T: Serialize,
 {
     let mut data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
 
-    // Add environment variables to the data context under "env" key.
-    // This allows templates to use {{env.VAR_NAME}} syntax.
     if let serde_json::Value::Object(ref mut map) = data_value {
         let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
         let env_value =
@@ -135,11 +136,28 @@ where
         map.insert("env".to_string(), env_value);
     }
 
+    render_with_value(template, &data_value)
+}
+
+/// Renders a string template with provided data context **without** injecting
+/// process environment variables.
+///
+/// Use this when the template comes from untrusted or semi-trusted content
+/// (e.g. flow-author Rhai scripts), where exposing the pod's full
+/// environment to the script would let the author exfiltrate secrets.
+pub fn render_template_no_env<T>(template: &str, data: &T) -> Result<String, Error>
+where
+    T: Serialize,
+{
+    let data_value = serde_json::to_value(data).map_err(|e| Error::SerdeJson { source: e })?;
+    render_with_value(template, &data_value)
+}
+
+fn render_with_value(template: &str, data_value: &serde_json::Value) -> Result<String, Error> {
     let mut handlebars = Handlebars::new();
-    // Disable HTML escaping since we're rendering data, not HTML.
     handlebars.register_escape_fn(handlebars::no_escape);
     handlebars
-        .render_template(template, &data_value)
+        .render_template(template, data_value)
         .map_err(|e| Error::Render { source: e })
 }
 

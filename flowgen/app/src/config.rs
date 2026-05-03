@@ -29,7 +29,7 @@ pub struct FlowConfig {
 impl FlowConfig {
     /// Validates flow and task names so they are safe to use as filesystem
     /// path segments. Called by the loaders before a flow is accepted.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), flowgen_core::validate::Error> {
         use flowgen_core::validate::{validate_name, NameField};
         validate_name(NameField::Flow, &self.flow.name)?;
         for task in &self.flow.tasks {

@@ -121,7 +121,7 @@ struct ResourceHandle {
 
 impl EventHandler {
     /// Processes an event by executing the script on its data.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -440,6 +440,16 @@ impl crate::task::runner::Runner for Processor {
             .map_err(|source| Error::ResourceLoad { source })?;
 
         let mut engine = Engine::new();
+
+        // Bound script CPU and memory so a runaway or hostile script
+        // cannot stall the worker. Limits come from the task config and
+        // are individually overridable in flow YAML.
+        let limits = &self.config.limits;
+        engine.set_max_operations(limits.max_operations);
+        engine.set_max_call_levels(limits.max_call_depth);
+        engine.set_max_string_size(limits.max_string_size);
+        engine.set_max_array_size(limits.max_array_size);
+        engine.set_max_map_size(limits.max_map_size);
 
         // Route Rhai print() and debug() through tracing so output inherits
         // the current span context (flow, task, task_id, task_type).
@@ -831,13 +841,17 @@ impl crate::task::runner::Runner for Processor {
 
         // Register render(template, data) -> String.
         // Renders a Handlebars template string against a data map.
-        // Supports {{field}}, {{nested.field}}, and {{env.VAR}} syntax.
+        // Supports {{field}} and {{nested.field}} syntax.
+        // Process environment variables are intentionally NOT exposed here:
+        // scripts may be authored by anyone with commit access to a synced
+        // repository, and surfacing pod env vars would let them exfiltrate
+        // secrets. Operator-controlled config rendering retains env access.
         engine.register_fn(
             "render",
             |template: &str, data: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
                 let json_value: Value =
                     rhai::serde::from_dynamic(&data).map_err(|e| e.to_string())?;
-                crate::config::render_template(template, &json_value)
+                crate::config::render_template_no_env(template, &json_value)
                     .map_err(|e| e.to_string().into())
             },
         );
@@ -1042,6 +1056,7 @@ mod tests {
             engine: crate::task::script::config::ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("event".to_string()),
             sandbox: None,
+            limits: crate::task::script::config::RhaiLimits::default(),
             depends_on: None,
             retry: None,
         });
@@ -1358,6 +1373,7 @@ mod tests {
                     r#"let id = sha256("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
                 sandbox: None,
+                limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
             }),
@@ -1413,6 +1429,7 @@ mod tests {
                     r#"let id = sha512("campaign_1_ref_42"); #{ id: id }"#.to_string(),
                 ),
                 sandbox: None,
+                limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
             }),
@@ -1470,6 +1487,7 @@ mod tests {
                     engine: crate::task::script::config::ScriptEngine::Rhai,
                     code: crate::resource::Source::Inline(code.to_string()),
                     sandbox: None,
+                    limits: crate::task::script::config::RhaiLimits::default(),
                     depends_on: None,
                     retry: None,
                 }),
@@ -1533,6 +1551,7 @@ mod tests {
                     .to_string(),
                 ),
                 sandbox: None,
+                limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
             }),
@@ -1597,6 +1616,7 @@ mod tests {
                     .to_string(),
                 ),
                 sandbox: None,
+                limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
             }),
@@ -1663,6 +1683,7 @@ mod tests {
                     .to_string(),
                 ),
                 sandbox: None,
+                limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
             }),

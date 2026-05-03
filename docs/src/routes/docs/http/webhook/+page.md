@@ -29,6 +29,7 @@ worker:
 | `headers` | map | | Expected headers. |
 | `credentials_path` | string | | Path to credentials for request authentication. |
 | `ack_timeout` | duration | | Max time to wait for flow completion before responding. |
+| `max_body_bytes` | int | `10485760` | Maximum accepted request body size in bytes (10 MiB default). Larger requests are rejected with HTTP 413 before being read into memory. |
 | `stream` | bool | false | Stream responses as Server-Sent Events. |
 | `auth` | object | | User authentication configuration. |
 | `depends_on` | list | | Upstream task names. |

@@ -13,6 +13,11 @@ pub struct Processor {
     /// Script engine type (defaults to Rhai).
     #[serde(default)]
     pub engine: ScriptEngine,
+    /// Resource limits for the Rhai engine to bound CPU and memory use.
+    /// Defaults are chosen to keep a single misbehaving script from
+    /// stalling the worker. Overridable per-task in flow YAML.
+    #[serde(default)]
+    pub limits: RhaiLimits,
     /// Script source code to execute (inline or from resource file).
     ///
     /// # Examples
@@ -57,6 +62,7 @@ impl Default for Processor {
             engine: ScriptEngine::default(),
             code: crate::resource::Source::Inline(String::new()),
             sandbox: None,
+            limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
         }
@@ -72,6 +78,60 @@ pub enum ScriptEngine {
     Rhai,
 }
 
+fn default_max_operations() -> u64 {
+    10_000_000
+}
+fn default_max_call_depth() -> usize {
+    64
+}
+fn default_max_string_size() -> usize {
+    16 * 1024 * 1024
+}
+fn default_max_array_size() -> usize {
+    100_000
+}
+fn default_max_map_size() -> usize {
+    100_000
+}
+
+/// Rhai engine resource limits.
+///
+/// Bounds the CPU and memory a single script invocation can consume,
+/// preventing a malicious or buggy script from stalling the worker.
+#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
+pub struct RhaiLimits {
+    /// Maximum number of operations the script may execute before
+    /// the engine aborts it. Each Rhai operation is roughly one
+    /// bytecode step; the default ~10M operations is on the order
+    /// of a few seconds of CPU on modern hardware.
+    #[serde(default = "default_max_operations")]
+    pub max_operations: u64,
+    /// Maximum function call nesting depth.
+    #[serde(default = "default_max_call_depth")]
+    pub max_call_depth: usize,
+    /// Maximum string length in bytes.
+    #[serde(default = "default_max_string_size")]
+    pub max_string_size: usize,
+    /// Maximum number of elements in an array.
+    #[serde(default = "default_max_array_size")]
+    pub max_array_size: usize,
+    /// Maximum number of entries in a map.
+    #[serde(default = "default_max_map_size")]
+    pub max_map_size: usize,
+}
+
+impl Default for RhaiLimits {
+    fn default() -> Self {
+        Self {
+            max_operations: default_max_operations(),
+            max_call_depth: default_max_call_depth(),
+            max_string_size: default_max_string_size(),
+            max_array_size: default_max_array_size(),
+            max_map_size: default_max_map_size(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +143,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data + 1".to_string()),
             sandbox: None,
+            limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
         };
@@ -118,6 +179,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data * 2".to_string()),
             sandbox: None,
+            limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
         };
@@ -134,6 +196,7 @@ mod tests {
             engine: ScriptEngine::Rhai,
             code: crate::resource::Source::Inline("data".to_string()),
             sandbox: None,
+            limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
         };
@@ -151,6 +214,7 @@ mod tests {
                 resource: "scripts/transform.rhai".to_string(),
             },
             sandbox: None,
+            limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
         };

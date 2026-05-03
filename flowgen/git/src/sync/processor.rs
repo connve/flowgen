@@ -58,8 +58,11 @@ pub enum Error {
     },
     #[error("SSH authentication is not supported. Use HTTPS with a token instead.")]
     SshNotSupported,
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
+    #[error("Invalid clone_path configuration: {source}")]
+    InvalidClonePath {
+        #[source]
+        source: flowgen_core::validate::Error,
+    },
     #[error("Git operation panicked or was cancelled: {source}")]
     JoinError {
         #[source]
@@ -227,9 +230,16 @@ async fn clone_or_pull(config: &ProcessorConfig, clone_path: &Path) -> Result<St
     let branch = config.branch.clone();
     let original_url = config.repository_url.clone();
 
-    task::spawn_blocking(move || sync_blocking(&url, &original_url, &branch, &clone_path))
-        .await
-        .map_err(|source| Error::JoinError { source })?
+    // Capture the current tracing span so log lines emitted from the gix
+    // worker thread inherit the flow/task context. Without this the
+    // `pull_repo` events show up bare with no `flow=…` / `task=…` fields.
+    let span = tracing::Span::current();
+    task::spawn_blocking(move || {
+        let _enter = span.enter();
+        sync_blocking(&url, &original_url, &branch, &clone_path)
+    })
+    .await
+    .map_err(|source| Error::JoinError { source })?
 }
 
 /// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
@@ -239,6 +249,14 @@ fn sync_blocking(
     branch: &str,
     path: &Path,
 ) -> Result<String, Error> {
+    // gix expects the clone target's parent to exist. The derived default
+    // path includes per-flow and per-task segments that are not pre-created
+    // by the volume mount, so ensure the full path exists up front.
+    std::fs::create_dir_all(path).map_err(|e| Error::Clone {
+        url: original_url.to_string(),
+        source: Box::new(e),
+    })?;
+
     if path.join(".git").exists() {
         fetch_existing(path, original_url)?;
     } else {
@@ -384,10 +402,10 @@ impl flowgen_core::task::runner::Runner for Processor {
         let clone_path = match &self.config.clone_path {
             Some(path) => {
                 flowgen_core::validate::validate_path(
-                    flowgen_core::validate::PathField::ClonePath,
+                    flowgen_core::validate::PathField("clone_path"),
                     path,
                 )
-                .map_err(Error::InvalidConfig)?;
+                .map_err(|source| Error::InvalidClonePath { source })?;
                 path.clone()
             }
             None => std::env::temp_dir()

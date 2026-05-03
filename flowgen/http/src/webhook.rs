@@ -83,12 +83,15 @@ pub enum Error {
     },
     #[error("Flow completion failed or timed out for webhook request")]
     FlowCompletionFailed,
+    #[error("Request body exceeds configured max_body_bytes limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = match &self {
             Error::SerdeJson { .. } | Error::Axum { .. } => StatusCode::BAD_REQUEST,
+            Error::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         status.into_response()
@@ -209,9 +212,14 @@ impl EventHandler {
 
         let user_context = self.validate_user_auth(headers).await?;
 
-        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+        // Bound body size to prevent oversized POSTs from exhausting
+        // worker memory. Axum returns an error if the body exceeds the
+        // limit; we map that to a typed BodyTooLarge so the response is
+        // a proper 413 instead of a generic 400.
+        let limit = self.config.max_body_bytes;
+        let body = axum::body::to_bytes(request.into_body(), limit)
             .await
-            .map_err(|e| Error::Axum { source: e })?;
+            .map_err(|_| Error::BodyTooLarge { limit })?;
 
         let json_body = match body.is_empty() {
             true => Value::Null,
@@ -766,6 +774,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -834,6 +845,9 @@ mod tests {
             headers: Some(configured_headers),
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,
@@ -870,6 +884,9 @@ mod tests {
             headers: None,
             credentials_path: None,
             ack_timeout: None,
+            timeout: crate::config::default_request_timeout(),
+            connect_timeout: crate::config::default_connect_timeout(),
+            max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
             auth: None,
             depends_on: None,

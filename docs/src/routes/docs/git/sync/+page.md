@@ -25,7 +25,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | `repository_url` | string | required | Git repository URL (SSH or HTTPS). |
 | `branch` | string | `main` | Branch to track. |
 | `path` | string | | Directory within the repo to scan. All files under this path are emitted. |
-| `clone_path` | string | `/tmp/flowgen-repo` | Local path to clone into. |
+| `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
 | `auth` | object | `none` | Authentication configuration (see below). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | Retry configuration. |

@@ -25,8 +25,19 @@ Rhai is a sandboxed, embedded scripting language: it cannot perform IO, spawn pr
 | `name` | string | required | Task name. |
 | `engine` | string | `rhai` | Script engine. Only `rhai` is supported today. |
 | `code` | string / resource | required | Script code — inline string or `{ resource: "path" }` to load from the resources directory. |
+| `limits` | object | | Rhai engine resource limits (see below). Defaults bound a single script's CPU and memory so a misbehaving script cannot stall the worker. |
 | `depends_on` | list | | Upstream task names. See [Flows](/docs/concepts/flows). |
 | `retry` | object | | Retry overrides. See [Retry](/docs/concepts/retry). |
+
+#### `limits`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_operations` | int | `10000000` | Maximum bytecode operations per invocation. ~10M is on the order of seconds of CPU. |
+| `max_call_depth` | int | `64` | Maximum function call nesting depth. |
+| `max_string_size` | int | `16777216` | Maximum string length in bytes (16 MiB default). |
+| `max_array_size` | int | `100000` | Maximum elements in an array. |
+| `max_map_size` | int | `100000` | Maximum entries in a map. |
 
 ## What the script sees
 
@@ -121,7 +132,7 @@ All timestamps are Unix epoch in **seconds** unless noted.
 
 | Function | Description |
 |---|---|
-| `render(template, data)` | Render a Handlebars template string against a data map. Same syntax as YAML config templates — `{{path.to.value}}`, `{{env.VAR}}`. Returns the rendered string or throws on missing variables. |
+| `render(template, data)` | Render a Handlebars template string against a data map. Supports `{{path.to.value}}` syntax against the supplied data. Process environment variables (`{{env.VAR}}`) are intentionally not exposed here — pass any required values in via `data` or read them from `ctx.cache`. Returns the rendered string or throws on missing variables. |
 
 ```rhai
 let body = render("Hello {{name}}, your order #{{order_id}} is ready.", #{

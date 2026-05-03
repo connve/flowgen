@@ -11,7 +11,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { version = "0.13" }
+salesforce_core = { version = "0.13.6" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }

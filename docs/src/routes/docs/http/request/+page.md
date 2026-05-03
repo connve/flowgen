@@ -22,6 +22,8 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `credentials_path` | string | | Path to credentials file for request authentication. |
 | `payload` | object | | Request body (see below). |
 | `headers` | map | | HTTP headers. Values support templating. |
+| `timeout` | duration | `30s` | Total request timeout from start to response body received. Set explicitly to override or omit-with-`null` to disable. |
+| `connect_timeout` | duration | `10s` | TCP/TLS connect timeout. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | Retry configuration. |
 
@@ -33,6 +35,20 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `input` | string | Raw JSON string. |
 | `from_event` | bool | Use incoming event data as the request body. |
 | `send_as` | string | Encoding: `json` (default), `urlencoded`, `queryparams`. |
+
+### What `send_as` controls
+
+| Value | Where the payload goes | `Content-Type` set by client |
+|---|---|---|
+| `json` (default) | Request body | `application/json` |
+| `urlencoded` | Request body | `application/x-www-form-urlencoded` |
+| `queryparams` | URL query string (`?a=1&b=2`) | not set; no body sent |
+
+`send_as` is the only knob that changes how the payload is serialized.
+Setting `Content-Type` in `headers` does not change serialization — it
+just overrides the header value the client would otherwise send. Other
+content types (XML, multipart form-data, raw binary) are not currently
+supported.
 
 ### `urlencoded` and `queryparams` require flat scalar payloads
 
@@ -72,6 +88,39 @@ For nested data, either:
     credentials_path: /etc/http/credentials.json
     payload:
       from_event: true
+```
+
+**GET with query parameters:**
+
+```yaml
+- http_request:
+    name: search_orders
+    endpoint: "https://api.example.com/orders"
+    method: GET
+    credentials_path: /etc/http/credentials.json
+    payload:
+      send_as: queryparams
+      object:
+        status: "open"
+        customer_id: "{{event.data.customer_id}}"
+        limit: 50
+```
+
+Resolves to `GET https://api.example.com/orders?status=open&customer_id=…&limit=50`.
+
+**Form-urlencoded body (typical for OAuth token endpoints):**
+
+```yaml
+- http_request:
+    name: exchange_code
+    endpoint: "https://login.example.com/oauth/token"
+    method: POST
+    payload:
+      send_as: urlencoded
+      object:
+        grant_type: "authorization_code"
+        code: "{{event.data.code}}"
+        client_id: "{{env.OAUTH_CLIENT_ID}}"
 ```
 
 ## Response handling
