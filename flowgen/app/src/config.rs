@@ -123,8 +123,8 @@ pub enum TaskType {
     ai_completion(flowgen_ai_agent::completion::config::Processor),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
     mcp_tool(flowgen_mcp::config::Processor),
-    /// AI gateway — OpenAI-compatible chat completions endpoint.
-    ai_gateway(flowgen_ai_agent::ai_gateway::config::Processor),
+    /// LLM proxy task — registers a flow as a backend on the AI gateway server.
+    llm_proxy(flowgen_ai_agent::ai_gateway::config::Processor),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
     git_sync(flowgen_git::sync::config::Processor),
 }
@@ -159,7 +159,7 @@ impl TaskType {
             TaskType::nats_kv_store(_) => "nats_kv_store",
             TaskType::ai_completion(_) => "ai_completion",
             TaskType::mcp_tool(_) => "mcp_tool",
-            TaskType::ai_gateway(_) => "ai_gateway",
+            TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
         }
     }
@@ -193,7 +193,7 @@ impl TaskType {
             TaskType::nats_kv_store(c) => &c.name,
             TaskType::ai_completion(c) => &c.name,
             TaskType::mcp_tool(c) => &c.name,
-            TaskType::ai_gateway(c) => &c.name,
+            TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
         }
     }
@@ -227,7 +227,7 @@ impl TaskType {
             TaskType::nats_kv_store(c) => c.depends_on.as_ref(),
             TaskType::ai_completion(c) => c.depends_on.as_ref(),
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
-            TaskType::ai_gateway(c) => c.depends_on.as_ref(),
+            TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
         }
     }
@@ -261,6 +261,10 @@ pub struct WorkerConfig {
     pub http_server: Option<HttpServerOptions>,
     /// Optional MCP server configuration for exposing flows as MCP tools.
     pub mcp_server: Option<McpServerOptions>,
+    /// Optional AI gateway configuration for OpenAI-compatible chat completion endpoints.
+    /// Runs on its own port so the surface can later migrate to gRPC or WebSocket
+    /// independently of the webhook HTTP server.
+    pub ai_gateway: Option<AiGatewayOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional event channel buffer size (defaults to 10M if not specified).
@@ -414,6 +418,60 @@ pub struct McpServerOptions {
     /// Optional path to global credentials file for API key authentication.
     /// Individual `mcp_tool` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider configuration for user identity resolution.
+    /// Shared across all `mcp_tool` flows on this worker.
+    pub auth: Option<flowgen_core::auth::AuthConfig>,
+}
+
+/// Default AI gateway port.
+fn default_ai_gateway_port() -> u16 {
+    3002
+}
+
+/// Default AI gateway path prefix.
+///
+/// `/v1` matches the de-facto OpenAI-compatible convention used by vLLM, Ollama,
+/// LiteLLM, OpenRouter, and the OpenAI SDKs. Clients configure `base_url=http://host/v1`
+/// and reach `POST /v1/chat/completions` and `GET /v1/models` directly.
+fn default_ai_gateway_path() -> String {
+    "/v1".to_string()
+}
+
+/// AI gateway server configuration options.
+///
+/// Exposes registered AI gateway flows as a single OpenAI-compatible endpoint.
+/// Routing across gateways is driven by the `model` field of the request body
+/// (`model: "<gateway-name>/<downstream-model>"`), so OpenAI clients work with
+/// stock `base_url` configuration and no per-gateway URL changes.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct AiGatewayOptions {
+    /// Whether the AI gateway server is enabled. Must be explicitly enabled by
+    /// the admin for `ai_gateway` tasks to be registered.
+    pub enabled: bool,
+    /// AI gateway port number. Defaults to 3002.
+    #[serde(default = "default_ai_gateway_port")]
+    pub port: u16,
+    /// Path prefix for AI gateway routes. Defaults to "/v1".
+    /// The chat completion endpoint is served at `<path>/chat/completions` and
+    /// the model list at `<path>/models`.
+    #[serde(default = "default_ai_gateway_path")]
+    pub path: String,
+    /// Optional path to global credentials file for API key authentication.
+    /// Individual `ai_gateway` tasks can override this with their own `credentials_path`.
+    pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider configuration for user identity resolution.
+    /// Shared across all AI gateway flows on this worker.
+    pub auth: Option<flowgen_core::auth::AuthConfig>,
+}
+
+/// Default webhook HTTP server port.
+fn default_http_port() -> u16 {
+    3000
+}
+
+/// Default webhook HTTP server path prefix.
+fn default_http_path() -> String {
+    "/api/flowgen/workers".to_string()
 }
 
 /// HTTP server configuration options.
@@ -421,10 +479,12 @@ pub struct McpServerOptions {
 pub struct HttpServerOptions {
     /// Whether HTTP server is enabled.
     pub enabled: bool,
-    /// Optional HTTP server port number (defaults to 3000).
-    pub port: Option<u16>,
-    /// Optional path prefix for all routes (e.g., "/api/flowgen/workers").
-    pub path: Option<String>,
+    /// HTTP server port number. Defaults to 3000.
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+    /// Path prefix for all webhook routes. Defaults to "/api/flowgen/workers".
+    #[serde(default = "default_http_path")]
+    pub path: String,
     /// Optional path to global credentials file for webhook authentication.
     /// Individual `http_webhook` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
@@ -609,6 +669,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -642,6 +703,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -672,6 +734,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -703,6 +766,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -839,28 +903,29 @@ mod tests {
     fn test_http_server_options_creation() {
         let http_server_options = HttpServerOptions {
             enabled: true,
-            port: Some(8080),
-            path: None,
+            port: 8080,
+            path: default_http_path(),
             credentials_path: None,
             auth: None,
         };
 
         assert!(http_server_options.enabled);
-        assert_eq!(http_server_options.port, Some(8080));
+        assert_eq!(http_server_options.port, 8080);
     }
 
     #[test]
-    fn test_http_server_options_without_port() {
+    fn test_http_server_options_defaults() {
         let http_server_options = HttpServerOptions {
             enabled: false,
-            port: None,
-            path: None,
+            port: default_http_port(),
+            path: default_http_path(),
             credentials_path: None,
             auth: None,
         };
 
         assert!(!http_server_options.enabled);
-        assert!(http_server_options.port.is_none());
+        assert_eq!(http_server_options.port, 3000);
+        assert_eq!(http_server_options.path, "/api/flowgen/workers");
     }
 
     #[test]
@@ -876,12 +941,13 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: Some(HttpServerOptions {
                     enabled: true,
-                    port: Some(8080),
-                    path: Some("/workers".to_string()),
+                    port: 8080,
+                    path: "/workers".to_string(),
                     credentials_path: None,
                     auth: None,
                 }),
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -896,8 +962,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(http_server.enabled);
-        assert_eq!(http_server.port, Some(8080));
-        assert_eq!(http_server.path, Some("/workers".to_string()));
+        assert_eq!(http_server.port, 8080);
+        assert_eq!(http_server.path, "/workers".to_string());
     }
 
     #[test]

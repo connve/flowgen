@@ -1617,10 +1617,11 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "arrow",
  "atty",
+ "bytes",
  "clap",
  "config",
  "flowgen_ai_agent",
@@ -1654,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1681,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1689,6 +1690,7 @@ dependencies = [
  "arrow-schema",
  "async-nats",
  "async-trait",
+ "axum 0.8.8",
  "bincode",
  "bytes",
  "chrono",
@@ -1725,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1753,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1769,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1785,12 +1787,13 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "arrow-json",
  "async-trait",
  "axum 0.8.8",
  "base64",
+ "bytes",
  "chrono",
  "flowgen_core",
  "futures-util",
@@ -1803,19 +1806,21 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
  "base64",
  "dashmap",
  "flowgen_core",
+ "flowgen_http",
  "futures-util",
  "handlebars",
  "humantime",
@@ -1832,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1854,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1881,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1904,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.101.0"
+version = "0.102.0"
 dependencies = [
  "apache-avro",
  "arrow",

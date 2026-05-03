@@ -33,4 +33,22 @@ spec:
     protocol: TCP
     name: mcp
 {{- end }}
+{{- if $worker.ai_gateway }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flowgen.fullname" . }}-ai-gateway
+  labels:
+    {{- include "flowgen.labels" . | nindent 4 }}
+spec:
+  type: {{ $worker.ai_gateway.type }}
+  selector:
+    {{- include "flowgen.selectorLabels" . | nindent 4 }}
+  ports:
+  - port: {{ $worker.ai_gateway.port }}
+    targetPort: ai-gateway
+    protocol: TCP
+    name: ai-gateway
+{{- end }}
 {{- end }}

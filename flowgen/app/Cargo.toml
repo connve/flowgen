@@ -41,6 +41,7 @@ atty = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
 walkdir = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

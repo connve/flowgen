@@ -19,6 +19,8 @@ flowgen_core = { path = "../core" }
 handlebars = { workspace = true }
 arrow-json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }

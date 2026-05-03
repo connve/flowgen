@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.101.0"
+version = "0.102.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -37,6 +37,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 serde_yaml = { version = "0.9" }
 tokio = { version = "1.48", features = ["rt-multi-thread"] }
+
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["compat"] }
 thiserror = { version = "1.0" }
@@ -92,6 +93,8 @@ humantime = { version = "2.1" }
 humantime-serde = { version = "1.1" }
 croner = { version = "3.0.1" }
 dashmap = { version = "6.1" }
+arc-swap = { version = "1" }
+tower = { version = "0.5", features = ["util"] }
 # Pinned to avoid 0.2.17 which has a non-exhaustive match compile error on recent Rust toolchains.
 native-tls = { version = "=0.2.16" }
 opentelemetry = { version = "0.27" }

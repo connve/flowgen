@@ -64,6 +64,16 @@ pub enum Error {
         #[source]
         source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
     },
+    #[error("KV watch subscription error: {source}")]
+    KVWatch {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
+    },
+    #[error("KV watch stream error: {source}")]
+    KVWatchStream {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::kv::WatcherErrorKind>,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
 }
@@ -392,6 +402,53 @@ impl flowgen_core::cache::Cache for Cache {
             }
         }
         Ok(keys)
+    }
+
+    /// Subscribes to key changes under the given prefix.
+    ///
+    /// Uses NATS KV watch without history replay — startup load via `list_keys` already
+    /// handles the initial state, so we only want events that arrive after the watcher starts.
+    async fn watch(
+        &self,
+        prefix: &str,
+    ) -> Result<
+        futures_util::stream::BoxStream<
+            'static,
+            Result<flowgen_core::cache::WatchEvent, flowgen_core::cache::Error>,
+        >,
+        flowgen_core::cache::Error,
+    > {
+        use async_nats::jetstream::kv::Operation;
+        use futures_util::StreamExt;
+
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?
+            .clone();
+
+        // Append the NATS wildcard so the watch covers all keys under the prefix.
+        let subject = format!("{prefix}.>");
+        let watcher = store.watch(subject).await.map_err(|e| {
+            flowgen_core::cache::CacheError::WatchFailed(Box::new(Error::KVWatch { source: e }))
+        })?;
+
+        let stream = watcher.map(|result| match result {
+            Err(e) => Err(flowgen_core::cache::CacheError::WatchFailed(Box::new(
+                Error::KVWatchStream { source: e },
+            ))),
+            Ok(entry) => match entry.operation {
+                Operation::Put => Ok(flowgen_core::cache::WatchEvent::Put {
+                    key: entry.key,
+                    value: entry.value,
+                }),
+                Operation::Delete | Operation::Purge => {
+                    Ok(flowgen_core::cache::WatchEvent::Delete { key: entry.key })
+                }
+            },
+        });
+
+        Ok(stream.boxed())
     }
 }
 

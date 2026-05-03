@@ -24,20 +24,36 @@ pub const SSE_DONE: &str = "data: [DONE]\n\n";
 
 // --- Task configuration ---
 
-/// AI gateway processor configuration.
+/// LLM proxy protocol shape.
 ///
-/// Thin HTTP layer that accepts OpenAI-format chat completion requests,
-/// translates them into pipeline events, and streams back OpenAI-format
-/// responses. Registers at the exact path (bypasses worker path prefix)
-/// so OpenAI clients can connect directly.
+/// Determines the URL layout the AI gateway server mounts for this task. The
+/// task's `name` is used as the per-protocol routing key (e.g. for OpenAI it
+/// is the prefix in the request body's `model` field).
+#[derive(PartialEq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    /// OpenAI-compatible chat completions API.
+    /// Mounts `POST <ai_gateway.path>/chat/completions` and
+    /// `GET <ai_gateway.path>/models`. Tasks are picked by the request
+    /// body's `model` field, sent as `<task-name>/<downstream-model>`.
+    #[default]
+    Openai,
+}
+
+/// LLM proxy task configuration.
+///
+/// Registers a flow as a backend on the shared AI gateway server (configured
+/// under `worker.ai_gateway`). The `protocol` selects which URL layout the
+/// server exposes; the task's `name` is the routing key clients use to pick
+/// this backend within that protocol.
 ///
 /// # Example
 ///
 /// ```yaml
 /// tasks:
-///   - ai_gateway:
+///   - llm_proxy:
 ///       name: proxy
-///       path: /v1/chat/completions
+///       # protocol: openai  # default; mounts /v1/chat/completions
 ///       credentials_path: /etc/proxy/credentials.json
 ///
 ///   - ai_completion:
@@ -47,13 +63,16 @@ pub const SSE_DONE: &str = "data: [DONE]\n\n";
 ///       stream: true
 ///       prompt: "{{event.data.prompt}}"
 /// ```
+///
+/// Clients then send `model: "proxy/<downstream-model>"` to reach this proxy.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
-    /// The unique name / identifier of the task.
+    /// The unique name / identifier of the task. Used as the routing key
+    /// inside the chosen protocol (e.g. the prefix of OpenAI's `model` field).
     pub name: String,
-    /// HTTP path to register the endpoint on (e.g., "/v1/chat/completions").
-    /// Registered at the root level, not under the worker path prefix.
-    pub path: String,
+    /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
+    #[serde(default)]
+    pub protocol: Protocol,
     /// Optional path to credentials file for authenticating incoming requests.
     pub credentials_path: Option<PathBuf>,
     /// Optional user authentication configuration.

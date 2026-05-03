@@ -31,10 +31,6 @@ pub struct TaskContext {
     pub task_manager: std::sync::Arc<crate::task::manager::TaskManager>,
     /// Shared cache for task operations.
     pub cache: std::sync::Arc<dyn crate::cache::Cache>,
-    /// Optional shared HTTP server for webhook tasks.
-    pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    /// Optional shared MCP server for exposing flows as MCP tools.
-    pub mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Optional shared response registry for streaming progress back to source tasks.
     pub response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Optional resource loader for loading external assets (SQL files, templates, etc.).
@@ -59,14 +55,6 @@ impl std::fmt::Debug for TaskContext {
             .field("task_manager", &"<TaskManager>")
             .field("cache", &"<Cache>")
             .field(
-                "http_server",
-                &self.http_server.as_ref().map(|_| "<HttpServer>"),
-            )
-            .field(
-                "mcp_server",
-                &self.mcp_server.as_ref().map(|_| "<McpServer>"),
-            )
-            .field(
                 "response_registry",
                 &self
                     .response_registry
@@ -76,6 +64,7 @@ impl std::fmt::Debug for TaskContext {
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
             .field("cancellation_token", &"<CancellationToken>")
+            .field("leaf_count", &self.leaf_count)
             .finish()
     }
 }
@@ -91,10 +80,6 @@ pub struct TaskContextBuilder {
     task_manager: Option<std::sync::Arc<crate::task::manager::TaskManager>>,
     /// Shared cache for task operations.
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
-    /// Optional shared HTTP server for webhook tasks.
-    http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    /// Optional shared MCP server for exposing flows as MCP tools.
-    mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Optional shared response registry for streaming progress.
     response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Resource loader for loading external assets.
@@ -149,30 +134,6 @@ impl TaskContextBuilder {
     /// * `cache` - Cache instance
     pub fn cache(mut self, cache: std::sync::Arc<dyn crate::cache::Cache>) -> Self {
         self.cache = Some(cache);
-        self
-    }
-
-    /// Sets the optional HTTP server for webhook tasks.
-    ///
-    /// # Arguments
-    /// * `http_server` - Optional HTTP server instance
-    pub fn http_server(
-        mut self,
-        http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    ) -> Self {
-        self.http_server = http_server;
-        self
-    }
-
-    /// Sets the optional MCP server for exposing flows as MCP tools.
-    ///
-    /// # Arguments
-    /// * `mcp_server` - Optional MCP server instance
-    pub fn mcp_server(
-        mut self,
-        mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
-    ) -> Self {
-        self.mcp_server = mcp_server;
         self
     }
 
@@ -246,8 +207,6 @@ impl TaskContextBuilder {
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
-            http_server: self.http_server,
-            mcp_server: self.mcp_server,
             response_registry: self.response_registry,
             resource_loader: self.resource_loader,
             retry: self.retry,

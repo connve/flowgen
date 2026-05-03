@@ -84,14 +84,36 @@ worker:
     #   user_id_field: "user_id"       # optional: JSON field in response (defaults to "user_id")
 
   # MCP server configuration for exposing flows as MCP tools (optional).
-  # Runs on its own port, independent of the HTTP server.
+  # Runs on its own port, independent of the webhook HTTP server.
   # Must be explicitly enabled for mcp_tool tasks to be registered.
   # Global credentials apply to all mcp_tool endpoints unless overridden per tool.
+  # The optional `auth` block accepts the same shape as `http_server.auth`
+  # (jwt / oidc / session); each server has its own auth provider.
   # mcp_server:
   #   enabled: true
   #   port: 3001
   #   path: "/mcp"
   #   credentials_path: "/etc/mcp/api-keys.json"
+  #   # auth:
+  #   #   type: jwt
+  #   #   secret: "your-hmac-secret"
+
+  # AI gateway server hosting LLM proxy backends (optional).
+  # Runs on its own port. The path defaults to "/v1" so OpenAI clients reach
+  # POST /v1/chat/completions and GET /v1/models with stock
+  # base_url=http://host:3002/v1 configuration.
+  #
+  # Each `llm_proxy` task registers under its `name`. Clients pick the proxy
+  # via the request `model` field, sent as "<task-name>/<model>" — e.g. an
+  # llm_proxy task named `gemini` is reached with `model: "gemini/gemini-2.0-flash"`.
+  # ai_gateway:
+  #   enabled: true
+  #   port: 3002
+  #   path: "/v1"
+  #   credentials_path: "/etc/ai-gateway/credentials.json"
+  #   # auth:
+  #   #   type: jwt
+  #   #   secret: "your-hmac-secret"
 
   # Event channel buffer size (optional, defaults to 10M).
   # Controls memory allocation for broadcast channel between tasks.

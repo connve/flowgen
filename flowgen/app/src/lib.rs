@@ -11,3 +11,7 @@ pub mod app;
 pub mod config;
 /// Flow execution and task management.
 pub mod flow;
+/// Hot-reload reconciler that applies watch events to the running flow registry.
+pub mod reconciler;
+/// Hot-reload watcher for cache-sourced flows.
+pub mod watcher;

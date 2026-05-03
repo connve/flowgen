@@ -68,6 +68,12 @@ flowgen:
   #   type: ClusterIP
   #   port: 3001
 
+  # AI gateway service configuration (optional).
+  # Only exposed when ai_gateway is enabled in the worker config.
+  # ai_gateway:
+  #   type: ClusterIP
+  #   port: 3002
+
   serviceAccount:
     # Specifies whether a service account should be created
     create: true

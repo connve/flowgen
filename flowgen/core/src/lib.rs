@@ -19,15 +19,8 @@ pub mod credentials;
 pub mod event;
 /// Executor for distributed coordination via cache-based leases.
 pub mod executor;
-/// HTTP server trait for task context integration.
+/// Generic HTTP server with role-specific dispatchers (webhook / MCP / AI gateway).
 pub mod http_server;
-/// MCP (Model Context Protocol) core types and backward-compatible re-exports.
-pub mod mcp {
-    /// Backward-compatible re-exports from the registry module.
-    pub mod registry;
-}
-/// MCP server trait for task context integration.
-pub mod mcp_server;
 /// NsJail sandbox for secure script execution.
 pub mod nsjail {
     /// Sandbox executor using nsjail for process isolation.

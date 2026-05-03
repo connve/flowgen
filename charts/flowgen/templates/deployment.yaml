@@ -65,6 +65,11 @@ spec:
           containerPort: {{ $worker.mcp_server.port }}
           protocol: TCP
         {{- end }}
+        {{- if $worker.ai_gateway }}
+        - name: ai-gateway
+          containerPort: {{ $worker.ai_gateway.port }}
+          protocol: TCP
+        {{- end }}
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:

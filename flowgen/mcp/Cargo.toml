@@ -15,6 +15,7 @@ path = "src/lib.rs"
 serde_json = { workspace = true }
 futures-util = { workspace = true }
 flowgen_core = { path = "../core" }
+flowgen_http = { path = "../http" }
 tokio = { workspace = true, features = ["sync"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }

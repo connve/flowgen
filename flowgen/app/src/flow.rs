@@ -78,7 +78,7 @@ pub enum Error {
     HtmlScrapeProcessor(#[from] flowgen_html::scrape::processor::Error),
     /// Error in HTTP server task.
     #[error(transparent)]
-    HttpServer(#[from] flowgen_http::server::Error),
+    HttpServer(#[from] flowgen_core::http_server::Error),
     /// Error in NATS JetStream publisher task.
     #[error(transparent)]
     NatsJetStreamPublisher(#[from] flowgen_nats::jetstream::publisher::Error),
@@ -162,13 +162,16 @@ pub enum Error {
     NatsKvStore(#[from] flowgen_nats::jetstream::kv_store::Error),
     /// Error in AI gateway task.
     #[error(transparent)]
-    AiGateway(#[from] flowgen_ai_agent::ai_gateway::processor::Error),
+    LlmProxy(#[from] flowgen_ai_agent::ai_gateway::llm_proxy::Error),
     /// Error in Git sync task.
     #[error(transparent)]
     GitSync(#[from] flowgen_git::sync::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
+    /// Failed to store the task context after starting tasks.
+    #[error("Error storing task context after start_tasks")]
+    TaskContextStoreFailed,
     /// Failed to retrieve background task handles for monitoring.
     #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
@@ -178,6 +181,9 @@ pub enum Error {
     /// Flow cannot be initialized because MCP server is not enabled.
     #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool tasks.")]
     McpServerNotEnabled,
+    /// Flow cannot be initialized because AI gateway server is not enabled.
+    #[error("Flow cannot be initialized as ai_gateway is not configured. Add worker.ai_gateway to config or remove llm_proxy tasks.")]
+    AiGatewayServerNotEnabled,
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
@@ -291,7 +297,7 @@ impl TaskRegistryBuilder {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
 
             let input_rx = if idx > 0 {
@@ -473,7 +479,7 @@ impl TaskRegistryBuilder {
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
@@ -494,10 +500,12 @@ impl TaskRegistryBuilder {
 pub struct Flow {
     /// The flow's static configuration, loaded from a file.
     pub config: Arc<FlowConfig>,
-    /// An optional shared HTTP server instance, passed in from the main application.
-    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// An optional shared MCP server instance, passed in from the main application.
-    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
+    /// An optional shared webhook HTTP server, passed in from the main application.
+    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    /// An optional shared MCP server, passed in from the main application.
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    /// An optional shared AI gateway server, passed in from the main application.
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
     /// Shared cache, passed in from the main application.
     cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
@@ -510,6 +518,9 @@ pub struct Flow {
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
     background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
+    /// Task context from the most recent start_tasks call; used to read registration
+    /// info (registered_http_routes, registered_mcp_tools) before run() consumes self.
+    last_task_context: Arc<std::sync::Mutex<Option<Arc<flowgen_core::task::context::TaskContext>>>>,
 }
 
 impl Flow {
@@ -523,6 +534,18 @@ impl Flow {
         self.task_manager.as_ref().map(Arc::clone)
     }
 
+    /// Returns the cancellation token for the most recently started task tenure.
+    ///
+    /// Used by the reconciler to cancel a running flow before replacing it. Returns
+    /// `None` if `start_tasks()` has not yet been called (e.g. leader-elected flows
+    /// that have not yet acquired leadership).
+    pub fn cancellation_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.last_task_context
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|ctx| ctx.cancellation_token.clone()))
+    }
+
     /// Determines if the flow should run with leader election.
     ///
     /// If a flow contains any webhook tasks, it will always be treated as
@@ -531,14 +554,14 @@ impl Flow {
         let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
             matches!(
                 task,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             )
         });
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook, mcp_tool, or ai_gateway); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook, mcp_tool, or llm_proxy); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -562,7 +585,7 @@ impl Flow {
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::ai_gateway(_)));
+            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::llm_proxy(_)));
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
@@ -615,8 +638,6 @@ impl Flow {
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
-            .http_server(self.http_server.clone())
-            .mcp_server(self.mcp_server.clone())
             .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token);
@@ -675,14 +696,28 @@ impl Flow {
         // Spawn all blocking tasks (webhooks).
         let mut blocking_handles = Vec::new();
         for task_desc in blocking_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             blocking_handles.push(handle);
         }
 
         // Spawn all background tasks.
         let mut background_handles = Vec::new();
         for task_desc in background_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             background_handles.push(handle);
         }
 
@@ -715,14 +750,28 @@ impl Flow {
         // Spawn all blocking tasks.
         let mut blocking_handles = Vec::new();
         for task_desc in all_blocking_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             blocking_handles.push(handle);
         }
 
         // Spawn all background tasks.
         let mut background_handles = Vec::new();
         for task_desc in all_background_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             background_handles.push(handle);
         }
 
@@ -756,6 +805,12 @@ impl Flow {
             .lock()
             .map_err(|_| Error::BackgroundHandlesStoreFailed)?;
         *lock = Some(handles.background_handles);
+
+        // Store task context so registration info is accessible before run() consumes self.
+        self.last_task_context
+            .lock()
+            .map_err(|_| Error::TaskContextStoreFailed)
+            .map(|mut guard| *guard = Some(Arc::clone(&handles.task_context)))?;
 
         Ok(handles.blocking_handles)
     }
@@ -1000,6 +1055,9 @@ impl Flow {
 async fn spawn_task(
     task_desc: TaskDescriptor,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
 ) -> Result<JoinHandle<Result<(), Error>>, Error> {
     let task_id = task_desc.id;
     let rx = task_desc.input_rx;
@@ -1169,13 +1227,15 @@ async fn spawn_task(
         }
         TaskType::http_webhook(config) => {
             let config = Arc::new(config);
+            let http_server = http_server.clone().ok_or(Error::HttpServerNotEnabled)?;
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_http::webhook::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
-                        .task_context(task_context);
+                        .task_context(task_context)
+                        .http_server(http_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1601,13 +1661,15 @@ async fn spawn_task(
         }
         TaskType::mcp_tool(config) => {
             let config = Arc::new(config);
+            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_mcp::processor::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
-                        .task_context(task_context);
+                        .task_context(task_context)
+                        .mcp_server(mcp_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1617,16 +1679,20 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::ai_gateway(config) => {
+        TaskType::llm_proxy(config) => {
             let config = Arc::new(config);
+            let ai_gateway_server = ai_gateway_server
+                .clone()
+                .ok_or(Error::AiGatewayServerNotEnabled)?;
             tokio::spawn(
                 async move {
                     let mut builder =
-                        flowgen_ai_agent::ai_gateway::processor::ProcessorBuilder::new()
+                        flowgen_ai_agent::ai_gateway::llm_proxy::ProcessorBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)
-                            .task_context(task_context);
+                            .task_context(task_context)
+                            .ai_gateway_server(ai_gateway_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1667,10 +1733,12 @@ async fn spawn_task(
 pub struct FlowBuilder {
     /// Optional flow configuration.
     config: Option<Arc<FlowConfig>>,
-    /// Optional shared HTTP server instance.
-    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// Optional shared MCP server instance.
-    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
+    /// Optional shared webhook HTTP server.
+    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    /// Optional shared MCP server.
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    /// Optional shared AI gateway server.
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
     /// Shared cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
@@ -1693,15 +1761,24 @@ impl FlowBuilder {
         self
     }
 
-    /// Sets the shared HTTP server instance.
-    pub fn http_server(mut self, server: Arc<dyn flowgen_core::http_server::HttpServer>) -> Self {
+    /// Sets the shared webhook HTTP server.
+    pub fn http_server(mut self, server: Arc<flowgen_http::server::WebhookServer>) -> Self {
         self.http_server = Some(server);
         self
     }
 
-    /// Sets the shared MCP server instance.
-    pub fn mcp_server(mut self, server: Arc<dyn flowgen_core::mcp_server::McpServer>) -> Self {
+    /// Sets the shared MCP server.
+    pub fn mcp_server(mut self, server: Arc<flowgen_mcp::server::McpServer>) -> Self {
         self.mcp_server = Some(server);
+        self
+    }
+
+    /// Sets the shared AI gateway server.
+    pub fn ai_gateway_server(
+        mut self,
+        server: Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>,
+    ) -> Self {
+        self.ai_gateway_server = Some(server);
         self
     }
 
@@ -1743,6 +1820,7 @@ impl FlowBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
             mcp_server: self.mcp_server,
+            ai_gateway_server: self.ai_gateway_server,
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
@@ -1751,6 +1829,7 @@ impl FlowBuilder {
             resource_loader: self.resource_loader,
             task_manager: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
+            last_task_context: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }
@@ -1791,14 +1870,22 @@ mod tests {
 
     #[test]
     fn test_flow_builder_http_server() {
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::WebhookDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+        ));
         let builder = FlowBuilder::new().http_server(server.clone());
         assert!(builder.http_server.is_some());
     }
 
     #[test]
     fn test_flow_builder_build_missing_config() {
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::WebhookDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+        ));
 
         let result = FlowBuilder::new().http_server(server).build();
 
@@ -1840,7 +1927,11 @@ mod tests {
                 parallel_instances: 1,
             },
         });
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::WebhookDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+        ));
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
 

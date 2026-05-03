@@ -830,8 +830,6 @@ mod tests {
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
-            http_server: None,
-            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             leaf_count: 1,
         });
@@ -888,8 +886,6 @@ mod tests {
             resource_loader: None,
             cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                 as Arc<dyn flowgen_core::cache::Cache>,
-            http_server: None,
-            mcp_server: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             leaf_count: 1,
         });
