@@ -310,7 +310,17 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     /// Initializes the processor by building the HTTP client.
     async fn init(&self) -> Result<EventHandler, Error> {
-        let mut builder = reqwest::ClientBuilder::new().https_only(true);
+        // Enable transparent gzip, brotli, and deflate decoding. Reqwest
+        // adds an `Accept-Encoding: gzip, br, deflate` header to outgoing
+        // requests, decodes any compressed response body before it reaches
+        // `response.text()`, and strips the `Content-Encoding` header so
+        // downstream consumers see plaintext. Servers that do not compress
+        // simply ignore the request header.
+        let mut builder = reqwest::ClientBuilder::new()
+            .https_only(true)
+            .gzip(true)
+            .brotli(true)
+            .deflate(true);
         // Apply outbound timeouts so a slow or hung upstream cannot
         // pin a worker task indefinitely. Both fields default in config
         // (30s total / 10s connect); explicit None disables.

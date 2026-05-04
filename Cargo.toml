@@ -4,7 +4,7 @@ resolver = "2"
 exclude = [".cargo"]
 
 [workspace.package]
-version = "0.102.0"
+version = "0.103.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -50,6 +50,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
     "rustls",
     "gzip",
     "brotli",
+    "deflate",
     "charset",
 ] }
 url = { version = "2.5" }

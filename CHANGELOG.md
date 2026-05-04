@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.103.0
+
+### Tasks
+
+- `http_request` now transparently decompresses gzip-, brotli-, and
+  deflate-encoded responses (`Content-Encoding: gzip`, `br`, `deflate`).
+  The client sends `Accept-Encoding: gzip, br, deflate` on every outbound
+  request; servers that do not compress ignore the header. Previously the
+  client read raw compressed bytes as text and silently corrupted any
+  response a server compressed. No config change.
+
 ## 0.102.0
 
 ### Breaking
