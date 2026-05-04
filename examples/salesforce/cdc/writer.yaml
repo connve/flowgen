@@ -6,16 +6,28 @@
 #   - BigQuery Storage Write API in CDC upsert mode: deduplicates by
 #     Salesforce Id, keeping each row at its latest state.
 #
-# Both sinks depend on the same `strip_subject_prefix` script, so flowgen
-# clones every event into both branches. The NATS message is acknowledged
-# only after every leaf (object store + BigQuery) has committed, matching
-# the `feedback_nats_first` reliability principle: persist in NATS, then
-# fan out to durable storage with end-to-end acknowledgement.
+# Both sinks branch off the same `route` script. The script computes:
+#   - `event.subject`  → "data/<SObject>ChangeEvent" form for object store
+#                        partitioning (preserves the original CDC topic path).
+#   - `ctx.meta.bq_table` → lowercase SObject name for BigQuery routing
+#                           (e.g. "AccountChangeEvent" → "account").
+#
+# The BigQuery task templates `table_id` against `event.meta.bq_table`, so
+# the same writer flow handles every CDC SObject — adding a new subscriber
+# requires no writer changes as long as the SObject's `<Name>ChangeEvent`
+# topic and the BigQuery table follow the convention.
+#
+# The NATS message is acknowledged only after every leaf (object store +
+# BigQuery) has committed, matching the `feedback_nats_first` reliability
+# principle: persist in NATS, then fan out to durable storage with
+# end-to-end acknowledgement.
 #
 # Required:
 #   - /etc/nats/credentials.json
 #   - /etc/gcp/credentials.json
 #   - NATS_URL, GCP_PROJECT_ID, GCS_BUCKET_PATH env vars
+#   - BigQuery dataset `salesforce` with one table per SObject (lowercase),
+#     each with a primary key on `Id` so CDC upsert mode is accepted.
 flow:
   name: salesforce_writer
   tasks:
@@ -36,15 +48,28 @@ flow:
         durable_name: salesforce_writer
         max_messages: 100
 
-    # Strip the `pubsub.` prefix and turn the dotted topic into a path
-    # segment so downstream sinks can use the original topic shape
-    # (data/AccountChangeEvent) for partitioning and table routing.
+    # Strip the `pubsub.` prefix and split out the routing keys.
+    #
+    # Sets:
+    #   event.subject       → "data/<SObject>ChangeEvent" (object store path).
+    #   ctx.meta.bq_table   → lowercase SObject name (BigQuery table_id).
+    #                         e.g. "AccountChangeEvent" → "account".
+    #
+    # Events whose subject does not match the expected `pubsub.{data,event}.*`
+    # shape pass through unchanged with no `bq_table` set; the BigQuery task
+    # will fail to render the templated `table_id` and the message will be
+    # retried, surfacing the routing problem in logs.
     - script:
-        name: strip_subject_prefix
+        name: route
         code: |
           let parts = event.subject.split(".");
           if parts.len() >= 3 && parts[0] == "pubsub" && (parts[1] == "data" || parts[1] == "event") {
               event.subject = parts[1] + "/" + parts[2];
+              let topic = parts[2];
+              let suffix = "ChangeEvent";
+              if topic.ends_with(suffix) {
+                  ctx.meta.bq_table = topic.sub_string(0, topic.len - suffix.len).to_lower();
+              }
           }
           event
 
@@ -59,17 +84,19 @@ flow:
           enabled: true
           partition_keys:
             - EventDate
-        depends_on: [strip_subject_prefix]
+        depends_on: [route]
 
     # Branch B: stream into BigQuery in CDC upsert mode. Each row is
     # keyed by the Salesforce Id, so updates and deletes converge to
-    # the latest state. The destination table must declare a primary
-    # key on `Id` for BigQuery to accept upserts.
+    # the latest state. The destination table is selected per event
+    # via `event.meta.bq_table` set by the `route` script. Every
+    # destination table must declare a primary key on `Id` for
+    # BigQuery to accept upserts.
     - gcp_bigquery_storage_write:
         name: write_to_bigquery
         credentials_path: /etc/gcp/credentials.json
         project_id: "{{env.GCP_PROJECT_ID}}"
         dataset_id: salesforce
-        table_id: account
+        table_id: "{{event.meta.bq_table}}"
         change_type: upsert
-        depends_on: [strip_subject_prefix]
+        depends_on: [route]
