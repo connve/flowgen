@@ -1211,6 +1211,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rhai_string_suffix_strip_lowercase() {
+        // Pattern used by examples/salesforce/cdc/writer.yaml to derive the
+        // BigQuery table name from a CDC topic. The script splits the NATS
+        // subject (`pubsub.data.AccountChangeEvent`), takes the SObject
+        // segment (`AccountChangeEvent`), strips the `ChangeEvent` suffix,
+        // and lowercases the result (`account`). Verifies that the Rhai
+        // string ops the YAML relies on (`split`, `ends_with`, `len`,
+        // `sub_string`, `to_lower`) all behave as expected.
+        let engine = Engine::new();
+
+        // Builds the table-routing key for AccountChangeEvent.
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"
+                let parts = "pubsub.data.AccountChangeEvent".split(".");
+                let topic = parts[2];
+                let suffix = "ChangeEvent";
+                if topic.ends_with(suffix) {
+                    topic.sub_string(0, topic.len - suffix.len).to_lower()
+                } else {
+                    ""
+                }
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result.into_string().unwrap(), "account");
+
+        // Same pattern with a different SObject confirms it's not hardcoded.
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"
+                let topic = "OpportunityLineItemChangeEvent";
+                let suffix = "ChangeEvent";
+                topic.sub_string(0, topic.len - suffix.len).to_lower()
+                "#,
+            )
+            .unwrap();
+        assert_eq!(result.into_string().unwrap(), "opportunitylineitem");
+
+        // Topic without the expected suffix falls through the `if` branch.
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"
+                let topic = "AccountChangeFeed";
+                let suffix = "ChangeEvent";
+                if topic.ends_with(suffix) {
+                    topic.sub_string(0, topic.len - suffix.len).to_lower()
+                } else {
+                    ()
+                }
+                "#,
+            )
+            .unwrap();
+        assert!(result.is_unit());
+    }
+
+    #[tokio::test]
     async fn test_script_array_output() {
         let (tx, mut rx) = mpsc::channel(100);
 

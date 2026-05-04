@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.102.0
+
+### Breaking
+
+- **Top-level config key `flow_resources` is `resources`** as of
+  0.101.0. The field was first introduced as `flow_resources` (PR
+  #146) and renamed to `resources` (PR #147) without a release
+  note, which silently broke any tenant whose `config.yaml` still
+  used the older name — resource-loading tasks (`bulkapi`, `mssql`,
+  `gcp_bigquery_*`) fail with "Resource path is not configured".
+  Tenants on `flow_resources:` must rename it to `resources:` in
+  their inline config and any external config ConfigMaps. No
+  backward-compatibility alias is provided.
+
+### Tasks
+
+- `iterate` now accepts `EventData::ArrowRecordBatch` and
+  `EventData::Avro` inputs by converting them to a JSON array of
+  row objects internally before walking the rows. Previously the
+  task rejected non-JSON inputs with `ExpectedJsonGotArrowRecordBatch`
+  / `ExpectedJsonGotAvro`, breaking ETL chains where an upstream
+  task (BigQuery storage read, MSSQL query) emits Arrow and a
+  downstream `iterate` walks the result set. The two old error
+  variants are removed; conversion failures surface via the new
+  `EventConversion` variant.
+
+### Configuration
+
+- `script::config::RhaiLimits` defaults raised: `max_map_size` and
+  `max_array_size` go from `100_000` to `1_000_000`. The previous
+  defaults flatten nested entries, so a script processing N rows ×
+  ~20 fields hits the cap at N ≈ 5k — well within normal ETL batch
+  sizes. Operators on tight memory budgets can override via the
+  `limits` block on individual `script` tasks; the per-script
+  override semantics are unchanged.
+
+### Internal
+
+- New unit test `test_rhai_string_suffix_strip_lowercase` covering
+  the `split` + `ends_with` + `len` + `sub_string` + `to_lower`
+  pattern used by Salesforce CDC routing scripts. Locks the
+  contract so a Rhai dependency bump that changes string-op
+  semantics fails fast in CI.
+
 ## 0.101.0
 
 ### Highlights
