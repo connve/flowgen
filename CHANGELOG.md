@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.104.0
+
+### Breaking
+
+- **`event_buffer_size` default lowered from 10,000,000 to 10,000.**
+  The previous 10M default dated from an earlier single-channel architecture
+  and effectively disabled backpressure, allowing flows to consume
+  unbounded memory under load. The new default caps each inter-task channel
+  at 10,000 events; when full the upstream task blocks until the downstream
+  task drains a slot. No events are dropped. Flows that previously relied
+  on the large buffer as a shock absorber will now apply backpressure
+  sooner, which bounds memory at the cost of brief producer stalls during
+  bursts. Override per-worker via `worker.event_buffer_size` in the config
+  file if your workload requires a larger buffer.
+
+### Tasks
+
+- `http_request` supports a new `response_type` field (`json` | `bytes` |
+  `text`, default `json`). Set `response_type: bytes` to download binary
+  payloads (archives, images, etc.) as `EventData::Bytes`; set
+  `response_type: text` to capture plain-text responses as a JSON string.
+
+- New `EventData::Bytes` variant for binary payloads. Tasks that need raw
+  bytes pattern-match on the variant directly. The JSON projection (used
+  by templating and logging) returns `{"$bytes": true, "len": N}` — the
+  actual payload is never inlined into JSON.
+
+- `object_store` write accepts `EventData::Bytes` input and writes raw
+  bytes. Auto-detection maps bytes to `format: bytes` with a `.bin`
+  extension; explicit `format: bytes` is also supported.
+
 ## 0.103.0
 
 ### Tasks
