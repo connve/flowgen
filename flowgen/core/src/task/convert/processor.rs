@@ -69,6 +69,8 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Schema is required for Avro target format")]
     MissingAvroSchema,
+    #[error("Bytes input is not supported by the convert task")]
+    BytesNotSupported,
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -260,6 +262,7 @@ impl EventHandler {
                         EventData::Avro(avro_data.clone())
                     }
                 },
+                EventData::Bytes(_) => return Err(Error::BytesNotSupported),
             };
 
             let mut e = event_builder

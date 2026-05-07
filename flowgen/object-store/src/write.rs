@@ -1,6 +1,6 @@
 use super::config::{
-    WriteFormat, DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION,
-    DEFAULT_PARQUET_EXTENSION,
+    WriteFormat, DEFAULT_AVRO_EXTENSION, DEFAULT_BYTES_EXTENSION, DEFAULT_CSV_EXTENSION,
+    DEFAULT_JSON_EXTENSION, DEFAULT_PARQUET_EXTENSION,
 };
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
@@ -185,12 +185,16 @@ impl EventHandler {
                         flowgen_core::event::EventData::Json(_) => {
                             (WriteFormat::Json, DEFAULT_JSON_EXTENSION)
                         }
+                        flowgen_core::event::EventData::Bytes(_) => {
+                            (WriteFormat::Bytes, DEFAULT_BYTES_EXTENSION)
+                        }
                     }
                 }
                 WriteFormat::Parquet => (WriteFormat::Parquet, DEFAULT_PARQUET_EXTENSION),
                 WriteFormat::Csv => (WriteFormat::Csv, DEFAULT_CSV_EXTENSION),
                 WriteFormat::Avro => (WriteFormat::Avro, DEFAULT_AVRO_EXTENSION),
                 WriteFormat::Json => (WriteFormat::Json, DEFAULT_JSON_EXTENSION),
+                WriteFormat::Bytes => (WriteFormat::Bytes, DEFAULT_BYTES_EXTENSION),
             };
 
             // Write data in the appropriate format.

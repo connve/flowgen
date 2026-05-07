@@ -781,6 +781,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: crate::config::ResponseType::default(),
         });
         let (tx, _rx) = mpsc::channel(100);
 
@@ -852,6 +853,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: crate::config::ResponseType::default(),
         });
 
         let (tx, _rx) = mpsc::channel(100);
@@ -891,6 +893,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: crate::config::ResponseType::default(),
         });
 
         let (tx, _rx) = mpsc::channel(100);

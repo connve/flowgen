@@ -4,6 +4,7 @@
 //! and various payload formats. Processes events by making HTTP requests
 //! and publishing the responses as new events.
 
+use crate::config::ResponseType;
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::{
     config::ConfigExt,
@@ -235,25 +236,62 @@ impl EventHandler {
             })?;
 
             let status = response.status();
-            let body = response.text().await.map_err(|source| Error::Reqwest {
-                endpoint: endpoint.clone(),
-                method: method.clone(),
-                source,
-            })?;
 
-            if status.is_client_error() || status.is_server_error() {
-                return Err(Error::HttpError {
-                    endpoint: endpoint.clone(),
-                    method: method.clone(),
-                    status: status.as_u16(),
-                    body,
-                });
-            }
-
-            let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
+            // For error detection we need the body as text regardless of response_type.
+            // For bytes mode we read raw bytes first, then convert error body to lossy string.
+            let event_data = match self.config.response_type {
+                ResponseType::Bytes => {
+                    let raw = response.bytes().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body: String::from_utf8_lossy(&raw).into_owned(),
+                        });
+                    }
+                    EventData::Bytes(raw)
+                }
+                ResponseType::Text => {
+                    let body = response.text().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body,
+                        });
+                    }
+                    EventData::Json(Value::String(body))
+                }
+                ResponseType::Json => {
+                    let body = response.text().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body,
+                        });
+                    }
+                    EventData::Json(serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body)))
+                }
+            };
 
             let mut e = event_builder
-                .data(EventData::Json(data))
+                .data(event_data)
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
@@ -641,6 +679,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: crate::config::ResponseType::default(),
         });
         let (tx, rx) = mpsc::channel(100);
 

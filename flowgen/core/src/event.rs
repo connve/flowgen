@@ -406,6 +406,20 @@ pub enum EventData {
     Avro(AvroData),
     /// JSON format for flexible structured data.
     Json(serde_json::Value),
+    /// Raw byte payload, used for binary file downloads (HTTP responses,
+    /// archive contents, etc.). Tasks that need to interpret the bytes
+    /// pattern-match on `EventData::Bytes` directly and read
+    /// `bytes::Bytes` natively.
+    ///
+    /// The default JSON projection (used by Handlebars templating, event
+    /// logging, and serialisation) does NOT inline the payload. It returns
+    /// only metadata: `{"$bytes": true, "len": <byte_count>}`. This keeps
+    /// log volumes small for multi-MB blobs and gives templates a
+    /// deterministic shape to detect bytes (`{{#if event.data.$bytes}}`)
+    /// without ever exposing the binary payload through string-oriented
+    /// surfaces. Code paths that need the actual bytes must pattern-match
+    /// on the variant.
+    Bytes(bytes::Bytes),
 }
 
 /// Avro data container with schema and serialized payload.
@@ -443,6 +457,12 @@ impl TryFrom<&EventData> for Value {
                 serde_json::Value::try_from(avro_value).map_err(|e| Error::Avro { source: e })?
             }
             EventData::Json(data) => data.clone(),
+            EventData::Bytes(data) => {
+                let mut obj = Map::new();
+                obj.insert("$bytes".to_string(), Value::Bool(true));
+                obj.insert("len".to_string(), Value::Number(data.len().into()));
+                Value::Object(obj)
+            }
         };
         Ok(data)
     }
@@ -692,6 +712,13 @@ impl<W: Write> ToWriter<W> for EventData {
                     .append(value)
                     .map_err(|e| Error::Avro { source: e })?;
                 avro_writer.flush().map_err(|e| Error::Avro { source: e })?;
+                Ok(())
+            }
+            EventData::Bytes(data) => {
+                let mut writer = writer;
+                writer
+                    .write_all(&data)
+                    .map_err(|e| Error::IO { source: e })?;
                 Ok(())
             }
         }

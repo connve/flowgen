@@ -85,6 +85,9 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
                     serde_json::to_vec(data).map_err(|e| Error::SerdeJson { source: e })?;
                 event = event.payload(serialized.into());
             }
+            EventData::Bytes(data) => {
+                event = event.payload(data.clone());
+            }
         }
         Ok(event)
     }

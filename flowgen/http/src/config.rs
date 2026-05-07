@@ -71,6 +71,11 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// How to interpret the HTTP response body. Defaults to `json`.
+    /// Use `bytes` to download binary payloads (archives, images, etc.);
+    /// use `text` to capture plain-text responses as a JSON string.
+    #[serde(default)]
+    pub response_type: ResponseType,
 }
 
 impl ConfigExt for Processor {}
@@ -92,6 +97,7 @@ impl Default for Processor {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: ResponseType::default(),
         }
     }
 }
@@ -121,6 +127,19 @@ pub enum PayloadSendAs {
     UrlEncoded,
     /// Send payload as query parameters.
     QueryParams,
+}
+
+/// How the http_request processor reads the response body.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseType {
+    /// Parse body as JSON and emit `EventData::Json` (default).
+    #[default]
+    Json,
+    /// Emit raw response bytes as `EventData::Bytes` (for binary downloads).
+    Bytes,
+    /// Read body as text and emit `EventData::Json(Value::String(...))`.
+    Text,
 }
 
 /// HTTP method types supported by the processor.
@@ -192,6 +211,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: ResponseType::default(),
         };
 
         assert_eq!(processor.name, "test_processor".to_string());
@@ -222,6 +242,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: ResponseType::default(),
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -246,6 +267,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: ResponseType::default(),
         };
 
         let cloned = processor.clone();
@@ -406,6 +428,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            response_type: ResponseType::default(),
         };
 
         let json = serde_json::to_string(&processor).unwrap();
