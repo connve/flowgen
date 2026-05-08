@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.105.0
+
+### Fixes
+
+- `salesforce_bulkapi_query_job` no longer buffers all parsed Arrow
+  RecordBatches in memory before emitting. Batches are now streamed
+  one at a time via the centralized `FromReader` iterator, keeping
+  peak memory to CSV bytes + one batch instead of CSV bytes + all
+  batches. Fixes OOM kills on large Salesforce Bulk API exports
+  (600k+ rows).
+
+- `object_store` read now streams all multi-record formats (CSV,
+  Parquet, Avro) one item at a time instead of collecting everything
+  in memory before emitting. Uses the same `FromReader` iterator.
+
+### Internal
+
+- `FromReader` trait returns a lazy `ReaderIter` (boxed iterator)
+  instead of `Vec`. Format-specific parsing (CSV, Parquet, Avro, JSON)
+  stays centralized in `flowgen_core::buffer`; callers drive the
+  iterator and can perform async sends between items. No call site
+  collects all items in memory.
+
+- `salesforce_bulkapi_query_job` completion handling extracted into
+  `send_final_event` helper, removing five duplicated completion_tx
+  wiring blocks across create, get, delete, abort, and get_results
+  operations.
+
 ## 0.104.0
 
 ### Breaking

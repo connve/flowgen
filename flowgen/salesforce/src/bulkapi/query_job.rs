@@ -55,6 +55,11 @@ pub enum Error {
     },
     #[error(transparent)]
     EventError(#[from] flowgen_core::event::Error),
+    #[error("Arrow error: {source}")]
+    Arrow {
+        #[source]
+        source: arrow::error::ArrowError,
+    },
     #[error(transparent)]
     ConfigRender(#[from] flowgen_core::config::Error),
     #[error("Task failed after all retry attempts: {source}")]
@@ -125,6 +130,29 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Attaches the completion signal to the event and sends it downstream.
+    async fn send_final_event(
+        &self,
+        mut event: Event,
+        completion_tx_arc: &Option<flowgen_core::event::SharedCompletionTx>,
+    ) -> Result<(), Error> {
+        match self.tx {
+            Some(_) => {
+                event.completion_tx = completion_tx_arc.clone();
+            }
+            None => {
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    arc.signal_completion(event.data_as_json().ok());
+                }
+            }
+        }
+        event
+            .send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|e| Error::SendMessage { source: e })?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
@@ -211,8 +239,7 @@ impl EventHandler {
             source: flowgen_core::serde::Error::Serde { source: e },
         })?;
 
-        // Emit event with job response.
-        let mut e = EventBuilder::new()
+        let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
@@ -220,24 +247,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        self.send_final_event(e, &completion_tx_arc).await
     }
 
     /// Gets a Salesforce bulk query job status and metadata using the SDK.
@@ -263,7 +273,7 @@ impl EventHandler {
         })?;
 
         // Emit event with job response.
-        let mut e = EventBuilder::new()
+        let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
@@ -271,25 +281,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Signal completion or pass through to next task.
-        match self.tx {
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-            Some(_) => {
-                // Pass through completion_tx to next task.
-                e.completion_tx = completion_tx_arc.clone();
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        self.send_final_event(e, &completion_tx_arc).await
     }
 
     /// Deletes a Salesforce bulk query job using the SDK.
@@ -320,7 +312,7 @@ impl EventHandler {
             source: flowgen_core::serde::Error::Serde { source: e },
         })?;
 
-        let mut e = EventBuilder::new()
+        let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(response.job_id)
@@ -328,24 +320,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        self.send_final_event(e, &completion_tx_arc).await
     }
 
     /// Aborts a running Salesforce bulk query job using the SDK.
@@ -372,7 +347,7 @@ impl EventHandler {
         })?;
 
         // Emit event with job response.
-        let mut e = EventBuilder::new()
+        let e = EventBuilder::new()
             .data(EventData::Json(resp))
             .subject(config.name.to_owned())
             .id(std::mem::take(&mut job_info.id))
@@ -380,24 +355,7 @@ impl EventHandler {
             .task_type(self.task_type)
             .build()?;
 
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        self.send_final_event(e, &completion_tx_arc).await
     }
 
     /// Retrieves Salesforce bulk query job results using the SDK.
@@ -417,7 +375,7 @@ impl EventHandler {
                 source: Box::new(e),
             })?;
 
-        // Collect the stream into bytes.
+        // Buffer the full CSV response for schema inference (requires seek).
         let mut csv_bytes = Vec::new();
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(|e| Error::Stream {
@@ -426,8 +384,6 @@ impl EventHandler {
             csv_bytes.extend_from_slice(&chunk);
         }
 
-        // Parse CSV using FromReader trait.
-        let cursor = Cursor::new(csv_bytes);
         let content_type = ContentType::Csv {
             batch_size: config.batch_size,
             has_header: config.has_header,
@@ -435,35 +391,28 @@ impl EventHandler {
             infer_schema_max_records: None,
         };
 
-        let mut events = EventData::from_reader(cursor, content_type)?;
+        let iter = EventData::from_reader(Cursor::new(csv_bytes), content_type)?;
 
-        // If no data rows, create empty batch.
-        if events.is_empty() {
-            let empty_batch = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(
-                arrow::datatypes::Schema::empty(),
-            ));
-            events.push(EventData::ArrowRecordBatch(empty_batch));
-        }
+        // Emit batches one at a time. Hold the previous event so we can
+        // attach completion_tx to the final one (count unknown upfront).
+        let mut pending_event: Option<(Event, usize)> = None;
 
-        // Emit all parsed events with job_id-based event IDs.
-        // Set event.id to job_id-batch_index for traceable, idempotent file naming.
-        // This allows correlating files back to Salesforce jobs while handling multiple batches.
-        let num_events = events.len();
-        for (batch_index, event_data) in events.into_iter().enumerate() {
-            let event_id = if num_events == 1 {
-                // Single batch: use job_id directly.
-                job_id.clone()
-            } else {
-                // Multiple batches: append batch index.
-                format!("{job_id}-{batch_index}")
-            };
-
+        for (batch_index, item_result) in iter.enumerate() {
+            let event_data = item_result?;
             let num_records = match &event_data {
                 EventData::ArrowRecordBatch(batch) => batch.num_rows(),
-                _ => 0,
+                _ => 1,
             };
 
-            let mut e = EventBuilder::new()
+            if let Some((prev, prev_records)) = pending_event.take() {
+                prev.send_with_logging(self.tx.as_ref())
+                    .context("num_records", prev_records)
+                    .await
+                    .map_err(|e| Error::SendMessage { source: e })?;
+            }
+
+            let event_id = format!("{job_id}-{batch_index}");
+            let e = EventBuilder::new()
                 .data(event_data)
                 .subject(config.name.to_owned())
                 .id(event_id)
@@ -471,28 +420,27 @@ impl EventHandler {
                 .task_type(self.task_type)
                 .build()?;
 
-            // Attach completion_tx to last event only (like iterate task).
-            if batch_index == num_events - 1 {
-                match self.tx {
-                    Some(_) => {
-                        e.completion_tx = completion_tx_arc.clone();
-                    }
-                    None => {
-                        // Leaf task: signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            arc.signal_completion(e.data_as_json().ok());
-                        }
-                    }
-                }
-            }
-
-            e.send_with_logging(self.tx.as_ref())
-                .context("num_records", num_records)
-                .await
-                .map_err(|e| Error::SendMessage { source: e })?;
+            pending_event = Some((e, num_records));
         }
 
-        Ok(())
+        // Send the final event (or an empty batch if no data) with completion_tx.
+        let final_event = match pending_event.take() {
+            Some((e, _num_records)) => e,
+            None => {
+                let empty_batch = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                ));
+                EventBuilder::new()
+                    .data(EventData::ArrowRecordBatch(empty_batch))
+                    .subject(config.name.to_owned())
+                    .id(job_id.clone())
+                    .task_id(self.current_task_id)
+                    .task_type(self.task_type)
+                    .build()?
+            }
+        };
+
+        self.send_final_event(final_event, &completion_tx_arc).await
     }
 }
 
