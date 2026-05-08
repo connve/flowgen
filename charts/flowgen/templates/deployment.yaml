@@ -65,6 +65,20 @@ spec:
           containerPort: {{ $worker.mcp_server.port }}
           protocol: TCP
         {{- end }}
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
         resources:
           {{- toYaml $worker.resources | nindent 12 }}
         volumeMounts:

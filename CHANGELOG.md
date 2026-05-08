@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.106.0
+
+### Infrastructure
+
+- HTTP server `/healthz` endpoint for Kubernetes readiness and
+  liveness probes. Pods that crash or haven't bound the listener
+  are removed from the Service endpoints, preventing traffic from
+  being routed to unhealthy replicas.
+
 ## 0.105.0
 
 ### Fixes

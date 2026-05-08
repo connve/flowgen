@@ -3,7 +3,7 @@
 //! Provides a shared HTTP server that allows multiple webhook processors
 //! to register routes dynamically before starting the server.
 
-use axum::{routing::MethodRouter, Router};
+use axum::{http::StatusCode, routing::MethodRouter, Router};
 use flowgen_core::auth::AuthProvider;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
@@ -14,6 +14,9 @@ const DEFAULT_HTTP_PORT: u16 = 3000;
 
 /// Default path prefix for all routes.
 const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
+
+/// Default health check endpoint path for Kubernetes readiness and liveness probes.
+const DEFAULT_HEALTH_PATH: &str = "/healthz";
 
 /// Errors that can occur during HTTP server operations.
 #[derive(thiserror::Error, Debug)]
@@ -167,7 +170,12 @@ impl HttpServer {
             .clone()
             .unwrap_or_else(|| DEFAULT_ROUTES_PREFIX.to_string());
 
-        let router = Router::new().nest(&base_path, api_router);
+        let router = Router::new()
+            .route(
+                DEFAULT_HEALTH_PATH,
+                axum::routing::get(|| async { StatusCode::OK }),
+            )
+            .nest(&base_path, api_router);
         let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
             .await
@@ -264,6 +272,7 @@ mod tests {
     #[test]
     fn test_constants() {
         assert_eq!(DEFAULT_HTTP_PORT, 3000);
+        assert_eq!(DEFAULT_HEALTH_PATH, "/healthz");
     }
 
     #[tokio::test]
