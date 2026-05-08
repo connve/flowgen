@@ -32,10 +32,11 @@ pub enum Error {
     ExpectedArray { key: String, got: String },
     #[error("Key '{}' not found in JSON object", _0)]
     KeyNotFound(String),
-    #[error("Expected JSON event data, got ArrowRecordBatch")]
-    ExpectedJsonGotArrowRecordBatch,
-    #[error("Expected JSON event data, got Avro")]
-    ExpectedJsonGotAvro,
+    #[error("Failed to convert event data to JSON: {source}")]
+    EventConversion {
+        #[source]
+        source: crate::event::Error,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
     #[error("Task failed after all retry attempts: {source}")]
@@ -132,13 +133,13 @@ impl EventHandler {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         crate::event::with_event_context(&Arc::clone(&event), async move {
-            let json_data = match &event.data {
-                EventData::Json(data) => data,
-                EventData::ArrowRecordBatch(_) => {
-                    return Err(Error::ExpectedJsonGotArrowRecordBatch)
-                }
-                EventData::Avro(_) => return Err(Error::ExpectedJsonGotAvro),
-            };
+            // Convert Arrow / Avro inputs to JSON so iterate can walk the rows
+            // uniformly — Arrow batches become JSON arrays of row objects,
+            // Avro records decode to their JSON shape. Pure-JSON inputs go
+            // through the same path; the inner clone is the price for one
+            // unified codepath.
+            let json_data =
+                Value::try_from(&event.data).map_err(|source| Error::EventConversion { source })?;
 
             let array = match &self.config.iterate_key {
                 Some(key) => {
@@ -155,7 +156,7 @@ impl EventHandler {
                         }
                     }
                 }
-                None => match json_data {
+                None => match &json_data {
                     Value::Array(arr) => arr.clone(),
                     _ => {
                         return Err(Error::ExpectedArray {
@@ -780,5 +781,72 @@ mod tests {
         let result = event_handler.handle(input_event).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::ExpectedArray { .. }));
+    }
+
+    /// Iterate accepts Arrow record batches by converting them to a JSON
+    /// array of row objects and walking the rows. This unblocks the common
+    /// ETL pattern where an upstream task (BigQuery storage read, MSSQL
+    /// query) emits Arrow and a downstream `iterate` walks the result set.
+    #[tokio::test]
+    async fn test_event_handler_iterate_arrow_record_batch() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            iterate_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let event_handler = EventHandler {
+            config,
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let id_array = Int64Array::from(vec![1, 2, 3]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(id_array)]).unwrap();
+
+        let input_event = Event {
+            data: EventData::ArrowRecordBatch(batch),
+            subject: "input.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+
+        let mut ids = Vec::new();
+        while let Some(output_event) = rx.recv().await {
+            match output_event.data {
+                EventData::Json(value) => {
+                    let id = value
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .expect("row should carry an id");
+                    ids.push(id);
+                }
+                _ => panic!("Expected JSON data"),
+            }
+            if ids.len() == 3 {
+                break;
+            }
+        }
+
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 }

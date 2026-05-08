@@ -1,7 +1,8 @@
 //! Buffer handling utilities and types.
 //!
-//! Provides abstractions for reading and writing different content formats and converting
-//! them to/from EventData variants.
+//! Provides centralized format parsing for reading and writing different content
+//! formats. The `FromReader` trait streams parsed items one at a time via a
+//! callback, so callers never collect all items in memory.
 use std::io::{Read, Seek, Write};
 
 /// Supported content types with their specific configuration options.
@@ -31,20 +32,23 @@ pub enum ContentType {
     },
 }
 
-/// Trait for converting readers to EventData based on content type.
+/// Boxed iterator that yields parsed items one at a time.
+pub type ReaderIter<T, E> = Box<dyn Iterator<Item = Result<T, E>> + Send>;
+
+/// Returns a lazy iterator that yields parsed items one at a time from a reader.
+///
+/// Only one parsed item lives in memory at a time alongside the raw bytes.
+/// Callers drive the iterator at their own pace and can perform async work
+/// (such as sending events downstream) between iterations.
 pub trait FromReader<R: Read + Seek> {
     /// Error type for conversion operations.
     type Error;
 
-    /// Converts a reader to a vector of EventData based on the specified content type.
-    ///
-    /// # Arguments
-    /// * `reader` - The reader to consume data from
-    /// * `content_type` - The type of content and its configuration
-    ///
-    /// # Returns
-    /// Vector of EventData instances parsed from the reader
-    fn from_reader(reader: R, content_type: ContentType) -> Result<Vec<Self>, Self::Error>
+    /// Parses a reader according to the content type, returning a lazy iterator.
+    fn from_reader(
+        reader: R,
+        content_type: ContentType,
+    ) -> Result<ReaderIter<Self, Self::Error>, Self::Error>
     where
         Self: Sized;
 }
@@ -55,12 +59,6 @@ pub trait ToWriter<W: Write> {
     type Error;
 
     /// Converts EventData to a writer using the data's native format.
-    ///
-    /// # Arguments
-    /// * `writer` - The writer to output data to
-    ///
-    /// # Returns
-    /// Result indicating success or failure
     fn to_writer(self, writer: W) -> Result<(), Self::Error>;
 }
 

@@ -36,11 +36,11 @@ use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info, warn, Instrument};
 
-// Event buffer size for MPSC channels. This needs to be large enough to handle
-// bursts from tasks like iterate that fan-out large arrays (e.g., 100k+ rows).
-// Set to 10M (~1.2 GB memory) to provide ample headroom for high-volume processing.
-// With MPSC, this buffer is distributed across N-1 channels for N tasks.
-const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000_000;
+// Per-edge event buffer capacity. Sized to absorb burst jitter (e.g. iterate
+// fan-out) without pinning the producer. When full the sender awaits — this is
+// intentional backpressure that bounds memory. Override per-worker via
+// `worker.event_buffer_size` in the config file.
+const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000;
 
 /// Errors that can occur during flow execution.
 #[derive(thiserror::Error, Debug)]

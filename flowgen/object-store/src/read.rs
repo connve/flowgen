@@ -107,6 +107,38 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    async fn flush_pending(
+        &self,
+        pending: Option<(Event, usize)>,
+        had_data: bool,
+        completion_tx_arc: &Option<flowgen_core::event::SharedCompletionTx>,
+    ) -> Result<(), Error> {
+        if let Some((mut last, last_n)) = pending {
+            match self.tx {
+                None => {
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        arc.signal_completion(last.data_as_json().ok());
+                    }
+                }
+                Some(_) => {
+                    last.completion_tx = completion_tx_arc.clone();
+                }
+            }
+            last.send_with_logging(self.tx.as_ref())
+                .context("num_records", last_n)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        } else if !had_data {
+            if let Some(arc) = completion_tx_arc.as_ref() {
+                let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                for _ in 0..upstream_leaf_share {
+                    arc.signal_completion(None);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Processes an event and writes it to the configured object store.
     #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -195,89 +227,63 @@ impl EventHandler {
                 }
             };
 
-            // Parse payload into event data based on type.
-            let event_data_list = match result.payload {
-                GetResultPayload::File(file, _) => {
-                    let reader = BufReader::new(file);
-                    EventData::from_reader(reader, content_type.clone())
-                        .map_err(|source| Error::EventBuilder { source })?
+            // Materialise a seekable reader from the payload.
+            // Both File and Stream paths need seek for CSV schema
+            // inference and Parquet random access.
+            let seekable_reader: BufReader<Cursor<bytes::Bytes>> = match result.payload {
+                GetResultPayload::File(mut file, _) => {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut file, &mut buf)
+                        .map_err(|source| Error::IO { source })?;
+                    BufReader::new(Cursor::new(bytes::Bytes::from(buf)))
                 }
                 GetResultPayload::Stream(mut stream) => {
-                    // Collect stream into bytes.
                     let mut buffer = BytesMut::new();
                     while let Some(chunk) = stream.next().await {
                         let chunk = chunk.map_err(|e| Error::ObjectStore { source: e })?;
                         buffer.extend_from_slice(&chunk);
                     }
-                    let bytes = buffer.freeze();
-
-                    // Parse bytes using Cursor for Seek support.
-                    let cursor = Cursor::new(bytes);
-                    let reader = BufReader::new(cursor);
-                    EventData::from_reader(reader, content_type.clone())
-                        .map_err(|source| Error::EventBuilder { source })?
+                    BufReader::new(Cursor::new(buffer.freeze()))
                 }
             };
 
-            // If parsing produced no events there is nothing to forward
-            // downstream. Release the source by signalling once per leaf
-            // reachable from this read's subtree, otherwise the source waits
-            // forever for completions that will never come.
-            if event_data_list.is_empty() {
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
-                    for _ in 0..upstream_leaf_share {
-                        arc.signal_completion(None);
-                    }
+            // Parse the file using the centralized format reader. The iterator
+            // yields one item at a time so only one parsed item lives in memory
+            // alongside the raw bytes.
+            let iter = EventData::from_reader(seekable_reader, content_type)
+                .map_err(|source| Error::EventBuilder { source })?;
+
+            let mut pending: Option<(Event, usize)> = None;
+            let mut had_data = false;
+
+            for item_result in iter {
+                let event_data = item_result.map_err(|source| Error::EventBuilder { source })?;
+                let num_records = match &event_data {
+                    EventData::ArrowRecordBatch(batch) => batch.num_rows(),
+                    _ => 1,
+                };
+                had_data = true;
+
+                if let Some((prev, prev_n)) = pending.take() {
+                    prev.send_with_logging(self.tx.as_ref())
+                        .context("num_records", prev_n)
+                        .await
+                        .map_err(|source| Error::SendMessage { source })?;
                 }
-            } else {
-                // Send events. Only the last event carries the completion
-                // signal so the source receives exactly one signal per leaf
-                // (delivered when the last event reaches each leaf), rather
-                // than draining the leaf-counter prematurely on early events.
-                let total_events = event_data_list.len();
-                for (idx, event_data) in event_data_list.into_iter().enumerate() {
-                    let num_records = match &event_data {
-                        flowgen_core::event::EventData::ArrowRecordBatch(batch) => {
-                            Some(batch.num_rows())
-                        }
-                        _ => None,
-                    };
 
-                    let mut e = EventBuilder::new()
-                        .subject(self.config.name.to_owned())
-                        .data(event_data)
-                        .task_id(self.task_id)
-                        .task_type(self.task_type)
-                        .build()
-                        .map_err(|source| Error::EventBuilder { source })?;
+                let e = EventBuilder::new()
+                    .subject(self.config.name.to_owned())
+                    .data(event_data)
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
 
-                    if idx == total_events - 1 {
-                        match self.tx {
-                            None => {
-                                // Leaf task: signal completion with the last
-                                // event's payload.
-                                if let Some(arc) = completion_tx_arc.as_ref() {
-                                    arc.signal_completion(e.data_as_json().ok());
-                                }
-                            }
-                            Some(_) => {
-                                // Pass through completion_tx on the last
-                                // event so downstream leaves signal exactly
-                                // once per branch.
-                                e.completion_tx = completion_tx_arc.clone();
-                            }
-                        }
-                    }
-
-                    let send = e.send_with_logging(self.tx.as_ref());
-                    let send = match num_records {
-                        Some(n) => send.context("num_records", n),
-                        None => send,
-                    };
-                    send.await.map_err(|source| Error::SendMessage { source })?;
-                }
+                pending = Some((e, num_records));
             }
+
+            self.flush_pending(pending, had_data, &completion_tx_arc)
+                .await?;
 
             // Delete file from object store if configured.
             if self.config.delete_after_read.unwrap_or(false) {

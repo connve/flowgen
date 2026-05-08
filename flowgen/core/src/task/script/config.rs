@@ -88,10 +88,10 @@ fn default_max_string_size() -> usize {
     16 * 1024 * 1024
 }
 fn default_max_array_size() -> usize {
-    100_000
+    1_000_000
 }
 fn default_max_map_size() -> usize {
-    100_000
+    1_000_000
 }
 
 /// Rhai engine resource limits.

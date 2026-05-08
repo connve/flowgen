@@ -267,9 +267,8 @@ pub struct WorkerConfig {
     pub ai_gateway: Option<AiGatewayOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
-    /// Optional event channel buffer size (defaults to 10M if not specified).
-    /// Controls memory allocation for the broadcast channel used for inter-task communication.
-    /// Approximate memory usage: buffer_size * 128 bytes (e.g., 10M = ~1.2 GB).
+    /// Per-edge event channel capacity in events (defaults to 10,000).
+    /// When full the upstream task blocks until downstream drains a slot.
     pub event_buffer_size: Option<usize>,
 }
 

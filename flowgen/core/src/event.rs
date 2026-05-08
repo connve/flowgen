@@ -569,16 +569,20 @@ impl EventBuilder {
     }
 }
 
-impl<R: Read + Seek> FromReader<R> for EventData {
+impl<R: Read + Seek + Send + 'static> FromReader<R> for EventData {
     type Error = Error;
 
-    fn from_reader(mut reader: R, content_type: ContentType) -> Result<Vec<Self>, Self::Error> {
+    fn from_reader(
+        mut reader: R,
+        content_type: ContentType,
+    ) -> Result<Box<dyn Iterator<Item = Result<Self, Self::Error>> + Send>, Self::Error> {
         match content_type {
             ContentType::Json => {
                 let data: Value =
                     serde_json::from_reader(reader).map_err(|e| Error::SerdeJson { source: e })?;
-                Ok(vec![EventData::Json(data)])
+                Ok(Box::new(std::iter::once(Ok(EventData::Json(data)))))
             }
+
             ContentType::Csv {
                 batch_size,
                 has_header,
@@ -587,8 +591,6 @@ impl<R: Read + Seek> FromReader<R> for EventData {
             } => {
                 let delimiter_byte = delimiter.unwrap_or(b',');
 
-                // Infer schema from rows. None scans all rows for accurate type detection.
-                // Sampling limited rows can infer incorrect types when early rows contain nulls.
                 let (schema, _) = Format::default()
                     .with_header(has_header)
                     .with_delimiter(delimiter_byte)
@@ -596,24 +598,20 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                     .map_err(|e| Error::Arrow { source: e })?;
                 reader.rewind().map_err(|e| Error::IO { source: e })?;
 
-                let csv = arrow::csv::ReaderBuilder::new(Arc::new(schema))
+                let csv_reader = arrow::csv::ReaderBuilder::new(Arc::new(schema))
                     .with_header(has_header)
                     .with_delimiter(delimiter_byte)
                     .with_batch_size(batch_size)
                     .build(reader)
                     .map_err(|e| Error::Arrow { source: e })?;
 
-                let mut events = Vec::new();
-                for batch in csv {
-                    events.push(EventData::ArrowRecordBatch(
-                        batch.map_err(|e| Error::Arrow { source: e })?,
-                    ));
-                }
-                Ok(events)
+                Ok(Box::new(csv_reader.map(|batch_result| {
+                    let batch = batch_result.map_err(|e| Error::Arrow { source: e })?;
+                    Ok(EventData::ArrowRecordBatch(batch))
+                })))
             }
 
             ContentType::Parquet { batch_size } => {
-                // Read all bytes into memory for Parquet (requires random access).
                 let mut buffer = Vec::new();
                 reader
                     .read_to_end(&mut buffer)
@@ -632,12 +630,10 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                         source: arrow::error::ArrowError::ExternalError(Box::new(e)),
                     })?;
 
-                let mut events = Vec::new();
-                for batch_result in parquet_reader {
+                Ok(Box::new(parquet_reader.map(|batch_result| {
                     let batch = batch_result.map_err(|e| Error::Arrow { source: e })?;
-                    events.push(EventData::ArrowRecordBatch(batch));
-                }
-                Ok(events)
+                    Ok(EventData::ArrowRecordBatch(batch))
+                })))
             }
 
             ContentType::Avro => {
@@ -645,19 +641,15 @@ impl<R: Read + Seek> FromReader<R> for EventData {
                 let schema = avro_reader.writer_schema().clone();
                 let schema_json = schema.canonical_form();
 
-                let mut events = Vec::new();
-                for record in avro_reader {
+                Ok(Box::new(avro_reader.map(move |record| {
                     let value = record.map_err(|e| Error::Avro { source: e })?;
                     let raw_bytes = apache_avro::to_avro_datum(&schema, value)
                         .map_err(|e| Error::Avro { source: e })?;
-
-                    let avro_data = AvroData {
+                    Ok(EventData::Avro(AvroData {
                         schema: schema_json.clone(),
                         raw_bytes,
-                    };
-                    events.push(EventData::Avro(avro_data));
-                }
-                Ok(events)
+                    }))
+                })))
             }
         }
     }
@@ -790,7 +782,11 @@ mod tests {
         let json_content = r#"{"name": "test", "value": 123}"#;
         let cursor = Cursor::new(json_content);
 
-        let events = EventData::from_reader(cursor, ContentType::Json).unwrap();
+        let events: Vec<EventData> = EventData::from_reader(cursor, ContentType::Json)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
         assert_eq!(events.len(), 1);
 
         match &events[0] {
@@ -831,8 +827,11 @@ mod tests {
         parquet_writer.close().unwrap();
 
         let cursor = Cursor::new(buffer);
-        let events =
-            EventData::from_reader(cursor, ContentType::Parquet { batch_size: 1024 }).unwrap();
+        let events: Vec<EventData> =
+            EventData::from_reader(cursor, ContentType::Parquet { batch_size: 1024 })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
 
         assert_eq!(events.len(), 1);
         match &events[0] {

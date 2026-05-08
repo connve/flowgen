@@ -20,7 +20,7 @@
 //! is built once at startup and never rebuilt. Bulk deregister-by-flow is
 //! enabled by the [`HasFlowName`] supertrait on `Registration`.
 
-use axum::Router;
+use axum::{http::StatusCode, Router};
 use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -47,6 +47,9 @@ pub enum Error {
         source: std::io::Error,
     },
 }
+
+/// Default health check endpoint path for Kubernetes readiness and liveness probes.
+const DEFAULT_HEALTH_PATH: &str = "/healthz";
 
 /// Marker trait for registrations that know which flow they belong to.
 ///
@@ -280,7 +283,10 @@ impl<D: Dispatcher> HttpServer<D> {
             path: self.path.clone(),
             extras: self.extras.clone(),
         };
-        let router = D::build_router(state);
+        let router = D::build_router(state).route(
+            DEFAULT_HEALTH_PATH,
+            axum::routing::get(|| async { StatusCode::OK }),
+        );
 
         info!(port, path = %self.path, "Starting HTTP server");
 

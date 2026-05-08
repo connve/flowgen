@@ -59,7 +59,7 @@ worker:
     max_attempts: 10
     initial_backoff: "1s"
 
-  event_buffer_size: 10000000
+  event_buffer_size: 10000
 
 telemetry:
   enabled: true
@@ -123,7 +123,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 | `http_server` | object | | HTTP server for `http_webhook` and `ai_gateway` tasks. |
 | `mcp_server` | object | | MCP server for `mcp_tool` tasks. |
 | `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/concepts/retry). |
-| `event_buffer_size` | int | `10000000` | Capacity of inter-task event channels. Each slot is roughly 128 bytes, so the default reserves ~1.2 GB across the worker. |
+| `event_buffer_size` | int | `10000` | Capacity of each inter-task event channel (in events). When full the upstream task blocks until the downstream task drains a slot. |
 
 ### `worker.http_server`
 
@@ -157,9 +157,9 @@ See [Retry](/docs/concepts/retry) for the two retry patterns (circuit breaker fo
 
 ### `worker.event_buffer_size`
 
-Each pair of connected tasks shares a bounded mpsc channel. `event_buffer_size` sets the channel capacity (in events). When the channel fills, the upstream task blocks until the downstream task drains — this is how backpressure propagates through the flow.
+Each pair of connected tasks shares a bounded mpsc channel. `event_buffer_size` sets the channel capacity (in events). When the channel fills, the upstream task blocks until the downstream task drains a slot — this is how backpressure propagates through the flow. No events are dropped.
 
-Tune it down for memory-constrained workers. Tune it up for high-throughput flows where producer/consumer rates fluctuate. The default (10M) is generous for most deployments.
+The default (10,000) is sufficient for most workloads. The buffer only needs to absorb the gap between producer and consumer processing rates; downstream throughput is determined by task processing speed, not channel depth. Increase it if you observe producer stalls in flows with very bursty fan-out patterns and fast consumers.
 
 ## `telemetry`
 

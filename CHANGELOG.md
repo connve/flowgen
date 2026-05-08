@@ -1,31 +1,6 @@
 # Changelog
 
-## 0.102.0
-
-### Highlights
-
-- **Hot-reload for cache-loaded flows.** A new watcher subscribes to flow
-  key changes in the system cache (NATS KV) and a reconciler debounces
-  rapid bursts (2 s window, 10 s ceiling) before reconciling the running
-  flow registry: starting new flows, stopping removed ones, and swapping
-  changed flows without interrupting unaffected flows. Replacement flows
-  are fully built and ready before the old flow is cancelled.
-- **Generic HTTP server** in `flowgen_core::http_server`. One reusable
-  `HttpServer<D>` parameterised by a `Dispatcher` implementation, used by
-  three peer roles: webhooks, MCP, and AI gateway. The axum router is
-  built once at startup and never rebuilt; hot-reload is `DashMap::insert
-  / retain` on a per-server dispatch table, with bulk
-  `deregister_flow(flow_name)` driven by a `HasFlowName` supertrait on
-  every registration type.
-- **AI gateway server** for OpenAI-compatible chat completions. Runs on
-  its own port (default 3002, path `/v1`) and exposes `POST
-  /v1/chat/completions` and `GET /v1/models`. Per-flow routing is driven
-  by the request body's `model` field (`<task-name>/<downstream-model>`),
-  matching the convention used by vLLM, Ollama, LiteLLM, and OpenRouter.
-- **Three independent listeners** (webhook on 3000, MCP on 3001, AI
-  gateway on 3002), each with its own port, path, credentials path, and
-  auth provider. The Helm chart now exposes a third Service for the AI
-  gateway.
+## 0.107.0
 
 ### Tasks
 
@@ -55,39 +30,45 @@
 
 ### Internal
 
-- `flowgen_core::http_server::HttpServer<D>` is now generic over a
-  `Dispatcher` whose associated types are a `Registration` (must impl
-  `HasFlowName`) and `Extras` (role-specific shared state, `()` for
-  webhook). Webhook, MCP, and AI gateway each own a dispatcher impl in
-  their crate.
+- Hot-reload for cache-loaded flows. Watcher subscribes to flow key
+  changes in the system cache (NATS KV), reconciler debounces rapid
+  bursts (2 s window, 10 s ceiling) before reconciling the running flow
+  registry. Replacement flows are fully built before the old flow is
+  cancelled.
+- Generic `HttpServer<D>` in `flowgen_core::http_server` parameterised
+  by a `Dispatcher` implementation. Used by webhooks, MCP, and AI
+  gateway. The axum router is built once at startup and never rebuilt;
+  hot-reload is `DashMap::insert / retain` on a per-server dispatch
+  table, with bulk `deregister_flow(flow_name)` driven by a
+  `HasFlowName` supertrait on every registration type.
+- AI gateway server for OpenAI-compatible chat completions on port 3002
+  (`/v1`). `POST /v1/chat/completions` and `GET /v1/models`. Per-flow
+  routing driven by the request body's `model` field
+  (`<task-name>/<downstream-model>`).
+- Three independent listeners (webhook 3000, MCP 3001, AI gateway 3002),
+  each with its own port, path, credentials path, and auth provider.
 - `flowgen_core::http_server::try_register` returns the rejected
   registration on key collision so callers can surface a hard error
-  instead of silently overwriting (used by MCP for tool name
-  uniqueness).
+  instead of silently overwriting (used by MCP for tool name uniqueness).
 - `flowgen_core::cache::Cache::watch(prefix)` extension method returns
   a stream of `WatchEvent` (`Put`/`Delete`). NATS KV implementation
   provided; backends that do not support watching return
   `WatchNotSupported`.
-- `flowgen_core::task::context::TaskContext` no longer carries
-  `http_server`, `mcp_server`, `registered_http_routes`, or
-  `registered_mcp_tools`. Server access is now per-processor via the
-  relevant `ProcessorBuilder` (`http_server`, `mcp_server`,
-  `ai_gateway_server`); deregistration is bulk-by-flow-name on each
-  server, not per-route tracking lists.
-- `flowgen_core::http_server` and the deleted
-  `flowgen_core::mcp_server` marker trait modules. The old
-  `register_route(path, Box<dyn Any + Send>)` indirection and runtime
-  downcast are gone.
+- `TaskContext` no longer carries `http_server`, `mcp_server`,
+  `registered_http_routes`, or `registered_mcp_tools`. Server access is
+  now per-processor via the relevant `ProcessorBuilder`; deregistration
+  is bulk-by-flow-name on each server.
+- Removed old `register_route(path, Box<dyn Any + Send>)` indirection
+  and runtime downcast. Deleted `flowgen_core::mcp_server` marker trait
+  module and dead `flowgen_core::mcp::registry` re-export.
 - New `flow::Error::LlmProxy` (renamed from `AiGateway`) and
-  `flow::Error::AiGatewayServerNotEnabled`.
-- New `app::Error::AiGatewayServerStart`. Removed `HttpServerDowncast`,
-  `McpServerDowncast` (no longer reachable).
+  `flow::Error::AiGatewayServerNotEnabled`. New
+  `app::Error::AiGatewayServerStart`. Removed `HttpServerDowncast`,
+  `McpServerDowncast`.
 - `FlowHandle` shrunk to `{cancellation_token, join_handle,
   from_filesystem}`.
-- `flowgen_app::reconciler` and `flowgen_app::watcher` are new modules
-  driving the hot-reload loop.
-- Removed the dead `flowgen_core::mcp::registry` re-export module.
-  Consumers should import directly from `flowgen_core::registry`.
+- `flowgen_app::reconciler` and `flowgen_app::watcher` modules driving
+  the hot-reload loop.
 
 ### Documentation
 
@@ -110,6 +91,129 @@
 - `flowgen_core` gains `axum` (for the generic `HttpServer<D>`).
 - `flowgen_http` gains `bytes` and `tokio-util`.
 - `flowgen_mcp` gains a path dependency on `flowgen_http`.
+
+## 0.106.0
+
+### Infrastructure
+
+- HTTP server `/healthz` endpoint for Kubernetes readiness and
+  liveness probes. Pods that crash or haven't bound the listener
+  are removed from the Service endpoints, preventing traffic from
+  being routed to unhealthy replicas.
+
+## 0.105.0
+
+### Fixes
+
+- `salesforce_bulkapi_query_job` no longer buffers all parsed Arrow
+  RecordBatches in memory before emitting. Batches are now streamed
+  one at a time via the centralized `FromReader` iterator, keeping
+  peak memory to CSV bytes + one batch instead of CSV bytes + all
+  batches. Fixes OOM kills on large Salesforce Bulk API exports
+  (600k+ rows).
+
+- `object_store` read now streams all multi-record formats (CSV,
+  Parquet, Avro) one item at a time instead of collecting everything
+  in memory before emitting. Uses the same `FromReader` iterator.
+
+### Internal
+
+- `FromReader` trait returns a lazy `ReaderIter` (boxed iterator)
+  instead of `Vec`. Format-specific parsing (CSV, Parquet, Avro, JSON)
+  stays centralized in `flowgen_core::buffer`; callers drive the
+  iterator and can perform async sends between items. No call site
+  collects all items in memory.
+
+- `salesforce_bulkapi_query_job` completion handling extracted into
+  `send_final_event` helper, removing five duplicated completion_tx
+  wiring blocks across create, get, delete, abort, and get_results
+  operations.
+
+## 0.104.0
+
+### Breaking
+
+- **`event_buffer_size` default lowered from 10,000,000 to 10,000.**
+  The previous 10M default dated from an earlier single-channel architecture
+  and effectively disabled backpressure, allowing flows to consume
+  unbounded memory under load. The new default caps each inter-task channel
+  at 10,000 events; when full the upstream task blocks until the downstream
+  task drains a slot. No events are dropped. Flows that previously relied
+  on the large buffer as a shock absorber will now apply backpressure
+  sooner, which bounds memory at the cost of brief producer stalls during
+  bursts. Override per-worker via `worker.event_buffer_size` in the config
+  file if your workload requires a larger buffer.
+
+### Tasks
+
+- `http_request` supports a new `response_type` field (`json` | `bytes` |
+  `text`, default `json`). Set `response_type: bytes` to download binary
+  payloads (archives, images, etc.) as `EventData::Bytes`; set
+  `response_type: text` to capture plain-text responses as a JSON string.
+
+- New `EventData::Bytes` variant for binary payloads. Tasks that need raw
+  bytes pattern-match on the variant directly. The JSON projection (used
+  by templating and logging) returns `{"$bytes": true, "len": N}` — the
+  actual payload is never inlined into JSON.
+
+- `object_store` write accepts `EventData::Bytes` input and writes raw
+  bytes. Auto-detection maps bytes to `format: bytes` with a `.bin`
+  extension; explicit `format: bytes` is also supported.
+
+## 0.103.0
+
+### Tasks
+
+- `http_request` now transparently decompresses gzip-, brotli-, and
+  deflate-encoded responses (`Content-Encoding: gzip`, `br`, `deflate`).
+  The client sends `Accept-Encoding: gzip, br, deflate` on every outbound
+  request; servers that do not compress ignore the header. Previously the
+  client read raw compressed bytes as text and silently corrupted any
+  response a server compressed. No config change.
+
+## 0.102.0
+
+### Breaking
+
+- **Top-level config key `flow_resources` is `resources`** as of
+  0.101.0. The field was first introduced as `flow_resources` (PR
+  #146) and renamed to `resources` (PR #147) without a release
+  note, which silently broke any tenant whose `config.yaml` still
+  used the older name — resource-loading tasks (`bulkapi`, `mssql`,
+  `gcp_bigquery_*`) fail with "Resource path is not configured".
+  Tenants on `flow_resources:` must rename it to `resources:` in
+  their inline config and any external config ConfigMaps. No
+  backward-compatibility alias is provided.
+
+### Tasks
+
+- `iterate` now accepts `EventData::ArrowRecordBatch` and
+  `EventData::Avro` inputs by converting them to a JSON array of
+  row objects internally before walking the rows. Previously the
+  task rejected non-JSON inputs with `ExpectedJsonGotArrowRecordBatch`
+  / `ExpectedJsonGotAvro`, breaking ETL chains where an upstream
+  task (BigQuery storage read, MSSQL query) emits Arrow and a
+  downstream `iterate` walks the result set. The two old error
+  variants are removed; conversion failures surface via the new
+  `EventConversion` variant.
+
+### Configuration
+
+- `script::config::RhaiLimits` defaults raised: `max_map_size` and
+  `max_array_size` go from `100_000` to `1_000_000`. The previous
+  defaults flatten nested entries, so a script processing N rows ×
+  ~20 fields hits the cap at N ≈ 5k — well within normal ETL batch
+  sizes. Operators on tight memory budgets can override via the
+  `limits` block on individual `script` tasks; the per-script
+  override semantics are unchanged.
+
+### Internal
+
+- New unit test `test_rhai_string_suffix_strip_lowercase` covering
+  the `split` + `ends_with` + `len` + `sub_string` + `to_lower`
+  pattern used by Salesforce CDC routing scripts. Locks the
+  contract so a Rhai dependency bump that changes string-op
+  semantics fails fast in CI.
 
 ## 0.101.0
 
