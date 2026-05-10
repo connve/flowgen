@@ -506,14 +506,19 @@ pub struct Flow {
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// An optional shared AI gateway server, passed in from the main application.
     ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-    /// Shared cache, passed in from the main application.
+    /// Runtime cache for task processors (replay state, etc.).
     cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// System cache for leases and peer discovery. Falls back to `cache` when
+    /// no distributed cache is configured.
+    system_cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional resource loader for loading external files, passed in from the main application.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Optional peer registry for flow distribution via consistent hashing.
+    peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
@@ -603,14 +608,18 @@ impl Flow {
             return Err(Error::McpServerNotEnabled);
         }
 
-        // Create an Executor with the cache for lease management.
         let lease_config = flowgen_core::executor::LeaseConfig::default();
-        let executor = flowgen_core::executor::Executor::new(self.cache.clone(), lease_config)?;
+        let executor =
+            flowgen_core::executor::Executor::new(self.system_cache.clone(), lease_config)?;
         let executor = Arc::new(executor);
 
-        let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
-            .executor(executor)
-            .build()?;
+        let mut builder = flowgen_core::task::manager::TaskManagerBuilder::new().executor(executor);
+
+        if let Some(ref registry) = self.peer_registry {
+            builder = builder.peer_registry(Arc::clone(registry));
+        }
+
+        let task_manager = builder.build()?;
         let task_manager = Arc::new(task_manager.start().await);
 
         self.task_manager = Some(task_manager);
@@ -1739,14 +1748,18 @@ pub struct FlowBuilder {
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// Optional shared AI gateway server.
     ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-    /// Shared cache instance.
+    /// Runtime cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+    /// System cache for leases and peer discovery.
+    system_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration.
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Resource loader for loading external files.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Optional peer registry for flow distribution.
+    peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
 }
 
 impl FlowBuilder {
@@ -1782,9 +1795,15 @@ impl FlowBuilder {
         self
     }
 
-    /// Sets the shared cache instance.
+    /// Sets the runtime cache instance.
     pub fn cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Sets the system cache for leases and peer discovery.
+    pub fn system_cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
+        self.system_cache = Some(cache);
         self
     }
 
@@ -1809,6 +1828,12 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets the peer registry for flow distribution via consistent hashing.
+    pub fn peer_registry(mut self, registry: Arc<flowgen_core::peer::PeerRegistry>) -> Self {
+        self.peer_registry = Some(registry);
+        self
+    }
+
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -1823,10 +1848,16 @@ impl FlowBuilder {
             ai_gateway_server: self.ai_gateway_server,
             cache: self
                 .cache
+                .clone()
+                .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
+            system_cache: self
+                .system_cache
+                .or(self.cache)
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
+            peer_registry: self.peer_registry,
             task_manager: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
             last_task_context: Arc::new(std::sync::Mutex::new(None)),

@@ -21,6 +21,8 @@ pub mod event;
 pub mod executor;
 /// Generic HTTP server with role-specific dispatchers (webhook / MCP / AI gateway).
 pub mod http_server;
+/// Peer discovery and flow distribution via consistent hashing.
+pub mod peer;
 /// NsJail sandbox for secure script execution.
 pub mod nsjail {
     /// Sandbox executor using nsjail for process isolation.

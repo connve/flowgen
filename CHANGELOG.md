@@ -69,6 +69,21 @@
   from_filesystem}`.
 - `flowgen_app::reconciler` and `flowgen_app::watcher` modules driving
   the hot-reload loop.
+- `flowgen_core::peer::PeerRegistry` for automatic pod discovery and
+  flow distribution via consistent hashing. Each pod registers itself
+  in the system cache under a TTL-backed key (`peers.{identity}`),
+  renewed every 10 seconds. Before racing for a flow lease, the task
+  manager hashes the flow name against the sorted peer list to
+  determine the preferred owner. Non-preferred pods defer their
+  acquisition attempt by 5 seconds, distributing leader-elected flows
+  evenly across pods instead of concentrating them on the fastest
+  starter.
+- Two-bucket cache architecture: `runtime_cache` (`flowgen_cache`
+  bucket) for task replay state, `system_cache` (`flowgen_system`
+  bucket) for flow definitions, resources, leases, and peer discovery.
+  The system cache is initialized once at startup and shared across
+  all consumers. Single-pod deployments without a distributed cache
+  fall back to the in-memory runtime cache for both roles.
 
 ### Documentation
 

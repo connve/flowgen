@@ -333,8 +333,8 @@ fn default_flows_cache_prefix() -> String {
     "flowgen.flows".to_string()
 }
 
-/// Default metadata bucket name for flow/resource loading.
-fn default_system_db_name() -> String {
+/// Default system bucket name for flow definitions, resources, leases, and peer discovery.
+pub(crate) fn default_system_db_name() -> String {
     "flowgen_system".to_string()
 }
 

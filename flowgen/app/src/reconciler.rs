@@ -64,13 +64,25 @@ pub enum Error {
 
 /// All dependencies the reconciler needs to build and start replacement flows.
 pub struct ReconcilerContext {
+    /// Runtime cache passed to each flow's task processors.
     pub cache: Arc<dyn Cache>,
+    /// System cache for leases and peer discovery.
+    pub system_cache: Arc<dyn Cache>,
+    /// Global application configuration.
     pub app_config: Arc<crate::config::AppConfig>,
+    /// Optional resource loader for external files (SQL, JSON, etc.).
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Shared webhook HTTP server for registering webhook routes.
     pub http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    /// Shared MCP server for registering tool endpoints.
     pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    /// Shared AI gateway server for registering LLM proxy endpoints.
     pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Peer registry for flow distribution via consistent hashing.
+    pub peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
+    /// Flow names loaded from the filesystem; these are never overwritten by cache events.
     pub filesystem_flow_names: Arc<HashSet<String>>,
+    /// Live registry of running flows, keyed by flow name.
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
 }
 
@@ -359,7 +371,8 @@ fn build_flow(
     let flow_name = flow_config.flow.name.clone();
     let mut builder = crate::flow::FlowBuilder::new()
         .config(Arc::new(flow_config))
-        .cache(Arc::clone(&ctx.cache));
+        .cache(Arc::clone(&ctx.cache))
+        .system_cache(Arc::clone(&ctx.system_cache));
 
     if let Some(server) = &ctx.http_server {
         builder = builder.http_server(Arc::clone(server));
@@ -385,6 +398,9 @@ fn build_flow(
     }
     if let Some(loader) = &ctx.resource_loader {
         builder = builder.resource_loader(loader.clone());
+    }
+    if let Some(registry) = &ctx.peer_registry {
+        builder = builder.peer_registry(Arc::clone(registry));
     }
 
     builder.build().map_err(|source| Error::FlowBuild {

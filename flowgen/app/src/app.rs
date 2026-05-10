@@ -451,32 +451,44 @@ impl App {
         // On name collisions the filesystem entry wins, which keeps locally
         // mounted bootstrap flows from being silently overridden by a stale
         // cache entry with the same name.
+        // Initialize the system cache once, shared across flow loading, resource
+        // loading, leases, and peer discovery. Falls back to None when no
+        // distributed cache is configured (single-pod / in-memory mode).
+        let system_cache: Option<Arc<dyn flowgen_core::cache::Cache>> = if app_config
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.enabled)
+        {
+            let db_name = match app_config.flows.cache.as_ref() {
+                Some(c) => c.db_name.clone(),
+                None => crate::config::default_system_db_name(),
+            };
+            match Self::init_system_cache(&app_config, &db_name) {
+                Ok(cache) => {
+                    info!(bucket = %db_name, "Initialized system cache.");
+                    Some(cache)
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to initialize system cache. Continuing without.");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let filesystem_flows = Self::load_flows_from_filesystem(&app_config)?;
         info!("Loaded {} flows from filesystem.", filesystem_flows.len());
 
-        let (cache_flows, system_cache) = match app_config.flows.cache.as_ref() {
-            Some(cache_opts) if cache_opts.enabled => {
-                match Self::init_system_cache(&app_config, &cache_opts.db_name) {
-                    Ok(cache) => {
-                        info!(
-                            "Initialized system cache for flow loading on bucket '{}'.",
-                            cache_opts.db_name
-                        );
-                        let configs =
-                            Self::load_flows_from_cache(cache.as_ref(), &cache_opts.prefix).await?;
-                        info!("Loaded {} flows from cache.", configs.len());
-                        (configs, Some((cache, cache_opts.clone())))
-                    }
-                    Err(e) => {
-                        error!(
-                            error = %e,
-                            "Failed to initialize system cache. Continuing with filesystem flows only."
-                        );
-                        (Vec::new(), None)
-                    }
-                }
+        let flow_cache_opts = app_config.flows.cache.clone();
+        let cache_flows = match (&system_cache, flow_cache_opts.as_ref()) {
+            (Some(cache), Some(cache_opts)) if cache_opts.enabled => {
+                let configs =
+                    Self::load_flows_from_cache(cache.as_ref(), &cache_opts.prefix).await?;
+                info!("Loaded {} flows from cache.", configs.len());
+                configs
             }
-            _ => (Vec::new(), None),
+            _ => Vec::new(),
         };
 
         let mut flow_configs = filesystem_flows;
@@ -643,7 +655,7 @@ impl App {
                 None
             };
 
-        let cache: Arc<dyn flowgen_core::cache::Cache> =
+        let runtime_cache: Arc<dyn flowgen_core::cache::Cache> =
             if let Some(cache_config) = &app_config.cache {
                 if cache_config.enabled {
                     let db_name = cache_config
@@ -687,6 +699,26 @@ impl App {
                     as Arc<dyn flowgen_core::cache::Cache>
             };
 
+        // System cache for leases, peer discovery, and flow coordination.
+        // Falls back to the runtime cache in single-pod mode.
+        let lease_cache = match &system_cache {
+            Some(sc) => Arc::clone(sc),
+            None => Arc::clone(&runtime_cache),
+        };
+
+        // Peer registry for distributing leader-elected flows across pods
+        // via consistent hashing. Uses the system cache for peer heartbeats.
+        let holder_identity = flowgen_core::executor::LeaseConfig::default().holder_identity;
+        let peer_registry = Arc::new(flowgen_core::peer::PeerRegistry::new(
+            Arc::clone(&lease_cache),
+            holder_identity,
+        ));
+        if let Err(e) = peer_registry.register().await {
+            warn!("Failed to register peer: {}", e);
+        }
+        let peer_renewal_cancel = tokio_util::sync::CancellationToken::new();
+        let peer_renewal_handle = peer_registry.spawn_renewal(peer_renewal_cancel.clone());
+
         // Build the resource loader. Filesystem and cache sources are
         // independent: configure either, both, or neither. When both are
         // active, the loader tries the filesystem first and falls back to
@@ -698,31 +730,30 @@ impl App {
 
                 let cache_source = match resource_options.cache.as_ref() {
                     Some(rc) if rc.enabled => {
-                        // Reuse the system cache initialised for flow loading
-                        // when the bucket matches; otherwise spin up a fresh one.
-                        let cache = if system_cache.as_ref().map(|(_, opts)| opts.db_name.as_str())
-                            == Some(&rc.db_name)
+                        let sc = if system_cache.is_some()
+                            && flow_cache_opts.as_ref().map(|o| o.db_name.as_str())
+                                == Some(&rc.db_name)
                         {
-                            system_cache.as_ref().map(|(c, _)| c.clone())
+                            system_cache.clone()
                         } else {
                             match Self::init_system_cache(&app_config, &rc.db_name) {
-                                Ok(cache) => {
+                                Ok(c) => {
                                     info!(
-                                        "Initialized system cache for resource loading on bucket '{}'.",
-                                        rc.db_name
+                                        bucket = %rc.db_name,
+                                        "Initialized dedicated cache for resource loading."
                                     );
-                                    Some(cache)
+                                    Some(c)
                                 }
                                 Err(e) => {
                                     warn!(
                                         error = %e,
-                                        "Failed to init resource system cache. Continuing with filesystem only."
+                                        "Failed to init resource cache. Continuing with filesystem only."
                                     );
                                     None
                                 }
                             }
                         };
-                        cache.map(|c| (c, rc.prefix.clone()))
+                        sc.map(|c| (c, rc.prefix.clone()))
                     }
                     _ => None,
                 };
@@ -751,7 +782,8 @@ impl App {
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
-                .cache(Arc::clone(&cache));
+                .cache(Arc::clone(&runtime_cache))
+                .system_cache(Arc::clone(&lease_cache));
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);
@@ -777,6 +809,8 @@ impl App {
             if let Some(ref loader) = resource_loader {
                 flow_builder = flow_builder.resource_loader(loader.clone());
             }
+
+            flow_builder = flow_builder.peer_registry(Arc::clone(&peer_registry));
 
             match flow_builder.build() {
                 Ok(flow) => flows.push(flow),
@@ -929,36 +963,40 @@ impl App {
         // Spawn the hot-reload watcher and reconciler if the system cache supports watching.
         // The watcher subscribes to flow key changes and the reconciler applies them.
         let watcher_shutdown = tokio_util::sync::CancellationToken::new();
-        if let Some((cache, cache_opts)) = &system_cache {
-            let prefix = cache_opts.prefix.clone();
-            let (watch_tx, watch_rx) =
-                tokio::sync::mpsc::channel::<flowgen_core::cache::WatchEvent>(256);
+        if let (Some(cache), Some(cache_opts)) = (&system_cache, &flow_cache_opts) {
+            if cache_opts.enabled {
+                let prefix = cache_opts.prefix.clone();
+                let (watch_tx, watch_rx) =
+                    tokio::sync::mpsc::channel::<flowgen_core::cache::WatchEvent>(256);
 
-            let watcher_handle = crate::watcher::spawn(
-                Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>,
-                prefix.clone(),
-                watch_tx,
-                watcher_shutdown.clone(),
-            );
-            background_handles.push(watcher_handle);
+                let watcher_handle = crate::watcher::spawn(
+                    Arc::clone(cache),
+                    prefix.clone(),
+                    watch_tx,
+                    watcher_shutdown.clone(),
+                );
+                background_handles.push(watcher_handle);
 
-            let reconciler_ctx = crate::reconciler::ReconcilerContext {
-                cache: Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>,
-                app_config: Arc::clone(&app_config),
-                resource_loader: resource_loader.clone(),
-                http_server: http_server.clone(),
-                mcp_server: mcp_server.clone(),
-                ai_gateway_server: ai_gateway_server.clone(),
-                filesystem_flow_names: Arc::new(filesystem_flow_names.clone()),
-                flow_registry: Arc::clone(&flow_registry),
-            };
-            let reconciler_shutdown = watcher_shutdown.clone();
-            let reconciler_handle = tokio::spawn(async move {
-                crate::reconciler::run(watch_rx, reconciler_ctx, reconciler_shutdown).await;
-            });
-            background_handles.push(reconciler_handle);
+                let reconciler_ctx = crate::reconciler::ReconcilerContext {
+                    cache: Arc::clone(&runtime_cache),
+                    system_cache: Arc::clone(&lease_cache),
+                    app_config: Arc::clone(&app_config),
+                    resource_loader: resource_loader.clone(),
+                    http_server: http_server.clone(),
+                    mcp_server: mcp_server.clone(),
+                    ai_gateway_server: ai_gateway_server.clone(),
+                    peer_registry: Some(Arc::clone(&peer_registry)),
+                    filesystem_flow_names: Arc::new(filesystem_flow_names.clone()),
+                    flow_registry: Arc::clone(&flow_registry),
+                };
+                let reconciler_shutdown = watcher_shutdown.clone();
+                let reconciler_handle = tokio::spawn(async move {
+                    crate::reconciler::run(watch_rx, reconciler_ctx, reconciler_shutdown).await;
+                });
+                background_handles.push(reconciler_handle);
 
-            info!(prefix = %prefix, "Hot-reload watcher and reconciler started.");
+                info!(prefix = %prefix, "Hot-reload watcher and reconciler started.");
+            }
         }
 
         // Wait for shutdown signal. In production, flows run indefinitely until shutdown.
@@ -998,6 +1036,13 @@ impl App {
             if let Err(e) = task_manager.shutdown().await {
                 warn!("Failed to shutdown task manager: {}", e);
             }
+        }
+
+        // Stop peer heartbeat and deregister so other pods see us gone immediately.
+        peer_renewal_cancel.cancel();
+        peer_renewal_handle.abort();
+        if let Err(e) = peer_registry.deregister().await {
+            warn!("Failed to deregister peer: {}", e);
         }
 
         info!("Shutdown complete, all flows stopped and leases released");
