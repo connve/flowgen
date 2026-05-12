@@ -98,11 +98,11 @@ Distributed cache backend. When omitted, flowgen uses an in-memory cache (single
 | `history` | int | `10` | Historical entries retained per key. Only applies when the bucket is created. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete/purge tombstones. Required for per-key TTLs on cache entries to work. |
 
-If NATS is configured but unreachable, flowgen falls back to in-memory automatically and logs a warning. See [Caching](/docs/concepts/caching).
+If NATS is configured but unreachable, flowgen falls back to in-memory automatically and logs a warning. See [Caching](/docs/flowgen/concepts/caching).
 
 ## `resources`
 
-External resource loading for SQL queries, prompts, scripts, schemas. See [Resources](/docs/concepts/resources).
+External resource loading for SQL queries, prompts, scripts, schemas. See [Resources](/docs/flowgen/concepts/resources).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -122,7 +122,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 |---|---|---|---|
 | `http_server` | object | | HTTP server for `http_webhook` and `ai_gateway` tasks. |
 | `mcp_server` | object | | MCP server for `mcp_tool` tasks. |
-| `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/concepts/retry). |
+| `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/flowgen/concepts/retry). |
 | `event_buffer_size` | int | `10000` | Capacity of each inter-task event channel (in events). When full the upstream task blocks until the downstream task drains a slot. |
 
 ### `worker.http_server`
@@ -132,8 +132,8 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 | `enabled` | bool | required | Required for `http_webhook` and `ai_gateway` tasks to start. |
 | `port` | int | `3000` | Listening port. |
 | `path` | string | | Optional path prefix applied to every registered route. |
-| `credentials_path` | string | | Worker-level shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/concepts/credentials). |
-| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/concepts/auth). |
+| `credentials_path` | string | | Worker-level shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |
+| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
 ### `worker.mcp_server`
 
@@ -153,7 +153,7 @@ Sets the default retry policy for every task on this worker. Individual tasks ca
 | `max_attempts` | int / null | `10` | Maximum attempts before giving up. `null` for infinite retries. |
 | `initial_backoff` | duration | `1s` | Delay before first retry. Each subsequent retry doubles, with jitter. |
 
-See [Retry](/docs/concepts/retry) for the two retry patterns (circuit breaker for processors, infinite reconnect for subscribers).
+See [Retry](/docs/flowgen/concepts/retry) for the two retry patterns (circuit breaker for processors, infinite reconnect for subscribers).
 
 ### `worker.event_buffer_size`
 
@@ -163,7 +163,7 @@ The default (10,000) is sufficient for most workloads. The buffer only needs to 
 
 ## `telemetry`
 
-OpenTelemetry export over OTLP/gRPC. See [Telemetry](/docs/concepts/telemetry).
+OpenTelemetry export over OTLP/gRPC. See [Telemetry](/docs/flowgen/concepts/telemetry).
 
 | Field | Type | Default | Description |
 |---|---|---|---|

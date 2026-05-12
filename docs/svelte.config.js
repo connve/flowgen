@@ -19,6 +19,9 @@ const config = {
 	extensions: ['.svelte', '.svx', '.md'],
 	preprocess: [mdsvex(mdsvexOptions)],
 	kit: {
+		paths: {
+			base: '/docs/flowgen'
+		},
 		adapter: adapter({
 			pages: 'build',
 			assets: 'build',

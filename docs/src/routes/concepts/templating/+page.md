@@ -107,7 +107,7 @@ Numeric and boolean fields (such as `port`, `enabled`, `max_results`) accept tem
 
 ## Templates and resource files
 
-Resource-loaded content (SQL queries, prompts, HTML templates) is also rendered. See [Resources](/docs/concepts/resources) for inline-vs-file-vs-cache trade-offs.
+Resource-loaded content (SQL queries, prompts, HTML templates) is also rendered. See [Resources](/docs/flowgen/concepts/resources) for inline-vs-file-vs-cache trade-offs.
 
 ```yaml
 - gcp_bigquery_query:

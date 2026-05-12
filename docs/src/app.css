@@ -1,21 +1,9 @@
 @import 'tailwindcss';
-@plugin 'daisyui' {
-	themes: connve-light --default;
-}
+@plugin 'daisyui';
+@import '$lib/theme.css';
 
 @theme {
-	--color-primary: #006B55;
-	--color-primary-content: oklch(93% .034 272.788);
-	--color-secondary: oklch(65% .241 354.308);
-	--color-accent: oklch(77% .152 181.912);
-	--color-neutral: oklch(14% .005 285.823);
-	--color-base-100: oklch(100% 0 0);
-	--color-base-200: oklch(98% .003 247.858);
-	--color-base-300: oklch(95% 0 0);
-	--color-info: oklch(74% .16 232.661);
-	--color-success: oklch(76% .177 163.223);
-	--color-warning: oklch(82% .189 84.429);
-	--color-error: oklch(71% .194 13.428);
+	--color-primary: #006b55;
 }
 
 /* Prose styling for markdown content. */

@@ -102,5 +102,5 @@ Spans are exported in batches as they end — there is no separate trace interva
 
 ## Related
 
-- [Flows](/docs/concepts/flows) — how task wiring affects span hierarchy.
-- [Retry](/docs/concepts/retry) — retried calls produce one `task.handle` span per attempt with the retry attempt number in attributes.
+- [Flows](/docs/flowgen/concepts/flows) — how task wiring affects span hierarchy.
+- [Retry](/docs/flowgen/concepts/retry) — retried calls produce one `task.handle` span per attempt with the retry attempt number in attributes.

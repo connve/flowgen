@@ -4,7 +4,7 @@ This guide walks you through creating your first flowgen flow.
 
 ## Prerequisites
 
-- Flowgen binary ([Installation](/docs/getting-started/installation))
+- Flowgen binary ([Installation](/docs/flowgen/getting-started/installation))
 - NATS JetStream (optional — for distributed cache, messaging, leader election)
 
 ## Your first flow
@@ -103,7 +103,7 @@ worker:
   # event_buffer_size: 10000
 ```
 
-Without cache configured, flowgen uses an in-memory cache (single-node). See [Caching](/docs/concepts/caching) for details.
+Without cache configured, flowgen uses an in-memory cache (single-node). See [Caching](/docs/flowgen/concepts/caching) for details.
 
 ## Running
 
@@ -123,6 +123,6 @@ Flowgen discovers all YAML files in the configured flows directory and starts pr
 
 ## Next steps
 
-- Learn about [Flows](/docs/concepts/flows) and how tasks connect.
-- Explore [NATS JetStream](/docs/nats/subscriber) for durable message consumption.
-- See [Script (Rhai)](/docs/core/script) for the full scripting API.
+- Learn about [Flows](/docs/flowgen/concepts/flows) and how tasks connect.
+- Explore [NATS JetStream](/docs/flowgen/nats/subscriber) for durable message consumption.
+- See [Script (Rhai)](/docs/flowgen/core/script) for the full scripting API.

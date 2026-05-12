@@ -2,7 +2,7 @@
 
 Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server). Auth is configured once at the worker level and shared across every HTTP-facing task on that worker. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
 
-User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/concepts/credentials) for the distinction.
+User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/flowgen/concepts/credentials) for the distinction.
 
 ## Providers
 

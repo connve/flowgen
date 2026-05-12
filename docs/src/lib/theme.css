@@ -1,0 +1,16 @@
+@plugin 'daisyui/theme' {
+	name: 'mytheme';
+	default: true;
+	prefersdark: false;
+	color-scheme: light;
+
+	--color-primary: #006b55;
+	--color-secondary: #007600;
+	--color-accent: #00e168;
+	--color-neutral: #0e271b;
+	--color-base-100: #fffef9;
+	--color-info: #007cf3;
+	--color-success: #00ffd1;
+	--color-warning: #ff9804;
+	--color-error: #cf3450;
+}

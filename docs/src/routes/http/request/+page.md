@@ -137,4 +137,4 @@ HTTP client applies a few transparent transforms:
 
 If the server returns 4xx/5xx, the task fails with the status code and
 body. 4xx (other than 429) is permanent and skips retries; 429, 5xx, and
-network errors are retriable per the task's [retry config](/docs/concepts/retry).
+network errors are retriable per the task's [retry config](/docs/flowgen/concepts/retry).

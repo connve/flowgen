@@ -51,7 +51,7 @@ Processors receive events, do something with them, and emit events to the next t
 
 ## Task wiring
 
-By default, tasks are wired sequentially — each task receives from the previous task and sends to the next. Linear chains, fan-out, fan-in, and end-to-end acknowledgement semantics are covered in [Flows](/docs/concepts/flows).
+By default, tasks are wired sequentially — each task receives from the previous task and sends to the next. Linear chains, fan-out, fan-in, and end-to-end acknowledgement semantics are covered in [Flows](/docs/flowgen/concepts/flows).
 
 ## Common configuration
 

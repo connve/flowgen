@@ -89,7 +89,7 @@ Individual `http_webhook` tasks override the worker default by setting their own
 
 ## User-level authentication is separate
 
-`credentials_path` authenticates the task itself (e.g., the bearer token for incoming webhook requests). User-level authentication — JWT, OIDC, session tokens — happens via the worker's `auth` configuration. See [Authentication](/docs/concepts/auth).
+`credentials_path` authenticates the task itself (e.g., the bearer token for incoming webhook requests). User-level authentication — JWT, OIDC, session tokens — happens via the worker's `auth` configuration. See [Authentication](/docs/flowgen/concepts/auth).
 
 The two compose: a webhook can require a worker-level shared secret (via `credentials_path`) **and** a user-level JWT (via `auth.required: true`). Both checks must pass.
 

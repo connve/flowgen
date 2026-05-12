@@ -1,5 +1,13 @@
 # Changelog
 
+## Docs 0.2.0
+
+- Connve branding: favicon, DaisyUI theme matching connve.com, full-width
+  footer with company info and social links.
+- Route structure flattened for `/docs/flowgen` base path, preparing for
+  `connve.com/docs/flowgen/...` subpath hosting.
+- Removed GitHub App token from docs CI workflow (uses default `GITHUB_TOKEN`).
+
 ## Chart 0.16.1
 
 ### Fixes

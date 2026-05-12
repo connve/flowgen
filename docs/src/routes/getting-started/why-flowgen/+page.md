@@ -77,5 +77,3 @@ flow:
 | **AI** | Completion (multi-provider), AI Gateway (OpenAI-compatible), MCP Tools |
 | **Git** | Git Sync |
 | **Core** | Script (Rhai), Convert, Iterate, Buffer, Generate, Log |
-
-Enjoy :)
