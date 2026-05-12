@@ -1,13 +1,14 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 
 	onMount(() => {
-		goto('/docs/getting-started/why-flowgen', { replaceState: true });
+		goto(`${base}/getting-started/why-flowgen`, { replaceState: true });
 	});
 </script>
 
 <svelte:head>
-	<meta http-equiv="refresh" content="0; url=/docs/getting-started/why-flowgen" />
-	<link rel="canonical" href="/docs/getting-started/why-flowgen" />
+	<meta http-equiv="refresh" content="0; url=/docs/flowgen/getting-started/why-flowgen" />
+	<link rel="canonical" href="/docs/flowgen/getting-started/why-flowgen" />
 </svelte:head>

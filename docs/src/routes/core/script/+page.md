@@ -26,8 +26,8 @@ Rhai is a sandboxed, embedded scripting language: it cannot perform IO, spawn pr
 | `engine` | string | `rhai` | Script engine. Only `rhai` is supported today. |
 | `code` | string / resource | required | Script code — inline string or `{ resource: "path" }` to load from the resources directory. |
 | `limits` | object | | Rhai engine resource limits (see below). Defaults bound a single script's CPU and memory so a misbehaving script cannot stall the worker. |
-| `depends_on` | list | | Upstream task names. See [Flows](/docs/concepts/flows). |
-| `retry` | object | | Retry overrides. See [Retry](/docs/concepts/retry). |
+| `depends_on` | list | | Upstream task names. See [Flows](/docs/flowgen/concepts/flows). |
+| `retry` | object | | Retry overrides. See [Retry](/docs/flowgen/concepts/retry). |
 
 #### `limits`
 
@@ -84,7 +84,7 @@ Keys are automatically namespaced by the flow name, so two flows can use the sam
 
 ### `ctx.resource` — load files at script runtime
 
-Loads content from the resource backend (filesystem or cache, see [Resources](/docs/concepts/resources)). Useful when the resource key depends on the event:
+Loads content from the resource backend (filesystem or cache, see [Resources](/docs/flowgen/concepts/resources)). Useful when the resource key depends on the event:
 
 ```rhai
 let template_key = "templates/" + event.data.tenant + ".html";
@@ -231,7 +231,7 @@ event.data
       resource: scripts/transform.rhai
 ```
 
-The file content is rendered as a Handlebars template against the event before execution — see [Resources](/docs/concepts/resources).
+The file content is rendered as a Handlebars template against the event before execution — see [Resources](/docs/flowgen/concepts/resources).
 
 ## Logging
 

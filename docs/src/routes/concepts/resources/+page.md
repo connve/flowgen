@@ -19,7 +19,7 @@ query:
   resource: queries/recent_orders.sql
 ```
 
-When a resource is referenced, flowgen loads it through the configured `ResourceLoader` and renders it as a Handlebars template against the current event (see [Templating](/docs/concepts/templating)).
+When a resource is referenced, flowgen loads it through the configured `ResourceLoader` and renders it as a Handlebars template against the current event (see [Templating](/docs/flowgen/concepts/templating)).
 
 ## Backends
 
@@ -71,7 +71,7 @@ This is the recommended setup for:
 - **Git-synced flows** — a `git_sync` task can write resource files into the cache as it pulls them, and other replicas pick them up via cache subscription.
 - **Multi-tenant workers** where resources are templated per tenant and provisioned through an API.
 
-The cache backend reuses the same cache configuration as the rest of flowgen (see [Caching](/docs/concepts/caching)).
+The cache backend reuses the same cache configuration as the rest of flowgen (see [Caching](/docs/flowgen/concepts/caching)).
 
 ## Inline vs resource trade-offs
 
@@ -97,7 +97,7 @@ ORDER BY created_at DESC
 LIMIT 100
 ```
 
-The same templating rules from [Templating](/docs/concepts/templating) apply: simple `{{ path }}` substitution, environment variables under `{{env.X}}`, and runtime errors for missing variables.
+The same templating rules from [Templating](/docs/flowgen/concepts/templating) apply: simple `{{ path }}` substitution, environment variables under `{{env.X}}`, and runtime errors for missing variables.
 
 For SQL specifically, prefer the task's `parameters` field over template substitution when the value is user-controlled — it produces a parameterised query and avoids injection. See the BigQuery and MSSQL pages for details.
 
