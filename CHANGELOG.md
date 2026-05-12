@@ -1,5 +1,14 @@
 # Changelog
 
+## Chart 0.16.1
+
+### Fixes
+
+- WireGuard gateway: remove pod-level `sysctls` that cause
+  `SysctlForbidden` on clusters with restricted pod security policies.
+  The required sysctls (`net.ipv4.ip_forward`, `net.ipv4.conf.all.src_valid_mark`)
+  are now set via the init container using `NET_ADMIN` capability instead.
+
 ## Chart 0.16.0
 
 ### Infrastructure
