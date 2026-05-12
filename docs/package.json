@@ -29,6 +29,7 @@
 	},
 	"dependencies": {
 		"lucide-svelte": "^1.0.1",
+		"posthog-js": "^1.373.2",
 		"rehype-autolink-headings": "^7.1.0",
 		"rehype-slug": "^6.0.0",
 		"simple-icons": "^16.17.0"

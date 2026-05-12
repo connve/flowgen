@@ -1,0 +1,23 @@
+{{- $gw := .Values.wireguardGateway -}}
+{{- if $gw.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flowgen.fullname" . }}-wireguard-gateway
+  labels:
+    {{- include "flowgen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wireguard-gateway
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "flowgen.wireguardGateway.selectorLabels" . | nindent 4 }}
+  ports:
+  {{- range $gw.tunnels }}
+  {{- range .portForwards }}
+  - name: {{ .name }}
+    port: {{ .servicePort | default .port }}
+    targetPort: {{ .port }}
+    protocol: TCP
+  {{- end }}
+  {{- end }}
+{{- end }}

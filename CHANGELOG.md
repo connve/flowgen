@@ -1,5 +1,18 @@
 # Changelog
 
+## Chart 0.16.0
+
+### Infrastructure
+
+- **WireGuard gateway** replaces the WireGuard sidecar in the Helm
+  chart. A standalone pod holds a single VPN identity and forwards
+  ports via socat; flowgen pods connect through the gateway's
+  ClusterIP Service. Fixes intermittent timeouts caused by multiple
+  replicas sharing the same WireGuard private key and IP, which made
+  the VPN server flap handshakes between pods. The `flowgen.wireguard`
+  sidecar section is removed and replaced by the top-level
+  `wireguardGateway` section with tunnel-based configuration.
+
 ## 0.106.0
 
 ### Infrastructure

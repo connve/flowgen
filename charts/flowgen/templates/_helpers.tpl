@@ -56,6 +56,15 @@ app: flowgen
 {{/*
 Create the name of the service account to use
 */}}
+{{/*
+Selector labels for the WireGuard gateway component.
+*/}}
+{{- define "flowgen.wireguardGateway.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "flowgen.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: wireguard-gateway
+{{- end }}
+
 {{- define "flowgen.serviceAccountName" -}}
 {{- $worker := index .Values "flowgen" -}}
 {{- if $worker.serviceAccount.create }}
