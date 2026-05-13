@@ -87,7 +87,7 @@ pub struct Processor {
     /// Required for read, write, and list operations.
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// Optional path to credentials file.
+    /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     pub credentials_path: Option<PathBuf>,
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,

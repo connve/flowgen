@@ -2,6 +2,14 @@ use object_store::{parse_url_opts, path::Path, ObjectStore};
 use std::{collections::HashMap, path::PathBuf};
 use url::Url;
 
+/// Known credential keys extracted from an AWS credentials JSON file.
+const AWS_CREDENTIAL_KEYS: &[&str] = &[
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "aws_region",
+];
+
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -23,6 +31,18 @@ pub enum Error {
     NoContext,
 }
 
+impl Error {
+    /// Wraps a standard error as an S3-specific object store error.
+    fn s3(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::ObjectStore {
+            source: object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(source),
+            },
+        }
+    }
+}
+
 /// Object store context containing the store instance and base path.
 #[derive(Debug)]
 pub struct Context {
@@ -37,7 +57,7 @@ pub struct Context {
 pub struct Client {
     /// Object store URL path.
     path: PathBuf,
-    /// Optional path to service account credentials file.
+    /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     credentials_path: Option<PathBuf>,
     /// Additional connection options for the object store.
     options: Option<HashMap<String, String>>,
@@ -46,36 +66,57 @@ pub struct Client {
 }
 
 impl Client {
-    /// Internal method to establish connection to the object store.
-    /// Used by both initial connect() and reconnect() to avoid code duplication.
+    /// Establishes connection to the object store.
     fn create_context(&self) -> Result<Context, Error> {
-        // Parse URL and prepare connection options.
-        let path = self.path.to_str().ok_or_else(|| Error::EmptyPath)?;
+        let path = self.path.to_str().ok_or(Error::EmptyPath)?;
         let url = Url::parse(path).map_err(|source| Error::ParseUrl { source })?;
-        let mut parse_opts = match &self.options {
-            Some(options) => options.clone(),
-            None => HashMap::new(),
-        };
+        let mut parse_opts = self.options.clone().unwrap_or_default();
 
-        // Add Google Service Account credentials if provided.
         if let Some(credentials_path) = &self.credentials_path {
-            parse_opts.insert(
-                "google_service_account".to_string(),
-                credentials_path.to_string_lossy().to_string(),
-            );
+            match url.scheme() {
+                "gs" => {
+                    parse_opts.insert(
+                        "google_service_account".to_string(),
+                        credentials_path.to_string_lossy().to_string(),
+                    );
+                }
+                "s3" | "s3a" => {
+                    Self::load_aws_credentials(credentials_path, &mut parse_opts)?;
+                }
+                _ => {}
+            }
         }
 
-        // Initialize object store from URL and options.
         let (object_store, path) =
             parse_url_opts(&url, parse_opts).map_err(|e| Error::ObjectStore { source: e })?;
         Ok(Context { object_store, path })
     }
 
+    /// Reads an AWS credentials JSON file and inserts known keys into the options map.
+    /// Keys already present in the map (e.g. from client_options) are not overwritten.
+    fn load_aws_credentials(
+        path: &std::path::Path,
+        opts: &mut HashMap<String, String>,
+    ) -> Result<(), Error> {
+        let content = std::fs::read_to_string(path).map_err(Error::s3)?;
+        let creds: serde_json::Value = serde_json::from_str(&content).map_err(Error::s3)?;
+
+        for &key in AWS_CREDENTIAL_KEYS {
+            if let Some(value) = creds.get(key).and_then(|v| v.as_str()) {
+                opts.entry(key.to_string())
+                    .or_insert_with(|| value.to_string());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Reconnects to the object store, refreshing credentials.
     ///
     /// This creates a new connection with fresh credentials, which is necessary
-    /// because GCS OAuth tokens expire after approximately one hour. Without
-    /// reconnecting, operations will fail with 401 Unauthenticated errors.
+    /// because cloud provider tokens expire (GCS OAuth ~1 hour, AWS STS
+    /// session tokens ~12 hours). Without reconnecting, operations will fail
+    /// with authentication errors.
     pub async fn reconnect(&mut self) -> Result<(), Error> {
         self.context = Some(self.create_context()?);
         Ok(())
@@ -101,7 +142,7 @@ impl flowgen_core::client::Client for Client {
 pub struct ClientBuilder {
     /// Object store URL path.
     path: Option<PathBuf>,
-    /// Optional path to service account credentials file.
+    /// Optional path to credentials file (GCP service account JSON or AWS credentials JSON).
     credentials_path: Option<PathBuf>,
     /// Additional connection options for the object store.
     pub options: Option<HashMap<String, String>>,

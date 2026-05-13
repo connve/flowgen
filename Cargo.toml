@@ -18,6 +18,7 @@ gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-googleapis = { git = "https://github.com/connve/google-cloud-rust" }
 google-cloud-gax = { version = "0.21" }
 object_store = { version = "0.13.1", default-features = false, features = [
+    "aws",
     "gcp",
     "fs",
     "tls-webpki-roots",
