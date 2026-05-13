@@ -57,6 +57,75 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
 | `source_files` | list/template | | Explicit list of file URIs to move. Takes precedence over `source`. |
 | `destination` | string | required | Destination path. |
 
+## Credentials
+
+### Google Cloud Storage
+
+Pass a GCP service account JSON file via `credentials_path`:
+
+```yaml
+- object_store:
+    name: read_gcs
+    operation: read
+    path: gs://my-bucket/data/orders.csv
+    credentials_path: /etc/gcp/service-account.json
+```
+
+### Amazon S3
+
+Three authentication methods are supported, in order of precedence:
+
+**1. Inline credentials via `client_options`:**
+
+```yaml
+- object_store:
+    name: read_s3
+    operation: read
+    path: s3://my-bucket/data/
+    client_options:
+      aws_access_key_id: "{{env.AWS_ACCESS_KEY_ID}}"
+      aws_secret_access_key: "{{env.AWS_SECRET_ACCESS_KEY}}"
+      aws_region: eu-west-1
+```
+
+**2. Credentials JSON file via `credentials_path`:**
+
+```yaml
+- object_store:
+    name: read_s3
+    operation: read
+    path: s3://my-bucket/data/
+    credentials_path: /etc/aws/credentials.json
+```
+
+The file must contain a JSON object with one or more of these keys:
+
+```json
+{
+  "aws_access_key_id": "AKIA...",
+  "aws_secret_access_key": "...",
+  "aws_session_token": "...",
+  "aws_region": "eu-west-1"
+}
+```
+
+Values from `client_options` take precedence over the credentials file.
+
+**3. Environment variables and IAM roles (automatic):**
+
+When no `credentials_path` or `client_options` are provided, the underlying client picks up credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables, ECS task roles, or EC2 instance profiles.
+
+### Local filesystem
+
+No credentials needed. Use `file://` paths:
+
+```yaml
+- object_store:
+    name: read_local
+    operation: read
+    path: file:///data/orders.csv
+```
+
 ## Examples
 
 ### Read CSV from GCS
@@ -78,8 +147,10 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
     name: write_results
     operation: write
     path: s3://output-bucket/results/
-    credentials_path: /path/to/aws-creds.json
+    credentials_path: /etc/aws/credentials.json
     format: parquet
+    client_options:
+      aws_region: eu-west-1
     hive_partition_options:
       enabled: true
       partition_keys:

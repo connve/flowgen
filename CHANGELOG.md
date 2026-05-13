@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.107.0
+
+### Features
+
+- **Amazon S3 support for object store.** Read, write, list, and move
+  operations now work with `s3://` paths. Credentials can be provided via
+  a JSON file (`credentials_path`), inline `client_options`, or
+  automatically from environment variables and IAM roles.
+
 ## Docs 0.2.0
 
 - Connve branding: favicon, DaisyUI theme matching connve.com, full-width
