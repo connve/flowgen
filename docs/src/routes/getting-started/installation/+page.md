@@ -49,7 +49,8 @@ docker run -v $(pwd)/config.yaml:/etc/app/config.yaml \
 Add the Helm repository and install:
 
 ```bash
-helm install flowgen oci://ghcr.io/connve/charts/flowgen
+helm repo add connve https://helm.connve.com
+helm install flowgen connve/flowgen
 ```
 
 See the [Helm chart values](https://github.com/connve/flowgen/blob/main/charts/flowgen/values.yaml) for configuration options.
