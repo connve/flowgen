@@ -9,6 +9,16 @@
   a JSON file (`credentials_path`), inline `client_options`, or
   automatically from environment variables and IAM roles.
 
+### Infrastructure
+
+- **Pre-built binaries on GitHub Releases.** Each release now publishes
+  binaries for Linux (amd64, arm64) and macOS (Intel, Apple Silicon).
+  Linux binaries are extracted from the Docker image; macOS binaries
+  are built natively.
+- **Multi-arch Docker images.** Docker images now include both
+  `linux/amd64` and `linux/arm64` platforms.
+- Replaced deprecated `actions/create-release@v1` with `gh release create`.
+
 ## Docs 0.2.0
 
 - Connve branding: favicon, DaisyUI theme matching connve.com, full-width
