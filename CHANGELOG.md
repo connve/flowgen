@@ -16,7 +16,8 @@
   Linux binaries are extracted from the Docker image; macOS binaries
   are built natively.
 - **Multi-arch Docker images.** Docker images now include both
-  `linux/amd64` and `linux/arm64` platforms.
+  `linux/amd64` and `linux/arm64` platforms, built natively in parallel
+  (no QEMU emulation) and merged into a single manifest.
 - Replaced deprecated `actions/create-release@v1` with `gh release create`.
 
 ## Docs 0.2.0
