@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.108.0
+
+### Infrastructure
+
+- **Native multi-arch Docker builds.** Split Docker build into parallel
+  native runners (`ubuntu-latest` for amd64, `ubuntu-24.04-arm` for arm64)
+  with digest-based merge into a single multi-arch manifest. Eliminates
+  QEMU emulation overhead.
+- **Pre-built binary extraction from Docker.** Linux release binaries are
+  now extracted directly from the Docker image, guaranteeing the released
+  binary is identical to what runs in containers.
+- Fixed Helm chart install command in docs to use `helm.connve.com`.
+- Docs: mobile hamburger menu with drawer navigation, matching connve.com
+  navbar style.
+
 ## 0.107.0
 
 ### Features

@@ -37,24 +37,37 @@
 	<meta name="description" content="Flowgen — open-source data activation engine written in Rust" />
 </svelte:head>
 
-<div class="flex min-h-screen">
-	<div class="hidden lg:block sticky top-0 h-screen">
-		<Sidebar />
+<div class="drawer lg:drawer-open">
+	<input id="sidebar-drawer" type="checkbox" class="drawer-toggle" />
+
+	<div class="drawer-content flex flex-col">
+		<header class="sticky top-0 z-40 border-b border-base-300 bg-base-100 lg:hidden">
+			<nav class="flex items-center justify-between px-4 py-4">
+				<a href="{base}/" class="flex items-center gap-2">
+					<span class="text-xl font-bold text-primary">flowgen</span>
+					<span class="badge badge-outline text-xs px-2 py-0.5">docs</span>
+				</a>
+				<label for="sidebar-drawer" class="inline-flex cursor-pointer items-center justify-center rounded-md p-1">
+					<svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+					</svg>
+				</label>
+			</nav>
+		</header>
+
+		<main class="flex-1 min-w-0">
+			<div class="max-w-3xl mx-auto px-6 py-10">
+				<article class="prose">
+					{@render children()}
+				</article>
+			</div>
+		</main>
 	</div>
 
-	<main class="flex-1 min-w-0">
-		<div class="navbar bg-base-100 border-b border-base-300 sticky top-0 z-40 lg:hidden">
-			<div class="navbar-start">
-				<a href="{base}/" class="text-xl font-bold text-primary px-4">flowgen</a>
-			</div>
-		</div>
-
-		<div class="max-w-3xl mx-auto px-6 py-10">
-			<article class="prose">
-				{@render children()}
-			</article>
-		</div>
-	</main>
+	<div class="drawer-side z-50">
+		<label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
+		<Sidebar />
+	</div>
 </div>
 
 <footer class="border-t border-base-200">
