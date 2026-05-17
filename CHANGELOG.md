@@ -14,6 +14,7 @@
 - Fixed Helm chart install command in docs to use `helm.connve.com`.
 - Docs: mobile hamburger menu with drawer navigation, matching connve.com
   navbar style.
+- Added `ENTRYPOINT` to Dockerfile for distroless image compatibility.
 
 ## 0.107.0
 

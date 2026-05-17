@@ -40,3 +40,4 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM gcr.io/distroless/cc-debian12:nonroot AS final
 ARG SERVICE_NAME
 COPY --from=builder /bin/$SERVICE_NAME /bin/
+ENTRYPOINT ["/bin/flowgen"]
