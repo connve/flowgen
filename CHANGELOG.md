@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.109.0
+
+### Fixes
+
+- Fixed Docker `ENTRYPOINT` for distroless image — resolves binary
+  extraction failure in release workflow and `docker run` without
+  explicit command.
+
 ## 0.108.0
 
 ### Infrastructure
