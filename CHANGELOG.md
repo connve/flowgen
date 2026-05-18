@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.110.0
+
+### Fixes
+
+- macOS release binaries now cross-compile from a single `macos-latest`
+  ARM runner instead of using the slow `macos-13` Intel runner.
+
 ## 0.109.0
 
 ### Fixes
