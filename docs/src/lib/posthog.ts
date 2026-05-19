@@ -11,7 +11,7 @@ export function initPosthog(): typeof posthog | null {
 
 	posthog.init(env.PUBLIC_POSTHOG_KEY, {
 		api_host: env.PUBLIC_POSTHOG_HOST || '/ingest',
-		ui_host: 'https://eu.posthog.com',
+		ui_host: env.PUBLIC_POSTHOG_UI_HOST || 'https://eu.posthog.com',
 		capture_pageview: true,
 		capture_pageleave: true
 	});
