@@ -3,7 +3,7 @@
 	import 'prismjs/themes/prism-tomorrow.css';
 	import { base } from '$app/paths';
 	import Sidebar from '$lib/components/Sidebar.svelte';
-	import { capture } from '$lib/posthog';
+	import { initPosthog, capture } from '$lib/posthog';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
@@ -27,6 +27,8 @@
 	}
 
 	onMount(() => {
+		initPosthog();
+
 		document.querySelectorAll('.prose table').forEach((table) => {
 			if (table.parentElement?.classList.contains('table-wrapper')) return;
 			const wrapper = document.createElement('div');
