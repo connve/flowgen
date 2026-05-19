@@ -133,6 +133,9 @@ pub enum Error {
     /// Error in Salesforce REST API Composite operations.
     #[error(transparent)]
     SalesforceRestApiComposite(#[from] flowgen_salesforce::restapi::composite::Error),
+    /// Error in Salesforce REST API SOSL search operations.
+    #[error(transparent)]
+    SalesforceRestApiSearch(#[from] flowgen_salesforce::restapi::search::Error),
     /// Error in Salesforce Tooling API operations.
     #[error(transparent)]
     SalesforceTooling(#[from] flowgen_salesforce::toolingapi::processor::Error),
@@ -1339,6 +1342,27 @@ async fn spawn_task(
                             .task_id(task_id)
                             .task_type(task_type_str)
                             .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::salesforce_restapi_search(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_salesforce::restapi::search::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }

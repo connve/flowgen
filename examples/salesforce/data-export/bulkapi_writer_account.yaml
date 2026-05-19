@@ -1,0 +1,66 @@
+# Bulk API writer for Account query results.
+#
+# Consumes account query results from NATS, casts the Arrow schema,
+# and fans out to object store and a data warehouse using depends_on.
+# Deploy one writer per object type, changing the subject, schema
+# resource, and table_id.
+#
+# The NATS message is acknowledged only after every leaf has committed.
+#
+# Required:
+#   - /etc/nats/credentials.json
+#   - /etc/gcp/credentials.json
+#   - NATS_URL, GCP_PROJECT_ID, GCS_BUCKET_PATH env vars
+#   - resources/salesforce/schema_account.json
+flow:
+  name: salesforce_bulkapi_writer_account
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: salesforce_bulkapi.query_jobs.account
+        stream:
+          create_or_update: true
+          name: salesforce_bulkapi
+          description: "Salesforce Bulk API query results."
+          subjects: ["salesforce_bulkapi.>"]
+          max_age: 1h
+          max_bytes: 2147483648
+          retention: limits
+          discard: old
+        durable_name: salesforce_bulkapi_account_writer
+        ack_timeout: "120s"
+        max_deliver: 5
+        backoff:
+          - "5s"
+          - "30s"
+          - "1m"
+          - "5m"
+
+    - convert:
+        name: cast_schema
+        target_format: arrow
+        schema:
+          resource: salesforce/schema_account.json
+
+    - object_store:
+        name: write_to_object_store
+        operation: write
+        credentials_path: /etc/gcp/credentials.json
+        path: "{{env.GCS_BUCKET_PATH}}/salesforce/account"
+        hive_partition_options:
+          enabled: true
+          partition_keys:
+            - EventDate
+        depends_on: [cast_schema]
+
+    - gcp_bigquery_storage_write:
+        name: write_to_data_warehouse
+        credentials_path: /etc/gcp/credentials.json
+        project_id: "{{env.GCP_PROJECT_ID}}"
+        dataset_id: salesforce
+        table_id: account
+        change_type: upsert
+        depends_on: [cast_schema]

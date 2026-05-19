@@ -3,10 +3,16 @@ export interface NavItem {
 	href: string;
 }
 
+export interface NavSubsection {
+	title: string;
+	items: NavItem[];
+}
+
 export interface NavSection {
 	title: string;
 	icon?: string;
 	items: NavItem[];
+	subsections?: NavSubsection[];
 }
 
 export const navigation: NavSection[] = [
@@ -53,6 +59,17 @@ export const navigation: NavSection[] = [
 			{ title: 'REST API', href: '/salesforce/rest' },
 			{ title: 'Bulk API', href: '/salesforce/bulk' },
 			{ title: 'Tooling API', href: '/salesforce/tooling' }
+		],
+		subsections: [
+			{
+				title: 'Guides',
+				items: [
+					{ title: 'CDC Replication', href: '/salesforce/guides/cdc-replication' },
+					{ title: 'Data Export', href: '/salesforce/guides/data-export' },
+					{ title: 'Data Activation', href: '/salesforce/guides/data-activation' },
+					{ title: 'REST API', href: '/salesforce/guides/rest-api' }
+				]
+			}
 		]
 	},
 	{
@@ -107,5 +124,5 @@ export const navigation: NavSection[] = [
 			{ title: 'Generate', href: '/core/generate' },
 			{ title: 'Log', href: '/core/log' }
 		]
-	}
+	},
 ];

@@ -1,0 +1,41 @@
+# Publish platform events to Salesforce via Pub/Sub API.
+#
+# Consumes events from NATS and publishes them as platform
+# events to trigger Salesforce automation (flows, triggers).
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - /etc/nats/credentials.json
+#   - NATS_URL env var
+flow:
+  name: salesforce_platform_event_publisher
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: salesforce.platform_events.order_status
+        stream:
+          create_or_update: true
+          name: salesforce_platform_events
+          subjects: ["salesforce.platform_events.>"]
+          max_age: 1h
+          max_bytes: 2147483648
+          retention: limits
+          discard: old
+        durable_name: salesforce_platform_event_publisher
+        ack_timeout: "60s"
+        max_deliver: 5
+        backoff:
+          - "10s"
+          - "30s"
+          - "1m"
+          - "5m"
+
+    - salesforce_pubsubapi_publisher:
+        name: publish_order_status
+        credentials_path: /etc/sfdc/credentials.json
+        topic: /event/OrderStatus__e
+        payload:
+          from_event: true

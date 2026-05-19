@@ -1,0 +1,11 @@
+SELECT
+  Id,
+  Name,
+  Type,
+  Industry,
+  AnnualRevenue,
+  CreatedDate,
+  LastModifiedDate
+FROM Account
+WHERE LastModifiedDate >= {{event.data.last_run_iso}}
+ORDER BY LastModifiedDate ASC

@@ -1,0 +1,44 @@
+# Batch upsert records into Salesforce using the Composite API.
+#
+# Consumes events from NATS and upserts up to 200 records per
+# request using the all_or_none transactional guarantee.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - /etc/nats/credentials.json
+#   - NATS_URL env var
+flow:
+  name: salesforce_composite_upsert_contact
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: start_subscription
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: crm.contacts.upsert
+        stream:
+          create_or_update: true
+          name: crm
+          subjects: ["crm.>"]
+          max_age: 1h
+          max_bytes: 2147483648
+          retention: limits
+          discard: old
+        durable_name: salesforce_composite_upsert_contact
+        ack_timeout: "120s"
+        max_deliver: 5
+        backoff:
+          - "10s"
+          - "30s"
+          - "1m"
+          - "5m"
+
+    - salesforce_restapi_composite:
+        name: upsert_contacts
+        operation: upsert
+        credentials_path: /etc/sfdc/credentials.json
+        sobject_type: Contact
+        external_id_field: ExternalId__c
+        all_or_none: true
+        payload:
+          from_event: true

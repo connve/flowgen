@@ -111,12 +111,18 @@
 	color: inherit;
 }
 
+.prose .table-wrapper {
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
 .prose table {
 	width: 100%;
 	border-collapse: collapse;
-	margin-top: 1rem;
-	margin-bottom: 1rem;
 	font-size: 0.875rem;
+	white-space: nowrap;
 }
 
 .prose th {

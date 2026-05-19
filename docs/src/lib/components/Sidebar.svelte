@@ -37,6 +37,26 @@
 						</li>
 					{/each}
 				</ul>
+				{#if section.subsections}
+					{#each section.subsections as sub}
+						<div class="mt-1 ml-2 border-l border-base-300 pl-2">
+							<span class="text-[10px] font-medium uppercase tracking-wider text-base-content/35">{sub.title}</span>
+							<ul class="menu menu-sm p-0">
+								{#each sub.items as item}
+									<li>
+										<a
+											href="{base}{item.href}"
+											class={page.url.pathname === `${base}${item.href}` ? 'active font-medium' : ''}
+											onclick={closeDrawer}
+										>
+											{item.title}
+										</a>
+									</li>
+								{/each}
+							</ul>
+						</div>
+					{/each}
+				{/if}
 			</div>
 		{/each}
 	</div>

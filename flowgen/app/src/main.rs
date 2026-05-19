@@ -38,17 +38,22 @@ fn determine_log_format() -> LogFormat {
 fn init_tracing() {
     let format = determine_log_format();
 
+    let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => tracing_subscriber::EnvFilter::new("info"),
+    };
+
     match format {
         LogFormat::Compact => {
             tracing_subscriber::fmt()
                 .compact()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_env_filter(env_filter)
                 .init();
         }
         LogFormat::Json => {
             tracing_subscriber::fmt()
                 .json()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_env_filter(env_filter)
                 .init();
         }
     }

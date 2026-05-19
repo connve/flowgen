@@ -1,0 +1,11 @@
+{
+  "fields": [
+    { "name": "Id", "type": "utf8" },
+    { "name": "Name", "type": "utf8" },
+    { "name": "Type", "type": "utf8" },
+    { "name": "Industry", "type": "utf8" },
+    { "name": "AnnualRevenue", "type": "float64" },
+    { "name": "CreatedDate", "type": "utf8" },
+    { "name": "LastModifiedDate", "type": "utf8" }
+  ]
+}

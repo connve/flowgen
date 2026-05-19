@@ -13,7 +13,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 ```bash
 # Example: Linux x86_64, replace version as needed
-VERSION=0.110.0
+VERSION=0.111.0
 curl -LO "https://github.com/connve/flowgen/releases/download/v${VERSION}/flowgen-linux-amd64-${VERSION}.tar.gz"
 tar -xzf "flowgen-linux-amd64-${VERSION}.tar.gz"
 sudo mv flowgen /usr/local/bin/
@@ -21,7 +21,20 @@ sudo mv flowgen /usr/local/bin/
 
 ## From source
 
-Requires [Rust](https://rustup.rs) 1.88+.
+Requires [Rust](https://rustup.rs) 1.88+ and `protoc` (the Protocol Buffers compiler).
+
+```bash
+# macOS
+brew install protobuf
+
+# Ubuntu / Debian
+sudo apt install -y protobuf-compiler
+
+# Verify
+protoc --version
+```
+
+Then build and install:
 
 ```bash
 git clone https://github.com/connve/flowgen.git

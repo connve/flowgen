@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.111.0
+
+### Features
+
+- **Salesforce SOSL search task.** New `salesforce_restapi_search` task
+  type for executing SOSL queries across multiple Salesforce objects.
+  Supports Handlebars templating in the query string.
+
+### Fixes
+
+- **Default log level is now `info`.** When `RUST_LOG` is not set,
+  flowgen defaults to `info` instead of `error`. New users no longer
+  see a silent startup.
+- Fixed "Loaded 1 flows" pluralization — now correctly says "Loaded 1 flow".
+
+### Docs
+
+- **Salesforce guides.** Added four end-to-end guides under Salesforce:
+  CDC Replication, Data Export (Bulk API), Data Activation (Composite +
+  Platform Events), and REST API (SObject, SOSL, MCP tools).
+- Guides are nested under the Salesforce sidebar section with a
+  subsection header.
+- Added `protoc` as a build prerequisite in the installation docs.
+- Mobile-friendly tables with horizontal scroll.
+- Footer now matches connve.com (newsletter signup, GitHub, Helm icons).
+- Mermaid diagram component for architecture visualizations in guides.
+
+### Examples
+
+- Reorganized Salesforce examples under `examples/salesforce/` with
+  subdirectories per guide: `cdc-replication/`, `data-export/`,
+  `data-activation/`, `rest-api/`.
+- Removed old flat `examples/salesforce/` example files.
+
 ## 0.110.0
 
 ### Fixes

@@ -1,0 +1,34 @@
+# Incremental Bulk API query for Account records.
+#
+# Runs on a schedule and creates a Bulk API query job for records
+# modified since the last run. Results are picked up by the
+# job_listener flow when Salesforce publishes a BulkApi2JobEvent.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - resources/salesforce/query_account.soql
+flow:
+  name: salesforce_bulkapi_query_account
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: trigger
+        cron: "*/5 * * * *"
+
+    - script:
+        name: prepare_query_time
+        code: |
+          let timestamp = if event.data.system_info.last_run_time != () { event.data.system_info.last_run_time - 3600 } else { timestamp_now() - 86400 };
+          #{ last_run_unix: timestamp, last_run_iso: timestamp_to_iso(timestamp) }
+
+    - salesforce_bulkapi_query_job:
+        name: query_account
+        operation: create
+        credentials_path: /etc/sfdc/credentials.json
+        query_operation: query
+        query:
+          resource: salesforce/query_account.soql
+        content_type: csv
+        column_delimiter: comma
+        line_ending: lf

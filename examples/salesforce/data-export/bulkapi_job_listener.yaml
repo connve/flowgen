@@ -1,0 +1,87 @@
+# Bulk API job listener.
+#
+# Subscribes to BulkApi2JobEvent via Pub/Sub API, filters for final
+# results, downloads CSV, and publishes Arrow batches to NATS.
+# Subject is dynamic based on the object name so each writer flow
+# can consume its own object type.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - /etc/nats/credentials.json
+#   - NATS_URL env var
+flow:
+  name: salesforce_bulkapi_job_listener
+  require_leader_election: true
+  tasks:
+
+    - salesforce_pubsubapi_subscriber:
+        name: listen_job_events
+        credentials_path: /etc/sfdc/credentials.json
+        topic:
+          name: /event/BulkApi2JobEvent
+          durable_consumer_options:
+            enabled: true
+            managed_subscription: false
+            name: salesforce_bulkapi_job_listener
+
+    - script:
+        name: filter_available_results
+        code: |
+          if event.data.Type == "RESULT" && event.data.ResultType == "FINAL" {
+            #{
+              id: event.data.JobIdentifier,
+              result_type: event.data.ResultType,
+              result_url: event.data.ResultUrl,
+              state: event.data.JobState,
+              event_type: event.data.Type
+            }
+          } else {
+            ()
+          }
+
+    - salesforce_bulkapi_query_job:
+        name: get_job_info
+        operation: get
+        credentials_path: /etc/sfdc/credentials.json
+        job_id: "{{event.data.id}}"
+
+    - script:
+        name: add_metadata_to_meta
+        code: |
+          ctx.meta.object_name = event.data.object.to_lower();
+          ctx.meta.job_id = event.data.id;
+          ctx.meta.job_state = event.data.state;
+          event
+
+    - script:
+        name: filter_final_results
+        code: |
+          if event.meta.job_state == "JobComplete" {
+            event
+          } else {
+            ()
+          }
+
+    - salesforce_bulkapi_query_job:
+        name: get_job_results
+        operation: get_results
+        credentials_path: /etc/sfdc/credentials.json
+        job_id: "{{event.meta.job_id}}"
+        batch_size: 10000
+        has_header: true
+
+    - nats_jetstream_publisher:
+        name: publish_to_nats
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: salesforce_bulkapi.query_jobs.{{event.meta.object_name}}
+        ack_timeout: 120s
+        stream:
+          create_or_update: true
+          name: salesforce_bulkapi
+          description: "Salesforce Bulk API query results."
+          subjects: ["salesforce_bulkapi.>"]
+          max_age: 1h
+          max_bytes: 2147483648
+          retention: limits
+          discard: old

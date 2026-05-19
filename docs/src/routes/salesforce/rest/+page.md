@@ -1,6 +1,6 @@
 # Salesforce REST API
 
-CRUD operations on Salesforce SObjects and composite batch operations.
+CRUD operations on Salesforce SObjects, composite batch operations, and SOSL search.
 
 ## SObject operations
 
@@ -91,3 +91,68 @@ Batch operations on multiple records: create, get, update, upsert, delete, tree.
 | `all_or_none` | bool | | Atomic transaction — all succeed or all fail. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | Retry configuration. |
+
+## SOSL Search
+
+Execute [SOSL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_sosl.htm) queries to search across multiple objects simultaneously. Returns matching records as a JSON event.
+
+```yaml
+- salesforce_restapi_search:
+    name: find_accounts
+    credentials_path: /etc/salesforce/credentials.json
+    query: "FIND {Acme} IN ALL FIELDS RETURNING Account(Id, Name, Industry)"
+```
+
+### Search fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | required | Task name. |
+| `credentials_path` | string | required | Path to Salesforce credentials. |
+| `query` | string | required | SOSL query string. Supports templating. |
+| `depends_on` | list | | Upstream task names. |
+| `retry` | object | | Retry configuration. |
+
+### Templating the search term
+
+SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars only treats double `{{` as special, a single `{` is a literal character. This means `{{{event.data.term}}}` is parsed as literal `{` + `{{event.data.term}}` + literal `}`.
+
+```yaml
+- salesforce_restapi_search:
+    name: dynamic_search
+    credentials_path: /etc/salesforce/credentials.json
+    query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, FirstName, LastName, Email)"
+```
+
+### Examples
+
+**Search with specific scope and field limits:**
+
+```yaml
+- salesforce_restapi_search:
+    name: search_name_fields
+    credentials_path: /etc/salesforce/credentials.json
+    query: "FIND {Acme} IN NAME FIELDS RETURNING Account(Id, Name, Industry LIMIT 10), Contact(Id, FirstName, LastName LIMIT 5)"
+```
+
+**Webhook-triggered search:**
+
+```yaml
+flow:
+  name: salesforce_search
+  tasks:
+    - http_webhook:
+        name: trigger
+        method: POST
+        endpoint: /search
+
+    - salesforce_restapi_search:
+        name: sosl_search
+        credentials_path: $SALESFORCE_CREDENTIALS_PATH
+        query: "FIND {{{event.data.term}}} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, Email)"
+
+    - log:
+        name: log_results
+        level: info
+        structured: true
+```

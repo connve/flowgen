@@ -22,10 +22,11 @@ pub mod bulkapi {
     pub mod query_job;
 }
 
-/// Salesforce REST API operations (create, get, update, upsert, delete).
+/// Salesforce REST API operations (create, get, update, upsert, delete, search).
 pub mod restapi {
     pub mod composite;
     pub mod config;
+    pub mod search;
     pub mod sobject;
 }
 

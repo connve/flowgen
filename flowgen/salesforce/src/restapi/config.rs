@@ -185,6 +185,34 @@ pub struct Composite {
 
 impl ConfigExt for Composite {}
 
+/// Configuration for Salesforce REST API SOSL search operations.
+///
+/// # Examples
+///
+/// ```yaml
+/// salesforce_restapi_search:
+///   name: find_accounts
+///   credentials_path: /path/to/salesforce_creds.json
+///   query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name)"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct Search {
+    /// Unique task identifier.
+    pub name: String,
+    /// Path to Salesforce authentication credentials.
+    pub credentials_path: PathBuf,
+    /// SOSL query string (supports Handlebars templating).
+    pub query: String,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl ConfigExt for Search {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

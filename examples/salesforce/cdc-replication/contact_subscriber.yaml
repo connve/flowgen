@@ -1,0 +1,39 @@
+# Salesforce CDC subscriber → NATS JetStream.
+#
+# Subscribes to change events via Pub/Sub API and republishes them to NATS.
+# The writer flow consumes from this stream and fans events out to object
+# storage and a data warehouse.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+#   - /etc/nats/credentials.json
+#   - NATS_URL env var (e.g. nats://localhost:4222)
+flow:
+  name: salesforce_contact_subscriber
+  require_leader_election: true
+  tasks:
+
+    - salesforce_pubsubapi_subscriber:
+        name: start_subscription
+        credentials_path: /etc/sfdc/credentials.json
+        topic:
+          name: /data/ContactChangeEvent
+          durable_consumer_options:
+            enabled: true
+            managed_subscription: false
+            name: salesforce_contact_subscriber
+            # replay_preset: EARLIEST
+
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: pubsub.data.{{event.subject}}
+        stream:
+          create_or_update: true
+          name: salesforce
+          description: "Salesforce platform events and change events."
+          subjects: ["pubsub.>"]
+          max_age: "24h"
+          retention: limits
+          discard: old
