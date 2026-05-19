@@ -1,16 +1,16 @@
 import { browser } from '$app/environment';
 import posthog from 'posthog-js';
-import { PUBLIC_POSTHOG_KEY, PUBLIC_POSTHOG_HOST } from '$env/static/public';
+import { env } from '$env/dynamic/public';
 
 let initialized = false;
 
 export function initPosthog(): typeof posthog | null {
 	if (!browser) return null;
-	if (!PUBLIC_POSTHOG_KEY) return null;
+	if (!env.PUBLIC_POSTHOG_KEY) return null;
 	if (initialized) return posthog;
 
-	posthog.init(PUBLIC_POSTHOG_KEY, {
-		api_host: PUBLIC_POSTHOG_HOST || '/ingest',
+	posthog.init(env.PUBLIC_POSTHOG_KEY, {
+		api_host: env.PUBLIC_POSTHOG_HOST || '/ingest',
 		ui_host: 'https://eu.posthog.com',
 		capture_pageview: true,
 		capture_pageleave: true
@@ -21,10 +21,7 @@ export function initPosthog(): typeof posthog | null {
 
 export function capture(event: string, properties?: Record<string, unknown>): void {
 	if (!browser) return;
-	if (!PUBLIC_POSTHOG_KEY) {
-		console.info('[posthog] capture (no key):', event, properties);
-		return;
-	}
+	if (!env.PUBLIC_POSTHOG_KEY) return;
 	initPosthog();
 	posthog.capture(event, properties);
 }
