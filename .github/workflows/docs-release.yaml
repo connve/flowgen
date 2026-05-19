@@ -27,6 +27,13 @@ jobs:
         working-directory: docs
         run: npm ci
 
+      - name: Write .env
+        working-directory: docs
+        run: |
+          echo "PUBLIC_POSTHOG_KEY=${{ vars.PUBLIC_POSTHOG_KEY }}" >> .env
+          echo "PUBLIC_POSTHOG_HOST=${{ vars.PUBLIC_POSTHOG_HOST }}" >> .env
+          echo "PUBLIC_POSTHOG_UI_HOST=${{ vars.PUBLIC_POSTHOG_UI_HOST }}" >> .env
+
       - name: Build
         working-directory: docs
         run: npm run build
