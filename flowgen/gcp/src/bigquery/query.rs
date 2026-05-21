@@ -10,7 +10,7 @@ use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
 };
-use gcloud_auth::credentials::CredentialsFile;
+
 use google_cloud_bigquery::client::{Client, ClientConfig};
 use google_cloud_bigquery::http::job::get_query_results::{
     GetQueryResultsRequest, GetQueryResultsResponse,
@@ -212,11 +212,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials = CredentialsFile::new_from_file(
-            init_config.credentials_path.to_string_lossy().to_string(),
-        )
-        .await
-        .map_err(|source| Error::ClientAuth { source })?;
+        let credentials = crate::resolve_credentials(&init_config.credentials_path)
+            .await
+            .map_err(|source| Error::ClientAuth { source })?;
 
         let (client_config, _project_id) = ClientConfig::new_with_credentials(credentials)
             .await

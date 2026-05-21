@@ -36,7 +36,7 @@ Create, monitor, and manage BigQuery jobs. Used for load jobs from GCS.
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `operation` | string | required | `create`, `get`, `cancel`, `delete`. |
-| `credentials_path` | string | required | GCP service account credentials. |
+| `credentials_path` | string | | GCP service account credentials. Falls back to Application Default Credentials when omitted. |
 | `project_id` | string | required | GCP project ID. |
 | `location` | string | | BigQuery location. |
 | `source_uris` | list/template | | GCS source URIs (for create). |

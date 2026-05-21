@@ -25,7 +25,7 @@ Reads table data directly via the BigQuery Storage Read API. Returns Arrow Recor
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `credentials_path` | string | required | GCP service account credentials. |
+| `credentials_path` | string | | GCP service account credentials. Falls back to Application Default Credentials when omitted. |
 | `project_id` | string | required | GCP project ID. |
 | `dataset_id` | string | required | BigQuery dataset. |
 | `table_id` | string | required | BigQuery table. |
@@ -56,7 +56,7 @@ Streams data into BigQuery tables via the Storage Write API. Accepts Arrow Recor
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `credentials_path` | string | required | GCP service account credentials. |
+| `credentials_path` | string | | GCP service account credentials. Falls back to Application Default Credentials when omitted. |
 | `project_id` | string | required | GCP project ID. |
 | `dataset_id` | string | required | BigQuery dataset. |
 | `table_id` | string | required | BigQuery table. |

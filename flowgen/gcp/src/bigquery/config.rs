@@ -152,7 +152,9 @@ pub struct Query {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to GCP service account credentials JSON file.
-    pub credentials_path: PathBuf,
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// GCP project ID where BigQuery resources are located (data project).
     pub project_id: String,
     /// Optional GCP project ID for running the query job (billing project).
@@ -316,7 +318,9 @@ pub struct Job {
     /// Job operation type (create, get, cancel, delete).
     pub operation: JobOperation,
     /// Path to GCP service account credentials JSON file.
-    pub credentials_path: PathBuf,
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// GCP project ID where BigQuery resources are located.
     pub project_id: String,
     /// Optional GCP project ID for running the job (billing project).
@@ -636,7 +640,7 @@ mod tests {
 
         let query = Query {
             name: "test_query".to_string(),
-            credentials_path: PathBuf::from("/etc/gcp/credentials.json"),
+            credentials_path: Some(PathBuf::from("/etc/gcp/credentials.json")),
             project_id: "my-project-id".to_string(),
             job_project_id: None,
             query: flowgen_core::resource::Source::Inline(
@@ -668,7 +672,7 @@ mod tests {
     fn test_query_config_serialization() {
         let query = Query {
             name: "serialize_test".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
             project_id: "test-project".to_string(),
             job_project_id: None,
             query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
@@ -699,7 +703,7 @@ mod tests {
 
         let query = Query {
             name: "parameterized_query".to_string(),
-            credentials_path: PathBuf::from("/etc/gcp/creds.json"),
+            credentials_path: Some(PathBuf::from("/etc/gcp/creds.json")),
             project_id: "analytics-prod".to_string(),
             job_project_id: None,
             query: flowgen_core::resource::Source::Inline("SELECT * FROM orders WHERE customer_id = @customer_id AND amount >= @min_amount AND active = @active".to_string()),
@@ -727,7 +731,7 @@ mod tests {
     fn test_query_config_clone() {
         let query = Query {
             name: "clone_test".to_string(),
-            credentials_path: PathBuf::from("/creds.json"),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             project_id: "test-project".to_string(),
             job_project_id: None,
             query: flowgen_core::resource::Source::Inline(
@@ -754,7 +758,7 @@ mod tests {
     fn test_get_job_project_id_with_override() {
         let query = Query {
             name: "cross_project_query".to_string(),
-            credentials_path: PathBuf::from("/creds.json"),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             project_id: "data-project".to_string(),
             job_project_id: Some("billing-project".to_string()),
             query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
@@ -778,7 +782,7 @@ mod tests {
     fn test_get_job_project_id_default() {
         let query = Query {
             name: "single_project_query".to_string(),
-            credentials_path: PathBuf::from("/creds.json"),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             project_id: "my-project".to_string(),
             job_project_id: None,
             query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
@@ -802,7 +806,7 @@ mod tests {
     fn test_storage_read_get_job_project_id_with_override() {
         let storage_read = StorageRead {
             name: "cross_project_read".to_string(),
-            credentials_path: PathBuf::from("/creds.json"),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             project_id: "data-project".to_string(),
             job_project_id: Some("billing-project".to_string()),
             dataset_id: "warehouse".to_string(),
@@ -817,7 +821,7 @@ mod tests {
     fn test_storage_read_get_job_project_id_default() {
         let storage_read = StorageRead {
             name: "single_project_read".to_string(),
-            credentials_path: PathBuf::from("/creds.json"),
+            credentials_path: Some(PathBuf::from("/creds.json")),
             project_id: "my-project".to_string(),
             job_project_id: None,
             dataset_id: "analytics".to_string(),
@@ -949,7 +953,9 @@ pub struct StorageRead {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to GCP service account credentials JSON file.
-    pub credentials_path: PathBuf,
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// GCP project ID where BigQuery resources are located (data project).
     pub project_id: String,
     /// Optional GCP project ID for creating the read session (billing project).
@@ -1079,7 +1085,9 @@ pub struct StorageWrite {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Path to GCP service account credentials JSON file.
-    pub credentials_path: PathBuf,
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// GCP project ID where BigQuery resources are located.
     pub project_id: String,
     /// BigQuery dataset ID containing the table.

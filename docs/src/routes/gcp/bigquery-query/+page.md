@@ -19,7 +19,7 @@ Runs SQL queries against Google BigQuery. Returns results as Arrow RecordBatch.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `credentials_path` | string | required | GCP service account credentials. |
+| `credentials_path` | string | | GCP service account credentials. Falls back to Application Default Credentials when omitted. |
 | `project_id` | string | required | GCP project ID (data project). |
 | `job_project_id` | string | | GCP project ID for billing (if different). |
 | `query` | string/resource | required | SQL query. Supports templating and resource files. |

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.112.0
+
+### Features
+
+- **Application Default Credentials for GCP.** The `credentials_path`
+  field is now optional on all BigQuery processors (`gcp_bigquery_query`,
+  `gcp_bigquery_job`, `gcp_bigquery_storage_read`,
+  `gcp_bigquery_storage_write`). When omitted, credentials are resolved
+  via the Application Default Credentials chain:
+  `GOOGLE_APPLICATION_CREDENTIALS_JSON` env, `GOOGLE_APPLICATION_CREDENTIALS`
+  env, or `~/.config/gcloud/application_default_credentials.json`
+  (written by `gcloud auth application-default login`).
+
 ## 0.111.0
 
 ### Features

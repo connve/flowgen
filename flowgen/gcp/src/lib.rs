@@ -4,6 +4,26 @@
 //! It handles authentication, connection management, and provides task
 //! implementations that integrate with the flowgen event system.
 
+use gcloud_auth::credentials::CredentialsFile;
+use std::path::PathBuf;
+
+/// Resolves Google Cloud credentials from an explicit file path or Application Default Credentials.
+///
+/// When a `credentials_path` is provided, credentials are loaded from that file.
+/// When `None`, falls back to the Application Default Credentials discovery chain:
+/// `GOOGLE_APPLICATION_CREDENTIALS_JSON` environment variable, then
+/// `GOOGLE_APPLICATION_CREDENTIALS` file path environment variable, then the well-known
+/// location at `~/.config/gcloud/application_default_credentials.json` (written by
+/// `gcloud auth application-default login`).
+pub async fn resolve_credentials(
+    credentials_path: &Option<PathBuf>,
+) -> Result<CredentialsFile, gcloud_auth::error::Error> {
+    match credentials_path {
+        Some(path) => CredentialsFile::new_from_file(path.to_string_lossy().to_string()).await,
+        None => CredentialsFile::new().await,
+    }
+}
+
 /// BigQuery functionality for data warehousing and analytics.
 pub mod bigquery {
     /// Configuration structures for BigQuery operations.

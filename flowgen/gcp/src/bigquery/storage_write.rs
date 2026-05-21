@@ -11,7 +11,7 @@ use flowgen_core::{
     event::{Event, EventBuilder, EventData, EventExt},
 };
 use futures_util::StreamExt;
-use gcloud_auth::credentials::CredentialsFile;
+
 use google_cloud_bigquery::{
     client::{Client, ClientConfig},
     http::table::{TableFieldMode, TableFieldSchema, TableFieldType},
@@ -483,11 +483,9 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials = CredentialsFile::new_from_file(
-            init_config.credentials_path.to_string_lossy().to_string(),
-        )
-        .await
-        .map_err(|source| Error::ClientAuth { source })?;
+        let credentials = crate::resolve_credentials(&init_config.credentials_path)
+            .await
+            .map_err(|source| Error::ClientAuth { source })?;
 
         let (client_config, _project_id) = ClientConfig::new_with_credentials(credentials)
             .await
@@ -707,7 +705,7 @@ mod tests {
     async fn test_processor_builder_missing_receiver() {
         let config = Arc::new(super::super::config::StorageWrite {
             name: "test".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
             project_id: "test-project".to_string(),
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
@@ -729,7 +727,7 @@ mod tests {
     async fn test_processor_builder_missing_task_id() {
         let config = Arc::new(super::super::config::StorageWrite {
             name: "test".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
             project_id: "test-project".to_string(),
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
@@ -756,7 +754,7 @@ mod tests {
     async fn test_processor_builder_missing_task_context() {
         let config = Arc::new(super::super::config::StorageWrite {
             name: "test".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
             project_id: "test-project".to_string(),
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
@@ -785,7 +783,7 @@ mod tests {
     async fn test_processor_builder_missing_task_type() {
         let config = Arc::new(super::super::config::StorageWrite {
             name: "test".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
             project_id: "test-project".to_string(),
             dataset_id: "test-dataset".to_string(),
             table_id: "test-table".to_string(),
