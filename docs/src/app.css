@@ -94,6 +94,7 @@
 }
 
 .prose pre {
+	position: relative;
 	padding: 1rem 1.25rem;
 	border-radius: 0.5rem;
 	overflow-x: auto;
@@ -111,14 +112,10 @@
 	color: inherit;
 }
 
-.prose .table-wrapper {
+.prose table {
+	display: block;
 	overflow-x: auto;
 	-webkit-overflow-scrolling: touch;
-	margin-top: 1rem;
-	margin-bottom: 1rem;
-}
-
-.prose table {
 	width: 100%;
 	border-collapse: collapse;
 	font-size: 0.875rem;
@@ -162,7 +159,7 @@
 	transition: opacity 0.15s;
 }
 
-div:has(> pre):hover .copy-btn {
+pre:hover .copy-btn {
 	opacity: 1;
 }
 

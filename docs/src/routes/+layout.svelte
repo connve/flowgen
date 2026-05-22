@@ -29,36 +29,21 @@
 	onMount(() => {
 		initPosthog();
 
-		requestAnimationFrame(() => {
-			document.querySelectorAll('.prose table').forEach((table) => {
-				if (table.parentElement?.classList.contains('table-wrapper')) return;
-				const wrapper = document.createElement('div');
-				wrapper.className = 'table-wrapper';
-				table.parentNode?.insertBefore(wrapper, table);
-				wrapper.appendChild(table);
+		document.querySelectorAll('pre').forEach((pre) => {
+			if (pre.querySelector('.copy-btn')) return;
+
+			const btn = document.createElement('button');
+			btn.className = 'copy-btn';
+			btn.textContent = 'Copy';
+			btn.addEventListener('click', () => {
+				const code = pre.querySelector('code');
+				if (code) {
+					navigator.clipboard.writeText(code.textContent || '');
+					btn.textContent = 'Copied';
+					setTimeout(() => (btn.textContent = 'Copy'), 2000);
+				}
 			});
-
-			document.querySelectorAll('pre').forEach((pre) => {
-				if (pre.querySelector('.copy-btn')) return;
-
-				const wrapper = document.createElement('div');
-				wrapper.style.position = 'relative';
-				pre.parentNode?.insertBefore(wrapper, pre);
-				wrapper.appendChild(pre);
-
-				const btn = document.createElement('button');
-				btn.className = 'copy-btn';
-				btn.textContent = 'Copy';
-				btn.addEventListener('click', () => {
-					const code = pre.querySelector('code');
-					if (code) {
-						navigator.clipboard.writeText(code.textContent || '');
-						btn.textContent = 'Copied';
-						setTimeout(() => (btn.textContent = 'Copy'), 2000);
-					}
-				});
-				wrapper.appendChild(btn);
-			});
+			pre.appendChild(btn);
 		});
 	});
 </script>
