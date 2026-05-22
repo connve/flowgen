@@ -6,8 +6,8 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 | Platform | Architecture | Archive |
 |---|---|---|
-| Linux | x86_64 | `flowgen-linux-amd64-VERSION.tar.gz` |
-| Linux | ARM64 | `flowgen-linux-arm64-VERSION.tar.gz` |
+| Linux | `x86_64` | `flowgen-linux-amd64-VERSION.tar.gz` |
+| Linux | `ARM64` | `flowgen-linux-arm64-VERSION.tar.gz` |
 | macOS | Intel | `flowgen-darwin-amd64-VERSION.tar.gz` |
 | macOS | Apple Silicon | `flowgen-darwin-arm64-VERSION.tar.gz` |
 
