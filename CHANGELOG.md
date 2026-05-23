@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.113.0
+
+### Fixes
+
+- **S3 credential chain now works out of the box.** The object store
+  client for S3 now uses `AmazonS3Builder::from_env()`, which picks up
+  IRSA (web identity token), EKS Pod Identity, ECS task roles, instance
+  profiles, and environment variable credentials automatically. Previously
+  `parse_url_opts` used `AmazonS3Builder::new()` which skipped the
+  environment credential chain entirely, causing timeouts when IMDS was
+  unreachable.
+
+### Docs
+
+- Fixed blank page on initial load caused by DOM manipulation breaking
+  Svelte hydration. Tables use CSS-only overflow, copy buttons are
+  appended without reparenting nodes.
+- Fixed escaped underscores in installation table (`x86\_64`).
+
 ## 0.112.0
 
 ### Features

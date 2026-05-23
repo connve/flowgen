@@ -113,7 +113,7 @@ Values from `client_options` take precedence over the credentials file.
 
 **3. Environment variables and IAM roles (automatic):**
 
-When no `credentials_path` or `client_options` are provided, the underlying client picks up credentials from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables, ECS task roles, or EC2 instance profiles.
+When no `credentials_path` or inline AWS keys in `client_options` are provided, the client resolves credentials automatically in this order: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables, IRSA (EKS web identity token), EKS Pod Identity, ECS task roles, or EC2 instance profiles. You still need `aws_region` in `client_options`.
 
 ### Local filesystem
 

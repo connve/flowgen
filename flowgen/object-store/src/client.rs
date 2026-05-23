@@ -1,3 +1,4 @@
+use object_store::aws::AmazonS3Builder;
 use object_store::{parse_url_opts, path::Path, ObjectStore};
 use std::{collections::HashMap, path::PathBuf};
 use url::Url;
@@ -87,9 +88,42 @@ impl Client {
             }
         }
 
-        let (object_store, path) =
-            parse_url_opts(&url, parse_opts).map_err(|e| Error::ObjectStore { source: e })?;
-        Ok(Context { object_store, path })
+        match url.scheme() {
+            "s3" | "s3a" => self.create_s3_context(&url, parse_opts),
+            _ => {
+                let (object_store, path) = parse_url_opts(&url, parse_opts)
+                    .map_err(|e| Error::ObjectStore { source: e })?;
+                Ok(Context { object_store, path })
+            }
+        }
+    }
+
+    /// Creates an S3 context using `from_env()` to pick up IRSA, EKS Pod Identity,
+    /// instance profiles, and env var credentials automatically.
+    fn create_s3_context(
+        &self,
+        url: &Url,
+        opts: HashMap<String, String>,
+    ) -> Result<Context, Error> {
+        let path =
+            Path::from_url_path(url.path()).map_err(|e| Error::ObjectStore { source: e.into() })?;
+
+        let builder = opts.into_iter().fold(
+            AmazonS3Builder::from_env().with_url(url.to_string()),
+            |builder, (key, value)| match key.to_ascii_lowercase().parse() {
+                Ok(k) => builder.with_config(k, value),
+                Err(_) => builder,
+            },
+        );
+
+        let object_store = builder
+            .build()
+            .map_err(|e| Error::ObjectStore { source: e })?;
+
+        Ok(Context {
+            object_store: Box::new(object_store),
+            path,
+        })
     }
 
     /// Reads an AWS credentials JSON file and inserts known keys into the options map.
