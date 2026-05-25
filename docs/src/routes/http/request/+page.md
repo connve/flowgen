@@ -25,7 +25,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `timeout` | duration | `30s` | Total request timeout from start to response body received. Set explicitly to override or omit-with-`null` to disable. |
 | `connect_timeout` | duration | `10s` | TCP/TLS connect timeout. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Payload options
 
@@ -61,6 +61,12 @@ For nested data, either:
 - flatten the payload in a `script` task before this one and choose a
   per-API key convention (bracket notation, dotted keys, comma-separated,
   etc.).
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [reqwest](https://docs.rs/reqwest/latest/reqwest/) | Parsed response body. JSON responses are decoded to objects/arrays; non-JSON responses are returned as a raw string. |
 
 ## Examples
 

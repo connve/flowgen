@@ -22,3 +22,16 @@ worker:
 ```
 
 Requests are sent to `POST /v1/chat/completions` with the standard OpenAI chat format.
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+| Field | Type | Description |
+|---|---|---|
+| `prompt` | string | User prompt merged from messages. |
+| `system_prompt` | string / null | System message if present. |
+| `model` | string | Requested model name. |
+| `temperature` | number / null | Sampling temperature if specified. |
+| `max_tokens` | int / null | Token limit if specified. |
+| `stream` | bool | Whether streaming was requested. |

@@ -16,7 +16,13 @@ Splits an array into individual events. Each element becomes a separate downstre
 | `name` | string | required | Task name. |
 | `iterate_key` | string | | Key to extract the array from a JSON object. Without this, the entire event data is treated as an array. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | element type | One event per element from the iterated array. Each element becomes `event.data` for downstream tasks. |
 
 ## Examples
 

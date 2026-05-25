@@ -162,6 +162,12 @@ if event.data.amount < 0 {
 event.data
 ```
 
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [Dynamic](https://docs.rs/rhai/latest/rhai/enum.Dynamic.html) | [rhai](https://docs.rs/rhai/latest/rhai/) | The script's return value. Object, array, or scalar becomes the next event's data. Returning `()` (unit) filters the event — no downstream event is emitted. |
+
 ## Examples
 
 **Set metadata:**

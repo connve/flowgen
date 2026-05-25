@@ -2,6 +2,12 @@
 
 Manage Salesforce metadata. Currently supports creating managed event subscriptions for Change Data Capture.
 
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Tooling API response. Structure depends on the operation — typically metadata records or subscription confirmation. |
+
 ## Configuration
 
 ```yaml
@@ -28,7 +34,7 @@ Manage Salesforce metadata. Currently supports creating managed event subscripti
 | `full_name` | string | | API name for the subscription. |
 | `metadata` | object | | Subscription metadata (see below). |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Metadata fields
 

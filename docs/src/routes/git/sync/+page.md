@@ -28,7 +28,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
 | `auth` | object | `none` | Authentication configuration (see below). |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Authentication
 
@@ -71,3 +71,13 @@ flow:
         key: "{{event.data.key}}"
         credentials_path: /etc/nats/credentials.json
 ```
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each file emitted produces an event with `event.data` containing:
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | string | Relative file path in the repository. |
+| `content` | string | Full file content. |
+| `commit` | string | HEAD commit hash. |

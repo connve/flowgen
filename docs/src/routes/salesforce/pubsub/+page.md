@@ -30,7 +30,7 @@ Subscribe to and publish Salesforce platform events and Change Data Capture even
 | `endpoint` | string | | Custom Pub/Sub API endpoint. |
 | `ack_timeout` | duration | | Flow completion timeout. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Durable consumer options
 
@@ -63,4 +63,10 @@ Subscribe to and publish Salesforce platform events and Change Data Capture even
 | `payload` | object | required | Event payload — explicit fields or `from_event: true`. |
 | `endpoint` | string | | Custom Pub/Sub API endpoint. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [Avro](https://docs.rs/apache-avro/latest/apache_avro/) | [salesforce_core](https://crates.io/crates/salesforce_core) | Avro-decoded event payload as defined by the Salesforce event schema. CDC events include change data and change descriptor. Event ID is set as `event.id`. |

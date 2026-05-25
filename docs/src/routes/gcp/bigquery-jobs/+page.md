@@ -52,4 +52,15 @@ Create, monitor, and manage BigQuery jobs. Used for load jobs from GCS.
 | `max_poll_duration` | duration | `30m` | Max time to wait for completion. |
 | `labels` | map | | Job labels. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+| Field | Type | Description |
+|---|---|---|
+| `job` | object | Full BigQuery job response for `create`, `get`, and `cancel` operations. |
+| `job_id` | string | Job identifier (also set as `event.id`). |
+| `project_id` | string | GCP project. Present in `delete` response. |
+| `deleted` | bool | Deletion confirmation. Present in `delete` response. |

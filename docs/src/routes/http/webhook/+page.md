@@ -33,7 +33,7 @@ worker:
 | `stream` | bool | false | Stream responses as Server-Sent Events. |
 | `auth` | object | | User authentication configuration. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ## Example: Webhook with SSE streaming
 
@@ -59,3 +59,12 @@ flow:
 ```
 
 With `stream: true`, the client receives intermediate results as SSE events while the flow processes.
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each received request produces an event with `event.data` containing:
+
+| Field | Type | Description |
+|---|---|---|
+| `headers` | object | Selected HTTP headers from the request. |
+| `payload` | value | Parsed request body as JSON. |

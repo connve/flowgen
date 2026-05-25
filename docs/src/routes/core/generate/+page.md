@@ -23,7 +23,16 @@ Produces events on a schedule. Source task — typically first in a flow.
 | `allow_rerun` | bool | false | Reset the counter on restart. |
 | `ack_timeout` | duration | | Flow completion timeout. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Includes user-defined payload fields (if configured) plus system info.
+
+| Field | Type | Description |
+|---|---|---|
+| `system_info.last_run_time` | int | Unix timestamp (seconds) of the current run. |
+| `system_info.next_run_time` | int / null | Unix timestamp (seconds) of the next scheduled run. |
 
 ## Examples
 

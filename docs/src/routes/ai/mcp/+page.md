@@ -31,3 +31,11 @@ Individual flows register as MCP tools using the `mcp_tool` task:
 ```
 
 The MCP server listens on the configured port and exposes registered tools over the MCP Streamable HTTP transport.
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+| Field | Type | Description |
+|---|---|---|
+| `arguments` | object | Tool input parameters from the MCP `tools/call` request, structured per the configured `input_schema`. |

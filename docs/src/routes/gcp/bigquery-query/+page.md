@@ -32,7 +32,13 @@ Runs SQL queries against Google BigQuery. Returns results as Arrow RecordBatch.
 | `default_dataset` | string | | Default dataset for unqualified table names. |
 | `labels` | map | | Job labels. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [google-cloud-bigquery](https://github.com/googleapis/google-cloud-rust) | Query results with columns and types matching the BigQuery result set. Job ID is set as `event.id`. |
 
 ## Example: Query with resource file
 

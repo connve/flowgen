@@ -36,7 +36,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 | `ack_timeout` | duration | | Acknowledgment timeout. |
 | `backoff` | list | | Redelivery backoff schedule (list of durations). |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Stream options
 
@@ -51,6 +51,12 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 | `retention` | string | `limits` | Retention policy: `limits`, `interest`, `work_queue`. |
 | `discard` | string | `old` | Discard policy: `old`, `new`. |
 | `duplicate_window` | duration | | Deduplication window. |
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) / [Avro](https://docs.rs/apache-avro/latest/apache_avro/) / [Arrow](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [async-nats](https://docs.rs/async-nats/latest/async_nats/) | Message payload from JetStream. Format depends on how the message was published. |
 
 ## Example
 

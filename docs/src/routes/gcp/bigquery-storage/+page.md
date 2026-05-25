@@ -36,7 +36,7 @@ Reads table data directly via the BigQuery Storage Read API. Returns Arrow Recor
 | `max_stream_count` | int | | Max parallel read streams. |
 | `data_format` | string | `arrow` | Result format: `arrow` or `avro`. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ## Storage Write
 
@@ -62,4 +62,18 @@ Streams data into BigQuery tables via the Storage Write API. Accepts Arrow Recor
 | `table_id` | string | required | BigQuery table. |
 | `change_type` | string | | CDC change type: `upsert` or `delete`. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+### Read
+
+| Format | Crate | Description |
+|---|---|---|
+| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [google-cloud-bigquery](https://github.com/googleapis/google-cloud-rust) | Table data via the BigQuery Storage Read API. Emits one event per batch. Empty tables emit an empty batch with the target schema. |
+
+### Write
+
+| Field | Type | Description |
+|---|---|---|
+| `rows_written` | int | Number of rows appended. |

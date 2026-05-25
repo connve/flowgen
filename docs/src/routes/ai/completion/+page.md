@@ -28,7 +28,18 @@ Run LLM completions from multiple providers within a flow. Supports tool calling
 | `tools` | list | | Tool definitions for function calling. |
 | `sandbox` | object | | Sandbox configuration for tool execution. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+| Field | Type | Description |
+|---|---|---|
+| `text` | string | Generated completion text. |
+| `model` | string | Model used. |
+| `provider` | string | Provider name. |
+| `usage` | object | Token counts (`prompt_tokens`, `completion_tokens`, `total_tokens`). |
 
 ### Sandbox
 

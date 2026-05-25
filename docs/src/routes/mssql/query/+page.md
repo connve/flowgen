@@ -27,7 +27,7 @@ Runs SQL queries against Microsoft SQL Server. Returns results as Arrow RecordBa
 | `connection_timeout` | duration | `30s` | Connection timeout. |
 | `query_timeout` | duration | `2m` | Query execution timeout. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Credentials file
 
@@ -42,3 +42,9 @@ Runs SQL queries against Microsoft SQL Server. Returns results as Arrow RecordBa
   "encrypt": true
 }
 ```
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [tiberius](https://docs.rs/tiberius/latest/tiberius/) | Query results with column schema matching the SQL result set. Emits one event per `batch_size` rows. |

@@ -38,7 +38,17 @@ Bulk query jobs for extracting large datasets from Salesforce.
 | `batch_size` | int | 10000 | Rows per Arrow RecordBatch. |
 | `has_header` | bool | true | First row is header. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) / [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) (for `get_results`)
+
+What `event.data` contains depends on the operation:
+
+- **`create`** / **`get`** / **`abort`**: Salesforce `QueryJobInfo` object (includes `id`, `state`, `operation`, `query`).
+- **`get_results`**: Arrow RecordBatch — each row from the query results becomes a record.
+- **`delete`**: `{job_id, deleted: true}`.
 
 ## Example: Create job and get results
 

@@ -35,7 +35,40 @@ Read, write, list, and delete keys in a NATS JetStream Key-Value bucket.
 | `key` | string | | Key for get, put, and delete. Supports templating. |
 | `key_prefix` | string | | Key prefix for list operations. Supports templating. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+### `get`
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | string | Requested key. |
+| `content` | string / null | Stored value, or null if not found. |
+| `found` | bool | Whether the key exists. |
+
+### `put`
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | string | Written key. |
+| `revision` | int | KV store revision number. |
+
+### `delete`
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | string | Deleted key. |
+
+### `list`
+
+| Field | Type | Description |
+|---|---|---|
+| `keys` | array | Matching key names. |
+| `count` | int | Number of keys returned. |
+| `prefix` | string | Prefix that was searched. |
 
 ## Examples
 

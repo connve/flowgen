@@ -17,7 +17,13 @@ Logs event data to stdout.
 | `level` | string | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`. |
 | `structured` | bool | false | Output as structured JSON. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+| Format | Crate | Description |
+|---|---|---|
+| same as input | — | Pass-through — event data is forwarded unchanged. |
 
 ## Example
 

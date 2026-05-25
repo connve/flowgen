@@ -31,7 +31,7 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
 | `credentials_path` | string | | Path to credentials file (GCS service account, AWS credentials). |
 | `client_options` | map | | Additional client options (region, endpoint, etc.). |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Read fields
 
@@ -190,3 +190,26 @@ Returns `{path, files}` where each file has `location`, `last_modified`, `size`,
     destination: gs://my-bucket/archive/
     credentials_path: /path/to/gcs-creds.json
 ```
+
+## Output
+
+### Read
+
+| Format | Crate | Description |
+|---|---|---|
+| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) / [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [object_store](https://docs.rs/object_store/latest/object_store/) | File contents. Format depends on source file type (Parquet, ORC, CSV, JSON). Each record batch becomes one event. |
+
+### Write
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | string | Written file path. |
+| `size` | int | Bytes written. |
+| `e_tag` | string / null | S3 ETag if available. |
+
+### List
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | string | Pattern searched. |
+| `files` | array | Matched files, each with `location`, `last_modified`, `size`, and `e_tag`. |

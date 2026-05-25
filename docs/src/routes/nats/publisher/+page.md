@@ -21,7 +21,17 @@ Publishes events to a NATS JetStream subject.
 | `subject` | string | required | Subject to publish to. Supports templating. |
 | `stream` | object | | Optional stream configuration (same as subscriber). |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Output
+
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
+
+| Field | Type | Description |
+|---|---|---|
+| `stream` | string | JetStream stream name. |
+| `sequence` | int | Message sequence number. |
+| `duplicate` | bool | Whether the message was deduplicated. |
 
 ## Example
 

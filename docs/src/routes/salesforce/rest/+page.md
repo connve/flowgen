@@ -2,6 +2,26 @@
 
 CRUD operations on Salesforce SObjects, composite batch operations, and SOSL search.
 
+## Output
+
+### SObject CRUD
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Salesforce API response. For `create`: includes `id`, `success`, `errors`. For `get` / `get_by_external_id`: the full record object. Record ID is set as `event.id`. |
+
+### Composite
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Array of sub-request results, each with `statusCode`, `result`, and `errors`. |
+
+### Search / Query
+
+| Format | Crate | Description |
+|---|---|---|
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Salesforce SOSL/SOQL response with `searchRecords` or `records` array. |
+
 ## SObject operations
 
 Single-record operations: create, get, get_by_external_id, update, upsert, delete.
@@ -31,7 +51,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 | `external_id_field` | string | | External ID field name (for upsert, get_by_external_id). |
 | `external_id_value` | string | | External ID value. Supports templating. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Examples
 
@@ -90,7 +110,7 @@ Batch operations on multiple records: create, get, update, upsert, delete, tree.
 | `external_id_field` | string | | External ID field (for upsert). |
 | `all_or_none` | bool | | Atomic transaction — all succeed or all fail. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ## SOSL Search
 
@@ -111,7 +131,7 @@ Execute [SOSL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/
 | `credentials_path` | string | required | Path to Salesforce credentials. |
 | `query` | string | required | SOSL query string. Supports templating. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | Retry configuration. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ### Templating the search term
 
