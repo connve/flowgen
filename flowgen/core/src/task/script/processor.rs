@@ -558,11 +558,23 @@ impl crate::task::runner::Runner for Processor {
             format!("{hash:x}")
         });
 
-        // Register function to get current Unix timestamp.
         engine.register_fn("timestamp_now", || -> i64 {
-            // Returns current Unix timestamp in seconds.
             chrono::Utc::now().timestamp()
         });
+
+        engine.register_fn(
+            "timestamp_format",
+            |timestamp_secs: i64, format: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+                chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                    .map(|dt| dt.format(format).to_string())
+                    .ok_or_else(|| {
+                        Box::new(rhai::EvalAltResult::ErrorRuntime(
+                            format!("Invalid timestamp: {timestamp_secs}").into(),
+                            rhai::Position::NONE,
+                        ))
+                    })
+            },
+        );
 
         // Register function to extract year from Unix timestamp.
         engine.register_fn(

@@ -118,6 +118,7 @@ All timestamps are Unix epoch in **seconds** unless noted.
 | Function | Returns | Description |
 |---|---|---|
 | `timestamp_now()` | i64 | Current Unix timestamp in seconds. |
+| `timestamp_format(ts_secs, fmt)` | string | Format Unix seconds with a [chrono format string](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) (e.g., `"%Y-%m-%d %H:%M:%S"`). |
 | `parse_timestamp(iso)` | i64 | Parse ISO 8601 / RFC 3339 to Unix milliseconds. Throws on parse error. |
 | `parse_rfc2822_timestamp(s)` | i64 | Parse RFC 2822 (e.g., HTTP `Date` header) to Unix milliseconds. |
 | `timestamp_to_iso(ts_secs)` | string | Format Unix seconds as ISO 8601 (`2026-02-02T12:00:00Z`). |

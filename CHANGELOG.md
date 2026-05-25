@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.114.0
+
+### Features
+
+- **`timestamp_format` Rhai function.** Format any Unix timestamp with a
+  custom format string: `timestamp_format(timestamp_now(), "%Y-%m-%d %H:%M:%S")`.
+  Uses [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) syntax.
+
 ## 0.113.0
 
 ### Fixes
