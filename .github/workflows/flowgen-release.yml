@@ -169,12 +169,13 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.detect-version.outputs.tag }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
         run: |
-          gh release create "${{ needs.detect-version.outputs.tag }}" \
-            --title "Release ${{ needs.detect-version.outputs.tag }}" \
-            --notes "## Changes in ${{ needs.detect-version.outputs.tag }}
-
-          ${{ steps.changelog.outputs.changelog }}"
+          printf '## Changes in %s\n\n%s\n' "$TAG" "$CHANGELOG" > release-notes.md
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --notes-file release-notes.md
 
   extract-linux-binaries:
     needs: [detect-version, create-release]

@@ -23,6 +23,13 @@ export function initPosthog(): typeof posthog | null {
 	return posthog;
 }
 
+export function identify(email: string, properties?: Record<string, unknown>): void {
+	if (!browser) return;
+	if (!PUBLIC_POSTHOG_KEY) return;
+	initPosthog();
+	posthog.identify(email, { email, ...properties });
+}
+
 export function capture(event: string, properties?: Record<string, unknown>): void {
 	if (!browser) return;
 	if (!PUBLIC_POSTHOG_KEY) {

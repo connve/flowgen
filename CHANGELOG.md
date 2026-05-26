@@ -8,6 +8,23 @@
   custom format string: `timestamp_format(timestamp_now(), "%Y-%m-%d %H:%M:%S")`.
   Uses [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) syntax.
 
+### Docs
+
+- Added concrete output format tables to all 24 task documentation pages
+  with links to underlying crate docs (arrow, serde_json, salesforce_core,
+  async-nats, rhai, object_store, reqwest, tiberius).
+- Added retry configuration links to all task configuration tables.
+- Added `identify()` to PostHog integration so newsletter signups create
+  persons instead of anonymous UUIDs.
+
+### CI
+
+- Fixed release notes shell interpolation bug — commit messages with
+  backticks or special characters no longer break `gh release create`.
+  Uses `--notes-file` instead of inline `--notes`.
+- Added docs CI pipeline (`docs-ci.yml`) — runs `svelte-check` and build
+  on PRs that touch `docs/`.
+
 ## 0.113.0
 
 ### Fixes

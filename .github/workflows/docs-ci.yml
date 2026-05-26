@@ -1,0 +1,40 @@
+name: Docs CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Install dependencies
+        working-directory: docs
+        run: npm ci
+
+      - name: Write .env
+        working-directory: docs
+        run: |
+          echo "PUBLIC_POSTHOG_KEY=test" >> .env
+          echo "PUBLIC_POSTHOG_HOST=/ingest" >> .env
+          echo "PUBLIC_POSTHOG_UI_HOST=https://eu.posthog.com" >> .env
+
+      - name: Typecheck
+        working-directory: docs
+        run: npm run check
+
+      - name: Build
+        working-directory: docs
+        run: npm run build

@@ -3,7 +3,7 @@
 	import 'prismjs/themes/prism-tomorrow.css';
 	import { base } from '$app/paths';
 	import Sidebar from '$lib/components/Sidebar.svelte';
-	import { initPosthog, capture } from '$lib/posthog';
+	import { initPosthog, identify, capture } from '$lib/posthog';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
@@ -22,6 +22,7 @@
 			return;
 		}
 		nlError = null;
+		identify(email);
 		capture('newsletter_signup', { email });
 		nlSubmitted = true;
 	}
