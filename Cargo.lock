@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "arrow",
  "atty",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1818,6 +1818,7 @@ dependencies = [
  "flowgen_core",
  "futures-util",
  "handlebars",
+ "http-body-util",
  "humantime",
  "humantime-serde",
  "serde",
@@ -1832,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1854,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1881,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1904,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.114.0"
+version = "0.115.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -6025,9 +6026,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.13.6"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c8f66303b1441546f9cff8fc2b6a340d5794d93c5171d183921ed919b215de"
+checksum = "e9986c23eecb0e9a097d898b98ff5b2c10c94f7c8da104ee439fed3b6722f600"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6048,9 +6049,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.13.6"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81608e5b0a5fc94492eca480a029a6369eb5b4d5ba998f624fd6ee4c7f2b75bc"
+checksum = "ba6b1b1c94de96c8e246c4d20e2507b112f2a443646dfcd85d4c45c83ab50b40"
 dependencies = [
  "bytes",
  "chrono",
@@ -6068,9 +6069,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.13.6"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "684499b1a434fb74d195aa9f3e0b503524cd0bf49e4088a7b3d6625488c4538a"
+checksum = "a346e478eb4a9fcdd7db69340b043545a93088066cc8091845fb41490ed483b2"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6093,9 +6094,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.13.6"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f87f32c1a71637e3320dcd6f662af71f3aa76bf294f6acffbffb852d9e718324"
+checksum = "3a31064a7c24d1a8f8af82caa5665dd0d90c3c5e1ca8865799d097ba5ca9ee47"
 dependencies = [
  "bytes",
  "chrono",
@@ -6113,9 +6114,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.13.6"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291863c5fea5eecbc4b97486a19d389ba2fbff3cb7dd6729bc53f068e3c07678"
+checksum = "a2872c2e3b9c102ae3d05bfd4f159ab54b29e884210e6051bcbd8e78e46f023b"
 dependencies = [
  "bytes",
  "chrono",

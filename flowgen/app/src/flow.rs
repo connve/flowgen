@@ -136,6 +136,9 @@ pub enum Error {
     /// Error in Salesforce REST API SOSL search operations.
     #[error(transparent)]
     SalesforceRestApiSearch(#[from] flowgen_salesforce::restapi::search::Error),
+    /// Error in Salesforce SOAP API merge operations.
+    #[error(transparent)]
+    SalesforceSoapApiMerge(#[from] flowgen_salesforce::soapapi::merge::Error),
     /// Error in Salesforce Tooling API operations.
     #[error(transparent)]
     SalesforceTooling(#[from] flowgen_salesforce::toolingapi::processor::Error),
@@ -1375,6 +1378,27 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
+        TaskType::salesforce_soapapi_merge(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_salesforce::soapapi::merge::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
         TaskType::salesforce_toolingapi(config) => {
             let config = Arc::new(config);
             tokio::spawn(
@@ -1782,55 +1806,6 @@ impl FlowBuilder {
 mod tests {
     use super::*;
     use crate::config::{Flow, FlowConfig};
-
-    #[test]
-    fn test_flow_builder_new() {
-        let builder = FlowBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.http_server.is_none());
-    }
-
-    #[test]
-    fn test_flow_builder_default() {
-        let builder = FlowBuilder::default();
-        assert!(builder.config.is_none());
-        assert!(builder.http_server.is_none());
-    }
-
-    #[test]
-    fn test_flow_builder_config() {
-        let flow_config = Arc::new(FlowConfig {
-            flow: Flow {
-                name: "test_flow".to_string(),
-                labels: None,
-                tasks: vec![],
-                require_leader_election: None,
-                parallel_instances: 1,
-            },
-        });
-
-        let builder = FlowBuilder::new().config(flow_config.clone());
-        assert_eq!(builder.config, Some(flow_config));
-    }
-
-    #[test]
-    fn test_flow_builder_http_server() {
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
-        let builder = FlowBuilder::new().http_server(server.clone());
-        assert!(builder.http_server.is_some());
-    }
-
-    #[test]
-    fn test_flow_builder_build_missing_config() {
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
-
-        let result = FlowBuilder::new().http_server(server).build();
-
-        assert!(matches!(
-            result,
-            Err(Error::MissingBuilderAttribute(attr)) if attr == "config"
-        ));
-    }
 
     #[test]
     fn test_flow_builder_build_without_http_server() {

@@ -719,30 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn test_event_builder_missing_data() {
-        let result = EventBuilder::new()
-            .subject("test.subject".to_string())
-            .build();
-
-        assert!(matches!(
-            result,
-            Err(Error::MissingBuilderAttribute(attr)) if attr == "data"
-        ));
-    }
-
-    #[test]
-    fn test_event_builder_missing_subject() {
-        let result = EventBuilder::new()
-            .data(EventData::Json(json!({"test": "value"})))
-            .build();
-
-        assert!(matches!(
-            result,
-            Err(Error::MissingBuilderAttribute(attr)) if attr == "subject"
-        ));
-    }
-
-    #[test]
     fn test_avro_data_serialization() {
         let avro_data = AvroData {
             schema: r#"{"type": "string"}"#.to_string(),

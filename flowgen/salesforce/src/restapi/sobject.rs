@@ -748,3 +748,210 @@ impl ProcessorBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_failure_success_true() {
+        let resp = serde_json::json!({"success": true, "id": "001abc"});
+        EventHandler::log_failure(&resp);
+    }
+
+    #[test]
+    fn test_log_failure_success_false() {
+        let resp = serde_json::json!({
+            "success": false,
+            "errors": [{"message": "DUPLICATE_VALUE", "statusCode": "DUPLICATE_VALUE"}]
+        });
+        EventHandler::log_failure(&resp);
+    }
+
+    #[test]
+    fn test_log_failure_no_success_field() {
+        let resp = serde_json::json!({"id": "001abc"});
+        EventHandler::log_failure(&resp);
+    }
+
+    #[test]
+    fn test_log_failure_non_object() {
+        EventHandler::log_failure(&serde_json::json!("just a string"));
+        EventHandler::log_failure(&serde_json::json!(42));
+        EventHandler::log_failure(&serde_json::json!(null));
+    }
+
+    #[test]
+    fn test_config_create_with_fields() {
+        let json = r#"{
+            "name": "create_account",
+            "operation": "create",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "payload": {
+                "Name": "Acme Corp",
+                "Industry": "Technology"
+            }
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::Create
+        );
+        match config.payload {
+            Some(super::super::config::Payload::Fields(ref fields)) => {
+                assert_eq!(fields.get("Name").unwrap(), "Acme Corp");
+                assert_eq!(fields.get("Industry").unwrap(), "Technology");
+            }
+            _ => panic!("expected Fields payload"),
+        }
+    }
+
+    #[test]
+    fn test_config_create_from_event() {
+        let json = r#"{
+            "name": "create_account",
+            "operation": "create",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "payload": { "from_event": true }
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        match config.payload {
+            Some(super::super::config::Payload::FromEvent { from_event }) => {
+                assert!(from_event);
+            }
+            _ => panic!("expected FromEvent payload"),
+        }
+    }
+
+    #[test]
+    fn test_config_get_with_fields() {
+        let json = r#"{
+            "name": "get_account",
+            "operation": "get",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "record_id": "001000000000001",
+            "fields": "Id,Name,Industry"
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::Get
+        );
+        assert_eq!(config.record_id.as_deref(), Some("001000000000001"));
+        assert_eq!(config.fields.as_deref(), Some("Id,Name,Industry"));
+    }
+
+    #[test]
+    fn test_config_get_by_external_id() {
+        let json = r#"{
+            "name": "get_contact",
+            "operation": "get_by_external_id",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Contact",
+            "external_id_field": "ExternalId__c",
+            "external_id_value": "EXT-001"
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::GetByExternalId
+        );
+        assert_eq!(config.external_id_field.as_deref(), Some("ExternalId__c"));
+        assert_eq!(config.external_id_value.as_deref(), Some("EXT-001"));
+    }
+
+    #[test]
+    fn test_config_upsert() {
+        let json = r#"{
+            "name": "upsert_contact",
+            "operation": "upsert",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Contact",
+            "external_id_field": "ExternalId__c",
+            "external_id_value": "EXT-001",
+            "payload": {
+                "FirstName": "Alice",
+                "LastName": "Smith"
+            }
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::Upsert
+        );
+        assert!(config.payload.is_some());
+        assert!(config.external_id_field.is_some());
+        assert!(config.external_id_value.is_some());
+    }
+
+    #[test]
+    fn test_config_delete() {
+        let json = r#"{
+            "name": "delete_account",
+            "operation": "delete",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "record_id": "001000000000001"
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::Delete
+        );
+        assert_eq!(config.record_id.as_deref(), Some("001000000000001"));
+    }
+
+    #[test]
+    fn test_config_update() {
+        let json = r#"{
+            "name": "update_account",
+            "operation": "update",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "record_id": "001000000000001",
+            "payload": { "Name": "New Name" }
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.operation,
+            super::super::config::SObjectOperation::Update
+        );
+        assert!(config.record_id.is_some());
+        assert!(config.payload.is_some());
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let json = r#"{
+            "name": "minimal",
+            "operation": "get",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account"
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert!(config.payload.is_none());
+        assert!(config.record_id.is_none());
+        assert!(config.fields.is_none());
+        assert!(config.external_id_field.is_none());
+        assert!(config.external_id_value.is_none());
+        assert!(config.depends_on.is_none());
+        assert!(config.retry.is_none());
+    }
+
+    #[test]
+    fn test_config_with_depends_on() {
+        let json = r#"{
+            "name": "get_account",
+            "operation": "get",
+            "credentials_path": "/etc/sfdc/credentials.json",
+            "sobject_type": "Account",
+            "record_id": "001abc",
+            "depends_on": ["upstream_task"]
+        }"#;
+        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(config.depends_on, Some(vec!["upstream_task".to_string()]));
+    }
+}

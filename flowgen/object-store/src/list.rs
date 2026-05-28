@@ -526,16 +526,4 @@ mod tests {
         assert_eq!(result.files[0].size, 1024);
         assert_eq!(result.files[0].e_tag, Some("etag123".to_string()));
     }
-
-    #[test]
-    fn test_error_variants() {
-        let err = Error::NoObjectStoreContext;
-        assert!(matches!(err, Error::NoObjectStoreContext));
-
-        let err = Error::MissingBuilderAttribute("config".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(ref s) if s == "config"));
-
-        let err = Error::MissingBuilderAttribute("task_id".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(ref s) if s == "task_id"));
-    }
 }

@@ -58,7 +58,8 @@ export const navigation: NavSection[] = [
 			{ title: 'PubSub API', href: '/salesforce/pubsub' },
 			{ title: 'REST API', href: '/salesforce/rest' },
 			{ title: 'Bulk API', href: '/salesforce/bulk' },
-			{ title: 'Tooling API', href: '/salesforce/tooling' }
+			{ title: 'Tooling API', href: '/salesforce/tooling' },
+			{ title: 'Merge (SOAP)', href: '/salesforce/merge' }
 		],
 		subsections: [
 			{
@@ -67,7 +68,8 @@ export const navigation: NavSection[] = [
 					{ title: 'CDC Replication', href: '/salesforce/guides/cdc-replication' },
 					{ title: 'Data Export', href: '/salesforce/guides/data-export' },
 					{ title: 'Data Activation', href: '/salesforce/guides/data-activation' },
-					{ title: 'REST API', href: '/salesforce/guides/rest-api' }
+					{ title: 'REST API', href: '/salesforce/guides/rest-api' },
+					{ title: 'Deduplication', href: '/salesforce/guides/deduplication' }
 				]
 			}
 		]

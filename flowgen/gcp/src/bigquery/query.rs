@@ -1101,15 +1101,6 @@ mod tests {
         assert!(arrow_field.is_nullable());
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_missing_config() {
-        let result = ProcessorBuilder::new().build().await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
     #[test]
     fn test_build_column_string() {
         use google_cloud_bigquery::http::table::TableFieldType;

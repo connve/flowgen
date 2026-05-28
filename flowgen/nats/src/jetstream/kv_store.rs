@@ -523,3 +523,222 @@ impl ProcessorBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Config deserialization ---
+
+    #[test]
+    fn config_deser_minimal() {
+        let json = r#"{
+            "name": "kv_task",
+            "credentials_path": "/etc/nats/creds.json",
+            "bucket": "my_bucket",
+            "operation": "get",
+            "key": "some.key"
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.name, "kv_task");
+        assert_eq!(
+            cfg.credentials_path,
+            std::path::PathBuf::from("/etc/nats/creds.json")
+        );
+        assert_eq!(cfg.bucket, "my_bucket");
+        assert_eq!(cfg.operation, Operation::Get);
+        assert_eq!(cfg.key, Some("some.key".to_string()));
+        assert_eq!(cfg.key_prefix, None);
+        assert_eq!(cfg.depends_on, None);
+        assert_eq!(cfg.retry, None);
+        // default url
+        assert_eq!(cfg.url, crate::client::DEFAULT_NATS_URL);
+    }
+
+    #[test]
+    fn config_deser_with_url_override() {
+        let json = r#"{
+            "name": "kv",
+            "credentials_path": "/creds.json",
+            "bucket": "b",
+            "operation": "put",
+            "key": "k",
+            "url": "nats://remote:4222"
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.url, "nats://remote:4222");
+    }
+
+    #[test]
+    fn config_deser_list_operation_with_prefix() {
+        let json = r#"{
+            "name": "lister",
+            "credentials_path": "/creds.json",
+            "bucket": "b",
+            "operation": "list",
+            "key_prefix": "flows."
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.operation, Operation::List);
+        assert_eq!(cfg.key_prefix, Some("flows.".to_string()));
+        assert_eq!(cfg.key, None);
+    }
+
+    #[test]
+    fn config_deser_delete_operation() {
+        let json = r#"{
+            "name": "deleter",
+            "credentials_path": "/creds.json",
+            "bucket": "b",
+            "operation": "delete",
+            "key": "old.key"
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.operation, Operation::Delete);
+    }
+
+    #[test]
+    fn config_deser_with_depends_on() {
+        let json = r#"{
+            "name": "kv",
+            "credentials_path": "/creds.json",
+            "bucket": "b",
+            "operation": "put",
+            "key": "k",
+            "depends_on": ["fetch", "transform"]
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.depends_on,
+            Some(vec!["fetch".to_string(), "transform".to_string()])
+        );
+    }
+
+    #[test]
+    fn config_deser_unknown_operation_rejected() {
+        let json = r#"{
+            "name": "kv",
+            "credentials_path": "/creds.json",
+            "bucket": "b",
+            "operation": "upsert"
+        }"#;
+        let result = serde_json::from_str::<Config>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_roundtrip() {
+        let cfg = Config {
+            name: "rt".to_string(),
+            credentials_path: std::path::PathBuf::from("/c.json"),
+            url: "nats://host:4222".to_string(),
+            bucket: "bkt".to_string(),
+            operation: Operation::Put,
+            key: Some("k".to_string()),
+            key_prefix: None,
+            depends_on: Some(vec!["a".to_string()]),
+            retry: None,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    // --- Operation enum ---
+
+    #[test]
+    fn operation_default_is_put() {
+        assert_eq!(Operation::default(), Operation::Put);
+    }
+
+    #[test]
+    fn operation_all_variants_roundtrip() {
+        for (variant, label) in [
+            (Operation::Put, "put"),
+            (Operation::Get, "get"),
+            (Operation::List, "list"),
+            (Operation::Delete, "delete"),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, format!("\"{label}\""));
+            let back: Operation = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // --- Result struct serialization ---
+
+    #[test]
+    fn get_result_found_serializes() {
+        let r = GetResult {
+            key: "flows.main".to_string(),
+            content: Some("hello world".to_string()),
+            found: true,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["key"], "flows.main");
+        assert_eq!(v["content"], "hello world");
+        assert_eq!(v["found"], true);
+    }
+
+    #[test]
+    fn get_result_not_found_serializes() {
+        let r = GetResult {
+            key: "missing".to_string(),
+            content: None,
+            found: false,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["key"], "missing");
+        assert!(v["content"].is_null());
+        assert_eq!(v["found"], false);
+    }
+
+    #[test]
+    fn put_result_serializes() {
+        let r = PutResult {
+            key: "k".to_string(),
+            revision: 42,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["key"], "k");
+        assert_eq!(v["revision"], 42);
+    }
+
+    #[test]
+    fn list_result_serializes() {
+        let r = ListResult {
+            keys: vec!["a".to_string(), "b".to_string()],
+            count: 2,
+            prefix: "".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["count"], 2);
+        let keys = v["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0], "a");
+        assert_eq!(keys[1], "b");
+    }
+
+    #[test]
+    fn list_result_empty_serializes() {
+        let r = ListResult {
+            keys: vec![],
+            count: 0,
+            prefix: "p.".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["keys"].as_array().unwrap().len(), 0);
+        assert_eq!(v["prefix"], "p.");
+    }
+
+    #[test]
+    fn delete_result_serializes() {
+        let r = DeleteResult {
+            key: "old.key".to_string(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["key"], "old.key");
+    }
+}

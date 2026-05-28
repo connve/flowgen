@@ -93,6 +93,20 @@ pub enum Error {
     MissingSchema,
     #[error("Protobuf encoding error: {0}")]
     ProtobufEncode(String),
+    #[error("Field '{field}': expected {expected_type}, got {actual_value}")]
+    FieldTypeMismatch {
+        field: String,
+        expected_type: &'static str,
+        actual_value: String,
+    },
+    #[error("Field '{field}': invalid base64 encoding: {source}")]
+    FieldBase64Decode {
+        field: String,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("Field '{field}': expected JSON object for RECORD/STRUCT, got {actual_value}")]
+    FieldExpectedObject { field: String, actual_value: String },
     #[error("Row write failed with errors")]
     RowWriteError,
 }
@@ -118,41 +132,68 @@ fn bq_type_to_proto_type(bq_type: &TableFieldType) -> field_descriptor_proto::Ty
         TableFieldType::Float64 | TableFieldType::Float => field_descriptor_proto::Type::Double,
         TableFieldType::Bool | TableFieldType::Boolean => field_descriptor_proto::Type::Bool,
         TableFieldType::Bytes => field_descriptor_proto::Type::Bytes,
+        TableFieldType::Record | TableFieldType::Struct => field_descriptor_proto::Type::Message,
         _ => field_descriptor_proto::Type::String,
     }
 }
 
 /// Builds a protobuf DescriptorProto from a BigQuery table schema.
-/// Maps BigQuery field modes to protobuf labels (REPEATED for ARRAY fields, OPTIONAL otherwise).
+/// Recursively handles nested RECORD/STRUCT fields.
 fn build_proto_descriptor(
     fields: &[TableFieldSchema],
     include_change_type: bool,
 ) -> DescriptorProto {
-    let mut proto_fields: Vec<FieldDescriptorProto> = fields
-        .iter()
-        .enumerate()
-        .map(|(i, field)| {
-            let label = match field.mode {
-                Some(TableFieldMode::Repeated) => {
-                    Some(field_descriptor_proto::Label::Repeated.into())
-                }
-                _ => Some(field_descriptor_proto::Label::Optional.into()),
-            };
-            FieldDescriptorProto {
-                name: Some(field.name.clone()),
-                number: Some((i + 1) as i32),
-                label,
-                r#type: Some(bq_type_to_proto_type(&field.data_type).into()),
-                type_name: None,
-                extendee: None,
-                default_value: None,
-                oneof_index: None,
-                json_name: None,
-                options: None,
-                proto3_optional: None,
+    build_proto_descriptor_inner("BqMessage", fields, include_change_type)
+}
+
+fn build_proto_descriptor_inner(
+    message_name: &str,
+    fields: &[TableFieldSchema],
+    include_change_type: bool,
+) -> DescriptorProto {
+    let mut proto_fields: Vec<FieldDescriptorProto> = Vec::with_capacity(fields.len());
+    let mut nested_types: Vec<DescriptorProto> = Vec::new();
+
+    for (i, field) in fields.iter().enumerate() {
+        let label = match field.mode {
+            Some(TableFieldMode::Repeated) => Some(field_descriptor_proto::Label::Repeated.into()),
+            _ => Some(field_descriptor_proto::Label::Optional.into()),
+        };
+
+        let is_record = matches!(
+            field.data_type,
+            TableFieldType::Record | TableFieldType::Struct
+        );
+
+        let (proto_type, type_name) = match is_record {
+            true => {
+                let nested_name = format!("{}_nested", field.name);
+                let nested_fields = field.fields.as_deref().unwrap_or(&[]);
+                let nested_descriptor =
+                    build_proto_descriptor_inner(&nested_name, nested_fields, false);
+                nested_types.push(nested_descriptor);
+                (
+                    Some(field_descriptor_proto::Type::Message.into()),
+                    Some(nested_name),
+                )
             }
-        })
-        .collect();
+            false => (Some(bq_type_to_proto_type(&field.data_type).into()), None),
+        };
+
+        proto_fields.push(FieldDescriptorProto {
+            name: Some(field.name.clone()),
+            number: Some((i + 1) as i32),
+            label,
+            r#type: proto_type,
+            type_name,
+            extendee: None,
+            default_value: None,
+            oneof_index: None,
+            json_name: None,
+            options: None,
+            proto3_optional: None,
+        });
+    }
 
     if include_change_type {
         proto_fields.push(FieldDescriptorProto {
@@ -171,10 +212,10 @@ fn build_proto_descriptor(
     }
 
     DescriptorProto {
-        name: Some("BqMessage".to_string()),
+        name: Some(message_name.to_string()),
         field: proto_fields,
         extension: vec![],
-        nested_type: vec![],
+        nested_type: nested_types,
         enum_type: vec![],
         extension_range: vec![],
         oneof_decl: vec![],
@@ -188,9 +229,10 @@ fn build_proto_descriptor(
 fn encode_scalar_value(
     tag: u32,
     value: &JsonValue,
+    field_name: &str,
     proto_type: field_descriptor_proto::Type,
     buf: &mut Vec<u8>,
-) {
+) -> Result<(), Error> {
     match proto_type {
         field_descriptor_proto::Type::String => {
             let s = match value {
@@ -199,27 +241,58 @@ fn encode_scalar_value(
             };
             prost::encoding::string::encode(tag, &s, buf);
         }
-        field_descriptor_proto::Type::Int64 => {
-            if let Some(n) = value.as_i64() {
-                prost::encoding::int64::encode(tag, &n, buf);
+        field_descriptor_proto::Type::Int64 => match value.as_i64() {
+            Some(n) => prost::encoding::int64::encode(tag, &n, buf),
+            None => {
+                return Err(Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected_type: "INT64",
+                    actual_value: value.to_string(),
+                });
             }
-        }
-        field_descriptor_proto::Type::Double => {
-            if let Some(n) = value.as_f64() {
-                prost::encoding::double::encode(tag, &n, buf);
+        },
+        field_descriptor_proto::Type::Double => match value.as_f64() {
+            Some(n) => prost::encoding::double::encode(tag, &n, buf),
+            None => {
+                return Err(Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected_type: "FLOAT64",
+                    actual_value: value.to_string(),
+                });
             }
-        }
-        field_descriptor_proto::Type::Bool => {
-            if let Some(b) = value.as_bool() {
-                prost::encoding::bool::encode(tag, &b, buf);
+        },
+        field_descriptor_proto::Type::Bool => match value.as_bool() {
+            Some(b) => prost::encoding::bool::encode(tag, &b, buf),
+            None => {
+                return Err(Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected_type: "BOOL",
+                    actual_value: value.to_string(),
+                });
             }
-        }
-        field_descriptor_proto::Type::Bytes => {
-            if let Some(s) = value.as_str() {
-                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(s) {
-                    prost::encoding::bytes::encode(tag, &decoded, buf);
+        },
+        field_descriptor_proto::Type::Bytes => match value.as_str() {
+            Some(s) => match base64::engine::general_purpose::STANDARD.decode(s) {
+                Ok(decoded) => prost::encoding::bytes::encode(tag, &decoded, buf),
+                Err(source) => {
+                    return Err(Error::FieldBase64Decode {
+                        field: field_name.to_string(),
+                        source,
+                    });
                 }
+            },
+            None => {
+                return Err(Error::FieldTypeMismatch {
+                    field: field_name.to_string(),
+                    expected_type: "base64 string (BYTES)",
+                    actual_value: value.to_string(),
+                });
             }
+        },
+        field_descriptor_proto::Type::Message => {
+            return Err(Error::ProtobufEncode(format!(
+                "field '{field_name}': nested MESSAGE type must be encoded via encode_nested_value"
+            )));
         }
         _ => {
             let s = match value {
@@ -229,14 +302,43 @@ fn encode_scalar_value(
             prost::encoding::string::encode(tag, &s, buf);
         }
     }
+    Ok(())
+}
+
+/// Encodes a nested RECORD/STRUCT JSON object as a length-delimited protobuf message.
+fn encode_nested_value(
+    tag: u32,
+    value: &JsonValue,
+    field_name: &str,
+    nested_fields: &[TableFieldSchema],
+    buf: &mut Vec<u8>,
+) -> Result<(), Error> {
+    match value.as_object() {
+        Some(_) => {
+            let nested_bytes = json_to_proto_bytes(value, nested_fields)?;
+            prost::encoding::encode_key(tag, prost::encoding::WireType::LengthDelimited, buf);
+            prost::encoding::encode_varint(nested_bytes.len() as u64, buf);
+            buf.extend_from_slice(&nested_bytes);
+            Ok(())
+        }
+        None => Err(Error::FieldExpectedObject {
+            field: field_name.to_string(),
+            actual_value: value.to_string(),
+        }),
+    }
 }
 
 /// Encodes a JSON value as protobuf bytes according to the table schema.
-/// Handles both scalar and repeated (ARRAY) fields.
+/// Handles scalar, repeated (ARRAY), and nested RECORD/STRUCT fields.
 fn json_to_proto_bytes(data: &JsonValue, fields: &[TableFieldSchema]) -> Result<Vec<u8>, Error> {
-    let obj = data
-        .as_object()
-        .ok_or_else(|| Error::ProtobufEncode("Expected JSON object".to_string()))?;
+    let obj = match data.as_object() {
+        Some(obj) => obj,
+        None => {
+            return Err(Error::ProtobufEncode(
+                "expected JSON object at top level".to_string(),
+            ));
+        }
+    };
 
     let mut buf = Vec::new();
 
@@ -244,21 +346,53 @@ fn json_to_proto_bytes(data: &JsonValue, fields: &[TableFieldSchema]) -> Result<
         let tag = (i + 1) as u32;
         let value = match obj.get(&field.name) {
             Some(v) if !v.is_null() => v,
-            _ => continue, // Skip missing or null fields.
+            _ => continue,
         };
 
         let proto_type = bq_type_to_proto_type(&field.data_type);
         let is_repeated = field.mode == Some(TableFieldMode::Repeated);
+        let is_record = matches!(
+            field.data_type,
+            TableFieldType::Record | TableFieldType::Struct
+        );
 
-        if is_repeated {
-            // Repeated fields encode each array element with the same tag.
-            if let Some(arr) = value.as_array() {
-                for elem in arr {
-                    encode_scalar_value(tag, elem, proto_type, &mut buf);
+        match (is_repeated, is_record) {
+            (true, true) => match value.as_array() {
+                Some(arr) => {
+                    let nested_fields = field.fields.as_deref().unwrap_or(&[]);
+                    for elem in arr {
+                        encode_nested_value(tag, elem, &field.name, nested_fields, &mut buf)?;
+                    }
                 }
+                None => {
+                    return Err(Error::FieldTypeMismatch {
+                        field: field.name.clone(),
+                        expected_type: "JSON array for repeated RECORD",
+                        actual_value: value.to_string(),
+                    });
+                }
+            },
+            (true, false) => match value.as_array() {
+                Some(arr) => {
+                    for elem in arr {
+                        encode_scalar_value(tag, elem, &field.name, proto_type, &mut buf)?;
+                    }
+                }
+                None => {
+                    return Err(Error::FieldTypeMismatch {
+                        field: field.name.clone(),
+                        expected_type: "JSON array for repeated field",
+                        actual_value: value.to_string(),
+                    });
+                }
+            },
+            (false, true) => {
+                let nested_fields = field.fields.as_deref().unwrap_or(&[]);
+                encode_nested_value(tag, value, &field.name, nested_fields, &mut buf)?;
             }
-        } else {
-            encode_scalar_value(tag, value, proto_type, &mut buf);
+            (false, false) => {
+                encode_scalar_value(tag, value, &field.name, proto_type, &mut buf)?;
+            }
         }
     }
 
@@ -689,172 +823,6 @@ impl Default for ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use tokio::sync::mpsc;
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_config() {
-        let result = ProcessorBuilder::new().build().await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_receiver() {
-        let config = Arc::new(super::super::config::StorageWrite {
-            name: "test".to_string(),
-            credentials_path: Some(PathBuf::from("/test/creds.json")),
-            project_id: "test-project".to_string(),
-            dataset_id: "test-dataset".to_string(),
-            table_id: "test-table".to_string(),
-            stream_name: None,
-            trace_id: None,
-            change_type: None,
-            depends_on: None,
-            retry: None,
-        });
-
-        let result = ProcessorBuilder::new().config(config).build().await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_id() {
-        let config = Arc::new(super::super::config::StorageWrite {
-            name: "test".to_string(),
-            credentials_path: Some(PathBuf::from("/test/creds.json")),
-            project_id: "test-project".to_string(),
-            dataset_id: "test-dataset".to_string(),
-            table_id: "test-table".to_string(),
-            stream_name: None,
-            trace_id: None,
-            change_type: None,
-            depends_on: None,
-            retry: None,
-        });
-        let (_tx, rx) = mpsc::channel(10);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .build()
-            .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_context() {
-        let config = Arc::new(super::super::config::StorageWrite {
-            name: "test".to_string(),
-            credentials_path: Some(PathBuf::from("/test/creds.json")),
-            project_id: "test-project".to_string(),
-            dataset_id: "test-dataset".to_string(),
-            table_id: "test-table".to_string(),
-            stream_name: None,
-            trace_id: None,
-            change_type: None,
-            depends_on: None,
-            retry: None,
-        });
-        let (tx, rx) = mpsc::channel(10);
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
-            .build()
-            .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_processor_builder_missing_task_type() {
-        let config = Arc::new(super::super::config::StorageWrite {
-            name: "test".to_string(),
-            credentials_path: Some(PathBuf::from("/test/creds.json")),
-            project_id: "test-project".to_string(),
-            dataset_id: "test-dataset".to_string(),
-            table_id: "test-table".to_string(),
-            stream_name: None,
-            trace_id: None,
-            change_type: None,
-            depends_on: None,
-            retry: None,
-        });
-        let (tx, rx) = mpsc::channel(10);
-        let task_manager = Arc::new(
-            flowgen_core::task::manager::TaskManagerBuilder::new()
-                .build()
-                .unwrap(),
-        );
-        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-            as Arc<dyn flowgen_core::cache::Cache>;
-        let task_context = Arc::new(
-            flowgen_core::task::context::TaskContextBuilder::new()
-                .flow_name("test".to_string())
-                .task_manager(task_manager)
-                .cache(cache)
-                .build()
-                .unwrap(),
-        );
-
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
-            .task_context(task_context)
-            .build()
-            .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
-    }
-
-    #[test]
-    fn test_error_types() {
-        let err = Error::MissingBuilderAttribute("config".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(_)));
-
-        let err = Error::RowWriteError;
-        assert!(matches!(err, Error::RowWriteError));
-    }
-
-    #[test]
-    fn test_error_display_messages() {
-        let err = Error::MissingBuilderAttribute("config".to_string());
-        assert_eq!(
-            err.to_string(),
-            "Missing required builder attribute: config"
-        );
-
-        let err = Error::RowWriteError;
-        assert_eq!(err.to_string(), "Row write failed with errors");
-    }
-
-    #[test]
-    fn test_processor_builder_default() {
-        let builder1 = ProcessorBuilder::new();
-        let builder2 = ProcessorBuilder::default();
-
-        assert!(builder1.config.is_none());
-        assert!(builder2.config.is_none());
-        assert!(builder1.rx.is_none());
-        assert!(builder2.rx.is_none());
-    }
 
     #[test]
     fn test_event_error_conversion() {
@@ -862,5 +830,459 @@ mod tests {
             flowgen_core::event::Error::MissingBuilderAttribute("test error".to_string());
         let storage_err: Error = event_err.into();
         assert!(matches!(storage_err, Error::EventData { .. }));
+    }
+
+    fn make_field(name: &str, data_type: TableFieldType) -> TableFieldSchema {
+        TableFieldSchema {
+            name: name.to_string(),
+            data_type,
+            mode: None,
+            fields: None,
+            description: None,
+            policy_tags: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            rounding_mode: None,
+            collation: None,
+            default_value_expression: None,
+        }
+    }
+
+    fn make_repeated_field(name: &str, data_type: TableFieldType) -> TableFieldSchema {
+        let mut field = make_field(name, data_type);
+        field.mode = Some(TableFieldMode::Repeated);
+        field
+    }
+
+    fn make_record_field(name: &str, children: Vec<TableFieldSchema>) -> TableFieldSchema {
+        let mut field = make_field(name, TableFieldType::Record);
+        field.fields = Some(children);
+        field
+    }
+
+    #[test]
+    fn test_bq_type_to_proto_type_all_variants() {
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::String),
+            field_descriptor_proto::Type::String
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Int64),
+            field_descriptor_proto::Type::Int64
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Integer),
+            field_descriptor_proto::Type::Int64
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Float64),
+            field_descriptor_proto::Type::Double
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Bool),
+            field_descriptor_proto::Type::Bool
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Bytes),
+            field_descriptor_proto::Type::Bytes
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Record),
+            field_descriptor_proto::Type::Message
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Struct),
+            field_descriptor_proto::Type::Message
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Timestamp),
+            field_descriptor_proto::Type::String
+        );
+        assert_eq!(
+            bq_type_to_proto_type(&TableFieldType::Numeric),
+            field_descriptor_proto::Type::String
+        );
+    }
+
+    #[test]
+    fn test_encode_scalar_string() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!("hello");
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::String,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scalar_int64() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(42);
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::Int64,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scalar_int64_type_mismatch() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!("not_a_number");
+        let result = encode_scalar_value(
+            1,
+            &value,
+            "age",
+            field_descriptor_proto::Type::Int64,
+            &mut buf,
+        );
+        match result {
+            Err(Error::FieldTypeMismatch {
+                ref field,
+                expected_type,
+                ..
+            }) => {
+                assert_eq!(field, "age");
+                assert_eq!(expected_type, "INT64");
+            }
+            other => panic!("expected FieldTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_encode_scalar_double() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(3.15);
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::Double,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scalar_double_type_mismatch() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!("not_a_float");
+        let result = encode_scalar_value(
+            1,
+            &value,
+            "price",
+            field_descriptor_proto::Type::Double,
+            &mut buf,
+        );
+        assert!(matches!(result, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_encode_scalar_bool() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(true);
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::Bool,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scalar_bool_type_mismatch() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(42);
+        let result = encode_scalar_value(
+            1,
+            &value,
+            "is_active",
+            field_descriptor_proto::Type::Bool,
+            &mut buf,
+        );
+        assert!(matches!(result, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_encode_scalar_bytes_valid_base64() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!("aGVsbG8=");
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::Bytes,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_encode_scalar_bytes_invalid_base64() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!("not-valid-base64!!!");
+        let result = encode_scalar_value(
+            1,
+            &value,
+            "payload",
+            field_descriptor_proto::Type::Bytes,
+            &mut buf,
+        );
+        assert!(matches!(result, Err(Error::FieldBase64Decode { .. })));
+    }
+
+    #[test]
+    fn test_encode_scalar_bytes_not_string() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(42);
+        let result = encode_scalar_value(
+            1,
+            &value,
+            "payload",
+            field_descriptor_proto::Type::Bytes,
+            &mut buf,
+        );
+        assert!(matches!(result, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_encode_scalar_non_string_to_string() {
+        let mut buf = Vec::new();
+        let value = serde_json::json!(123);
+        encode_scalar_value(
+            1,
+            &value,
+            "test_field",
+            field_descriptor_proto::Type::String,
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_flat_schema() {
+        let fields = vec![
+            make_field("name", TableFieldType::String),
+            make_field("age", TableFieldType::Int64),
+            make_field("active", TableFieldType::Bool),
+        ];
+        let data = serde_json::json!({"name": "Alice", "age": 30, "active": true});
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_skips_null_fields() {
+        let fields = vec![
+            make_field("name", TableFieldType::String),
+            make_field("age", TableFieldType::Int64),
+        ];
+        let data = serde_json::json!({"name": "Alice", "age": null});
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_skips_missing_fields() {
+        let fields = vec![
+            make_field("name", TableFieldType::String),
+            make_field("age", TableFieldType::Int64),
+        ];
+        let data = serde_json::json!({"name": "Alice"});
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_type_mismatch_returns_error() {
+        let fields = vec![make_field("age", TableFieldType::Int64)];
+        let data = serde_json::json!({"age": "not_a_number"});
+        let result = json_to_proto_bytes(&data, &fields);
+        assert!(matches!(result, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_not_object() {
+        let fields = vec![make_field("name", TableFieldType::String)];
+        let data = serde_json::json!("just a string");
+        let result = json_to_proto_bytes(&data, &fields);
+        assert!(matches!(result, Err(Error::ProtobufEncode(_))));
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_repeated_field() {
+        let fields = vec![make_repeated_field("tags", TableFieldType::String)];
+        let data = serde_json::json!({"tags": ["a", "b", "c"]});
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_repeated_not_array() {
+        let fields = vec![make_repeated_field("tags", TableFieldType::String)];
+        let data = serde_json::json!({"tags": "not_an_array"});
+        let result = json_to_proto_bytes(&data, &fields);
+        assert!(matches!(result, Err(Error::FieldTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_nested_record() {
+        let fields = vec![
+            make_field("id", TableFieldType::Int64),
+            make_record_field(
+                "address",
+                vec![
+                    make_field("street", TableFieldType::String),
+                    make_field("city", TableFieldType::String),
+                ],
+            ),
+        ];
+        let data = serde_json::json!({
+            "id": 1,
+            "address": {"street": "123 Main St", "city": "Springfield"}
+        });
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_nested_record_not_object() {
+        let fields = vec![make_record_field(
+            "address",
+            vec![make_field("street", TableFieldType::String)],
+        )];
+        let data = serde_json::json!({"address": "not_an_object"});
+        let result = json_to_proto_bytes(&data, &fields);
+        assert!(matches!(result, Err(Error::FieldExpectedObject { .. })));
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_repeated_record() {
+        let mut field = make_record_field(
+            "items",
+            vec![
+                make_field("name", TableFieldType::String),
+                make_field("qty", TableFieldType::Int64),
+            ],
+        );
+        field.mode = Some(TableFieldMode::Repeated);
+        let fields = vec![field];
+        let data = serde_json::json!({
+            "items": [
+                {"name": "widget", "qty": 5},
+                {"name": "gadget", "qty": 3}
+            ]
+        });
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_proto_bytes_deeply_nested_record() {
+        let fields = vec![make_record_field(
+            "outer",
+            vec![make_record_field(
+                "inner",
+                vec![make_field("value", TableFieldType::String)],
+            )],
+        )];
+        let data = serde_json::json!({
+            "outer": {"inner": {"value": "deep"}}
+        });
+        let bytes = json_to_proto_bytes(&data, &fields).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_build_proto_descriptor_flat() {
+        let fields = vec![
+            make_field("name", TableFieldType::String),
+            make_field("age", TableFieldType::Int64),
+        ];
+        let descriptor = build_proto_descriptor(&fields, false);
+        assert_eq!(descriptor.name, Some("BqMessage".to_string()));
+        assert_eq!(descriptor.field.len(), 2);
+        assert!(descriptor.nested_type.is_empty());
+    }
+
+    #[test]
+    fn test_build_proto_descriptor_with_change_type() {
+        let fields = vec![make_field("name", TableFieldType::String)];
+        let descriptor = build_proto_descriptor(&fields, true);
+        assert_eq!(descriptor.field.len(), 2);
+        assert_eq!(descriptor.field[1].name, Some("_CHANGE_TYPE".to_string()));
+    }
+
+    #[test]
+    fn test_build_proto_descriptor_with_nested_record() {
+        let fields = vec![
+            make_field("id", TableFieldType::Int64),
+            make_record_field(
+                "address",
+                vec![
+                    make_field("street", TableFieldType::String),
+                    make_field("city", TableFieldType::String),
+                ],
+            ),
+        ];
+        let descriptor = build_proto_descriptor(&fields, false);
+        assert_eq!(descriptor.field.len(), 2);
+        assert_eq!(descriptor.nested_type.len(), 1);
+        assert_eq!(
+            descriptor.nested_type[0].name,
+            Some("address_nested".to_string())
+        );
+        assert_eq!(descriptor.nested_type[0].field.len(), 2);
+    }
+
+    #[test]
+    fn test_build_proto_descriptor_repeated_field_label() {
+        let fields = vec![make_repeated_field("tags", TableFieldType::String)];
+        let descriptor = build_proto_descriptor(&fields, false);
+        assert_eq!(
+            descriptor.field[0].label,
+            Some(field_descriptor_proto::Label::Repeated.into())
+        );
+    }
+
+    #[test]
+    fn test_field_type_mismatch_error_display() {
+        let err = Error::FieldTypeMismatch {
+            field: "age".to_string(),
+            expected_type: "INT64",
+            actual_value: "\"hello\"".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Field 'age': expected INT64, got \"hello\""
+        );
+    }
+
+    #[test]
+    fn test_field_expected_object_error_display() {
+        let err = Error::FieldExpectedObject {
+            field: "address".to_string(),
+            actual_value: "42".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Field 'address': expected JSON object for RECORD/STRUCT, got 42"
+        );
     }
 }

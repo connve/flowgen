@@ -9,10 +9,15 @@
 	let { children } = $props();
 
 	let nlEmail = $state('');
+	let nlConsent = $state(false);
 	let nlSubmitted = $state(false);
 	let nlError = $state<string | null>(null);
 
 	const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+	function handleEmailInput() {
+		nlConsent = nlEmail.trim().length > 0;
+	}
 
 	function handleNewsletter(event: SubmitEvent) {
 		event.preventDefault();
@@ -21,9 +26,13 @@
 			nlError = 'Please enter a valid email address.';
 			return;
 		}
+		if (!nlConsent) {
+			nlError = 'Please agree to receive marketing communication.';
+			return;
+		}
 		nlError = null;
 		identify(email);
-		capture('newsletter_signup', { email });
+		capture('newsletter_signup', { email, marketing_consent: true });
 		nlSubmitted = true;
 	}
 
@@ -50,8 +59,8 @@
 </script>
 
 <svelte:head>
-	<title>Flowgen Documentation</title>
-	<meta name="description" content="Flowgen — open-source data activation engine written in Rust" />
+	<title>CONNVE — Data. Intelligence. Edge.™</title>
+	<meta name="description" content="Flowgen — Data activation with a blast 💥" />
 </svelte:head>
 
 <div class="drawer lg:drawer-open">
@@ -98,13 +107,20 @@
 				<p class="text-sm font-medium text-accent">You're in. Watch your inbox.</p>
 			{:else}
 				<form onsubmit={handleNewsletter} class="newsletter-form">
-					<input
-						type="email"
-						bind:value={nlEmail}
-						placeholder="you@company.com"
-						required
-						class="newsletter-input"
-					/>
+					<div class="newsletter-input-col">
+						<input
+							type="email"
+							bind:value={nlEmail}
+							oninput={handleEmailInput}
+							placeholder="you@company.com"
+							required
+							class="newsletter-input"
+						/>
+						<label class="mt-2 flex cursor-pointer items-start gap-2 text-xs">
+							<input type="checkbox" bind:checked={nlConsent} class="newsletter-checkbox" />
+							<span class="opacity-50 leading-relaxed">I consent to receive marketing communication from CONNVE, including emails, ads, and personalised content. You can withdraw consent anytime.</span>
+						</label>
+					</div>
 					<button type="submit" class="newsletter-btn">Subscribe</button>
 				</form>
 			{/if}
@@ -186,25 +202,23 @@
 	@media (min-width: 768px) {
 		.newsletter-section {
 			flex-direction: row;
-			align-items: center;
+			align-items: flex-start;
 			justify-content: space-between;
 		}
 	}
 
 	.newsletter-form {
 		display: flex;
+		align-items: flex-start;
 		gap: 0.5rem;
-		width: 100%;
 	}
 
-	@media (min-width: 768px) {
-		.newsletter-form {
-			width: auto;
-		}
+	.newsletter-input-col {
+		width: 30rem;
 	}
 
 	.newsletter-input {
-		flex: 1;
+		width: 100%;
 		min-width: 0;
 		padding: 0.5rem 0.75rem;
 		font-size: 0.875rem;
@@ -242,5 +256,34 @@
 	.newsletter-btn:hover {
 		background-color: #00c85a;
 		transform: translateY(-1px);
+	}
+
+	.newsletter-checkbox {
+		appearance: none;
+		width: 0.75rem;
+		height: 0.75rem;
+		min-width: 0.75rem;
+		border: 1px solid rgb(255 255 255 / 0.3);
+		border-radius: 0.125rem;
+		background: rgb(255 255 255 / 0.1);
+		cursor: pointer;
+		position: relative;
+	}
+
+	.newsletter-checkbox:checked {
+		background: #00e168;
+		border-color: #00e168;
+	}
+
+	.newsletter-checkbox:checked::after {
+		content: '';
+		position: absolute;
+		left: 3px;
+		top: 0px;
+		width: 4px;
+		height: 7px;
+		border: solid #0e271b;
+		border-width: 0 1.5px 1.5px 0;
+		transform: rotate(45deg);
 	}
 </style>

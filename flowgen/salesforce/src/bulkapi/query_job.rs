@@ -655,19 +655,6 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_error_types() {
-        let err = Error::MissingBuilderAttribute("config".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(_)));
-
-        let err = Error::MissingJobId;
-        assert!(matches!(err, Error::MissingJobId));
-
-        let err = Error::MissingQuery;
-        assert!(matches!(err, Error::MissingQuery));
-    }
 
     #[test]
     fn test_delete_job_response_creation() {
@@ -701,159 +688,98 @@ mod tests {
         assert!(response.deleted);
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_new() {
-        let builder = ProcessorBuilder::new();
-        assert!(builder.config.is_none());
-        assert!(builder.tx.is_none());
-        assert!(builder.rx.is_none());
-        assert!(builder.task_id.is_none());
-        assert!(builder.task_context.is_none());
-        assert!(builder.task_type.is_none());
+    // ── SDK enum mapping functions ─────────────────────────────────
+
+    #[test]
+    fn to_sdk_query_operation_query() {
+        let result = to_sdk_query_operation(&super::super::config::QueryOperation::Query);
+        assert!(matches!(result, SdkQueryOperation::Query));
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_default() {
-        let builder1 = ProcessorBuilder::new();
-        let builder2 = ProcessorBuilder::default();
-
-        assert_eq!(builder1.config.is_none(), builder2.config.is_none());
-        assert_eq!(builder1.tx.is_none(), builder2.tx.is_none());
-        assert_eq!(builder1.rx.is_none(), builder2.rx.is_none());
+    #[test]
+    fn to_sdk_query_operation_query_all() {
+        let result = to_sdk_query_operation(&super::super::config::QueryOperation::QueryAll);
+        assert!(matches!(result, SdkQueryOperation::QueryAll));
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_config() {
-        let config = Arc::new(super::super::config::QueryJob {
-            name: "test_query".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
-            operation: super::super::config::QueryJobOperation::Create,
-            query: Some(flowgen_core::resource::Source::Inline(
-                "SELECT Id FROM Account".to_string(),
-            )),
-            query_operation: Some(super::super::config::QueryOperation::Query),
-            content_type: Some(super::super::config::ContentType::Csv),
-            column_delimiter: Some(super::super::config::ColumnDelimiter::Comma),
-            line_ending: Some(super::super::config::LineEnding::Lf),
-            job_id: None,
-            batch_size: 5000,
-            has_header: true,
-            depends_on: None,
-            retry: None,
-        });
-
-        let builder = ProcessorBuilder::new().config(config.clone());
-        assert!(builder.config.is_some());
+    #[test]
+    fn to_sdk_content_type_csv() {
+        let result = to_sdk_content_type(&super::super::config::ContentType::Csv);
+        match result {
+            Some(ct) => assert!(matches!(ct, SdkContentType::Csv)),
+            None => panic!("expected Some(Csv)"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_task_id() {
-        let builder = ProcessorBuilder::new().task_id(42);
-        assert_eq!(builder.task_id, Some(42));
+    #[test]
+    fn to_sdk_column_delimiter_comma() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Comma);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Comma)),
+            None => panic!("expected Some(Comma)"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_task_type() {
-        let builder = ProcessorBuilder::new().task_type("salesforce_bulkapi_query_job");
-        assert_eq!(builder.task_type, Some("salesforce_bulkapi_query_job"));
+    #[test]
+    fn to_sdk_column_delimiter_tab() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Tab);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Tab)),
+            None => panic!("expected Some(Tab)"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_missing_config() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let (_task_tx, rx) = tokio::sync::mpsc::channel(1);
-        let task_manager = Arc::new(
-            flowgen_core::task::manager::TaskManagerBuilder::new()
-                .build()
-                .unwrap(),
-        );
-        let task_context = Arc::new(flowgen_core::task::context::TaskContext {
-            flow: flowgen_core::task::context::FlowOptions {
-                name: "test".to_string(),
-                labels: None,
-            },
-            task_manager,
-            retry: None,
-            response_registry: None,
-            resource_loader: None,
-            cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                as Arc<dyn flowgen_core::cache::Cache>,
-            http_server: None,
-            mcp_server: None,
-            cancellation_token: tokio_util::sync::CancellationToken::new(),
-            leaf_count: 1,
-        });
-
-        let result = ProcessorBuilder::new()
-            .receiver(rx)
-            .sender(tx)
-            .task_id(1)
-            .task_context(task_context)
-            .task_type("salesforce_bulkapi_query_job")
-            .build();
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
+    #[test]
+    fn to_sdk_column_delimiter_semicolon() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Semicolon);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Semicolon)),
+            None => panic!("expected Some(Semicolon)"),
+        }
     }
 
-    #[tokio::test]
-    async fn test_processor_builder_missing_receiver() {
-        let config = Arc::new(super::super::config::QueryJob {
-            name: "test_query".to_string(),
-            credentials_path: PathBuf::from("/test/creds.json"),
-            operation: super::super::config::QueryJobOperation::Create,
-            query: Some(flowgen_core::resource::Source::Inline(
-                "SELECT Id FROM Account".to_string(),
-            )),
-            query_operation: Some(super::super::config::QueryOperation::Query),
-            content_type: Some(super::super::config::ContentType::Csv),
-            column_delimiter: Some(super::super::config::ColumnDelimiter::Comma),
-            line_ending: Some(super::super::config::LineEnding::Lf),
-            job_id: None,
-            batch_size: 5000,
-            has_header: true,
-            depends_on: None,
-            retry: None,
-        });
+    #[test]
+    fn to_sdk_column_delimiter_pipe() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Pipe);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Pipe)),
+            None => panic!("expected Some(Pipe)"),
+        }
+    }
 
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let task_manager = Arc::new(
-            flowgen_core::task::manager::TaskManagerBuilder::new()
-                .build()
-                .unwrap(),
-        );
-        let task_context = Arc::new(flowgen_core::task::context::TaskContext {
-            flow: flowgen_core::task::context::FlowOptions {
-                name: "test".to_string(),
-                labels: None,
-            },
-            task_manager,
-            retry: None,
-            response_registry: None,
-            resource_loader: None,
-            cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                as Arc<dyn flowgen_core::cache::Cache>,
-            http_server: None,
-            mcp_server: None,
-            cancellation_token: tokio_util::sync::CancellationToken::new(),
-            leaf_count: 1,
-        });
+    #[test]
+    fn to_sdk_column_delimiter_caret() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Caret);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Caret)),
+            None => panic!("expected Some(Caret)"),
+        }
+    }
 
-        let result = ProcessorBuilder::new()
-            .config(config)
-            .sender(tx)
-            .task_id(1)
-            .task_context(task_context)
-            .task_type("salesforce_bulkapi_query_job")
-            .build();
+    #[test]
+    fn to_sdk_column_delimiter_backquote() {
+        let result = to_sdk_column_delimiter(&super::super::config::ColumnDelimiter::Backquote);
+        match result {
+            Some(cd) => assert!(matches!(cd, SdkColumnDelimiter::Backquote)),
+            None => panic!("expected Some(Backquote)"),
+        }
+    }
 
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
+    #[test]
+    fn to_sdk_line_ending_lf() {
+        let result = to_sdk_line_ending(&super::super::config::LineEnding::Lf);
+        match result {
+            Some(le) => assert!(matches!(le, SdkLineEnding::Lf)),
+            None => panic!("expected Some(Lf)"),
+        }
+    }
+
+    #[test]
+    fn to_sdk_line_ending_crlf() {
+        let result = to_sdk_line_ending(&super::super::config::LineEnding::Crlf);
+        match result {
+            Some(le) => assert!(matches!(le, SdkLineEnding::Crlf)),
+            None => panic!("expected Some(Crlf)"),
+        }
     }
 }

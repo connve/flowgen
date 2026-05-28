@@ -30,6 +30,14 @@ pub mod restapi {
     pub mod sobject;
 }
 
+/// Salesforce SOAP API operations (merge).
+pub mod soapapi {
+    /// Configuration structures for SOAP API operations.
+    pub mod config;
+    /// Record merge processor for combining duplicate SObject records.
+    pub mod merge;
+}
+
 /// Salesforce Tooling API operations for metadata management.
 pub mod toolingapi {
     /// Configuration structures for Salesforce Tooling API operations.

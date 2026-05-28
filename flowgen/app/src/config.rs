@@ -107,6 +107,8 @@ pub enum TaskType {
     salesforce_restapi_composite(flowgen_salesforce::restapi::config::Composite),
     /// Salesforce REST API SOSL search operations.
     salesforce_restapi_search(flowgen_salesforce::restapi::config::Search),
+    /// Salesforce SOAP API merge operation for combining duplicate records.
+    salesforce_soapapi_merge(flowgen_salesforce::soapapi::config::Merge),
     /// Salesforce Tooling API operations for metadata management.
     salesforce_toolingapi(flowgen_salesforce::toolingapi::config::Tooling),
     /// GCP BigQuery query task.
@@ -153,6 +155,7 @@ impl TaskType {
             TaskType::salesforce_restapi_sobject(_) => "salesforce_restapi_sobject",
             TaskType::salesforce_restapi_composite(_) => "salesforce_restapi_composite",
             TaskType::salesforce_restapi_search(_) => "salesforce_restapi_search",
+            TaskType::salesforce_soapapi_merge(_) => "salesforce_soapapi_merge",
             TaskType::salesforce_toolingapi(_) => "salesforce_toolingapi",
             TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
             TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
@@ -188,6 +191,7 @@ impl TaskType {
             TaskType::salesforce_restapi_sobject(c) => &c.name,
             TaskType::salesforce_restapi_composite(c) => &c.name,
             TaskType::salesforce_restapi_search(c) => &c.name,
+            TaskType::salesforce_soapapi_merge(c) => &c.name,
             TaskType::salesforce_toolingapi(c) => &c.name,
             TaskType::gcp_bigquery_query(c) => &c.name,
             TaskType::gcp_bigquery_storage_read(c) => &c.name,
@@ -223,6 +227,7 @@ impl TaskType {
             TaskType::salesforce_restapi_sobject(c) => c.depends_on.as_ref(),
             TaskType::salesforce_restapi_composite(c) => c.depends_on.as_ref(),
             TaskType::salesforce_restapi_search(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_soapapi_merge(c) => c.depends_on.as_ref(),
             TaskType::salesforce_toolingapi(c) => c.depends_on.as_ref(),
             TaskType::gcp_bigquery_query(c) => c.depends_on.as_ref(),
             TaskType::gcp_bigquery_storage_read(c) => c.depends_on.as_ref(),

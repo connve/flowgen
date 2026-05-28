@@ -674,3 +674,364 @@ fn build_columns(
 
     Ok(columns)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // ── Config Deserialization ───────────────────────────────────────
+
+    #[test]
+    fn config_deser_minimal_inline_query() {
+        let json = r#"{
+            "name": "fetch_users",
+            "credentials_path": "/var/secrets/mssql/creds.json",
+            "query": "SELECT * FROM users"
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "fetch_users");
+        assert_eq!(
+            config.credentials_path,
+            PathBuf::from("/var/secrets/mssql/creds.json")
+        );
+        match &config.query {
+            flowgen_core::resource::Source::Inline(s) => {
+                assert_eq!(s, "SELECT * FROM users");
+            }
+            other => panic!("expected Inline query, got {other:?}"),
+        }
+        assert_eq!(config.batch_size, 10000);
+        assert_eq!(config.max_connections, 10);
+        assert_eq!(
+            config.connection_timeout,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(config.query_timeout, std::time::Duration::from_secs(120));
+        assert!(config.parameters.is_none());
+        assert!(config.depends_on.is_none());
+        assert!(config.retry.is_none());
+    }
+
+    #[test]
+    fn config_deser_resource_query() {
+        let json = r#"{
+            "name": "fetch_orders",
+            "credentials_path": "/etc/mssql/creds.json",
+            "query": { "resource": "queries/orders.sql" }
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        match &config.query {
+            flowgen_core::resource::Source::Resource { resource } => {
+                assert_eq!(resource, "queries/orders.sql");
+            }
+            other => panic!("expected Resource query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_deser_with_parameters() {
+        let json = r#"{
+            "name": "parameterized",
+            "credentials_path": "/creds.json",
+            "query": "SELECT * FROM t WHERE a = @p1 AND b = @p2",
+            "parameters": ["val1", "val2"]
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        let params = config.parameters.unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], "val1");
+        assert_eq!(params[1], "val2");
+    }
+
+    #[test]
+    fn config_deser_custom_timeouts() {
+        let json = r#"{
+            "name": "slow_query",
+            "credentials_path": "/creds.json",
+            "query": "SELECT 1",
+            "connection_timeout": "1m",
+            "query_timeout": "5m",
+            "batch_size": 500,
+            "max_connections": 3
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.connection_timeout,
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(config.query_timeout, std::time::Duration::from_secs(300));
+        assert_eq!(config.batch_size, 500);
+        assert_eq!(config.max_connections, 3);
+    }
+
+    #[test]
+    fn config_deser_with_depends_on() {
+        let json = r#"{
+            "name": "downstream",
+            "credentials_path": "/creds.json",
+            "query": "SELECT 1",
+            "depends_on": ["upstream_a", "upstream_b"]
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        let deps = config.depends_on.unwrap();
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0], "upstream_a");
+    }
+
+    #[test]
+    fn config_deser_with_retry() {
+        let json = r#"{
+            "name": "retryable",
+            "credentials_path": "/creds.json",
+            "query": "SELECT 1",
+            "retry": { "max_retries": 3, "initial_interval": "1s" }
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        assert!(config.retry.is_some());
+    }
+
+    #[test]
+    fn config_deser_missing_name_fails() {
+        let json = r#"{
+            "credentials_path": "/creds.json",
+            "query": "SELECT 1"
+        }"#;
+        let result = serde_json::from_str::<crate::config::Query>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_deser_missing_credentials_path_fails() {
+        let json = r#"{
+            "name": "test",
+            "query": "SELECT 1"
+        }"#;
+        let result = serde_json::from_str::<crate::config::Query>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_deser_missing_query_fails() {
+        let json = r#"{
+            "name": "test",
+            "credentials_path": "/creds.json"
+        }"#;
+        let result = serde_json::from_str::<crate::config::Query>(json);
+        assert!(result.is_err());
+    }
+
+    // ── Credentials Deserialization ─────────────────────────────────
+
+    #[test]
+    fn credentials_deser_full() {
+        let json = r#"{
+            "host": "sqlserver.example.com",
+            "port": 1434,
+            "database": "proddb",
+            "username": "app",
+            "password": "secret",
+            "trust_server_certificate": true,
+            "encrypt": false
+        }"#;
+        let creds: crate::config::Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.host, "sqlserver.example.com");
+        assert_eq!(creds.port, 1434);
+        assert_eq!(creds.database, "proddb");
+        assert_eq!(creds.username, "app");
+        assert_eq!(creds.password, "secret");
+        assert!(creds.trust_server_certificate);
+        assert!(!creds.encrypt);
+    }
+
+    #[test]
+    fn credentials_deser_defaults() {
+        let json = r#"{
+            "host": "localhost",
+            "database": "testdb",
+            "username": "sa",
+            "password": "pass"
+        }"#;
+        let creds: crate::config::Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.port, 1433);
+        assert!(!creds.trust_server_certificate);
+        assert!(creds.encrypt);
+    }
+
+    #[test]
+    fn credentials_deser_missing_host_fails() {
+        let json = r#"{
+            "database": "testdb",
+            "username": "sa",
+            "password": "pass"
+        }"#;
+        let result = serde_json::from_str::<crate::config::Credentials>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_roundtrip_serde() {
+        let json = r#"{
+            "name": "roundtrip",
+            "credentials_path": "/creds.json",
+            "query": "SELECT 1",
+            "batch_size": 5000,
+            "max_connections": 5
+        }"#;
+        let config: crate::config::Query = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: crate::config::Query = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    // ── rows_to_record_batches ──────────────────────────────────────
+
+    #[test]
+    fn rows_to_record_batches_empty_returns_empty_vec() {
+        let rows: Vec<Row> = vec![];
+        let result = rows_to_record_batches(&rows, 100).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── infer_schema_from_rows ──────────────────────────────────────
+
+    #[test]
+    fn infer_schema_empty_rows_returns_empty_schema() {
+        let rows: Vec<Row> = vec![];
+        let schema = infer_schema_from_rows(&rows).unwrap();
+        assert_eq!(schema.fields().len(), 0);
+    }
+
+    // ── build_columns type dispatch ────────────────────────────────
+    //
+    // tiberius::Row has pub(crate) fields and cannot be constructed
+    // outside the tiberius crate. We test build_columns with empty row
+    // slices to verify each DataType arm produces the correct Arrow
+    // array type with zero rows.
+
+    fn build_columns_empty(fields: Vec<Field>) -> Vec<Arc<dyn Array>> {
+        let schema = Schema::new(fields);
+        let rows: Vec<Row> = vec![];
+        build_columns(&rows, &schema).unwrap()
+    }
+
+    #[test]
+    fn build_columns_int8_produces_int8_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Int8, true)]);
+        assert_eq!(cols.len(), 1);
+        assert_eq!(*cols[0].data_type(), DataType::Int8);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_int16_produces_int16_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Int16, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Int16);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_int32_produces_int32_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Int32, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Int32);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_int64_produces_int64_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Int64, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Int64);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_float32_produces_float32_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Float32, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Float32);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_float64_produces_float64_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Float64, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Float64);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_boolean_produces_boolean_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Boolean, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Boolean);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_utf8_produces_string_array() {
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Utf8, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Utf8);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_timestamp_produces_timestamp_array() {
+        let dt = DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None);
+        let cols = build_columns_empty(vec![Field::new("a", dt.clone(), true)]);
+        assert_eq!(*cols[0].data_type(), dt);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_timestamp_utc_produces_timestamp_array() {
+        let dt = DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()));
+        let cols = build_columns_empty(vec![Field::new("a", dt.clone(), true)]);
+        // Timestamp with timezone still uses the Timestamp branch, producing
+        // a TimestampMicrosecond array (timezone metadata is on the field, not
+        // the builder). The fallback branch handles non-matching timestamps.
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_fallback_unmapped_type_produces_utf8() {
+        // DataType::Date32 has no explicit branch; should hit the fallback arm.
+        let cols = build_columns_empty(vec![Field::new("a", DataType::Date32, true)]);
+        assert_eq!(*cols[0].data_type(), DataType::Utf8);
+        assert_eq!(cols[0].len(), 0);
+    }
+
+    #[test]
+    fn build_columns_multiple_fields() {
+        let cols = build_columns_empty(vec![
+            Field::new("id", DataType::Int32, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("active", DataType::Boolean, true),
+            Field::new("score", DataType::Float64, true),
+        ]);
+        assert_eq!(cols.len(), 4);
+        assert_eq!(*cols[0].data_type(), DataType::Int32);
+        assert_eq!(*cols[1].data_type(), DataType::Utf8);
+        assert_eq!(*cols[2].data_type(), DataType::Boolean);
+        assert_eq!(*cols[3].data_type(), DataType::Float64);
+    }
+
+    #[test]
+    fn build_columns_empty_schema_produces_no_columns() {
+        let cols = build_columns_empty(vec![]);
+        assert!(cols.is_empty());
+    }
+
+    // ── build_columns produces valid RecordBatch ───────────────────
+
+    #[test]
+    fn build_columns_empty_rows_forms_valid_record_batch() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("val", DataType::Utf8, true),
+        ]));
+        let rows: Vec<Row> = vec![];
+        let columns = build_columns(&rows, &schema).unwrap();
+        let batch = RecordBatch::try_new(schema, columns).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 2);
+    }
+}

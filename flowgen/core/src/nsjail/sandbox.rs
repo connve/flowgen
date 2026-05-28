@@ -281,3 +281,116 @@ impl SandboxExecutor {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults_from_empty_json() {
+        let config: SandboxConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.memory_limit_mb, 512);
+        assert_eq!(config.time_limit_seconds, 30);
+        assert_eq!(config.max_pids, 10);
+        assert!(!config.allow_network);
+        assert_eq!(config.nsjail_path, "nsjail");
+        assert_eq!(config.user_id, 99999);
+        assert_eq!(config.group_id, 99999);
+    }
+
+    #[test]
+    fn config_partial_override_preserves_remaining_defaults() {
+        let json = r#"{"memory_limit_mb": 1024, "allow_network": true}"#;
+        let config: SandboxConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory_limit_mb, 1024);
+        assert!(config.allow_network);
+        // Remaining fields keep defaults.
+        assert_eq!(config.time_limit_seconds, 30);
+        assert_eq!(config.max_pids, 10);
+        assert_eq!(config.nsjail_path, "nsjail");
+        assert_eq!(config.user_id, 99999);
+        assert_eq!(config.group_id, 99999);
+    }
+
+    #[test]
+    fn config_full_override() {
+        let json = r#"{
+            "memory_limit_mb": 2048,
+            "time_limit_seconds": 120,
+            "max_pids": 50,
+            "allow_network": true,
+            "nsjail_path": "/usr/local/bin/nsjail",
+            "user_id": 1000,
+            "group_id": 1000
+        }"#;
+        let config: SandboxConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.memory_limit_mb, 2048);
+        assert_eq!(config.time_limit_seconds, 120);
+        assert_eq!(config.max_pids, 50);
+        assert!(config.allow_network);
+        assert_eq!(config.nsjail_path, "/usr/local/bin/nsjail");
+        assert_eq!(config.user_id, 1000);
+        assert_eq!(config.group_id, 1000);
+    }
+
+    #[test]
+    fn config_deny_unknown_fields() {
+        let json = r#"{"memory_limit_mb": 512, "bogus_field": true}"#;
+        let result = serde_json::from_str::<SandboxConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_roundtrip_serialization() {
+        let original = SandboxConfig {
+            memory_limit_mb: 256,
+            time_limit_seconds: 60,
+            max_pids: 20,
+            allow_network: true,
+            nsjail_path: "/opt/nsjail".to_string(),
+            user_id: 500,
+            group_id: 500,
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: SandboxConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn config_default_trait_diverges_from_serde_defaults() {
+        // derive(Default) zeros all fields, while serde uses the custom
+        // default functions. This test documents the divergence so callers
+        // know to construct via serde, not Default::default().
+        let from_default = SandboxConfig::default();
+        let from_serde: SandboxConfig = serde_json::from_str("{}").unwrap();
+        assert_ne!(from_default, from_serde);
+        // Serde defaults carry the documented values.
+        assert_eq!(from_serde.memory_limit_mb, 512);
+        // Derive default zeros them.
+        assert_eq!(from_default.memory_limit_mb, 0);
+    }
+
+    #[test]
+    fn config_rejects_wrong_types() {
+        let json = r#"{"memory_limit_mb": "not_a_number"}"#;
+        let result = serde_json::from_str::<SandboxConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn memory_limit_kb_conversion() {
+        // The execute method computes rlimit_as as memory_limit_mb * 1024.
+        // Verify the arithmetic holds for edge cases.
+        let config = SandboxConfig {
+            memory_limit_mb: 1,
+            ..SandboxConfig::default()
+        };
+        assert_eq!(config.memory_limit_mb * 1024, 1024);
+
+        let config = SandboxConfig {
+            memory_limit_mb: 4096,
+            ..SandboxConfig::default()
+        };
+        assert_eq!(config.memory_limit_mb * 1024, 4_194_304);
+    }
+}

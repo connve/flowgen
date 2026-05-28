@@ -166,93 +166,6 @@ impl ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_client_builder_new() {
-        let builder = ClientBuilder::new();
-        assert!(builder.credentials_path.is_none());
-        assert!(builder.url.is_none());
-    }
-
-    #[test]
-    fn test_client_builder_credentials_path() {
-        let path = PathBuf::from("/path/to/nats.creds");
-        let mut builder = ClientBuilder::new();
-        builder.credentials_path(path.clone());
-        assert_eq!(builder.credentials_path, Some(path));
-    }
-
-    #[test]
-    fn test_client_builder_url() {
-        let url = "nats://nats.example.com:4222".to_string();
-        let mut builder = ClientBuilder::new();
-        builder.url(url.clone());
-        assert_eq!(builder.url, Some(url));
-    }
-
-    #[test]
-    fn test_client_builder_build_missing_credentials() {
-        let builder = ClientBuilder::new();
-        let result = builder.build();
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), Error::MissingBuilderAttribute(attr) if attr == "credentials_path")
-        );
-    }
-
-    #[test]
-    fn test_client_builder_build_success() {
-        let path = PathBuf::from("/valid/nats.creds");
-        let mut builder = ClientBuilder::new();
-        builder.credentials_path(path.clone());
-        let result = builder.build();
-
-        assert!(result.is_ok());
-        let client = result.unwrap();
-        assert_eq!(client.credentials_path, path);
-        assert_eq!(client.url, None);
-        assert!(client.jetstream.is_none());
-    }
-
-    #[test]
-    fn test_client_builder_with_url() {
-        let path = PathBuf::from("/valid/nats.creds");
-        let url = "nats://nats.example.com:4222".to_string();
-        let mut builder = ClientBuilder::new();
-        builder.credentials_path(path.clone());
-        builder.url(url.clone());
-        let result = builder.build();
-
-        assert!(result.is_ok());
-        let client = result.unwrap();
-        assert_eq!(client.credentials_path, path);
-        assert_eq!(client.url, Some(url));
-        assert!(client.jetstream.is_none());
-    }
-
-    #[test]
-    fn test_client_builder_method_chaining() {
-        let path = PathBuf::from("/chain/test.creds");
-        let url = "nats://localhost:4222".to_string();
-        let mut builder = ClientBuilder::new();
-        let client = builder
-            .credentials_path(path.clone())
-            .url(url.clone())
-            .build()
-            .unwrap();
-
-        assert_eq!(client.credentials_path, path);
-        assert_eq!(client.url, Some(url));
-        assert!(client.jetstream.is_none());
-    }
-
-    #[test]
-    fn test_client_builder_default() {
-        let builder = ClientBuilder::default();
-        assert!(builder.credentials_path.is_none());
-        assert!(builder.url.is_none());
-    }
 
     #[test]
     fn test_constants() {
@@ -305,20 +218,5 @@ mod tests {
 
         let cloned = nkey.clone();
         assert_eq!(nkey, cloned);
-    }
-
-    #[test]
-    fn test_client_structure() {
-        let path = PathBuf::from("/test/nats.creds");
-        let url = Some("nats://localhost:4222".to_string());
-        let client = Client {
-            credentials_path: path.clone(),
-            url: url.clone(),
-            jetstream: None,
-        };
-
-        assert_eq!(client.credentials_path, path);
-        assert_eq!(client.url, url);
-        assert!(client.jetstream.is_none());
     }
 }

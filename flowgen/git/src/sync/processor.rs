@@ -536,3 +536,388 @@ impl ProcessorBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::config::{GitAuth, GitAuthType};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// Helper to build a minimal TaskContext for tests.
+    fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("test_flow".to_string())
+                .task_manager(task_manager)
+                .cache(cache)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// Helper to construct a minimal ProcessorConfig for tests.
+    fn test_config() -> ProcessorConfig {
+        ProcessorConfig {
+            name: "test_sync".to_string(),
+            repository_url: "https://github.com/org/repo.git".to_string(),
+            branch: "main".to_string(),
+            path: None,
+            clone_path: None,
+            auth: GitAuth::default(),
+            depends_on: None,
+            retry: None,
+        }
+    }
+
+    // ── Error Display ────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_clone() {
+        let err = Error::Clone {
+            url: "https://github.com/org/repo.git".to_string(),
+            source: "network timeout".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Git clone failed for https://github.com/org/repo.git: network timeout"
+        );
+    }
+
+    #[test]
+    fn error_display_fetch() {
+        let err = Error::Fetch {
+            url: "https://github.com/org/repo.git".to_string(),
+            source: "auth failed".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Git fetch failed for https://github.com/org/repo.git: auth failed"
+        );
+    }
+
+    #[test]
+    fn error_display_open_repo() {
+        let err = Error::OpenRepo {
+            path: PathBuf::from("/tmp/repo"),
+            source: "corrupt index".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Failed to open existing repository at /tmp/repo: corrupt index"
+        );
+    }
+
+    #[test]
+    fn error_display_head_commit() {
+        let err = Error::HeadCommit {
+            source: "detached HEAD".into(),
+        };
+        assert_eq!(err.to_string(), "Failed to read HEAD commit: detached HEAD");
+    }
+
+    #[test]
+    fn error_display_checkout() {
+        let err = Error::Checkout {
+            source: "conflict".into(),
+        };
+        assert_eq!(err.to_string(), "Failed to checkout worktree: conflict");
+    }
+
+    #[test]
+    fn error_display_ssh_not_supported() {
+        assert_eq!(
+            Error::SshNotSupported.to_string(),
+            "SSH authentication is not supported. Use HTTPS with a token instead."
+        );
+    }
+
+    #[test]
+    fn error_display_file_read() {
+        let err = Error::FileRead {
+            path: "/tmp/file.txt".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Failed to read file '/tmp/file.txt': not found"
+        );
+    }
+
+    #[test]
+    fn error_display_missing_builder_attribute() {
+        let err = Error::MissingBuilderAttribute("config".to_string());
+        assert_eq!(
+            err.to_string(),
+            "Missing required builder attribute: config"
+        );
+    }
+
+    #[test]
+    fn error_display_retry_exhausted() {
+        let inner = Error::SshNotSupported;
+        let err = Error::RetryExhausted {
+            source: Box::new(inner),
+        };
+        assert!(err
+            .to_string()
+            .contains("Task failed after all retry attempts"));
+    }
+
+    // ── Config Deserialization ───────────────────────────────────────
+
+    #[test]
+    fn config_deser_minimal() {
+        let json = r#"{
+            "name": "sync",
+            "repository_url": "https://github.com/org/repo.git"
+        }"#;
+        let config: ProcessorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "sync");
+        assert_eq!(config.repository_url, "https://github.com/org/repo.git");
+        assert_eq!(config.branch, "main");
+        assert!(config.path.is_none());
+        assert!(config.clone_path.is_none());
+        assert_eq!(config.auth.auth_type, GitAuthType::None);
+        assert!(config.depends_on.is_none());
+        assert!(config.retry.is_none());
+    }
+
+    #[test]
+    fn config_deser_full() {
+        let json = r#"{
+            "name": "sync_all",
+            "repository_url": "https://github.com/org/repo.git",
+            "branch": "develop",
+            "path": "flows/",
+            "clone_path": "/data/repo",
+            "auth": {
+                "type": "token",
+                "token": "ghp_abc123"
+            },
+            "depends_on": ["trigger"],
+            "retry": { "max_retries": 2, "initial_interval": "500ms" }
+        }"#;
+        let config: ProcessorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.branch, "develop");
+        assert_eq!(config.path.as_deref(), Some("flows/"));
+        assert_eq!(config.clone_path, Some(PathBuf::from("/data/repo")));
+        assert_eq!(config.auth.auth_type, GitAuthType::Token);
+        assert_eq!(config.auth.token.as_deref(), Some("ghp_abc123"));
+        assert_eq!(config.depends_on, Some(vec!["trigger".to_string()]));
+        assert!(config.retry.is_some());
+    }
+
+    #[test]
+    fn config_deser_ssh_auth() {
+        let json = r#"{
+            "name": "sync_ssh",
+            "repository_url": "git@github.com:org/repo.git",
+            "auth": {
+                "type": "ssh",
+                "ssh_key_path": "/etc/git/deploy-key",
+                "ssh_known_hosts_path": "/etc/git/known_hosts"
+            }
+        }"#;
+        let config: ProcessorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.auth.auth_type, GitAuthType::Ssh);
+        assert_eq!(
+            config.auth.ssh_key_path,
+            Some(PathBuf::from("/etc/git/deploy-key"))
+        );
+        assert_eq!(
+            config.auth.ssh_known_hosts_path,
+            Some(PathBuf::from("/etc/git/known_hosts"))
+        );
+    }
+
+    #[test]
+    fn config_deser_missing_name_fails() {
+        let json = r#"{
+            "repository_url": "https://github.com/org/repo.git"
+        }"#;
+        let result = serde_json::from_str::<ProcessorConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_deser_missing_repository_url_fails() {
+        let json = r#"{
+            "name": "sync"
+        }"#;
+        let result = serde_json::from_str::<ProcessorConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_roundtrip_serde() {
+        let json = r#"{
+            "name": "rt",
+            "repository_url": "https://github.com/org/repo.git",
+            "branch": "main",
+            "path": "configs/"
+        }"#;
+        let config: ProcessorConfig = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: ProcessorConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    // ── GitAuth / GitAuthType ───────────────────────────────────────
+
+    #[test]
+    fn git_auth_default_is_none() {
+        let auth = GitAuth::default();
+        assert_eq!(auth.auth_type, GitAuthType::None);
+        assert!(auth.ssh_key_path.is_none());
+        assert!(auth.ssh_known_hosts_path.is_none());
+        assert!(auth.token.is_none());
+    }
+
+    #[test]
+    fn git_auth_type_deser_none() {
+        let json = r#"{ "type": "none" }"#;
+        let auth: GitAuth = serde_json::from_str(json).unwrap();
+        assert_eq!(auth.auth_type, GitAuthType::None);
+    }
+
+    #[test]
+    fn git_auth_type_deser_token() {
+        let json = r#"{ "type": "token", "token": "abc" }"#;
+        let auth: GitAuth = serde_json::from_str(json).unwrap();
+        assert_eq!(auth.auth_type, GitAuthType::Token);
+        assert_eq!(auth.token.as_deref(), Some("abc"));
+    }
+
+    // ── FileEvent ───────────────────────────────────────────────────
+
+    #[test]
+    fn file_event_serialization() {
+        let fe = FileEvent {
+            path: "flows/main.yaml".to_string(),
+            content: "name: test".to_string(),
+            commit: "abc123".to_string(),
+        };
+        let value = serde_json::to_value(&fe).unwrap();
+        assert_eq!(value["path"], "flows/main.yaml");
+        assert_eq!(value["content"], "name: test");
+        assert_eq!(value["commit"], "abc123");
+    }
+
+    #[test]
+    fn file_event_clone() {
+        let fe = FileEvent {
+            path: "a.txt".to_string(),
+            content: "hello".to_string(),
+            commit: "def456".to_string(),
+        };
+        let cloned = fe.clone();
+        assert_eq!(fe.path, cloned.path);
+        assert_eq!(fe.content, cloned.content);
+        assert_eq!(fe.commit, cloned.commit);
+    }
+
+    // ── build_authenticated_url ─────────────────────────────────────
+
+    #[test]
+    fn build_url_no_auth() {
+        let config = test_config();
+        let url = build_authenticated_url(&config).unwrap();
+        assert_eq!(url, "https://github.com/org/repo.git");
+    }
+
+    #[test]
+    fn build_url_token_auth_https() {
+        let mut config = test_config();
+        config.auth.auth_type = GitAuthType::Token;
+        config.auth.token = Some("ghp_tok123".to_string());
+        let url = build_authenticated_url(&config).unwrap();
+        assert_eq!(url, "https://ghp_tok123@github.com/org/repo.git");
+    }
+
+    #[test]
+    fn build_url_token_auth_http() {
+        let mut config = test_config();
+        config.repository_url = "http://git.internal/org/repo.git".to_string();
+        config.auth.auth_type = GitAuthType::Token;
+        config.auth.token = Some("tok".to_string());
+        let url = build_authenticated_url(&config).unwrap();
+        assert_eq!(url, "http://tok@git.internal/org/repo.git");
+    }
+
+    #[test]
+    fn build_url_token_auth_no_token_returns_original() {
+        let mut config = test_config();
+        config.auth.auth_type = GitAuthType::Token;
+        // Token is None
+        let url = build_authenticated_url(&config).unwrap();
+        assert_eq!(url, "https://github.com/org/repo.git");
+    }
+
+    #[test]
+    fn build_url_token_auth_non_http_returns_original() {
+        let mut config = test_config();
+        config.repository_url = "git@github.com:org/repo.git".to_string();
+        config.auth.auth_type = GitAuthType::Token;
+        config.auth.token = Some("tok".to_string());
+        let url = build_authenticated_url(&config).unwrap();
+        // Non-http(s) URL is returned as-is even with token auth
+        assert_eq!(url, "git@github.com:org/repo.git");
+    }
+
+    #[test]
+    fn build_url_ssh_auth_returns_original() {
+        let mut config = test_config();
+        config.auth.auth_type = GitAuthType::Ssh;
+        // SSH auth type doesn't embed tokens, just passes through
+        // (clone_or_pull will reject SSH before reaching this point)
+        let url = build_authenticated_url(&config).unwrap();
+        assert_eq!(url, "https://github.com/org/repo.git");
+    }
+
+    // ── Builder Validation ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn builder_succeeds_without_sender() {
+        let config = Arc::new(test_config());
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_id(42)
+            .task_type("git_sync")
+            .task_context(test_task_context())
+            .build()
+            .await;
+        // tx is optional — builder should succeed without it
+        assert!(result.is_ok());
+        let processor = result.unwrap();
+        assert!(processor.tx.is_none());
+        assert_eq!(processor.task_id, 42);
+    }
+
+    #[tokio::test]
+    async fn builder_succeeds_with_sender() {
+        let config = Arc::new(test_config());
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let result = ProcessorBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .sender(tx)
+            .task_id(7)
+            .task_type("git_sync")
+            .task_context(test_task_context())
+            .build()
+            .await;
+        assert!(result.is_ok());
+        let processor = result.unwrap();
+        assert!(processor.tx.is_some());
+    }
+}

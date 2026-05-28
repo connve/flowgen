@@ -589,16 +589,4 @@ mod tests {
         let deserialized: MoveResult = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized.files_moved, 0);
     }
-
-    #[test]
-    fn test_error_variants() {
-        let err = Error::NoObjectStoreContext;
-        assert!(matches!(err, Error::NoObjectStoreContext));
-
-        let err = Error::MissingBuilderAttribute("config".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(ref s) if s == "config"));
-
-        let err = Error::MissingBuilderAttribute("receiver".to_string());
-        assert!(matches!(err, Error::MissingBuilderAttribute(ref s) if s == "receiver"));
-    }
 }

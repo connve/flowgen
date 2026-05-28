@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.115.0
+
+### Features
+
+- **Salesforce SOAP API merge.** New `salesforce_soapapi_merge` task merges
+  duplicate SObject records (Account, Contact, Lead, Individual) into a single
+  master record via the Salesforce SOAP API. Related records are automatically
+  reparented to the master. Supports field overrides and duplicate detection bypass.
+
+### Fixes
+
+- **BigQuery Storage Write: silent data loss on type mismatch.**
+  `encode_scalar_value` now returns typed errors (`FieldTypeMismatch`,
+  `FieldBase64Decode`) instead of silently skipping fields when JSON
+  values don't match the expected BigQuery column type. Previously a
+  string in an INT64 column was quietly dropped.
+
+- **BigQuery Storage Write: nested RECORD/STRUCT support.**
+  `build_proto_descriptor` and `json_to_proto_bytes` now recursively
+  handle nested RECORD/STRUCT fields. Previously `nested_type: vec![]`
+  was hardcoded, silently dropping all data in RECORD columns.
+
+### Dependencies
+
+- Upgraded `salesforce_core` from 0.13.6 to 0.14.0 (adds `soapapi::Client::merge()`).
+
 ## 0.114.0
 
 ### Features

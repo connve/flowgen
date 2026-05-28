@@ -723,4 +723,150 @@ mod tests {
         let deserialized: Credentials = serde_json::from_str(&json).unwrap();
         assert_eq!(creds, deserialized);
     }
+
+    // --- CompletionResponse ---
+
+    #[test]
+    fn completion_response_without_usage() {
+        let resp = CompletionResponse {
+            text: "answer".to_string(),
+            model: "gpt-4".to_string(),
+            provider: "OpenAi".to_string(),
+            usage: None,
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("usage"));
+        assert_eq!(v["text"], "answer");
+        assert_eq!(v["model"], "gpt-4");
+        assert_eq!(v["provider"], "OpenAi");
+    }
+
+    #[test]
+    fn completion_response_deser_from_json() {
+        let json = r#"{
+            "text": "response text",
+            "model": "claude-3",
+            "provider": "Anthropic",
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            }
+        }"#;
+        let resp: CompletionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.text, "response text");
+        assert_eq!(resp.model, "claude-3");
+        assert_eq!(resp.provider, "Anthropic");
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    // --- CompletionChunk ---
+
+    #[test]
+    fn completion_chunk_intermediate() {
+        let chunk = CompletionChunk {
+            text: "partial".to_string(),
+            is_final: false,
+            index: 3,
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["text"], "partial");
+        assert_eq!(v["is_final"], false);
+        assert_eq!(v["index"], 3);
+    }
+
+    #[test]
+    fn completion_chunk_final() {
+        let chunk = CompletionChunk {
+            text: "full accumulated response".to_string(),
+            is_final: true,
+            index: 10,
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["is_final"], true);
+        assert_eq!(v["index"], 10);
+    }
+
+    #[test]
+    fn completion_chunk_roundtrip() {
+        let chunk = CompletionChunk {
+            text: "text".to_string(),
+            is_final: false,
+            index: 0,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: CompletionChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(chunk.text, back.text);
+        assert_eq!(chunk.is_final, back.is_final);
+        assert_eq!(chunk.index, back.index);
+    }
+
+    // --- CompletionUsage ---
+
+    #[test]
+    fn completion_usage_roundtrip() {
+        let usage = CompletionUsage {
+            prompt_tokens: 200,
+            completion_tokens: 100,
+            total_tokens: 300,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let back: CompletionUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(usage.prompt_tokens, back.prompt_tokens);
+        assert_eq!(usage.completion_tokens, back.completion_tokens);
+        assert_eq!(usage.total_tokens, back.total_tokens);
+    }
+
+    // --- Credentials optional fields ---
+
+    #[test]
+    fn credentials_minimal_deser() {
+        let json = r#"{"api_key": "sk-abc"}"#;
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.api_key, "sk-abc");
+        assert_eq!(creds.organization_id, None);
+        assert_eq!(creds.project_id, None);
+        assert_eq!(creds.region, None);
+    }
+
+    #[test]
+    fn credentials_all_fields() {
+        let json = r#"{
+            "api_key": "sk-123",
+            "organization_id": "org-456",
+            "project_id": "proj-789",
+            "region": "us-east-1"
+        }"#;
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.api_key, "sk-123");
+        assert_eq!(creds.organization_id, Some("org-456".to_string()));
+        assert_eq!(creds.project_id, Some("proj-789".to_string()));
+        assert_eq!(creds.region, Some("us-east-1".to_string()));
+    }
+
+    #[test]
+    fn credentials_skip_serializing_none() {
+        let creds = Credentials {
+            api_key: "sk-x".to_string(),
+            organization_id: None,
+            project_id: None,
+            region: None,
+        };
+        let v = serde_json::to_value(&creds).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("api_key"));
+        assert!(!obj.contains_key("organization_id"));
+        assert!(!obj.contains_key("project_id"));
+        assert!(!obj.contains_key("region"));
+    }
+
+    #[test]
+    fn credentials_missing_api_key_rejected() {
+        let json = r#"{"organization_id": "org-1"}"#;
+        let result = serde_json::from_str::<Credentials>(json);
+        assert!(result.is_err());
+    }
 }
