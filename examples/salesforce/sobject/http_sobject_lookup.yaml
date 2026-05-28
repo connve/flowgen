@@ -1,0 +1,23 @@
+# Look up a Salesforce record by ID.
+#
+# Accepts a record ID via webhook, retrieves the record, and returns
+# the result. Swap http_webhook for mcp_tool to expose as an MCP tool.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+flow:
+  name: salesforce_sobject_lookup
+  tasks:
+
+    - http_webhook:
+        name: receive_request
+        method: POST
+        endpoint: /salesforce/lookup
+
+    - salesforce_restapi_sobject:
+        name: get_record
+        operation: get
+        credentials_path: /etc/sfdc/credentials.json
+        sobject_type: "{{event.data.sobject_type}}"
+        record_id: "{{event.data.record_id}}"
+        fields: "{{event.data.fields}}"

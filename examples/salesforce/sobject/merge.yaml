@@ -1,0 +1,31 @@
+# Merge duplicate Salesforce records via the SOAP API.
+#
+# Accepts merge instructions via webhook, merges the duplicate into the
+# master record, and returns the result. The losing record is deleted
+# and its related records are reparented to the master.
+#
+# Expected request body:
+#   {
+#     "sobject_type": "Account",
+#     "master_id": "001000000000001",
+#     "duplicate_id": "001000000000002"
+#   }
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+flow:
+  name: salesforce_merge
+  tasks:
+
+    - http_webhook:
+        name: receive_request
+        method: POST
+        endpoint: /salesforce/merge
+
+    - salesforce_soapapi_merge:
+        name: merge
+        credentials_path: /etc/sfdc/credentials.json
+        sobject_type: "{{event.data.sobject_type}}"
+        master_record_id: "{{event.data.master_id}}"
+        record_ids_to_merge:
+          - "{{event.data.duplicate_id}}"
