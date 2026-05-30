@@ -1,6 +1,7 @@
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use flowgen_core::{client::Client, task::runner::Runner};
+use futures_util::TryStreamExt;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -137,40 +138,79 @@ impl EventHandler {
 
             let path = object_store::path::Path::from(prefix);
 
-            // Use list_with_delimiter to avoid recursing into subdirectories.
-            // Automatically reconnects on auth failure to refresh expired credentials.
             let mut client_guard = self.client.lock().await;
-            let mut list_result = {
-                let context = client_guard
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| Error::NoObjectStoreContext)?;
-                context.object_store.list_with_delimiter(Some(&path)).await
-            };
 
-            // Retries once on authentication failure after reconnecting.
-            if let Err(ref e) = list_result {
-                if super::client::Client::is_auth_error(e) {
-                    client_guard
-                        .reconnect()
-                        .await
-                        .map_err(|source| Error::ObjectStoreClient { source })?;
+            let files: Vec<FileInfo> = match self.config.recursive {
+                true => {
+                    let mut result = {
+                        let context = client_guard
+                            .context
+                            .as_ref()
+                            .ok_or_else(|| Error::NoObjectStoreContext)?;
+                        context
+                            .object_store
+                            .list(Some(&path))
+                            .try_collect::<Vec<_>>()
+                            .await
+                    };
 
-                    let context = client_guard
-                        .context
-                        .as_ref()
-                        .ok_or_else(|| Error::NoObjectStoreContext)?;
-                    list_result = context.object_store.list_with_delimiter(Some(&path)).await;
+                    if let Err(ref e) = result {
+                        if super::client::Client::is_auth_error(e) {
+                            client_guard
+                                .reconnect()
+                                .await
+                                .map_err(|source| Error::ObjectStoreClient { source })?;
+
+                            let context = client_guard
+                                .context
+                                .as_ref()
+                                .ok_or_else(|| Error::NoObjectStoreContext)?;
+                            result = context
+                                .object_store
+                                .list(Some(&path))
+                                .try_collect::<Vec<_>>()
+                                .await;
+                        }
+                    }
+
+                    result
+                        .map_err(|source| Error::ObjectStore { source })?
+                        .into_iter()
+                        .map(FileInfo::from)
+                        .collect()
                 }
-            }
+                false => {
+                    let mut result = {
+                        let context = client_guard
+                            .context
+                            .as_ref()
+                            .ok_or_else(|| Error::NoObjectStoreContext)?;
+                        context.object_store.list_with_delimiter(Some(&path)).await
+                    };
 
-            let list_result = list_result.map_err(|source| Error::ObjectStore { source })?;
+                    if let Err(ref e) = result {
+                        if super::client::Client::is_auth_error(e) {
+                            client_guard
+                                .reconnect()
+                                .await
+                                .map_err(|source| Error::ObjectStoreClient { source })?;
 
-            let files: Vec<FileInfo> = list_result
-                .objects
-                .into_iter()
-                .map(FileInfo::from)
-                .collect();
+                            let context = client_guard
+                                .context
+                                .as_ref()
+                                .ok_or_else(|| Error::NoObjectStoreContext)?;
+                            result = context.object_store.list_with_delimiter(Some(&path)).await;
+                        }
+                    }
+
+                    result
+                        .map_err(|source| Error::ObjectStore { source })?
+                        .objects
+                        .into_iter()
+                        .map(FileInfo::from)
+                        .collect()
+                }
+            };
 
             let num_files = files.len();
             let list_result = ListResult {
@@ -313,12 +353,13 @@ impl Runner for ListProcessor {
         };
 
         // Process incoming events, filtering by task ID.
+        let mut handlers = Vec::new();
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -343,8 +384,12 @@ impl Runner for ListProcessor {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    futures_util::future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

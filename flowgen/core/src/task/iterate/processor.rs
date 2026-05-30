@@ -226,6 +226,7 @@ impl EventHandler {
                 per_event_receivers.push(per_rx);
 
                 e.send_with_logging(self.tx.as_ref())
+                    .context("array_length", array_len)
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
             }
@@ -301,12 +302,19 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                futures_util::future::join_all(handlers).await;
+                return Ok(());
+            }
+
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -321,7 +329,6 @@ impl crate::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Iterate failed after all retry attempts.");
-                                // Emit error event downstream for error handling.
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
@@ -331,8 +338,12 @@ impl crate::task::runner::Runner for Processor {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    futures_util::future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

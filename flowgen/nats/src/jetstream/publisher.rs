@@ -151,6 +151,8 @@ impl EventHandler {
             }
 
             e.send_with_logging(self.tx.as_ref())
+                .context("subject", &config.subject)
+                .context("sequence", ack.sequence)
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
 

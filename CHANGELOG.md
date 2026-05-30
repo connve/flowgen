@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.116.0
+
+### Features
+
+- **Object store recursive listing.** New `recursive: true` option on
+  `object_store` list operations traverses nested subdirectories instead of
+  listing only the immediate prefix level. Enables `list → iterate → read`
+  patterns on directory trees of unknown depth.
+
+- **Pipeline tracing context.** `gcp_bigquery_query` now logs `num_rows`,
+  `iterate` logs `array_length`, and `nats_jetstream_publisher` logs `subject`
+  and `sequence` on each event — making it straightforward to trace row counts
+  through a fan-out pipeline.
+
+### Fixes
+
+- **S3 virtual-hosted style requests by default.** S3 requests now use
+  virtual-hosted style URLs (`{bucket}.s3.{region}.amazonaws.com`)
+  matching the AWS SDK default. Previously path-style URLs were used,
+  which can fail against bucket policies or VPC endpoint policies that
+  expect virtual-hosted requests. Override with
+  `aws_virtual_hosted_style_request: "false"` in `client_options`.
+
+- **All processors now await spawned tasks on channel close.**
+  Previously most processors used fire-and-forget `tokio::spawn` without
+  collecting handles. All processors now collect `JoinHandle`s and await
+  them when the input channel closes or cancellation is signalled,
+  matching the pattern already used by `nats_jetstream_publisher`.
+
 ## 0.115.0
 
 ### Features

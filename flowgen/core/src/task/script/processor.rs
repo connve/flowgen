@@ -902,12 +902,19 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                futures_util::future::join_all(handlers).await;
+                return Ok(());
+            }
+
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -932,24 +939,23 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                // Emit error event downstream for error handling.
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
                                 } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    // No downstream task to forward the error
-                                    // event to: this script is itself a leaf,
-                                    // so ack the source directly to keep bad
-                                    // data from blocking the pipeline.
                                     arc.signal_completion(event.data_as_json().ok());
                                 }
                             }
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    futures_util::future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

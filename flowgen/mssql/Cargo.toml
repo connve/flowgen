@@ -25,6 +25,7 @@ chrono = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
+futures-util = { workspace = true }
 humantime-serde = { workspace = true }
 
 [dev-dependencies]
