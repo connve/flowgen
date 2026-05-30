@@ -20,4 +20,5 @@ thiserror = { workspace = true }
 walkdir = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
+futures-util = { workspace = true }
 gix = { workspace = true }

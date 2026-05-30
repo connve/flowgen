@@ -430,12 +430,13 @@ impl flowgen_core::task::runner::Runner for Processor {
             Err(e) => return Err(e),
         };
 
+        let mut handlers = Vec::new();
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     let handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                             match handler.handle(event.clone()).await {
                                 Ok(()) => Ok(()),
@@ -451,8 +452,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                             error!(error = %e, "KV store operation exhausted all retry attempts.");
                         }
                     });
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    futures_util::future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }

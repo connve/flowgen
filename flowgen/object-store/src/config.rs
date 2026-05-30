@@ -109,6 +109,12 @@ pub struct Processor {
     /// Hive-style partitioning configuration (write only).
     pub hive_partition_options: Option<HivePartitionOptions>,
 
+    // --- List-specific fields ---
+    /// Recursively list files in nested subdirectories (list only).
+    /// Defaults to false (single level).
+    #[serde(default)]
+    pub recursive: bool,
+
     // --- Move-specific fields ---
     /// Source path pattern with wildcard support (move only).
     /// Ignored if source_files is provided.
@@ -261,6 +267,20 @@ mod tests {
         };
 
         assert_eq!(config.name, "test_lister");
+        assert_eq!(config.operation, Operation::List);
+        assert!(!config.recursive);
+    }
+
+    #[test]
+    fn test_list_config_recursive() {
+        let json = r#"{
+            "name": "recursive_lister",
+            "operation": "list",
+            "path": "gs://my-bucket/data/",
+            "recursive": true
+        }"#;
+        let config: Processor = serde_json::from_str(json).unwrap();
+        assert!(config.recursive);
         assert_eq!(config.operation, Operation::List);
     }
 

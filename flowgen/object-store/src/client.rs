@@ -109,7 +109,9 @@ impl Client {
             Path::from_url_path(url.path()).map_err(|e| Error::ObjectStore { source: e.into() })?;
 
         let builder = opts.into_iter().fold(
-            AmazonS3Builder::from_env().with_url(url.to_string()),
+            AmazonS3Builder::from_env()
+                .with_url(url.to_string())
+                .with_virtual_hosted_style_request(true),
             |builder, (key, value)| match key.to_ascii_lowercase().parse() {
                 Ok(k) => builder.with_config(k, value),
                 Err(_) => builder,

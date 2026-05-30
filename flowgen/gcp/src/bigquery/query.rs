@@ -139,6 +139,8 @@ impl EventHandler {
             )
             .await?;
 
+            let num_rows = record_batch.num_rows();
+
             // Build result event.
             let mut event_builder = EventBuilder::new()
                 .data(EventData::ArrowRecordBatch(record_batch))
@@ -157,19 +159,18 @@ impl EventHandler {
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
-                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         arc.signal_completion(result_event.data_as_json().ok());
                     }
                 }
                 Some(_) => {
-                    // Pass through completion_tx to next task.
                     result_event.completion_tx = completion_tx_arc.clone();
                 }
             }
 
             result_event
                 .send_with_logging(self.tx.as_ref())
+                .context("num_rows", num_rows)
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
 
@@ -260,12 +261,14 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
+        let mut handlers = Vec::new();
+
         loop {
             match self.rx.recv().await {
                 Some(event) => {
                     let event_handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    tokio::spawn(
+                    let handle = tokio::spawn(
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
@@ -290,8 +293,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                         }
                         .instrument(tracing::Span::current()),
                     );
+                    handlers.push(handle);
                 }
-                None => return Ok(()),
+                None => {
+                    futures_util::future::join_all(handlers).await;
+                    return Ok(());
+                }
             }
         }
     }
