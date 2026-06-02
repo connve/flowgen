@@ -455,7 +455,7 @@ fn default_ai_gateway_path() -> String {
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct AiGatewayOptions {
     /// Whether the AI gateway server is enabled. Must be explicitly enabled by
-    /// the admin for `ai_gateway` tasks to be registered.
+    /// the admin for `llm_proxy` tasks to be registered.
     pub enabled: bool,
     /// AI gateway port number. Defaults to 3002.
     #[serde(default = "default_ai_gateway_port")]
@@ -466,7 +466,7 @@ pub struct AiGatewayOptions {
     #[serde(default = "default_ai_gateway_path")]
     pub path: String,
     /// Optional path to global credentials file for API key authentication.
-    /// Individual `ai_gateway` tasks can override this with their own `credentials_path`.
+    /// Individual `llm_proxy` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional auth provider configuration for user identity resolution.
     /// Shared across all AI gateway flows on this worker.

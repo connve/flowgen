@@ -22,8 +22,17 @@ cache:
 
 # Flow discovery configuration (shared across worker and server).
 # Path can be either a base directory path (e.g., "flows") - recursively loads all .yaml, .yml, and .json files.
+# Filesystem and cache sources are independent: configure either, both, or neither.
+# When both are active, the filesystem entry wins on name collisions.
 flows:
   path: "path_to_configs_folder"
+  # Optional: load flows from a distributed cache (e.g., populated by git_sync).
+  # When enabled alongside filesystem, stale cache entries shadowed by filesystem flows
+  # are automatically deleted on startup.
+  # cache:
+  #   enabled: true
+  #   prefix: "flowgen.flows"
+  #   db_name: "flowgen_system"
 
 # Resource loading configuration (optional, shared across worker and server).
 # Enables loading external files (SQL queries, templates, etc.) instead of embedding content in YAML.
@@ -92,6 +101,15 @@ worker:
   #   port: 3001
   #   path: "/mcp"
   #   credentials_path: "/etc/mcp/api-keys.json"
+
+  # AI gateway server configuration for OpenAI-compatible chat completion endpoints (optional).
+  # Runs on its own port, independent of the HTTP and MCP servers.
+  # Must be explicitly enabled for llm_proxy tasks to be registered.
+  # ai_gateway:
+  #   enabled: true
+  #   port: 3002
+  #   path: "/v1"
+  #   credentials_path: "/etc/flowgen/credentials/ai.json"
 
   # Event channel buffer size (optional, defaults to 10,000).
   # Capacity of each inter-task event channel (in events). When full the

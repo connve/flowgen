@@ -232,16 +232,18 @@ impl<D: Dispatcher> HttpServer<D> {
         key: String,
         registration: D::Registration,
     ) -> Result<(), D::Registration> {
-        if self.table.contains_key(&key) {
-            return Err(registration);
+        match self.table.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(_) => Err(registration),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                info!(
+                    key = %entry.key(),
+                    flow = %registration.flow_name(),
+                    "Registering HTTP server entry"
+                );
+                entry.insert(registration);
+                Ok(())
+            }
         }
-        info!(
-            key = %key,
-            flow = %registration.flow_name(),
-            "Registering HTTP server entry"
-        );
-        self.table.insert(key, registration);
-        Ok(())
     }
 
     /// Removes every registration owned by the named flow.

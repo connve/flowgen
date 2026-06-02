@@ -161,14 +161,14 @@ async fn collect_batch(
     };
 
     let mut batch = vec![first];
-    let deadline = Instant::now() + DEBOUNCE_CEILING;
     let mut window = Box::pin(tokio::time::sleep(DEBOUNCE_WINDOW));
+    let mut ceiling = Box::pin(tokio::time::sleep(DEBOUNCE_CEILING));
 
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return None,
             _ = &mut window => break,
-            _ = tokio::time::sleep_until(deadline) => break,
+            _ = &mut ceiling => break,
             ev = rx.recv() => match ev {
                 None => break,
                 Some(e) => {
@@ -233,6 +233,25 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
             return;
         }
     };
+
+    if let Err(reason) = config.validate() {
+        error!(
+            key = %key,
+            error = %reason,
+            "Hot-reloaded flow config failed validation. Skipping."
+        );
+        return;
+    }
+
+    if config.flow.name != flow_name {
+        error!(
+            key = %key,
+            key_derived = %flow_name,
+            config_name = %config.flow.name,
+            "Flow name in config does not match cache key. Skipping."
+        );
+        return;
+    }
 
     // Build and start the replacement flow before touching the running one.
     let mut new_flow = match build_flow(config, ctx) {
@@ -451,6 +470,9 @@ fn build_flow(
     }
     if let Some(server) = &ctx.mcp_server {
         builder = builder.mcp_server(Arc::clone(server));
+    }
+    if let Some(server) = &ctx.ai_gateway_server {
+        builder = builder.ai_gateway_server(Arc::clone(server));
     }
     if let Some(retry) = ctx
         .app_config

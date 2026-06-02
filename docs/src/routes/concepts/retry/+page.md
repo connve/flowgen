@@ -36,7 +36,7 @@ Flowgen applies retry differently depending on the task's role.
 
 Most tasks use the retry config as a circuit breaker. They retry up to `max_attempts` with exponential backoff and jitter; if every attempt fails, the task emits an error event downstream and the source learns the flow did not complete (acknowledgement is not delivered).
 
-This applies to: `script`, `convert`, `iterate`, `buffer`, `log`, `http_request`, `http_webhook`, `ai_completion`, `ai_gateway`, and every connector processor (database queries, object store operations, message publishers, and so on).
+This applies to: `script`, `convert`, `iterate`, `buffer`, `log`, `http_request`, `http_webhook`, `ai_completion`, `llm_proxy`, and every connector processor (database queries, object store operations, message publishers, and so on).
 
 Failed events are not silently dropped. The error event carries `event.error` with the failure message, which downstream tasks can inspect and route to a dead-letter destination, an audit log, or an alerting endpoint.
 

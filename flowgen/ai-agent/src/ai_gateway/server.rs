@@ -597,6 +597,41 @@ enum DispatchError {
     FlowCompletionFailed,
 }
 
+/// OpenAI-compatible error response body.
+#[derive(serde::Serialize)]
+struct OpenAiErrorResponse {
+    error: OpenAiErrorDetail,
+}
+
+/// Inner detail of an OpenAI-compatible error response.
+#[derive(serde::Serialize)]
+struct OpenAiErrorDetail {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+}
+
+impl DispatchError {
+    /// Returns the OpenAI error type string for this error variant.
+    fn error_type(&self) -> &'static str {
+        match self {
+            DispatchError::MissingModelField | DispatchError::MissingProxyPrefix => {
+                "invalid_request_error"
+            }
+            DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
+                "not_found_error"
+            }
+            DispatchError::NoCredentials
+            | DispatchError::InvalidCredentials
+            | DispatchError::MalformedCredentials
+            | DispatchError::AuthProviderMissing => "authentication_error",
+            DispatchError::EventBuilder { .. }
+            | DispatchError::SendMessage { .. }
+            | DispatchError::FlowCompletionFailed => "server_error",
+        }
+    }
+}
+
 impl IntoResponse for DispatchError {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -614,7 +649,13 @@ impl IntoResponse for DispatchError {
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, self.to_string()).into_response()
+        let body = OpenAiErrorResponse {
+            error: OpenAiErrorDetail {
+                message: self.to_string(),
+                error_type: self.error_type(),
+            },
+        };
+        (status, axum::Json(body)).into_response()
     }
 }
 
