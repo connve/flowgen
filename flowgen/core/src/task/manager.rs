@@ -210,6 +210,8 @@ pub struct TaskManager {
     executor: Arc<crate::executor::Executor>,
     /// Active lease renewal tasks indexed by task ID.
     active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
+    /// Optional peer registry for flow distribution via consistent hashing.
+    peer_registry: Option<Arc<crate::peer::PeerRegistry>>,
 }
 
 impl TaskManager {
@@ -223,6 +225,7 @@ impl TaskManager {
 
         let executor = self.executor.clone();
         let active_leases = self.active_leases.clone();
+        let peer_registry = self.peer_registry.clone();
 
         // Event processing loop.
         let span = tracing::Span::current();
@@ -238,6 +241,36 @@ impl TaskManager {
                             crate::executor::LEASE_KEY_PREFIX,
                             registration.task_id.replace('_', "-").to_lowercase()
                         );
+
+                        // If peer registry is configured, non-preferred pods defer
+                        // their acquisition attempt to let the preferred pod win.
+                        if let Some(ref registry) = peer_registry {
+                            match registry.is_preferred_owner(&registration.task_id).await {
+                                Ok(true) => {
+                                    debug!(
+                                        task_id = %registration.task_id,
+                                        "This pod is the preferred owner, acquiring immediately"
+                                    );
+                                }
+                                Ok(false) => {
+                                    let deferral = registry.deferral_duration();
+                                    debug!(
+                                        task_id = %registration.task_id,
+                                        deferral_ms = %deferral.as_millis(),
+                                        "This pod is not the preferred owner, deferring acquisition"
+                                    );
+                                    tokio::time::sleep(deferral).await;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        task_id = %registration.task_id,
+                                        "Failed to check preferred ownership, proceeding with normal acquisition"
+                                    );
+                                }
+                            }
+                        }
+
                         match executor.acquire_lease(&lease_name).await {
                             Ok(crate::executor::LeaseResult::Acquired { revision })
                             | Ok(crate::executor::LeaseResult::TakenOver { revision }) => {
@@ -400,7 +433,10 @@ impl TaskManager {
 /// Builder for TaskManager.
 #[derive(Default)]
 pub struct TaskManagerBuilder {
+    /// Lease executor for leader election.
     executor: Option<Arc<crate::executor::Executor>>,
+    /// Optional peer registry for flow distribution via consistent hashing.
+    peer_registry: Option<Arc<crate::peer::PeerRegistry>>,
 }
 
 impl TaskManagerBuilder {
@@ -412,6 +448,12 @@ impl TaskManagerBuilder {
     /// Sets the executor for leader election.
     pub fn executor(mut self, executor: Arc<crate::executor::Executor>) -> Self {
         self.executor = Some(executor);
+        self
+    }
+
+    /// Sets the peer registry for flow distribution via consistent hashing.
+    pub fn peer_registry(mut self, registry: Arc<crate::peer::PeerRegistry>) -> Self {
+        self.peer_registry = Some(registry);
         self
     }
 
@@ -437,6 +479,7 @@ impl TaskManagerBuilder {
             tx: Arc::new(Mutex::new(None)),
             executor,
             active_leases: Arc::new(Mutex::new(HashMap::new())),
+            peer_registry: self.peer_registry,
         })
     }
 }

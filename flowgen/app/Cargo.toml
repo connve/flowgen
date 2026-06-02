@@ -30,6 +30,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
 arrow = { workspace = true }
 config = { workspace = true }
 glob = { workspace = true }

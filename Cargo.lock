@@ -1621,6 +1621,7 @@ version = "0.116.0"
 dependencies = [
  "arrow",
  "atty",
+ "bytes",
  "clap",
  "config",
  "flowgen_ai_agent",
@@ -1689,6 +1690,7 @@ dependencies = [
  "arrow-schema",
  "async-nats",
  "async-trait",
+ "axum 0.8.8",
  "bincode",
  "bytes",
  "chrono",
@@ -1714,6 +1716,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-retry2",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.14.5",
  "tracing",
@@ -1793,6 +1796,7 @@ dependencies = [
  "axum 0.8.8",
  "base64",
  "chrono",
+ "dashmap",
  "flowgen_core",
  "futures-util",
  "handlebars",
@@ -1804,6 +1808,7 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -1828,6 +1833,7 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tokio-stream",
+ "tower 0.5.3",
  "tracing",
  "uuid",
 ]

@@ -6,6 +6,7 @@
 pub mod memory;
 
 use async_trait::async_trait;
+use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -51,6 +52,23 @@ pub enum CacheError {
     /// Failed to list keys in cache.
     #[error("Failed to list keys: {0}")]
     ListKeysFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Watch stream error.
+    #[error("Watch stream error: {0}")]
+    WatchFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// Watch is not supported by this cache backend.
+    #[error("Watch is not supported by this cache backend")]
+    WatchNotSupported,
+}
+
+/// A single event emitted by a cache watch subscription.
+#[derive(Debug, Clone)]
+pub enum WatchEvent {
+    /// A key was created or updated with the given value.
+    Put { key: String, value: bytes::Bytes },
+    /// A key was deleted.
+    Delete { key: String },
 }
 
 /// Type alias for cache errors.
@@ -192,6 +210,18 @@ pub trait Cache: Debug + Send + Sync + 'static {
     /// # Returns
     /// A vector of key names that start with the given prefix.
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, Error>;
+
+    /// Subscribes to key changes under the given prefix, returning a stream of watch events.
+    ///
+    /// Events are emitted whenever a key matching the prefix is created, updated, or deleted.
+    /// The stream ends when the connection is lost; callers should reconnect as needed.
+    /// Returns `Err(CacheError::WatchNotSupported)` for backends that do not implement watching.
+    async fn watch(
+        &self,
+        _prefix: &str,
+    ) -> Result<BoxStream<'static, Result<WatchEvent, Error>>, Error> {
+        Err(Error::WatchNotSupported)
+    }
 }
 
 #[cfg(test)]

@@ -39,10 +39,6 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("MCP server not configured in task context.")]
-    McpServerNotConfigured,
-    #[error("Failed to downcast MCP server to concrete type.")]
-    McpServerDowncast,
     #[error("Failed to register MCP tool: {source}")]
     ToolRegistration {
         #[source]
@@ -85,6 +81,10 @@ pub struct Processor {
     task_context: Arc<TaskContext>,
     /// Task type identifier for logging and categorization.
     task_type: &'static str,
+    /// Shared MCP server. The processor inserts a `ToolRegistration` into
+    /// this server during `run()`; the dispatcher routes inbound JSON-RPC
+    /// `tools/call` requests for this tool name to it.
+    mcp_server: Arc<super::server::McpServer>,
 }
 
 #[async_trait::async_trait]
@@ -139,18 +139,6 @@ impl Runner for Processor {
             None => None,
         };
 
-        // Retrieve the MCP server from the task context.
-        let mcp_server = self
-            .task_context
-            .mcp_server
-            .as_ref()
-            .ok_or(Error::McpServerNotConfigured)?;
-
-        let server = mcp_server
-            .as_any()
-            .downcast_ref::<super::server::McpServer>()
-            .ok_or(Error::McpServerDowncast)?;
-
         // Use the tool name directly. Collisions are detected at registration time.
         let tool_name = event_handler.config.name.clone();
 
@@ -162,25 +150,26 @@ impl Runner for Processor {
             )
         })?;
 
-        server
-            .register_tool(
-                tool_name.clone(),
-                super::server::ToolRegistration {
-                    description: event_handler.config.description.clone(),
-                    input_schema: event_handler.config.input_schema.clone(),
-                    tx: tool_tx,
-                    credentials,
-                    ack_timeout: event_handler.config.ack_timeout,
-                    auth_required: event_handler
-                        .config
-                        .auth
-                        .as_ref()
-                        .map(|a| a.required)
-                        .unwrap_or(false),
-                    leaf_count: self.task_context.leaf_count,
-                },
-            )
-            .map_err(|source| Error::ToolRegistration { source })?;
+        super::server::register_tool(
+            self.mcp_server.as_ref(),
+            tool_name.clone(),
+            super::server::ToolRegistration {
+                flow_name: self.task_context.flow.name.clone(),
+                description: event_handler.config.description.clone(),
+                input_schema: event_handler.config.input_schema.clone(),
+                tx: tool_tx,
+                credentials,
+                ack_timeout: event_handler.config.ack_timeout,
+                auth_required: event_handler
+                    .config
+                    .auth
+                    .as_ref()
+                    .map(|a| a.required)
+                    .unwrap_or(false),
+                leaf_count: self.task_context.leaf_count,
+            },
+        )
+        .map_err(|source| Error::ToolRegistration { source })?;
 
         info!("MCP tool registered: {}", tool_name);
 
@@ -201,6 +190,8 @@ pub struct ProcessorBuilder {
     task_context: Option<Arc<TaskContext>>,
     /// Optional task type identifier.
     task_type: Option<&'static str>,
+    /// Optional shared MCP server.
+    mcp_server: Option<Arc<super::server::McpServer>>,
 }
 
 impl ProcessorBuilder {
@@ -239,6 +230,12 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Sets the shared MCP server.
+    pub fn mcp_server(mut self, server: Arc<super::server::McpServer>) -> Self {
+        self.mcp_server = Some(server);
+        self
+    }
+
     /// Builds the processor, validating all required attributes.
     pub async fn build(self) -> Result<Processor, Error> {
         Ok(Processor {
@@ -253,6 +250,9 @@ impl ProcessorBuilder {
             task_type: self
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
+            mcp_server: self
+                .mcp_server
+                .ok_or_else(|| Error::MissingBuilderAttribute("mcp_server".to_string()))?,
         })
     }
 }

@@ -1,313 +1,244 @@
-//! HTTP server management for webhook processors.
+//! Webhook role for the generic HTTP server.
 //!
-//! Provides a shared HTTP server that allows multiple webhook processors
-//! to register routes dynamically before starting the server.
+//! Defines the [`WebhookDispatcher`] and [`WebhookRegistration`] used to wire
+//! the worker's webhook traffic onto a `flowgen_core::http_server::HttpServer`.
+//! The server lifecycle, dispatch table, and hot-reload semantics live in
+//! `flowgen_core::http_server`; this module only owns the webhook-specific
+//! URL layout (a single catch-all under `<path>/{*endpoint}`) and the data
+//! shape carried per registered webhook.
+//!
+//! The actual per-request work — auth, body parsing, event creation,
+//! completion wait, response formatting — lives in `crate::webhook::dispatch`
+//! so the dispatcher logic stays colocated with the webhook config.
 
-use axum::{http::StatusCode, routing::MethodRouter, Router};
+use axum::{
+    body::Body,
+    extract::{Path, State},
+    http::{HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::any,
+    Router,
+};
 use flowgen_core::auth::AuthProvider;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, RwLock};
-use tracing::{info, warn};
+use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
+use std::sync::Arc;
 
-/// Default HTTP port for the server.
-const DEFAULT_HTTP_PORT: u16 = 3000;
+/// Default port for the webhook HTTP server.
+pub const DEFAULT_WEBHOOK_PORT: u16 = 3000;
 
-/// Default path prefix for all routes.
-const DEFAULT_ROUTES_PREFIX: &str = "/api/flowgen/workers";
+/// Default path prefix for webhook routes.
+pub const DEFAULT_WEBHOOK_PATH: &str = "/api/flowgen/workers";
 
-/// Default health check endpoint path for Kubernetes readiness and liveness probes.
-const DEFAULT_HEALTH_PATH: &str = "/healthz";
+/// Convenience type alias for the webhook server.
+pub type WebhookServer = HttpServer<WebhookDispatcher>;
 
-/// Errors that can occur during HTTP server operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    /// Failed to bind TCP listener on specified port.
-    #[error("Error binding TCP listener on port {port}: {source}")]
-    BindListener {
-        port: u16,
-        #[source]
-        source: std::io::Error,
-    },
-    /// Failed to serve HTTP requests.
-    #[error("Error serving HTTP requests: {source}")]
-    ServeHttp {
-        #[source]
-        source: std::io::Error,
-    },
+/// Dispatcher for webhook traffic.
+///
+/// Wires a single catch-all route `<path>/{*endpoint}` and dispatches each
+/// request to a [`WebhookRegistration`] keyed by the resolved endpoint path.
+pub struct WebhookDispatcher;
+
+impl Dispatcher for WebhookDispatcher {
+    type Registration = WebhookRegistration;
+    type Extras = ();
+
+    fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
+        let prefix = state.path.trim_end_matches('/').to_string();
+        let route = format!("{prefix}/{{*endpoint}}");
+        Router::new()
+            .route(&route, any(dispatch_webhook))
+            .with_state(state)
+    }
 }
 
-/// Shared HTTP server manager for webhook processors.
-/// Allows multiple webhook processors to register routes before starting
-/// the server. Routes are stored in a thread-safe HashMap and the server
-/// can only be started once.
+/// Handler for the catch-all webhook route. Looks the requested endpoint up
+/// in the dispatch table, validates the HTTP method against the registered
+/// webhook's configured method, and forwards to the per-webhook dispatcher
+/// in `crate::webhook`.
+async fn dispatch_webhook(
+    State(state): State<DispatchState<WebhookRegistration>>,
+    Path(endpoint): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    // Endpoint paths are stored with a leading slash; the catch-all extractor
+    // strips the prefix so we re-add it for the lookup.
+    let lookup_key = format!("/{endpoint}");
+    let registration = match state.table.get(&lookup_key) {
+        Some(entry) => entry.clone(),
+        None => return (StatusCode::NOT_FOUND, "Unknown webhook endpoint").into_response(),
+    };
+
+    if !methods_match(&method, &registration.config.method) {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Method not allowed for this webhook",
+        )
+            .into_response();
+    }
+
+    crate::webhook::dispatch(&registration, headers, body).await
+}
+
+/// Compares an axum HTTP method against the config-declared method.
+fn methods_match(req_method: &Method, configured: &crate::config::Method) -> bool {
+    match configured {
+        crate::config::Method::Get => req_method == Method::GET,
+        crate::config::Method::Post => req_method == Method::POST,
+        crate::config::Method::Put => req_method == Method::PUT,
+        crate::config::Method::Delete => req_method == Method::DELETE,
+        crate::config::Method::Patch => req_method == Method::PATCH,
+        crate::config::Method::Head => req_method == Method::HEAD,
+    }
+}
+
+/// Dispatch-table entry describing one registered webhook endpoint.
+///
+/// Stored in the webhook server's dispatch table keyed by endpoint path.
+/// `flow_name` lets the server bulk-deregister every webhook owned by a flow
+/// when the flow is stopped or hot-reloaded.
 #[derive(Clone)]
-pub struct HttpServer {
-    /// Thread-safe storage for registered routes.
-    routes: Arc<RwLock<HashMap<String, MethodRouter>>>,
-    /// Flag to track if server has been started.
-    server_started: Arc<Mutex<bool>>,
-    /// Optional path prefix for all routes (e.g., "/workers").
-    path: Option<String>,
-    /// Optional global credentials path for webhook authentication.
-    /// Individual webhooks can override this with their own `credentials_path`.
-    credentials_path: Option<std::path::PathBuf>,
+pub struct WebhookRegistration {
+    /// Name of the flow that registered this webhook.
+    pub flow_name: String,
+    /// Full processor configuration. The dispatcher reads `method`,
+    /// `max_body_bytes`, `headers`, `auth`, `ack_timeout`, `stream`, and
+    /// `name` from here.
+    pub config: Arc<crate::config::Processor>,
+    /// Optional bearer-token credentials loaded from `config.credentials_path`.
+    pub credentials: Option<flowgen_core::credentials::HttpCredentials>,
     /// Optional auth provider for user identity resolution (JWT, OIDC, session).
-    auth_provider: Option<Arc<dyn AuthProvider>>,
+    pub auth_provider: Option<Arc<dyn AuthProvider>>,
+    /// Channel to send the inbound webhook event into the flow pipeline.
+    pub tx: tokio::sync::mpsc::Sender<flowgen_core::event::Event>,
+    /// Task identifier used when constructing pipeline events.
+    pub task_id: usize,
+    /// Task type label used when constructing pipeline events.
+    pub task_type: &'static str,
+    /// Shared response registry for awaiting flow completion or streaming chunks back.
+    pub response_registry: Arc<flowgen_core::registry::ResponseRegistry>,
+    /// Number of leaf tasks reachable from this webhook source.
+    pub leaf_count: usize,
+    /// Cancellation token from the owning flow's task tenure.
+    pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
-impl std::fmt::Debug for HttpServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpServer")
-            .field("path", &self.path)
-            .field("credentials_path", &self.credentials_path)
-            .field("has_auth_provider", &self.auth_provider.is_some())
-            .finish()
-    }
-}
-
-/// Builder for constructing HttpServer instances.
-#[derive(Default)]
-pub struct HttpServerBuilder {
-    /// Optional path prefix for all routes.
-    path: Option<String>,
-    /// Optional credentials path for webhook authentication.
-    credentials_path: Option<std::path::PathBuf>,
-    /// Optional auth provider for user identity resolution.
-    auth_provider: Option<Arc<dyn AuthProvider>>,
-}
-
-impl HttpServerBuilder {
-    /// Creates a new HttpServerBuilder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the path prefix for all routes (e.g., "/api/flowgen/workers").
-    pub fn path(mut self, path: String) -> Self {
-        self.path = Some(path);
-        self
-    }
-
-    /// Sets the global credentials path for webhook authentication.
-    pub fn credentials_path(mut self, path: std::path::PathBuf) -> Self {
-        self.credentials_path = Some(path);
-        self
-    }
-
-    /// Sets the auth provider for user identity resolution.
-    pub fn auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
-        self.auth_provider = Some(provider);
-        self
-    }
-
-    /// Builds the HttpServer instance.
-    pub fn build(self) -> HttpServer {
-        HttpServer {
-            routes: Arc::new(RwLock::new(HashMap::new())),
-            server_started: Arc::new(Mutex::new(false)),
-            path: self.path,
-            credentials_path: self.credentials_path,
-            auth_provider: self.auth_provider,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl flowgen_core::http_server::HttpServer for HttpServer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    async fn register_route(&self, path: String, route: Box<dyn std::any::Any + Send>) {
-        match route.downcast::<MethodRouter>() {
-            Ok(method_router) => self.register_route_typed(path, *method_router).await,
-            Err(_) => {
-                warn!(
-                    "Failed to downcast route to MethodRouter for path: {}",
-                    path
-                );
-            }
-        }
-    }
-
-    fn auth_provider(&self) -> Option<Arc<dyn AuthProvider>> {
-        self.auth_provider.clone()
-    }
-}
-
-impl HttpServer {
-    /// Returns the global credentials path if configured.
-    pub fn credentials_path(&self) -> Option<&std::path::Path> {
-        self.credentials_path.as_deref()
-    }
-
-    /// Register a typed route with the HTTP Server.
-    pub async fn register_route_typed(&self, path: String, method_router: MethodRouter) {
-        let mut routes = self.routes.write().await;
-        info!("Registering HTTP route: {}", path);
-        routes.insert(path, method_router);
-    }
-
-    /// Start the HTTP Server with all registered routes.
-    pub async fn start_server(&self, port: Option<u16>) -> Result<(), Error> {
-        let mut server_started = self.server_started.lock().await;
-        if *server_started {
-            warn!("HTTP Server already started");
-            return Ok(());
-        }
-
-        let routes = self.routes.read().await;
-        let mut api_router = Router::new();
-
-        for (path, method_router) in routes.iter() {
-            api_router = api_router.route(path, method_router.clone());
-        }
-
-        // Apply routes prefix (use default if not configured).
-        let base_path = self
-            .path
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ROUTES_PREFIX.to_string());
-
-        let router = Router::new()
-            .route(
-                DEFAULT_HEALTH_PATH,
-                axum::routing::get(|| async { StatusCode::OK }),
-            )
-            .nest(&base_path, api_router);
-        let server_port = port.unwrap_or(DEFAULT_HTTP_PORT);
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
-            .await
-            .map_err(|e| Error::BindListener {
-                port: server_port,
-                source: e,
-            })?;
-
-        *server_started = true;
-
-        info!("Starting HTTP Server on port: {}", server_port);
-        axum::serve(listener, router)
-            .await
-            .map_err(|e| Error::ServeHttp { source: e })
-    }
-
-    /// Check if server has been started.
-    pub async fn is_started(&self) -> bool {
-        *self.server_started.lock().await
+impl HasFlowName for WebhookRegistration {
+    fn flow_name(&self) -> &str {
+        &self.flow_name
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::get;
+    use flowgen_core::registry::ResponseRegistry;
+    use tokio::sync::mpsc;
 
-    #[test]
-    fn test_http_server_builder() {
-        let server = HttpServerBuilder::new().build();
-        // We can't easily test the internal state, but we can verify it was created
-        // The struct should be properly initialized
-        assert!(format!("{server:?}").contains("HttpServer"));
-    }
-
-    #[test]
-    fn test_http_server_builder_with_prefix() {
-        let server = HttpServerBuilder::new()
-            .path("/workers".to_string())
-            .build();
-        assert!(format!("{server:?}").contains("HttpServer"));
-    }
-
-    #[test]
-    fn test_http_server_clone() {
-        let server = HttpServerBuilder::new().build();
-        let cloned = server.clone();
-
-        // Both should have the same structure (we can't easily compare internal state)
-        assert!(format!("{server:?}").contains("HttpServer"));
-        assert!(format!("{cloned:?}").contains("HttpServer"));
-    }
-
-    #[tokio::test]
-    async fn test_register_route() {
-        let server = HttpServerBuilder::new().build();
-        let method_router = get(|| async { "test response" });
-
-        // Should not panic when registering a route
-        server
-            .register_route_typed("/test".to_string(), method_router)
-            .await;
-
-        // Verify we can register multiple routes
-        let method_router2 = get(|| async { "test response 2" });
-        server
-            .register_route_typed("/test2".to_string(), method_router2)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_is_started_initially_false() {
-        let server = HttpServerBuilder::new().build();
-        assert!(!server.is_started().await);
-    }
-
-    #[test]
-    fn test_error_bind_listener_structure() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
-        let error = Error::BindListener {
-            port: 3000,
-            source: io_error,
-        };
-        assert!(matches!(error, Error::BindListener { .. }));
-    }
-
-    #[test]
-    fn test_error_serve_http_structure() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
-        let error = Error::ServeHttp { source: io_error };
-        assert!(matches!(error, Error::ServeHttp { .. }));
-    }
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_HTTP_PORT, 3000);
-        assert_eq!(DEFAULT_HEALTH_PATH, "/healthz");
-    }
-
-    #[tokio::test]
-    async fn test_register_multiple_routes_different_paths() {
-        let server = HttpServerBuilder::new().build();
-
-        let routes = vec![
-            ("/api/v1/users", get(|| async { "users" })),
-            ("/api/v1/posts", get(|| async { "posts" })),
-            ("/health", get(|| async { "ok" })),
-            ("/metrics", get(|| async { "metrics" })),
-        ];
-
-        for (path, method_router) in routes {
-            server
-                .register_route_typed(path.to_string(), method_router)
-                .await;
+    fn test_registration(flow: &str, endpoint: &str) -> WebhookRegistration {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut config = crate::config::Processor::default();
+        config.name = endpoint.to_string();
+        config.method = crate::config::Method::Post;
+        WebhookRegistration {
+            flow_name: flow.to_string(),
+            config: Arc::new(config),
+            credentials: None,
+            auth_provider: None,
+            tx,
+            task_id: 0,
+            task_type: "webhook",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
         }
-
-        assert!(!server.is_started().await);
     }
 
-    #[tokio::test]
-    async fn test_register_route_overwrites_existing() {
-        let server = HttpServerBuilder::new().build();
-        let path = "/test".to_string();
+    #[test]
+    fn test_default_constants() {
+        assert_eq!(DEFAULT_WEBHOOK_PORT, 3000);
+        assert_eq!(DEFAULT_WEBHOOK_PATH, "/api/flowgen/workers");
+    }
 
-        let method_router1 = get(|| async { "response 1" });
-        server
-            .register_route_typed(path.clone(), method_router1)
-            .await;
+    #[test]
+    fn test_methods_match() {
+        assert!(methods_match(&Method::POST, &crate::config::Method::Post));
+        assert!(methods_match(&Method::GET, &crate::config::Method::Get));
+        assert!(!methods_match(&Method::GET, &crate::config::Method::Post));
+        assert!(!methods_match(
+            &Method::DELETE,
+            &crate::config::Method::Patch
+        ));
+    }
 
-        let method_router2 = get(|| async { "response 2" });
-        server.register_route_typed(path, method_router2).await;
+    #[test]
+    fn new_creates_server_with_correct_path() {
+        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        assert_eq!(server.path(), DEFAULT_WEBHOOK_PATH);
+        // Verify empty: try_register should succeed for any key.
+        let reg = test_registration("probe_flow", "/probe");
+        assert!(server.try_register("/probe".to_string(), reg).is_ok());
+    }
 
-        assert!(!server.is_started().await);
+    #[test]
+    fn try_register_succeeds_for_new_route() {
+        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        let reg = test_registration("flow_a", "/hook1");
+        let result = server.try_register("/hook1".to_string(), reg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn try_register_collision_returns_error() {
+        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        let reg1 = test_registration("flow_a", "/hook1");
+        let reg2 = test_registration("flow_b", "/hook1");
+        assert!(server.try_register("/hook1".to_string(), reg1).is_ok());
+        let result = server.try_register("/hook1".to_string(), reg2);
+        assert!(result.is_err());
+        let rejected = result.unwrap_err();
+        assert_eq!(rejected.flow_name(), "flow_b");
+    }
+
+    #[test]
+    fn deregister_flow_cleans_up_all_routes() {
+        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        server.register("/hook1".to_string(), test_registration("flow_a", "/hook1"));
+        server.register("/hook2".to_string(), test_registration("flow_a", "/hook2"));
+        server.register("/hook3".to_string(), test_registration("flow_b", "/hook3"));
+
+        server.deregister_flow("flow_a");
+        // After deregister, flow_a's routes should be gone (try_register succeeds).
+        assert!(server
+            .try_register("/hook1".to_string(), test_registration("flow_c", "/hook1"))
+            .is_ok());
+        assert!(server
+            .try_register("/hook2".to_string(), test_registration("flow_c", "/hook2"))
+            .is_ok());
+        // flow_b's route should still be occupied.
+        assert!(server
+            .try_register("/hook3".to_string(), test_registration("flow_c", "/hook3"))
+            .is_err());
+    }
+
+    #[test]
+    fn methods_match_all_variants() {
+        assert!(methods_match(&Method::PUT, &crate::config::Method::Put));
+        assert!(methods_match(
+            &Method::DELETE,
+            &crate::config::Method::Delete
+        ));
+        assert!(methods_match(
+            &Method::PATCH,
+            &crate::config::Method::Patch
+        ));
+        assert!(methods_match(&Method::HEAD, &crate::config::Method::Head));
+    }
+
+    #[test]
+    fn has_flow_name_trait_impl() {
+        let reg = test_registration("my_flow", "/ep");
+        assert_eq!(reg.flow_name(), "my_flow");
     }
 }
