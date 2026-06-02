@@ -28,6 +28,12 @@ Total elapsed: about 15 minutes.
 
 `initial_backoff` accepts human-readable durations: `"500ms"`, `"2s"`, `"1m"`, etc. Setting `max_attempts: null` enables infinite retries, which is rarely what you want for a processor — see the patterns below.
 
+## Startup jitter
+
+Every background task sleeps a random duration (up to `initial_backoff`) before its first initialization attempt. This staggers connections across flows and replicas to avoid thundering-herd login storms on external services (e.g. Salesforce OAuth, database connection pools). The jitter is automatic and requires no configuration.
+
+Blocking tasks (`http_webhook`, `mcp_tool`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
+
 ## Two patterns
 
 Flowgen applies retry differently depending on the task's role.
@@ -45,7 +51,7 @@ Failed events are not silently dropped. The error event carries `event.error` wi
 Subscribers — `nats_jetstream_subscriber`, `salesforce_pubsubapi_subscriber`, and other long-lived consumers — must maintain connectivity indefinitely. They use the retry config differently:
 
 - **Initialization** is wrapped in the circuit-breaker strategy. If credentials are wrong or the broker is unreachable for the full retry window, the task fails fast so the operator notices.
-- **Connection loss** during the consume loop reconnects forever, sleeping `initial_backoff` between attempts. A subscriber never gives up on a transient network blip.
+- **Connection loss** during the consume loop reconnects forever with exponential backoff (capped at 5 minutes). Each successful reconnect resets the backoff to `initial_backoff`.
 
 If you set `max_attempts: 1` on a subscriber, only the initialisation circuit breaker is affected — the runtime reconnect loop still runs forever. This is intentional: the alternative is silently dropping a critical infrastructure component when the upstream broker has a hiccup.
 
@@ -122,5 +128,5 @@ A few patterns where the defaults are wrong.
 
 - It does not distinguish transient from permanent errors. Every error is retried up to `max_attempts`.
 - It does not preserve state between retries. The handler restarts from scratch with the same input event each time.
-- It does not coordinate across replicas. Each replica retries independently.
+- It does not coordinate across replicas. Each replica retries independently. Startup jitter reduces thundering-herd effects probabilistically but is not a distributed lock.
 - It does not affect the message broker's delivery semantics. After `max_attempts` fail, the source's acknowledgement never fires; the broker handles redelivery according to its own configuration (`ack_wait`, `max_deliver`, dead-letter subjects, and so on).

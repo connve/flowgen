@@ -239,25 +239,28 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    let is_retriable = !matches!(
-                        &e,
-                        Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
-                    );
+        let event_handler = match tokio_retry::Retry::spawn(
+            retry_config.init_strategy(self.task_context.startup_delay),
+            || async {
+                match self.init().await {
+                    Ok(handler) => Ok(handler),
+                    Err(e) => {
+                        let is_retriable = !matches!(
+                            &e,
+                            Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
+                        );
 
-                    if is_retriable {
-                        error!(error = %e, "Failed to initialize publisher");
-                        Err(tokio_retry::RetryError::transient(e))
-                    } else {
-                        error!(error = %e, "Non-retriable error");
-                        Err(tokio_retry::RetryError::permanent(e))
+                        if is_retriable {
+                            error!(error = %e, "Failed to initialize publisher");
+                            Err(tokio_retry::RetryError::transient(e))
+                        } else {
+                            error!(error = %e, "Non-retriable error");
+                            Err(tokio_retry::RetryError::permanent(e))
+                        }
                     }
                 }
-            }
-        })
+            },
+        )
         .await
         {
             Ok(handler) => Arc::new(handler),

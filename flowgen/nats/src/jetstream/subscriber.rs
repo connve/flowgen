@@ -350,10 +350,12 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         tokio::spawn(
             async move {
+                let mut reconnect_backoff = retry_config.reconnect_strategy();
+
                 // Infinite retry loop: subscribers must maintain connectivity indefinitely.
                 loop {
                     // Initialize with circuit breaker to detect permanent errors (bad config, filter mismatch, etc.).
-                    let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
+                    let event_handler = match tokio_retry::Retry::spawn(retry_config.init_strategy(self.task_context.startup_delay), || async {
                         match self.init().await {
                             Ok(handler) => Ok(handler),
                             Err(e) => {
@@ -371,10 +373,17 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     })
                     .await
                     {
-                        Ok(handler) => handler,
+                        Ok(handler) => {
+                            reconnect_backoff = retry_config.reconnect_strategy();
+                            handler
+                        }
                         Err(e) => {
-                            error!(error = %e, "Subscriber initialization exhausted retry attempts, will retry after backoff");
-                            tokio::time::sleep(retry_config.initial_backoff).await;
+                            let delay = match reconnect_backoff.next() {
+                            Some(d) => d,
+                            None => retry_config.initial_backoff,
+                        };
+                            error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
                     };
@@ -395,7 +404,12 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                         }
                     }
 
-                    tokio::time::sleep(retry_config.initial_backoff).await;
+                    let delay = match reconnect_backoff.next() {
+                            Some(d) => d,
+                            None => retry_config.initial_backoff,
+                        };
+                    tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
+                    tokio::time::sleep(delay).await;
                 }
             }
             .instrument(tracing::Span::current()),

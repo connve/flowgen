@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio_retry::strategy::{jitter, ExponentialBackoff};
 
+/// Maximum reconnect backoff delay (5 minutes).
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(300);
+
 /// Default initial backoff delay (1 second).
 pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
@@ -82,6 +85,35 @@ impl RetryConfig {
             (Some(app_config), None) => app_config.clone(),
             (None, None) => RetryConfig::default(),
         }
+    }
+
+    /// Returns a jittered duration in `[0, initial_backoff)` for staggering startup.
+    pub fn startup_jitter(&self) -> Duration {
+        jitter(self.initial_backoff / 2)
+    }
+
+    /// Like `strategy()` but prepends a startup delay when present.
+    pub fn init_strategy(
+        &self,
+        startup_delay: Option<Duration>,
+    ) -> Box<dyn Iterator<Item = Duration> + Send> {
+        let base = self.strategy();
+        match startup_delay {
+            Some(delay) => Box::new(std::iter::once(delay).chain(base)),
+            None => base,
+        }
+    }
+
+    /// Infinite exponential backoff for subscriber reconnect loops, capped at 5 minutes.
+    pub fn reconnect_strategy(&self) -> Box<dyn Iterator<Item = Duration> + Send> {
+        let initial_ms = self.initial_backoff.as_millis() as u64;
+        let factor = (initial_ms / 2).max(1);
+        let cap = MAX_RECONNECT_BACKOFF;
+        Box::new(
+            ExponentialBackoff::from_millis(2)
+                .factor(factor)
+                .map(move |d| std::cmp::min(jitter(d), cap)),
+        )
     }
 }
 
@@ -205,5 +237,66 @@ mod tests {
         for d in &delays {
             assert!(*d > Duration::ZERO, "delay must not be zero");
         }
+    }
+
+    #[test]
+    fn test_startup_jitter_bounded_by_initial_backoff() {
+        let config = RetryConfig {
+            max_attempts: Some(10),
+            initial_backoff: Duration::from_secs(5),
+        };
+        for _ in 0..100 {
+            let jitter = config.startup_jitter();
+            assert!(
+                jitter <= Duration::from_millis(5000),
+                "startup jitter {jitter:?} exceeds initial_backoff"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reconnect_strategy_capped() {
+        let config = RetryConfig {
+            max_attempts: Some(10),
+            initial_backoff: Duration::from_secs(1),
+        };
+        let delays: Vec<Duration> = config.reconnect_strategy().take(20).collect();
+        assert_eq!(delays.len(), 20);
+        for d in &delays {
+            assert!(
+                *d <= MAX_RECONNECT_BACKOFF + Duration::from_millis(1),
+                "reconnect delay {d:?} exceeds cap"
+            );
+            assert!(*d > Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn test_reconnect_strategy_grows_then_caps() {
+        let config = RetryConfig {
+            max_attempts: Some(10),
+            initial_backoff: Duration::from_secs(1),
+        };
+        let delays: Vec<Duration> = config.reconnect_strategy().take(15).collect();
+        let last = delays.last().unwrap();
+        assert!(
+            *last >= Duration::from_secs(60),
+            "reconnect should reach significant backoff, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn test_init_strategy_prepends_delay() {
+        let config = RetryConfig {
+            max_attempts: Some(3),
+            initial_backoff: Duration::from_millis(100),
+        };
+        let without: Vec<Duration> = config.init_strategy(None).collect();
+        assert_eq!(without.len(), 2);
+
+        let delay = Duration::from_secs(5);
+        let with: Vec<Duration> = config.init_strategy(Some(delay)).collect();
+        assert_eq!(with.len(), 3);
+        assert_eq!(with[0], delay);
     }
 }

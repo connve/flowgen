@@ -1020,6 +1020,13 @@ async fn spawn_task(
     let task_context = {
         let mut ctx = (*task_context).clone();
         ctx.leaf_count = task_desc.downstream_leaves;
+        // Stagger init for background tasks to avoid thundering-herd on
+        // external services. Blocking tasks (webhooks) and generate (cron)
+        // must start immediately.
+        if !task_desc.is_blocking && !matches!(task_desc.task_type, TaskType::generate(_)) {
+            let retry_config = flowgen_core::retry::RetryConfig::merge(&ctx.retry, &None);
+            ctx.startup_delay = Some(retry_config.startup_jitter());
+        }
         Arc::new(ctx)
     };
 

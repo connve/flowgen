@@ -444,15 +444,18 @@ impl crate::task::runner::Runner for Processor {
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         // Initialize (no-op for buffer processor).
-        match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    error!(error = %e, "Failed to initialize buffer processor");
-                    Err(tokio_retry::RetryError::transient(e))
+        match tokio_retry::Retry::spawn(
+            retry_config.init_strategy(self.task_context.startup_delay),
+            || async {
+                match self.init().await {
+                    Ok(handler) => Ok(handler),
+                    Err(e) => {
+                        error!(error = %e, "Failed to initialize buffer processor");
+                        Err(tokio_retry::RetryError::transient(e))
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         {
             Ok(_) => {}

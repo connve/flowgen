@@ -50,6 +50,8 @@ pub struct TaskContext {
     /// Defaults to one for linear flows where a single terminal task signals
     /// completion.
     pub leaf_count: usize,
+    /// Optional startup delay for staggering task initialization across replicas.
+    pub startup_delay: Option<std::time::Duration>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -253,6 +255,7 @@ impl TaskContextBuilder {
             retry: self.retry,
             cancellation_token: self.cancellation_token.unwrap_or_default(),
             leaf_count: self.leaf_count.unwrap_or(1),
+            startup_delay: None,
         })
     }
 }

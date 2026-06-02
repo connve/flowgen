@@ -324,12 +324,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
         let event_handler = Arc::new(
-            tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-                self.init().await.map_err(|e| {
-                    error!(error = %e, "Failed to initialize HTML scrape processor.");
-                    tokio_retry::RetryError::transient(e)
-                })
-            })
+            tokio_retry::Retry::spawn(
+                retry_config.init_strategy(self.task_context.startup_delay),
+                || async {
+                    self.init().await.map_err(|e| {
+                        error!(error = %e, "Failed to initialize HTML scrape processor.");
+                        tokio_retry::RetryError::transient(e)
+                    })
+                },
+            )
             .await?,
         );
 

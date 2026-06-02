@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.117.0
+
+### Features
+
+- **Startup jitter for all background tasks.** Every background task now
+  sleeps a random duration (up to `initial_backoff`) before its first
+  initialization attempt. This staggers connections across flows and
+  replicas to avoid thundering-herd login storms on external services.
+  Blocking tasks (`http_webhook`, `mcp_tool`, `ai_gateway`) and
+  `generate` tasks skip the jitter. The jitter is automatic and requires
+  no configuration.
+
+- **Exponential reconnect backoff for subscribers.** NATS JetStream and
+  Salesforce PubSub subscribers now use exponential backoff (capped at
+  5 minutes) when reconnecting after connection loss, replacing the
+  previous flat `initial_backoff` sleep. Each successful reconnect resets
+  the backoff.
+
+- **AGENTS.md.** Committed agent instructions (code quality standards and
+  architecture reference) to the repository root so they are shared
+  across all AI coding tools.
+
 ## 0.116.0
 
 ### Features
