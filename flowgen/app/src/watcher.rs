@@ -254,7 +254,10 @@ mod tests {
 
         // Verify no extra event is pending for the non-matching key.
         let extra = rx.try_recv();
-        assert!(extra.is_err(), "Should not have received event for non-matching prefix");
+        assert!(
+            extra.is_err(),
+            "Should not have received event for non-matching prefix"
+        );
 
         shutdown.cancel();
     }

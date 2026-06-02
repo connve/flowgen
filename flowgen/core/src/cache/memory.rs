@@ -83,7 +83,10 @@ impl super::Cache for MemoryCache {
                 e.value = value.clone();
                 e.revision += 1;
             })
-            .or_insert(CacheEntry { value: value.clone(), revision: 1 });
+            .or_insert(CacheEntry {
+                value: value.clone(),
+                revision: 1,
+            });
 
         self.broadcast(super::WatchEvent::Put {
             key: key.to_string(),
@@ -206,7 +209,11 @@ impl super::Cache for MemoryCache {
 
         let stream = UnboundedReceiverStream::new(rx);
         // Filter is already done at broadcast time, but we box the stream here.
-        Ok(Box::pin(stream) as BoxStream<'static, Result<super::WatchEvent, super::Error>>)
+        Ok(Box::pin(stream)
+            as BoxStream<
+                'static,
+                Result<super::WatchEvent, super::Error>,
+            >)
     }
 }
 

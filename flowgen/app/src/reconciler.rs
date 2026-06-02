@@ -619,10 +619,7 @@ flow:
 
     // -- cleanup_stale_cache_entries ------------------------------------------
 
-    fn test_context_with_fs_flows(
-        prefix: &str,
-        fs_flows: HashSet<String>,
-    ) -> ReconcilerContext {
+    fn test_context_with_fs_flows(prefix: &str, fs_flows: HashSet<String>) -> ReconcilerContext {
         use flowgen_core::cache::memory::MemoryCache;
 
         let app_config = crate::config::AppConfig {
@@ -678,10 +675,25 @@ flow:
         cleanup_stale_cache_entries(&ctx).await;
 
         // Filesystem-shadowed entries should be deleted.
-        assert!(ctx.cache.get("flowgen.flows.my-flow").await.unwrap().is_none());
-        assert!(ctx.cache.get("flowgen.flows.other-flow").await.unwrap().is_none());
+        assert!(ctx
+            .cache
+            .get("flowgen.flows.my-flow")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(ctx
+            .cache
+            .get("flowgen.flows.other-flow")
+            .await
+            .unwrap()
+            .is_none());
         // Cache-only entry should remain.
-        assert!(ctx.cache.get("flowgen.flows.cache-only-flow").await.unwrap().is_some());
+        assert!(ctx
+            .cache
+            .get("flowgen.flows.cache-only-flow")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -696,7 +708,12 @@ flow:
         cleanup_stale_cache_entries(&ctx).await;
 
         // Nothing should be deleted when there are no filesystem flows.
-        assert!(ctx.cache.get("flowgen.flows.some-flow").await.unwrap().is_some());
+        assert!(ctx
+            .cache
+            .get("flowgen.flows.some-flow")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

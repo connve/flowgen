@@ -560,10 +560,7 @@ mod tests {
     #[test]
     fn error_missing_jetstream_context_display() {
         let err = Error::MissingJetStreamContext;
-        assert_eq!(
-            err.to_string(),
-            "Missing required value JetStream Context"
-        );
+        assert_eq!(err.to_string(), "Missing required value JetStream Context");
     }
 
     // -----------------------------------------------------------------------

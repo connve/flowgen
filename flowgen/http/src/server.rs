@@ -229,10 +229,7 @@ mod tests {
             &Method::DELETE,
             &crate::config::Method::Delete
         ));
-        assert!(methods_match(
-            &Method::PATCH,
-            &crate::config::Method::Patch
-        ));
+        assert!(methods_match(&Method::PATCH, &crate::config::Method::Patch));
         assert!(methods_match(&Method::HEAD, &crate::config::Method::Head));
     }
 
