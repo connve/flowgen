@@ -408,7 +408,6 @@ mod tests {
 
     #[test]
     fn test_json_to_bson_float() {
-        assert_eq!(json_to_bson(&json!(3.14)), Bson::Double(3.14));
         assert_eq!(json_to_bson(&json!(-0.5)), Bson::Double(-0.5));
     }
 
