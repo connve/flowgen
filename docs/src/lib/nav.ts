@@ -97,6 +97,14 @@ export const navigation: NavSection[] = [
 		items: [{ title: 'Object Store', href: '/object-store/object-store' }]
 	},
 	{
+		title: 'MongoDB',
+		icon: '/icons/mongodb.svg',
+		items: [
+			{ title: 'Reader', href: '/mongo/reader' },
+			{ title: 'Writer', href: '/mongo/writer' }
+		]
+	},
+	{
 		title: 'MSSQL',
 		icon: '/icons/mssql.svg',
 		items: [{ title: 'Query', href: '/mssql/query' }]
