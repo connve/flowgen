@@ -90,7 +90,7 @@ impl EventHandler {
 
         let doc = build_filter_doc(&self.config.filter);
 
-        let mut cursor = document_collection.find(doc, None).await?;
+        let mut cursor = document_collection.find(doc).await?;
         while let Some(doc) = cursor.try_next().await? {
             self.process_message(Ok(doc)).await?;
         }

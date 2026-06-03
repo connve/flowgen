@@ -109,7 +109,7 @@ impl EventHandler {
             .database(&self.config.db_name)
             .collection(&self.config.collection_name);
 
-        let resp = db_collection.insert_one(&doc, None).await?;
+        let resp = db_collection.insert_one(&doc).await?;
 
         let resp_json = serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 

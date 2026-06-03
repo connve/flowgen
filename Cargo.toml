@@ -115,4 +115,4 @@ scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 walkdir = { version = "2.5" }
 bson = { version = "2" }
-mongodb = { version = "2" }
+mongodb = { version = "3" }
