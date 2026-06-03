@@ -88,6 +88,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn test_error_display_serde_json() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = Error::SerdeJson { source: serde_err };
+        assert!(err
+            .to_string()
+            .contains("JSON serialization/deserialization failed"));
+    }
+
+    #[test]
+    fn test_error_display_no_record_batch() {
+        let err = Error::NoRecordBatch();
+        assert_eq!(err.to_string(), "Error getting record batch");
+    }
+
+    #[test]
+    fn test_error_display_no_full_document() {
+        let err = Error::NoFullDocument();
+        assert_eq!(
+            err.to_string(),
+            "Full document is not available for this operation"
+        );
+    }
+
+    #[test]
+    fn test_error_display_event() {
+        let inner_err: flowgen_core::event::Error =
+            flowgen_core::event::Error::MissingBuilderAttribute("test".to_string());
+        let err: Error = inner_err.into();
+        assert_eq!(err.to_string(), "Missing required builder attribute: test");
+    }
+
+    #[test]
     fn test_document_to_event_basic() {
         let id = ObjectId::new();
         let mut d = Document::new();

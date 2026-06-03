@@ -370,6 +370,58 @@ mod tests {
 
         let err = Error::Other(Box::new(std::io::Error::other("mock")));
         assert_eq!(err.to_string(), "Other subscriber error");
+
+        let err = Error::Auth {
+            source: crate::client::Error::MissingCredentials,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Authentication error: Missing credentials error."
+        );
+
+        let err = Error::MongoDB(mongodb::error::Error::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        )));
+        assert!(err.to_string().contains("MongoDB error:"));
+
+        let err = Error::SendMessage {
+            source: flowgen_core::event::Error::SendMessage,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Sending event to channel failed with error: Error sending event to channel (receiver dropped)"
+        );
+
+        let err = Error::MessageConversion {
+            source: crate::message::Error::NoRecordBatch(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Message conversion failed with error: Error getting record batch"
+        );
+
+        let serde_err = serde_json::from_str::<()>("invalid").unwrap_err();
+        let err = Error::ConfigRender {
+            source: flowgen_core::config::Error::SerdeJson { source: serde_err },
+        };
+        assert!(err
+            .to_string()
+            .contains("Configuration template rendering failed with error:"));
+
+        let inner = Box::new(Error::MissingRequiredAttribute("inner".to_string()));
+        let err = Error::RetryExhausted { source: inner };
+        assert_eq!(
+            err.to_string(),
+            "Task failed after all retry attempts: Missing required builder attribute: inner"
+        );
+
+        let inner = flowgen_core::event::Error::MissingBuilderAttribute("test".to_string());
+        let err = Error::EventBuilder { source: inner };
+        assert_eq!(
+            err.to_string(),
+            "Reader event builder failed with error: Missing required builder attribute: test"
+        );
     }
 
     // ==========================================
@@ -439,9 +491,64 @@ mod tests {
         assert!(reader.tx.is_some());
     }
 
+    #[test]
+    fn test_reader_builder_no_sender() {
+        let (_tx, rx) = channel(1);
+        let config = Arc::new(create_mock_config(PathBuf::new()));
+
+        let reader = ReaderBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_id(7)
+            .task_context(mock_task_context())
+            .task_type("no_sender")
+            .build()
+            .expect("Builder should create Reader without sender");
+
+        assert_eq!(reader.task_id, 7);
+        assert_eq!(reader.task_type, "no_sender");
+        assert!(reader.tx.is_none());
+    }
+
+    #[test]
+    fn test_build_filter_doc_with_special_keys() {
+        let mut filter = HashMap::new();
+        filter.insert("field.with.dots".to_string(), "value1".to_string());
+        filter.insert("nested:field".to_string(), "value2".to_string());
+
+        let doc = build_filter_doc(&filter);
+
+        assert_eq!(doc.len(), 2);
+        assert_eq!(doc.get_str("field.with.dots").unwrap(), "value1");
+        assert_eq!(doc.get_str("nested:field").unwrap(), "value2");
+    }
+
     // ==========================================
     // 4. RUNTIME, ERROR & STATE HANDLING TESTS
     // ==========================================
+
+    #[tokio::test]
+    async fn test_event_handler_process_message_success() {
+        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+            .await
+            .unwrap();
+        let config = Arc::new(create_mock_config(PathBuf::new()));
+
+        let handler = EventHandler {
+            client,
+            config,
+            task_id: 1,
+            tx: None,
+            task_type: "reader_test",
+        };
+
+        let mut doc = Document::new();
+        doc.insert("name", "test_user");
+        doc.insert("value", 42_i64);
+
+        let result = handler.process_message(Ok(doc)).await;
+        assert!(result.is_ok());
+    }
 
     #[tokio::test]
     async fn test_event_handler_process_message_error_forwarding() {
@@ -488,5 +595,54 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Auth { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_reader_init_connect_failure() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "flowgen_test_connect_fail_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, r#"{"MONGODB_URI": "not-a-valid-uri"}"#).unwrap();
+
+        let (_tx, rx) = channel(1);
+        let config = Arc::new(create_mock_config(path.clone()));
+
+        let reader = ReaderBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_context(mock_task_context())
+            .task_type("connect_fail")
+            .build()
+            .unwrap();
+
+        let result = reader.init().await;
+
+        std::fs::remove_file(&path).ok();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Auth { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_reader_builder_missing_task_type_with_context() {
+        let (_tx, rx) = channel(1);
+        let config = Arc::new(create_mock_config(PathBuf::new()));
+
+        let builder = ReaderBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_context(mock_task_context());
+
+        let result = builder.build();
+        assert!(result.is_err());
+        if let Err(Error::MissingRequiredAttribute(attr)) = result {
+            assert_eq!(attr, "task_type");
+        } else {
+            panic!("Expected MissingRequiredAttribute error for 'task_type'");
+        }
     }
 }

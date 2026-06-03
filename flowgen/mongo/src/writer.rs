@@ -355,10 +355,29 @@ fn json_to_bson(value: &Value) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flowgen_core::task::runner::Runner;
     use mongodb::bson::Bson;
     use serde_json::json;
     use std::path::PathBuf;
     use tokio::sync::mpsc;
+
+    /// Creates a minimal mock TaskContext for builder tests.
+    fn mock_task_context() -> std::sync::Arc<flowgen_core::task::context::TaskContext> {
+        let layout = std::alloc::Layout::from_size_align(2048, 8).unwrap();
+        unsafe {
+            let ptr = std::alloc::alloc_zeroed(layout);
+            if ptr.is_null() {
+                panic!("Mock allocation failed");
+            }
+            let strong_ptr = ptr as *mut usize;
+            *strong_ptr = 1_000_000;
+            let weak_ptr = strong_ptr.add(1);
+            *weak_ptr = 1_000_000;
+            std::mem::transmute::<*mut u8, std::sync::Arc<flowgen_core::task::context::TaskContext>>(
+                ptr,
+            )
+        }
+    }
 
     /// Mock helper to generate a valid writer configuration module block
     fn create_mock_config() -> super::super::config::Writer {
@@ -388,6 +407,29 @@ mod tests {
     }
 
     #[test]
+    fn test_json_to_bson_float() {
+        assert_eq!(json_to_bson(&json!(3.14)), Bson::Double(3.14));
+        assert_eq!(json_to_bson(&json!(-0.5)), Bson::Double(-0.5));
+    }
+
+    #[test]
+    fn test_json_to_bson_non_integer_number() {
+        let big = serde_json::from_str::<serde_json::Value>("1e100").unwrap();
+        let result = json_to_bson(&big);
+        assert_eq!(result, Bson::Double(1e100));
+    }
+
+    #[test]
+    fn test_json_to_bson_empty_structures() {
+        assert_eq!(json_to_bson(&json!([])), Bson::Array(vec![]));
+        if let Bson::Document(doc) = json_to_bson(&json!({})) {
+            assert!(doc.is_empty());
+        } else {
+            panic!("Expected Bson::Document");
+        }
+    }
+
+    #[test]
     fn test_json_to_bson_complex_structures() {
         let json_data = json!({
             "meta": "data",
@@ -414,8 +456,68 @@ mod tests {
     }
 
     // ==========================================
-    // 2. WRITER BUILDER VALIDATION TESTS
+    // 2. EVENT HANDLER ERROR PATH TESTS
     // ==========================================
+
+    #[tokio::test]
+    async fn test_event_handler_unsupported_data() {
+        use std::sync::Arc as StdArc;
+
+        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+            .await
+            .unwrap();
+        let config = Arc::new(create_mock_config());
+
+        let handler = EventHandler {
+            config,
+            client,
+            task_id: 1,
+            tx: None,
+            task_type: "writer_test",
+        };
+
+        use arrow::datatypes::Schema;
+        use arrow::record_batch::RecordBatch;
+        use flowgen_core::event::EventData;
+
+        let schema = StdArc::new(Schema::empty());
+        let batch = RecordBatch::new_empty(schema);
+        let event = flowgen_core::event::EventBuilder::new()
+            .data(EventData::ArrowRecordBatch(batch))
+            .subject("test".to_string())
+            .task_id(1)
+            .task_type("test")
+            .build()
+            .unwrap();
+
+        let result = handler.handle(event).await;
+        assert!(matches!(result, Err(Error::UnsupportedEventData)));
+    }
+
+    // ==========================================
+    // 3. WRITER BUILDER VALIDATION TESTS
+    // ==========================================
+
+    #[test]
+    fn test_writer_builder_success_with_sender() {
+        let (_tx, rx) = mpsc::channel(1);
+        let config = Arc::new(create_mock_config());
+        let (task_tx, _) = mpsc::channel(1);
+
+        let writer = WriterBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .sender(task_tx)
+            .task_id(5)
+            .task_context(mock_task_context())
+            .task_type("writer_with_sender")
+            .build()
+            .expect("Builder should create Writer with sender");
+
+        assert_eq!(writer.task_id, 5);
+        assert_eq!(writer.task_type, "writer_with_sender");
+        assert!(writer.tx.is_some());
+    }
 
     #[test]
     fn test_writer_builder_missing_all_attributes() {
@@ -479,9 +581,152 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_writer_builder_missing_task_type_with_context() {
+        let (_tx, rx) = mpsc::channel(1);
+        let config = Arc::new(create_mock_config());
+
+        let builder = WriterBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_context(mock_task_context())
+            .task_id(1);
+
+        let result = builder.build();
+        assert!(result.is_err());
+        if let Err(Error::MissingRequiredAttribute(attr)) = result {
+            assert_eq!(attr, "task_type");
+        } else {
+            panic!("Expected MissingRequiredAttribute error variant for 'task_type'");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_writer_init_connect_failure() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "flowgen_test_writer_connect_fail_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, r#"{"MONGODB_URI": "not-a-valid-uri"}"#).unwrap();
+
+        let config = super::super::config::Writer {
+            name: "connect_fail_test".to_string(),
+            db_name: "test_db".to_string(),
+            collection_name: "test_col".to_string(),
+            credentials_path: path.clone(),
+            depends_on: Some(Vec::new()),
+            retry: Default::default(),
+        };
+
+        let (_tx, rx) = mpsc::channel(1);
+        let config = Arc::new(config);
+
+        let writer = WriterBuilder::new()
+            .config(config)
+            .receiver(rx)
+            .task_context(mock_task_context())
+            .task_type("connect_fail")
+            .build()
+            .unwrap();
+
+        let result = writer.init().await;
+
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(result, Err(Error::Auth { .. })));
+    }
+
     // ==========================================
-    // 3. ERROR STRUCT TRAIT IMPLEMENTATION TESTS
+    // 5. ERROR STRUCT TRAIT IMPLEMENTATION TESTS
     // ==========================================
+
+    #[test]
+    fn test_error_display_missing_attribute() {
+        let err = Error::MissingRequiredAttribute("writer_field".to_string());
+        assert_eq!(err.to_string(), "Missing required attribute: writer_field");
+    }
+
+    #[test]
+    fn test_error_display_unsupported_event_data() {
+        let err = Error::UnsupportedEventData;
+        assert_eq!(err.to_string(), "Unsupported event data");
+    }
+
+    #[test]
+    fn test_error_display_invalid_document() {
+        let err = Error::InvalidDocument;
+        assert_eq!(err.to_string(), "Invalid Mongo Document");
+    }
+
+    #[test]
+    fn test_error_display_serde_json() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = Error::SerdeJson { source: serde_err };
+        assert!(err.to_string().contains("JSON serialization error:"));
+    }
+
+    #[test]
+    fn test_error_display_auth() {
+        let err = Error::Auth {
+            source: crate::client::Error::MissingCredentials,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Authentication error: Missing credentials error."
+        );
+    }
+
+    #[test]
+    fn test_error_display_send_message() {
+        let err = Error::SendMessage {
+            source: flowgen_core::event::Error::SendMessage,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Send event message error: Error sending event to channel (receiver dropped)"
+        );
+    }
+
+    #[test]
+    fn test_error_display_retry_exhausted() {
+        let inner = Box::new(Error::MissingRequiredAttribute("inner".to_string()));
+        let err = Error::RetryExhausted { source: inner };
+        assert_eq!(
+            err.to_string(),
+            "Task failed after all retry attempts: Missing required attribute: inner"
+        );
+    }
+
+    #[test]
+    fn test_error_display_event_builder() {
+        let inner = flowgen_core::event::Error::MissingBuilderAttribute("test".to_string());
+        let err = Error::EventBuilder { source: inner };
+        assert_eq!(
+            err.to_string(),
+            "Writer event builder failed with error: Missing required builder attribute: test"
+        );
+    }
+
+    #[test]
+    fn test_error_display_event_transparent() {
+        let inner = flowgen_core::event::Error::SendMessage;
+        let err: Error = inner.into();
+        assert_eq!(
+            err.to_string(),
+            "Error sending event to channel (receiver dropped)"
+        );
+    }
+
+    #[test]
+    fn test_error_display_config_render_transparent() {
+        let serde_err = serde_json::from_str::<()>("invalid").unwrap_err();
+        let config_err = flowgen_core::config::Error::SerdeJson { source: serde_err };
+        let err: Error = config_err.into();
+        assert!(err.to_string().contains("JSON error:"));
+    }
 
     #[test]
     fn test_error_conversion_from_mongodb() {
