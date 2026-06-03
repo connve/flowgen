@@ -162,7 +162,10 @@ mod tests {
             uri: None,
         };
 
-        assert!(matches!(creds.build_connection_string("h"), Err(Error::MissingCredentials)));
+        assert!(matches!(
+            creds.build_connection_string("h"),
+            Err(Error::MissingCredentials)
+        ));
     }
 
     #[test]
@@ -206,7 +209,11 @@ mod tests {
             .unwrap()
             .as_nanos();
         path.push(format!("flowgen_test_default_host_{name}.json"));
-        std::fs::write(&path, "{ \"MONGODB_USERNAME\": \"u\", \"MONGODB_PASSWORD\": \"p\" }").unwrap();
+        std::fs::write(
+            &path,
+            "{ \"MONGODB_USERNAME\": \"u\", \"MONGODB_PASSWORD\": \"p\" }",
+        )
+        .unwrap();
         let client = b.credentials_path(path).unwrap().build().unwrap();
         assert_eq!(client.default_host, "custom:123");
     }
@@ -219,7 +226,10 @@ mod tests {
             uri: Some("".to_string()),
         };
 
-        assert!(matches!(creds.build_connection_string("h"), Err(Error::MissingCredentials)));
+        assert!(matches!(
+            creds.build_connection_string("h"),
+            Err(Error::MissingCredentials)
+        ));
     }
 
     #[tokio::test]

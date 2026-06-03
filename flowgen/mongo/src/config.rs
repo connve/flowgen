@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 /// Mongo batch reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
-pub struct Reader { 
+pub struct Reader {
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
     /// Path to credentials file containing Mongo authentication details.

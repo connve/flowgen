@@ -91,7 +91,7 @@ mod tests {
     fn test_document_to_event_basic() {
         let id = ObjectId::new();
         let mut d = Document::new();
-        d.insert("_id", id.clone());
+        d.insert("_id", id);
         d.insert("name", "alice");
 
         let evt = d.to_event("task_type", 5).expect("to_event");

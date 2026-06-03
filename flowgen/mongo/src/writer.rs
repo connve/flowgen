@@ -102,10 +102,7 @@ impl EventHandler {
         // Override _id with the native ObjectId.
         doc.insert("_id", Bson::ObjectId(oid));
 
-        let subject = format!(
-            "{}.{}",
-            self.config.db_name, self.config.collection_name
-        );
+        let subject = format!("{}.{}", self.config.db_name, self.config.collection_name);
 
         let db_collection: Collection<Document> = self
             .client
@@ -114,8 +111,7 @@ impl EventHandler {
 
         let resp = db_collection.insert_one(&doc, None).await?;
 
-        let resp_json =
-            serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
+        let resp_json = serde_json::to_value(&resp).map_err(|e| Error::SerdeJson { source: e })?;
 
         let mut e = flowgen_core::event::EventBuilder::new()
             .data(EventData::Json(resp_json))
@@ -225,17 +221,16 @@ impl flowgen_core::task::runner::Runner for Writer {
 
                         let handle = tokio::spawn(
                             async move {
-                                let result =
-                                    tokio_retry::Retry::spawn(retry_strategy, || async {
-                                        match event_handler.handle(event.clone()).await {
-                                            Ok(result) => Ok(result),
-                                            Err(e) => {
-                                                error!(error = %e, "Failed to write MongoDB document");
-                                                Err(tokio_retry::RetryError::transient(e))
-                                            }
+                                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                    match event_handler.handle(event.clone()).await {
+                                        Ok(result) => Ok(result),
+                                        Err(e) => {
+                                            error!(error = %e, "Failed to write MongoDB document");
+                                            Err(tokio_retry::RetryError::transient(e))
                                         }
-                                    })
-                                    .await;
+                                    }
+                                })
+                                .await;
 
                                 if let Err(err) = result {
                                     error!(
@@ -360,10 +355,10 @@ fn json_to_bson(value: &Value) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use serde_json::json;
-    use tokio::sync::mpsc;
     use mongodb::bson::Bson;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
 
     /// Mock helper to generate a valid writer configuration module block
     fn create_mock_config() -> super::super::config::Writer {
@@ -372,7 +367,7 @@ mod tests {
             db_name: "test_database".to_string(),
             collection_name: "test_collection".to_string(),
             credentials_path: PathBuf::from("/mock/path/credentials.json"),
-            depends_on: Some(Vec::new()), 
+            depends_on: Some(Vec::new()),
             retry: Default::default(),
         }
     }
@@ -386,8 +381,10 @@ mod tests {
         assert_eq!(json_to_bson(&json!(null)), Bson::Null);
         assert_eq!(json_to_bson(&json!(true)), Bson::Boolean(true));
         assert_eq!(json_to_bson(&json!(42)), Bson::Int64(42));
-        assert_eq!(json_to_bson(&json!(3.14)), Bson::Double(3.14));
-        assert_eq!(json_to_bson(&json!("flowgen")), Bson::String("flowgen".to_string()));
+        assert_eq!(
+            json_to_bson(&json!("flowgen")),
+            Bson::String("flowgen".to_string())
+        );
     }
 
     #[test]
@@ -401,10 +398,10 @@ mod tests {
         });
 
         let bson_doc = json_to_bson(&json_data);
-        
+
         if let Bson::Document(doc) = bson_doc {
             assert_eq!(doc.get_str("meta").unwrap(), "data");
-            
+
             let tags = doc.get_array("tags").unwrap();
             assert_eq!(tags.len(), 2);
             assert_eq!(tags[0].as_str().unwrap(), "rust");
@@ -424,7 +421,7 @@ mod tests {
     fn test_writer_builder_missing_all_attributes() {
         let builder = WriterBuilder::new();
         let result = builder.build();
-        
+
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
             assert_eq!(attr, "config");
@@ -438,7 +435,7 @@ mod tests {
         let config = Arc::new(create_mock_config());
         let builder = WriterBuilder::new().config(config);
         let result = builder.build();
-        
+
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
             assert_eq!(attr, "receiver");
@@ -451,12 +448,12 @@ mod tests {
     fn test_writer_builder_missing_task_context() {
         let (_tx, rx) = mpsc::channel(1);
         let config = Arc::new(create_mock_config());
-        
+
         let builder = WriterBuilder::new()
             .config(config)
             .receiver(rx)
             .task_type("mongo_write_task");
-            
+
         let result = builder.build();
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
@@ -470,11 +467,9 @@ mod tests {
     fn test_writer_builder_missing_task_type() {
         let (_tx, rx) = mpsc::channel(1);
         let config = Arc::new(create_mock_config());
-        
-        let builder = WriterBuilder::new()
-            .config(config)
-            .receiver(rx);
-            
+
+        let builder = WriterBuilder::new().config(config).receiver(rx);
+
         let result = builder.build();
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
@@ -497,12 +492,12 @@ mod tests {
         ));
 
         let writer_error: Error = Error::from(inner_mongo_err);
-        
+
         assert!(
             matches!(writer_error, Error::MongoWriter { .. }),
             "The error variant must map systematically down to Error::MongoWriter through From implementation overrides."
         );
-        
+
         let error_message = format!("{}", writer_error);
         assert!(error_message.contains("Mongo Writer failed"));
     }

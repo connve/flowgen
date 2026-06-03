@@ -1,13 +1,13 @@
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
 use flowgen_core::event::Event;
+use flowgen_core::event::EventExt;
 use futures::TryStreamExt;
 use mongodb::bson::Document;
 use mongodb::{bson::doc, Collection};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
-use flowgen_core::event::EventExt;
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -83,7 +83,6 @@ impl EventHandler {
 
     /// Queries MongoDB and emits each document as an event.
     async fn handle(&self, _event: Event) -> Result<(), Error> {
-        
         let document_collection: Collection<Document> = self
             .client
             .database(&self.config.db_name)
@@ -173,17 +172,16 @@ impl flowgen_core::task::runner::Runner for Reader {
 
                         tokio::spawn(
                             async move {
-                                let result =
-                                    tokio_retry::Retry::spawn(retry_strategy, || async {
-                                        match event_handler.handle(event_clone.clone()).await {
-                                            Ok(result) => Ok(result),
-                                            Err(e) => {
-                                                error!(error = %e, "Failed to process MongoDB event");
-                                                Err(tokio_retry::RetryError::transient(e))
-                                            }
+                                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                    match event_handler.handle(event_clone.clone()).await {
+                                        Ok(result) => Ok(result),
+                                        Err(e) => {
+                                            error!(error = %e, "Failed to process MongoDB event");
+                                            Err(tokio_retry::RetryError::transient(e))
                                         }
-                                    })
-                                    .await;
+                                    }
+                                })
+                                .await;
 
                                 if let Err(err) = result {
                                     error!(
@@ -291,11 +289,11 @@ impl ReaderBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::path::PathBuf;
-    use tokio::sync::mpsc::channel;
     use flowgen_core::task::runner::Runner;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::mpsc::channel;
 
     /// Helper utility to construct a mock Reader config matching the flowgen repository specification.
     fn create_mock_config(credentials: PathBuf) -> super::super::config::Reader {
@@ -305,13 +303,13 @@ mod tests {
             collection_name: "test_collection".to_string(),
             filter: HashMap::new(),
             credentials_path: credentials,
-            depends_on: Some(Vec::new()), 
+            depends_on: Some(Vec::new()),
             retry: Default::default(),
         }
     }
 
     /// Forges a heap-allocated ArcInner structure layout matching Arc<TaskContext>.
-    /// Initializes reference counts to 1,000,000 so downstream drops merely decrement 
+    /// Initializes reference counts to 1,000,000 so downstream drops merely decrement
     /// the counter instead of triggering uninitialized drops or allocator faults.
     fn mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
         let layout = std::alloc::Layout::from_size_align(2048, 8).unwrap();
@@ -320,15 +318,15 @@ mod tests {
             if ptr.is_null() {
                 panic!("Mock allocation failed");
             }
-            
+
             // Set strong reference count to 1,000,000
             let strong_ptr = ptr as *mut usize;
             *strong_ptr = 1_000_000;
-            
+
             // Set weak reference count to 1,000,000
             let weak_ptr = strong_ptr.add(1);
             *weak_ptr = 1_000_000;
-            
+
             // Transmute the pointer directly into a valid Arc instance
             std::mem::transmute::<*mut u8, Arc<flowgen_core::task::context::TaskContext>>(ptr)
         }
@@ -345,7 +343,7 @@ mod tests {
         filter.insert("environment".to_string(), "production".to_string());
 
         let doc = build_filter_doc(&filter);
-        
+
         assert_eq!(doc.len(), 2);
         assert_eq!(doc.get_str("status").unwrap(), "active");
         assert_eq!(doc.get_str("environment").unwrap(), "production");
@@ -365,9 +363,12 @@ mod tests {
     #[test]
     fn test_error_enum_formatting() {
         let err = Error::MissingRequiredAttribute("test_field".to_string());
-        assert_eq!(err.to_string(), "Missing required builder attribute: test_field");
+        assert_eq!(
+            err.to_string(),
+            "Missing required builder attribute: test_field"
+        );
 
-        let err = Error::Other(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "mock")));
+        let err = Error::Other(Box::new(std::io::Error::other("mock")));
         assert_eq!(err.to_string(), "Other subscriber error");
     }
 
@@ -379,7 +380,7 @@ mod tests {
     fn test_reader_builder_missing_all_attributes() {
         let builder = ReaderBuilder::new();
         let result = builder.build();
-        
+
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
             assert_eq!(attr, "config");
@@ -392,7 +393,7 @@ mod tests {
     fn test_reader_builder_missing_receiver() {
         let config = Arc::new(create_mock_config(PathBuf::new()));
         let builder = ReaderBuilder::new().config(config);
-        
+
         let result = builder.build();
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
@@ -406,11 +407,9 @@ mod tests {
     fn test_reader_builder_missing_task_type() {
         let (_tx, rx) = channel(1);
         let config = Arc::new(create_mock_config(PathBuf::new()));
-        
-        let builder = ReaderBuilder::new()
-            .config(config)
-            .receiver(rx);
-            
+
+        let builder = ReaderBuilder::new().config(config).receiver(rx);
+
         let result = builder.build();
         assert!(result.is_err());
         if let Err(Error::MissingRequiredAttribute(attr)) = result {
@@ -465,7 +464,7 @@ mod tests {
         ));
 
         let result = handler.process_message(Err(structural_error)).await;
-        
+
         assert!(result.is_err());
         assert!(matches!(result, Err(Error::Other(_))));
     }
@@ -473,7 +472,9 @@ mod tests {
     #[tokio::test]
     async fn test_reader_init_auth_failure() {
         let (_tx, rx) = channel(1);
-        let config = Arc::new(create_mock_config(PathBuf::from("/invalid/credentials/path.json")));
+        let config = Arc::new(create_mock_config(PathBuf::from(
+            "/invalid/credentials/path.json",
+        )));
 
         let reader = ReaderBuilder::new()
             .config(config)
@@ -484,7 +485,7 @@ mod tests {
             .unwrap();
 
         let result = reader.init().await;
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Auth { .. }));
     }

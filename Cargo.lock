@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongo"
-version = "0.114.0"
+version = "0.117.0"
 dependencies = [
  "apache-avro",
  "arrow",

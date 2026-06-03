@@ -1622,12 +1622,11 @@ async fn spawn_task(
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    let mut builder =
-                        flowgen_mongo::reader::ReaderBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
+                    let mut builder = flowgen_mongo::reader::ReaderBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }
@@ -1645,12 +1644,11 @@ async fn spawn_task(
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    let mut builder =
-                        flowgen_mongo::writer::WriterBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
+                    let mut builder = flowgen_mongo::writer::WriterBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }
