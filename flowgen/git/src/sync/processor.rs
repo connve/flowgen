@@ -4,7 +4,7 @@
 //! with `{path, content, commit}` data. Downstream tasks decide what to do
 //! with the files (parse as flows, write to cache, store in object store).
 
-use super::config::{GitAuthType, Processor as ProcessorConfig};
+use super::config::{Credentials, Processor as ProcessorConfig};
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,8 +56,20 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("SSH authentication is not supported. Use HTTPS with a token instead.")]
-    SshNotSupported,
+    #[error("SSH URLs are not supported — use HTTPS with a token via credentials_path: {url}")]
+    SshUrl { url: String },
+    #[error("Failed to read credentials file '{path}': {source}")]
+    ReadCredentials {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Failed to parse credentials file '{path}': {source}")]
+    ParseCredentials {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("Invalid clone_path configuration: {source}")]
     InvalidClonePath {
         #[source]
@@ -110,6 +122,8 @@ pub struct EventHandler {
     /// `clone_path` from config, or the derived default
     /// `<temp>/<flow_name>/<task_name>`.
     clone_path: PathBuf,
+    /// HTTPS token loaded from the credentials file at init, if configured.
+    token: Option<String>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -127,8 +141,13 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            // Clone or pull the repository.
-            let commit = clone_or_pull(&self.config, &self.clone_path).await?;
+            let commit = clone_or_pull(
+                &self.config.repository_url,
+                &self.config.branch,
+                self.token.as_deref(),
+                &self.clone_path,
+            )
+            .await?;
 
             // Determine the scan base path.
             let scan_path = match &self.config.path {
@@ -220,19 +239,17 @@ impl EventHandler {
 // re-paying the thread-handoff cost per call.
 
 /// Clone or pull the repository and return the HEAD commit hash.
-async fn clone_or_pull(config: &ProcessorConfig, clone_path: &Path) -> Result<String, Error> {
-    if matches!(config.auth.auth_type, GitAuthType::Ssh) {
-        return Err(Error::SshNotSupported);
-    }
-
-    let url = build_authenticated_url(config)?;
+async fn clone_or_pull(
+    repository_url: &str,
+    branch: &str,
+    token: Option<&str>,
+    clone_path: &Path,
+) -> Result<String, Error> {
+    let url = build_authenticated_url(repository_url, token);
     let clone_path = clone_path.to_path_buf();
-    let branch = config.branch.clone();
-    let original_url = config.repository_url.clone();
+    let branch = branch.to_string();
+    let original_url = repository_url.to_string();
 
-    // Capture the current tracing span so log lines emitted from the gix
-    // worker thread inherit the flow/task context. Without this the
-    // `pull_repo` events show up bare with no `flow=…` / `task=…` fields.
     let span = tracing::Span::current();
     task::spawn_blocking(move || {
         let _enter = span.enter();
@@ -265,24 +282,17 @@ fn sync_blocking(
     head_commit(path)
 }
 
-/// Builds the URL used for network operations, embedding a token in the
-/// userinfo segment when token auth is configured. The `original_url` is
-/// preserved separately for error messages so tokens never appear in logs.
-fn build_authenticated_url(config: &ProcessorConfig) -> Result<String, Error> {
-    if let GitAuthType::Token = config.auth.auth_type {
-        if let Some(token) = config.auth.token.as_deref() {
-            // Inject the token as a basic-auth username (GitHub/GitLab convention).
-            // For URLs like `https://github.com/org/repo.git`, the result is
-            // `https://<token>@github.com/org/repo.git`.
-            if let Some(rest) = config.repository_url.strip_prefix("https://") {
-                return Ok(format!("https://{token}@{rest}"));
-            }
-            if let Some(rest) = config.repository_url.strip_prefix("http://") {
-                return Ok(format!("http://{token}@{rest}"));
-            }
+/// Embeds a token in the URL userinfo segment when provided.
+fn build_authenticated_url(repository_url: &str, token: Option<&str>) -> String {
+    if let Some(token) = token {
+        if let Some(rest) = repository_url.strip_prefix("https://") {
+            return format!("https://{token}@{rest}");
+        }
+        if let Some(rest) = repository_url.strip_prefix("http://") {
+            return format!("http://{token}@{rest}");
         }
     }
-    Ok(config.repository_url.clone())
+    repository_url.to_string()
 }
 
 /// Performs a shallow clone of a single branch.
@@ -393,11 +403,31 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Reject unsupported auth at startup so the task fails fast rather
-        // than once per event under retry.
-        if matches!(self.config.auth.auth_type, GitAuthType::Ssh) {
-            return Err(Error::SshNotSupported);
+        if self.config.repository_url.starts_with("git@")
+            || self.config.repository_url.starts_with("ssh://")
+        {
+            return Err(Error::SshUrl {
+                url: self.config.repository_url.clone(),
+            });
         }
+
+        let token = match &self.config.credentials_path {
+            Some(path) => {
+                let content = tokio::fs::read_to_string(path).await.map_err(|source| {
+                    Error::ReadCredentials {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let creds: Credentials =
+                    serde_json::from_str(&content).map_err(|source| Error::ParseCredentials {
+                        path: path.clone(),
+                        source,
+                    })?;
+                Some(creds.token)
+            }
+            None => None,
+        };
 
         let clone_path = match &self.config.clone_path {
             Some(path) => {
@@ -416,6 +446,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(EventHandler {
             config: Arc::clone(&self.config),
             clone_path,
+            token,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -548,11 +579,9 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::config::{GitAuth, GitAuthType};
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    /// Helper to build a minimal TaskContext for tests.
     fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
         let task_manager = Arc::new(
             flowgen_core::task::manager::TaskManagerBuilder::new()
@@ -571,7 +600,6 @@ mod tests {
         )
     }
 
-    /// Helper to construct a minimal ProcessorConfig for tests.
     fn test_config() -> ProcessorConfig {
         ProcessorConfig {
             name: "test_sync".to_string(),
@@ -579,7 +607,7 @@ mod tests {
             branch: "main".to_string(),
             path: None,
             clone_path: None,
-            auth: GitAuth::default(),
+            credentials_path: None,
             depends_on: None,
             retry: None,
         }
@@ -640,11 +668,21 @@ mod tests {
     }
 
     #[test]
-    fn error_display_ssh_not_supported() {
-        assert_eq!(
-            Error::SshNotSupported.to_string(),
-            "SSH authentication is not supported. Use HTTPS with a token instead."
-        );
+    fn error_display_ssh_url() {
+        let err = Error::SshUrl {
+            url: "git@github.com:org/repo.git".to_string(),
+        };
+        assert!(err.to_string().contains("SSH URLs are not supported"));
+        assert!(err.to_string().contains("git@github.com:org/repo.git"));
+    }
+
+    #[test]
+    fn error_display_read_credentials() {
+        let err = Error::ReadCredentials {
+            path: PathBuf::from("/etc/creds/git.json"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        assert!(err.to_string().contains("/etc/creds/git.json"));
     }
 
     #[test]
@@ -670,7 +708,9 @@ mod tests {
 
     #[test]
     fn error_display_retry_exhausted() {
-        let inner = Error::SshNotSupported;
+        let inner = Error::SshUrl {
+            url: "git@github.com:org/repo.git".to_string(),
+        };
         let err = Error::RetryExhausted {
             source: Box::new(inner),
         };
@@ -693,7 +733,7 @@ mod tests {
         assert_eq!(config.branch, "main");
         assert!(config.path.is_none());
         assert!(config.clone_path.is_none());
-        assert_eq!(config.auth.auth_type, GitAuthType::None);
+        assert!(config.credentials_path.is_none());
         assert!(config.depends_on.is_none());
         assert!(config.retry.is_none());
     }
@@ -706,10 +746,7 @@ mod tests {
             "branch": "develop",
             "path": "flows/",
             "clone_path": "/data/repo",
-            "auth": {
-                "type": "token",
-                "token": "ghp_abc123"
-            },
+            "credentials_path": "/etc/flowgen/credentials/git.json",
             "depends_on": ["trigger"],
             "retry": { "max_retries": 2, "initial_interval": "500ms" }
         }"#;
@@ -717,33 +754,12 @@ mod tests {
         assert_eq!(config.branch, "develop");
         assert_eq!(config.path.as_deref(), Some("flows/"));
         assert_eq!(config.clone_path, Some(PathBuf::from("/data/repo")));
-        assert_eq!(config.auth.auth_type, GitAuthType::Token);
-        assert_eq!(config.auth.token.as_deref(), Some("ghp_abc123"));
+        assert_eq!(
+            config.credentials_path,
+            Some(PathBuf::from("/etc/flowgen/credentials/git.json"))
+        );
         assert_eq!(config.depends_on, Some(vec!["trigger".to_string()]));
         assert!(config.retry.is_some());
-    }
-
-    #[test]
-    fn config_deser_ssh_auth() {
-        let json = r#"{
-            "name": "sync_ssh",
-            "repository_url": "git@github.com:org/repo.git",
-            "auth": {
-                "type": "ssh",
-                "ssh_key_path": "/etc/git/deploy-key",
-                "ssh_known_hosts_path": "/etc/git/known_hosts"
-            }
-        }"#;
-        let config: ProcessorConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.auth.auth_type, GitAuthType::Ssh);
-        assert_eq!(
-            config.auth.ssh_key_path,
-            Some(PathBuf::from("/etc/git/deploy-key"))
-        );
-        assert_eq!(
-            config.auth.ssh_known_hosts_path,
-            Some(PathBuf::from("/etc/git/known_hosts"))
-        );
     }
 
     #[test]
@@ -778,30 +794,13 @@ mod tests {
         assert_eq!(config, deserialized);
     }
 
-    // ── GitAuth / GitAuthType ───────────────────────────────────────
+    // ── Credentials ─────────────────────────────────────────────────
 
     #[test]
-    fn git_auth_default_is_none() {
-        let auth = GitAuth::default();
-        assert_eq!(auth.auth_type, GitAuthType::None);
-        assert!(auth.ssh_key_path.is_none());
-        assert!(auth.ssh_known_hosts_path.is_none());
-        assert!(auth.token.is_none());
-    }
-
-    #[test]
-    fn git_auth_type_deser_none() {
-        let json = r#"{ "type": "none" }"#;
-        let auth: GitAuth = serde_json::from_str(json).unwrap();
-        assert_eq!(auth.auth_type, GitAuthType::None);
-    }
-
-    #[test]
-    fn git_auth_type_deser_token() {
-        let json = r#"{ "type": "token", "token": "abc" }"#;
-        let auth: GitAuth = serde_json::from_str(json).unwrap();
-        assert_eq!(auth.auth_type, GitAuthType::Token);
-        assert_eq!(auth.token.as_deref(), Some("abc"));
+    fn credentials_deser() {
+        let json = r#"{ "token": "ghp_abc123" }"#;
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.token, "ghp_abc123");
     }
 
     // ── FileEvent ───────────────────────────────────────────────────
@@ -835,59 +834,27 @@ mod tests {
     // ── build_authenticated_url ─────────────────────────────────────
 
     #[test]
-    fn build_url_no_auth() {
-        let config = test_config();
-        let url = build_authenticated_url(&config).unwrap();
+    fn build_url_no_token() {
+        let url = build_authenticated_url("https://github.com/org/repo.git", None);
         assert_eq!(url, "https://github.com/org/repo.git");
     }
 
     #[test]
-    fn build_url_token_auth_https() {
-        let mut config = test_config();
-        config.auth.auth_type = GitAuthType::Token;
-        config.auth.token = Some("ghp_tok123".to_string());
-        let url = build_authenticated_url(&config).unwrap();
+    fn build_url_token_https() {
+        let url = build_authenticated_url("https://github.com/org/repo.git", Some("ghp_tok123"));
         assert_eq!(url, "https://ghp_tok123@github.com/org/repo.git");
     }
 
     #[test]
-    fn build_url_token_auth_http() {
-        let mut config = test_config();
-        config.repository_url = "http://git.internal/org/repo.git".to_string();
-        config.auth.auth_type = GitAuthType::Token;
-        config.auth.token = Some("tok".to_string());
-        let url = build_authenticated_url(&config).unwrap();
+    fn build_url_token_http() {
+        let url = build_authenticated_url("http://git.internal/org/repo.git", Some("tok"));
         assert_eq!(url, "http://tok@git.internal/org/repo.git");
     }
 
     #[test]
-    fn build_url_token_auth_no_token_returns_original() {
-        let mut config = test_config();
-        config.auth.auth_type = GitAuthType::Token;
-        // Token is None
-        let url = build_authenticated_url(&config).unwrap();
-        assert_eq!(url, "https://github.com/org/repo.git");
-    }
-
-    #[test]
-    fn build_url_token_auth_non_http_returns_original() {
-        let mut config = test_config();
-        config.repository_url = "git@github.com:org/repo.git".to_string();
-        config.auth.auth_type = GitAuthType::Token;
-        config.auth.token = Some("tok".to_string());
-        let url = build_authenticated_url(&config).unwrap();
-        // Non-http(s) URL is returned as-is even with token auth
+    fn build_url_token_non_http_passthrough() {
+        let url = build_authenticated_url("git@github.com:org/repo.git", Some("tok"));
         assert_eq!(url, "git@github.com:org/repo.git");
-    }
-
-    #[test]
-    fn build_url_ssh_auth_returns_original() {
-        let mut config = test_config();
-        config.auth.auth_type = GitAuthType::Ssh;
-        // SSH auth type doesn't embed tokens, just passes through
-        // (clone_or_pull will reject SSH before reaching this point)
-        let url = build_authenticated_url(&config).unwrap();
-        assert_eq!(url, "https://github.com/org/repo.git");
     }
 
     // ── Builder Validation ──────────────────────────────────────────
@@ -904,7 +871,6 @@ mod tests {
             .task_context(test_task_context())
             .build()
             .await;
-        // tx is optional — builder should succeed without it
         assert!(result.is_ok());
         let processor = result.unwrap();
         assert!(processor.tx.is_none());

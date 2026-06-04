@@ -512,6 +512,8 @@ pub struct Flow {
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional resource loader for loading external files, passed in from the main application.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Shared client registry for deduplicating connections to external services.
+    client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
@@ -625,7 +627,8 @@ impl Flow {
             .mcp_server(self.mcp_server.clone())
             .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
-            .cancellation_token(cancellation_token);
+            .cancellation_token(cancellation_token)
+            .client_registry(Arc::clone(&self.client_registry));
 
         if let Some(retry_config) = &self.retry {
             task_context_builder = task_context_builder.retry(retry_config.clone());
@@ -1734,6 +1737,8 @@ pub struct FlowBuilder {
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Resource loader for loading external files.
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Shared client registry for connection pooling.
+    client_registry: Option<Arc<flowgen_core::client_registry::ClientRegistry>>,
 }
 
 impl FlowBuilder {
@@ -1787,6 +1792,15 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets the shared client registry for connection pooling across tasks.
+    pub fn client_registry(
+        mut self,
+        client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
+    ) -> Self {
+        self.client_registry = Some(client_registry);
+        self
+    }
+
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -1804,6 +1818,10 @@ impl FlowBuilder {
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
+            client_registry: match self.client_registry {
+                Some(registry) => registry,
+                None => Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            },
             task_manager: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
         })

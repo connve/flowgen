@@ -88,6 +88,10 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Event handler for processing NATS messages.
@@ -240,16 +244,38 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let client = crate::client::ClientBuilder::new()
-            .credentials_path(init_config.credentials_path.clone())
-            .url(init_config.url.clone())
-            .build()
-            .map_err(|source| Error::Client { source })?
-            .connect()
+        let nats_key = flowgen_core::client_registry::ClientKey::new(&(
+            &init_config.credentials_path,
+            &init_config.url,
+        ));
+        let jetstream_ctx = self
+            .task_context
+            .client_registry
+            .get_or_init(nats_key, || {
+                let credentials_path = init_config.credentials_path.clone();
+                let url = init_config.url.clone();
+                async move {
+                    let client = crate::client::ClientBuilder::new()
+                        .credentials_path(credentials_path)
+                        .url(url)
+                        .build()
+                        .map_err(|source| Error::Client { source })?
+                        .connect()
+                        .await
+                        .map_err(|source| Error::Client { source })?;
+                    client.jetstream.ok_or_else(|| {
+                        Error::Other("JetStream context not available".to_string().into())
+                    })
+                }
+            })
             .await
-            .map_err(|source| Error::Client { source })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
-        if let Some(mut jetstream) = client.jetstream {
+        {
+            let mut jetstream = (*jetstream_ctx).clone();
             let stream_opts = self
                 .config
                 .stream
@@ -336,10 +362,6 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 task_type: self.task_type,
                 task_context: Arc::clone(&self.task_context),
             })
-        } else {
-            Err(Error::Other(
-                "JetStream context not available".to_string().into(),
-            ))
         }
     }
 
@@ -351,6 +373,11 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         tokio::spawn(
             async move {
                 let mut reconnect_backoff = retry_config.reconnect_strategy();
+
+                let nats_key = flowgen_core::client_registry::ClientKey::new(&(
+                    &self.config.credentials_path,
+                    &self.config.url,
+                ));
 
                 // Infinite retry loop: subscribers must maintain connectivity indefinitely.
                 loop {
@@ -403,6 +430,10 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                             error!(error = %e, "Subscriber lost connectivity, reinitializing");
                         }
                     }
+
+                    // Evict the cached NATS client so the next init() creates a fresh connection
+                    // instead of reusing the dead one from the registry.
+                    self.task_context.client_registry.remove(&nats_key).await;
 
                     let delay = match reconnect_backoff.next() {
                             Some(d) => d,

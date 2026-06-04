@@ -674,6 +674,11 @@ impl App {
             None => None,
         };
 
+        // Shared client registry for deduplicating connections to external services.
+        // Created once at the worker level and shared across all flows so tasks with
+        // identical credentials (e.g. same Salesforce org) reuse the same client.
+        let client_registry = Arc::new(flowgen_core::client_registry::ClientRegistry::new());
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -681,7 +686,8 @@ impl App {
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
-                .cache(Arc::clone(&cache));
+                .cache(Arc::clone(&cache))
+                .client_registry(Arc::clone(&client_registry));
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);

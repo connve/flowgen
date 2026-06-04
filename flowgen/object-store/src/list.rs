@@ -50,6 +50,10 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Object store list operation requires a path.")]
     MissingPath,
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Result of a list operation containing file paths and metadata.
@@ -300,23 +304,35 @@ impl Runner for ListProcessor {
             std::path::PathBuf::from(stripped)
         };
 
-        let mut client_builder = super::client::ClientBuilder::new().path(client_path);
-
-        if let Some(options) = &self.config.client_options {
-            client_builder = client_builder.options(options.clone());
-        }
-        if let Some(credentials_path) = &self.config.credentials_path {
-            client_builder = client_builder.credentials_path(credentials_path.clone());
-        }
-
-        let client = Arc::new(Mutex::new(
-            client_builder
-                .build()
-                .map_err(|source| Error::ObjectStoreClient { source })?
-                .connect()
-                .await
-                .map_err(|source| Error::ObjectStoreClient { source })?,
-        ));
+        let credentials_path = self.config.credentials_path.clone();
+        let client_options = self.config.client_options.clone();
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&(&client_path, &credentials_path)),
+                || async {
+                    let mut client_builder = super::client::ClientBuilder::new().path(client_path);
+                    if let Some(options) = client_options {
+                        client_builder = client_builder.options(options);
+                    }
+                    if let Some(credentials_path) = credentials_path {
+                        client_builder = client_builder.credentials_path(credentials_path);
+                    }
+                    let client = client_builder
+                        .build()
+                        .map_err(|source| Error::ObjectStoreClient { source })?
+                        .connect()
+                        .await
+                        .map_err(|source| Error::ObjectStoreClient { source })?;
+                    Ok(Mutex::new(client))
+                },
+            )
+            .await
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         let event_handler = EventHandler {
             client,

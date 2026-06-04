@@ -120,6 +120,8 @@ pub struct EventHandler {
     client: Arc<reqwest::Client>,
     /// Processor configuration.
     config: Arc<super::config::Processor>,
+    /// Credentials loaded once at init from `credentials_path`.
+    credentials: Option<HttpCredentials>,
     /// Event sender channel.
     tx: Option<Sender<Event>>,
     /// Current task identifier.
@@ -208,25 +210,15 @@ impl EventHandler {
                 };
             }
 
-            if let Some(credentials_path) = &config.credentials_path {
-                let credentials_string =
-                    fs::read_to_string(credentials_path).await.map_err(|e| {
-                        Error::ReadHttpCredentials {
-                            path: credentials_path.clone(),
-                            source: e,
-                        }
-                    })?;
-                let credentials: HttpCredentials = serde_json::from_str(&credentials_string)
-                    .map_err(|source| Error::SerdeJson { source })?;
-
-                if let Some(bearer_token) = credentials.bearer_auth {
+            if let Some(credentials) = &self.credentials {
+                if let Some(bearer_token) = &credentials.bearer_auth {
                     client = client.bearer_auth(bearer_token);
                 }
 
-                if let Some(basic_auth) = credentials.basic_auth {
-                    client = client.basic_auth(basic_auth.username, Some(basic_auth.password));
+                if let Some(basic_auth) = &credentials.basic_auth {
+                    client = client.basic_auth(&basic_auth.username, Some(&basic_auth.password));
                 }
-            };
+            }
 
             let response = client.send().await.map_err(|source| Error::Reqwest {
                 endpoint: endpoint.clone(),
@@ -308,43 +300,48 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor by building the HTTP client.
     async fn init(&self) -> Result<EventHandler, Error> {
-        // Enable transparent gzip, brotli, and deflate decoding. Reqwest
-        // adds an `Accept-Encoding: gzip, br, deflate` header to outgoing
-        // requests, decodes any compressed response body before it reaches
-        // `response.text()`, and strips the `Content-Encoding` header so
-        // downstream consumers see plaintext. Servers that do not compress
-        // simply ignore the request header.
         let mut builder = reqwest::ClientBuilder::new()
             .https_only(true)
             .gzip(true)
             .brotli(true)
             .deflate(true);
-        // Apply outbound timeouts so a slow or hung upstream cannot
-        // pin a worker task indefinitely. Both fields default in config
-        // (30s total / 10s connect); explicit None disables.
         if let Some(timeout) = self.config.timeout {
             builder = builder.timeout(timeout);
         }
         if let Some(connect_timeout) = self.config.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);
         }
-        let client = builder
-            .build()
-            .map_err(|source| Error::ClientInit { source })?;
-        let client = Arc::new(client);
+        let client = Arc::new(
+            builder
+                .build()
+                .map_err(|source| Error::ClientInit { source })?,
+        );
 
-        let event_handler = EventHandler {
+        let credentials = match &self.config.credentials_path {
+            Some(path) => {
+                let content = fs::read_to_string(path).await.map_err(|source| {
+                    Error::ReadHttpCredentials {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let creds: HttpCredentials =
+                    serde_json::from_str(&content).map_err(|source| Error::SerdeJson { source })?;
+                Some(creds)
+            }
+            None => None,
+        };
+
+        Ok(EventHandler {
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
             client,
+            credentials,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-        };
-
-        Ok(event_handler)
+        })
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
