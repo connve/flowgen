@@ -131,6 +131,10 @@ pub enum TaskType {
     ai_gateway(flowgen_ai_agent::ai_gateway::config::Processor),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
     git_sync(flowgen_git::sync::config::Processor),
+    /// Mongo Reader task.
+    mongo_reader(flowgen_mongo::config::Reader),
+    /// Mongo Reader task.
+    mongo_writer(flowgen_mongo::config::Writer),
 }
 
 impl TaskType {
@@ -167,6 +171,8 @@ impl TaskType {
             TaskType::mcp_tool(_) => "mcp_tool",
             TaskType::ai_gateway(_) => "ai_gateway",
             TaskType::git_sync(_) => "git_sync",
+            TaskType::mongo_reader(_) => "mongo_reader",
+            TaskType::mongo_writer(_) => "mongo_writer",
         }
     }
 
@@ -203,6 +209,8 @@ impl TaskType {
             TaskType::mcp_tool(c) => &c.name,
             TaskType::ai_gateway(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
+            TaskType::mongo_reader(c) => &c.name,
+            TaskType::mongo_writer(c) => &c.name,
         }
     }
 
@@ -239,6 +247,8 @@ impl TaskType {
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
             TaskType::ai_gateway(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
+            TaskType::mongo_reader(c) => c.depends_on.as_ref(),
+            TaskType::mongo_writer(c) => c.depends_on.as_ref(),
         }
     }
 }

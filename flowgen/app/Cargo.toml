@@ -19,6 +19,7 @@ flowgen_nats = { path = "../nats" }
 flowgen_object_store = { path = "../object-store" }
 flowgen_gcp = { path = "../gcp" }
 flowgen_mssql = { path = "../mssql" }
+flowgen_mongo = { path = "../mongo" }
 flowgen_ai_agent = { path = "../ai-agent" }
 flowgen_mcp = { path = "../mcp" }
 flowgen_git = { path = "../git" }
