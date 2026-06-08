@@ -91,14 +91,14 @@ worker:
   http_server:
     enabled: true
     port: 3000
-    # path: "/api/flowgen/workers"
+    # path: "/api/flowgen/workers/v1"
     # credentials_path: /etc/http/credentials.json
 
   # MCP server for exposing flows as LLM tools.
   # mcp_server:
   #   enabled: true
   #   port: 3001
-  #   path: "/mcp"
+  #   path: "/mcp/v1"
 
   # event_buffer_size: 10000
 ```

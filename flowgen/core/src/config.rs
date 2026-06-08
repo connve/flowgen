@@ -366,4 +366,16 @@ mod tests {
 
         std::env::remove_var("TEST_BASE_URL");
     }
+
+    #[test]
+    fn test_render_sosl_braces() {
+        let data = json!({"event": {"data": {"search_term": "Acme"}}});
+
+        let r = render_template(
+            "FIND { {{event.data.search_term}} } IN ALL FIELDS RETURNING Account",
+            &data,
+        )
+        .unwrap();
+        assert_eq!(r, "FIND { Acme } IN ALL FIELDS RETURNING Account");
+    }
 }

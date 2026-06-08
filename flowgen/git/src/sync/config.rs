@@ -19,18 +19,16 @@ fn default_branch() -> String {
 /// ```yaml
 /// - git_sync:
 ///     name: sync_flows
-///     repository_url: "git@github.com:org/configs.git"
+///     repository_url: "https://github.com/org/configs.git"
 ///     branch: main
 ///     path: "flows/"
-///     auth:
-///       type: ssh
-///       ssh_key_path: /etc/git/deploy-key
+///     credentials_path: /etc/flowgen/credentials/git.json
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
     /// Task name.
     pub name: String,
-    /// Git repository URL (SSH or HTTPS).
+    /// Git repository URL (HTTPS).
     pub repository_url: String,
     /// Branch to track (defaults to "main").
     #[serde(default = "default_branch")]
@@ -47,9 +45,9 @@ pub struct Processor {
     /// persistent volume.
     #[serde(default)]
     pub clone_path: Option<PathBuf>,
-    /// Authentication configuration.
+    /// Path to credentials JSON file for HTTPS token authentication.
     #[serde(default)]
-    pub auth: GitAuth,
+    pub credentials_path: Option<PathBuf>,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -60,28 +58,11 @@ pub struct Processor {
 
 impl ConfigExt for Processor {}
 
-/// Git authentication configuration.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct GitAuth {
-    /// Authentication type.
-    #[serde(default, rename = "type")]
-    pub auth_type: GitAuthType,
-    /// Path to SSH private key file.
-    pub ssh_key_path: Option<PathBuf>,
-    /// Path to SSH known_hosts file.
-    pub ssh_known_hosts_path: Option<PathBuf>,
-    /// Token for HTTPS authentication.
-    pub token: Option<String>,
-}
-
-/// Supported Git authentication types.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GitAuthType {
-    #[default]
-    None,
-    Ssh,
-    Token,
+/// Git credentials loaded from the credentials JSON file.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Credentials {
+    /// HTTPS token (e.g., GitHub PAT, GitLab deploy token).
+    pub token: String,
 }
 
 #[cfg(test)]
@@ -92,21 +73,21 @@ mod tests {
     fn test_defaults() {
         let json = r#"{
             "name": "sync",
-            "repository_url": "git@github.com:org/repo.git"
+            "repository_url": "https://github.com/org/repo.git"
         }"#;
         let config: Processor = serde_json::from_str(json).unwrap();
         assert_eq!(config.branch, "main");
         assert!(config.path.is_none());
         assert!(config.clone_path.is_none());
+        assert!(config.credentials_path.is_none());
     }
 
     #[test]
-    fn test_auth_ssh() {
+    fn test_credentials() {
         let json = r#"{
-            "type": "ssh",
-            "ssh_key_path": "/etc/git/key"
+            "token": "ghp_xxxxxxxxxxxx"
         }"#;
-        let auth: GitAuth = serde_json::from_str(json).unwrap();
-        assert_eq!(auth.auth_type, GitAuthType::Ssh);
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.token, "ghp_xxxxxxxxxxxx");
     }
 }

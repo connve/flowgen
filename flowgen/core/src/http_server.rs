@@ -284,8 +284,6 @@ impl<D: Dispatcher> HttpServer<D> {
         };
         let router = D::build_router(state);
 
-        info!(port, path = %self.path, "Starting HTTP server");
-
         axum::serve(listener, router)
             .await
             .map_err(|source| Error::ServeHttp { source })

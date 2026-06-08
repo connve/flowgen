@@ -27,7 +27,7 @@ use std::sync::Arc;
 pub const DEFAULT_WEBHOOK_PORT: u16 = 3000;
 
 /// Default path prefix for webhook routes.
-pub const DEFAULT_WEBHOOK_PATH: &str = "/api/flowgen/workers";
+pub const DEFAULT_WEBHOOK_PATH: &str = "/api/flowgen/workers/v1";
 
 /// Convenience type alias for the webhook server.
 pub type WebhookServer = HttpServer<WebhookDispatcher>;
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_default_constants() {
         assert_eq!(DEFAULT_WEBHOOK_PORT, 3000);
-        assert_eq!(DEFAULT_WEBHOOK_PATH, "/api/flowgen/workers");
+        assert_eq!(DEFAULT_WEBHOOK_PATH, "/api/flowgen/workers/v1");
     }
 
     #[test]

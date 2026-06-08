@@ -28,7 +28,7 @@ use tracing::{error, info, Instrument};
 pub const DEFAULT_MCP_PORT: u16 = 3001;
 
 /// Default MCP endpoint path.
-pub const DEFAULT_MCP_PATH: &str = "/mcp";
+pub const DEFAULT_MCP_PATH: &str = "/mcp/v1";
 
 /// MCP protocol version supported by this server.
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -242,7 +242,7 @@ async fn handle_mcp(
         "initialize" => handle_initialize(request),
         "tools/list" => handle_tools_list(&state, &headers, request),
         "tools/call" => handle_tools_call(&state, &headers, request).await,
-        "notifications/initialized" => StatusCode::OK.into_response(),
+        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         _ => {
             let err = Error::MethodNotFound {
                 method: request.method.clone(),
@@ -615,7 +615,7 @@ fn build_result_event(
         error,
     };
     match serde_json::to_string(&response) {
-        Ok(data) => Some(format!("event: message\ndata: {data}\n\n")),
+        Ok(data) => Some(format!("data: {data}\n\n")),
         Err(e) => {
             error!("Failed to serialize MCP result event: {e}");
             None

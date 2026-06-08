@@ -219,7 +219,7 @@ worker:
   mcp_server:
     enabled: true
     port: 3001
-    path: /mcp
+    path: /mcp/v1
     credentials_path: /etc/mcp/api-keys.json
 ```
 

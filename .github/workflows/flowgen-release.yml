@@ -154,14 +154,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate changelog
+      - name: Extract changelog for version
         id: changelog
         run: |
-          if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -1)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }})
+          VERSION="${{ needs.detect-version.outputs.version }}"
+          # Extract the section for the current version from CHANGELOG.md.
+          # Matches from "## VERSION" until the next "## " header or end of file.
+          CHANGELOG=$(awk "/^## ${VERSION}/{found=1; next} /^## /{if(found) exit} found{print}" CHANGELOG.md)
+
+          if [ -z "$CHANGELOG" ]; then
+            # Fall back to git log if no CHANGELOG.md entry exists for this version.
+            if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -1)
+            else
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }})
+            fi
           fi
+
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT

@@ -7,12 +7,12 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 | Task family | Format | What it authenticates |
 |---|---|---|
 | `http_webhook`, `http_request`, `mcp_tool` | `HttpCredentials` (bearer / basic) | The HTTP request header. |
-| `nats_jetstream_*`, `nats_kv_store` | NATS `.creds` file | NATS server connection. |
+| `nats_jetstream_*`, `nats_kv_store` | NATS credentials JSON | NATS server connection. |
 | `gcp_*` (BigQuery) | GCP service account JSON | Google Cloud APIs. |
 | `salesforce_*` | Salesforce credentials JSON | Salesforce REST / Pub/Sub / Bulk APIs. |
 | `mssql_query` | MSSQL credentials JSON | SQL Server connection. |
 | `object_store` | Cloud-specific credentials JSON | S3, GCS, or Azure. |
-| `git_sync` | Inline `auth` block (token or SSH key) | Git remote. |
+| `git_sync` | Git credentials JSON (HTTPS token) | Git remote. |
 
 The format details live on each task's documentation page. This page covers what is shared.
 
@@ -92,6 +92,24 @@ Individual `http_webhook` tasks override the worker default by setting their own
 `credentials_path` authenticates the task itself (e.g., the bearer token for incoming webhook requests). User-level authentication — JWT, OIDC, session tokens — happens via the worker's `auth` configuration. See [Authentication](/docs/flowgen/concepts/auth).
 
 The two compose: a webhook can require a worker-level shared secret (via `credentials_path`) **and** a user-level JWT (via `auth.required: true`). Both checks must pass.
+
+## Connection pooling
+
+Tasks that share the same `credentials_path` automatically share the same authenticated client. The runtime hashes credential fields to detect duplicates — no configuration needed.
+
+For example, if three flows each have a `salesforce_restapi_sobject` task pointing at the same credentials file, the first task to initialise performs the OAuth handshake. The other two wait and reuse the same session. This avoids hammering external services with redundant login calls and respects rate limits (e.g., Salesforce OAuth).
+
+The key fields used for deduplication depend on the task family:
+
+| Task family | Identity fields |
+|---|---|
+| `salesforce_*` | `credentials_path` |
+| `gcp_*` (BigQuery) | `credentials_path` |
+| `mssql_query` | `credentials_path`, `max_connections`, `connection_timeout`, `query_timeout` |
+| `nats_jetstream_*`, `nats_kv_store` | `credentials_path`, `url` |
+| `object_store_*` | `path`, `credentials_path` |
+
+Tasks with different identity fields get separate clients. Two MSSQL tasks with the same credentials but different `max_connections` do not share a pool.
 
 ## Operational notes
 

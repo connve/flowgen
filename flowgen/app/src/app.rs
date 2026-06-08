@@ -153,7 +153,7 @@ pub enum Error {
         source: std::io::Error,
     },
     /// Failed to initialize the system cache for flow/resource loading.
-    #[error("Failed to initialize system cache: {source}")]
+    #[error("Failed to connect to NATS: {source}")]
     SystemCacheInit {
         #[source]
         source: flowgen_nats::cache::Error,
@@ -468,10 +468,7 @@ impl App {
                         (configs, Some((cache, cache_opts.clone())))
                     }
                     Err(e) => {
-                        error!(
-                            error = %e,
-                            "Failed to initialize system cache. Continuing with filesystem flows only."
-                        );
+                        warn!(error = %e, "Flows will load from filesystem only");
                         (Vec::new(), None)
                     }
                 }
@@ -533,7 +530,6 @@ impl App {
             _ => None,
         };
 
-        // Create MCP server if enabled by admin, HTTP server is available, and flows contain mcp_tool tasks.
         let mcp_enabled = app_config
             .worker
             .as_ref()
@@ -552,9 +548,7 @@ impl App {
             warn!("Flows contain mcp_tool tasks but mcp_server is not enabled in config. MCP tools will not be registered.");
         }
 
-        let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled
-            && has_mcp_tools
-        {
+        let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled {
             let mcp_config = app_config
                 .worker
                 .as_ref()
@@ -625,7 +619,7 @@ impl App {
         }
 
         let ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>> =
-            if ai_gateway_enabled && has_ai_gateway_tasks {
+            if ai_gateway_enabled {
                 let ai_config = app_config
                     .worker
                     .as_ref()
@@ -653,49 +647,47 @@ impl App {
                 None
             };
 
-        let cache: Arc<dyn flowgen_core::cache::Cache> =
-            if let Some(cache_config) = &app_config.cache {
-                if cache_config.enabled {
-                    let db_name = cache_config
-                        .db_name
-                        .as_deref()
-                        .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
+        let cache: Arc<dyn flowgen_core::cache::Cache> = if let Some(cache_config) =
+            &app_config.cache
+        {
+            if cache_config.enabled {
+                let db_name = cache_config
+                    .db_name
+                    .as_deref()
+                    .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
 
-                    let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
-                        .credentials_path(cache_config.credentials_path.clone())
-                        .url(cache_config.url.clone());
-                    if let Some(history) = cache_config.history {
-                        cache_builder = cache_builder.history(history);
+                let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
+                    .credentials_path(cache_config.credentials_path.clone())
+                    .url(cache_config.url.clone());
+                if let Some(history) = cache_config.history {
+                    cache_builder = cache_builder.history(history);
+                }
+                if let Some(ttl) = cache_config.tombstone_ttl {
+                    cache_builder = cache_builder.tombstone_ttl(ttl);
+                }
+                match cache_builder.build().and_then(|builder| {
+                    futures::executor::block_on(async { builder.init(db_name).await })
+                }) {
+                    Ok(nats_cache) => {
+                        info!("Using NATS distributed cache");
+                        Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
                     }
-                    if let Some(ttl) = cache_config.tombstone_ttl {
-                        cache_builder = cache_builder.tombstone_ttl(ttl);
+                    Err(e) => {
+                        warn!("Failed to connect to NATS, falling back to in-memory cache: {e}");
+                        Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                            as Arc<dyn flowgen_core::cache::Cache>
                     }
-                    match cache_builder.build().and_then(|builder| {
-                        futures::executor::block_on(async { builder.init(db_name).await })
-                    }) {
-                        Ok(nats_cache) => {
-                            info!("Using NATS distributed cache");
-                            Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
-                        }
-                        Err(e) => {
-                            warn!(
-                            "Failed to initialize NATS cache: {}, falling back to in-memory cache",
-                            e
-                        );
-                            Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                                as Arc<dyn flowgen_core::cache::Cache>
-                        }
-                    }
-                } else {
-                    info!("Cache disabled in config, using in-memory cache");
-                    Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                        as Arc<dyn flowgen_core::cache::Cache>
                 }
             } else {
-                info!("No cache configured, using in-memory cache");
+                info!("Cache disabled in config, using in-memory cache");
                 Arc::new(flowgen_core::cache::memory::MemoryCache::new())
                     as Arc<dyn flowgen_core::cache::Cache>
-            };
+            }
+        } else {
+            info!("No cache configured, using in-memory cache");
+            Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+                as Arc<dyn flowgen_core::cache::Cache>
+        };
 
         // Build the resource loader. Filesystem and cache sources are
         // independent: configure either, both, or neither. When both are
@@ -726,7 +718,7 @@ impl App {
                                 Err(e) => {
                                     warn!(
                                         error = %e,
-                                        "Failed to init resource system cache. Continuing with filesystem only."
+                                        "Resources will load from filesystem only"
                                     );
                                     None
                                 }
@@ -754,6 +746,11 @@ impl App {
             None => None,
         };
 
+        // Shared client registry for deduplicating connections to external services.
+        // Created once at the worker level and shared across all flows so tasks with
+        // identical credentials (e.g. same Salesforce org) reuse the same client.
+        let client_registry = Arc::new(flowgen_core::client_registry::ClientRegistry::new());
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -761,7 +758,8 @@ impl App {
 
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
-                .cache(Arc::clone(&cache));
+                .cache(Arc::clone(&cache))
+                .client_registry(Arc::clone(&client_registry));
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);
@@ -839,7 +837,6 @@ impl App {
             }
         }
 
-        // Start the webhook HTTP server.
         let mut background_handles = Vec::new();
         if let Some(ref http_server) = http_server {
             let configured_port = app_config
@@ -848,6 +845,7 @@ impl App {
                 .and_then(|w| w.http_server.as_ref())
                 .map(|http| http.port)
                 .unwrap_or(flowgen_http::server::DEFAULT_WEBHOOK_PORT);
+            info!(port = configured_port, path = %http_server.path(), "Starting HTTP server");
             let http_server = Arc::clone(http_server);
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
@@ -862,7 +860,6 @@ impl App {
             background_handles.push(server_handle);
         }
 
-        // Start the MCP server on its own port.
         if let Some(ref mcp_server) = mcp_server {
             let configured_port = app_config
                 .worker
@@ -870,6 +867,7 @@ impl App {
                 .and_then(|w| w.mcp_server.as_ref())
                 .map(|c| c.port)
                 .unwrap_or(flowgen_mcp::server::DEFAULT_MCP_PORT);
+            info!(port = configured_port, path = %mcp_server.path(), "Starting MCP server");
             let server = Arc::clone(mcp_server);
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
@@ -883,7 +881,6 @@ impl App {
             background_handles.push(server_handle);
         }
 
-        // Start the AI gateway server on its own port.
         if let Some(ref ai_gateway_server) = ai_gateway_server {
             let configured_port = app_config
                 .worker
@@ -891,6 +888,7 @@ impl App {
                 .and_then(|w| w.ai_gateway.as_ref())
                 .map(|c| c.port)
                 .unwrap_or(flowgen_ai_agent::ai_gateway::server::DEFAULT_AI_GATEWAY_PORT);
+            info!(port = configured_port, path = %ai_gateway_server.path(), "Starting AI gateway server");
             let server = Arc::clone(ai_gateway_server);
             let span = tracing::Span::current();
             let server_handle = tokio::spawn(
@@ -961,6 +959,7 @@ impl App {
                 ai_gateway_server: ai_gateway_server.clone(),
                 filesystem_flow_names: Arc::new(filesystem_flow_names.clone()),
                 flow_registry: Arc::clone(&flow_registry),
+                client_registry: Arc::clone(&client_registry),
             };
             let reconciler_shutdown = watcher_shutdown.clone();
             let reconciler_handle = tokio::spawn(async move {

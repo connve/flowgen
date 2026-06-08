@@ -11,6 +11,8 @@ pub mod buffer;
 pub mod cache;
 /// HTTP client utilities for external service communication.
 pub mod client;
+/// Shared connection pooling for external service clients.
+pub mod client_registry;
 /// Configuration structures and serialization support.
 pub mod config;
 /// Shared credential types for authenticating with external services.

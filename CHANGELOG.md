@@ -1,5 +1,116 @@
 # Changelog
 
+## 0.119.0
+
+### Features
+
+- **Config hot-reload.** Flowgen now watches the config directory for
+  changes and automatically reconciles flows without restarting. Added
+  flows start, removed flows stop, and modified flows are restarted.
+  File system events are debounced to avoid churn during multi-file
+  saves. HTTP server registrations (webhooks, MCP tools, AI gateway
+  proxies) are deregistered per-flow before restart so stale entries
+  never linger.
+
+- **Generic HTTP server infrastructure.** Webhooks, MCP, and AI gateway
+  now share a single `HttpServer<D>` type parameterised by a `Dispatcher`
+  trait. Each role owns its URL layout and request handling; the server
+  owns the listener, dispatch table, and hot-reload lifecycle. This
+  eliminates duplicated server boilerplate across roles.
+
+- **AI gateway (LLM proxy).** New `llm_proxy` task type exposes flows as
+  OpenAI-compatible chat completion endpoints. Supports both OpenAI and
+  Anthropic upstream protocols with automatic request/response
+  translation. Multiple gateways can run on a single port, routed by the
+  `model` field prefix.
+
+- **Versioned API paths.** Default MCP path changed from `/mcp` to
+  `/mcp/v1` and default HTTP webhook path changed from
+  `/api/flowgen/workers` to `/api/flowgen/workers/v1`, following the
+  Google MCP convention. Paths remain configurable.
+
+- **Force shutdown on second signal.** A second SIGTERM or SIGINT now
+  forces an immediate exit instead of hanging. First signal initiates
+  graceful shutdown, second signal calls `process::exit(1)`.
+
+- **Git sync refactor.** Removed SSH auth support (`GitAuth`,
+  `GitAuthType` enums) in favour of a simpler `credentials_path` field
+  pointing to a JSON file with an HTTPS token. SSH URLs are rejected at
+  startup with a clear error. Credentials are loaded once at init and
+  the token is embedded in the HTTPS URL for clone/pull operations.
+
+### Fixes
+
+- **MCP Streamable HTTP spec compliance.** `notifications/initialized`
+  now returns 202 Accepted instead of 200 OK. `ToolResult` serializes
+  `isError` in camelCase per the MCP `CallToolResult` spec. SSE result
+  events use the default format (`data:` only) instead of
+  `event: message`, matching what standard MCP clients expect.
+
+- **MCP and AI gateway servers start regardless of loaded tasks.** Servers
+  now start when `enabled: true` in config, even if no matching tasks are
+  loaded at startup. This supports hot-reload of flows from cache where
+  tasks arrive after initial boot.
+
+- **Improved config-not-found error message.** The error now includes the
+  working directory and uses sentence case for clarity.
+
+- **Unified NATS cache error messages.** All three NATS connection failure
+  paths (system cache, flow cache, resource cache) now use a consistent
+  message style and severity.
+
+- **Suppressed noisy OpenTelemetry logs.** Default log filter now includes
+  `opentelemetry=warn,opentelemetry_sdk=warn` to hide `MeterProvider`
+  INFO messages.
+
+- **Distinct server startup log messages.** Each server now logs its own
+  identity ("Starting HTTP server", "Starting MCP server", "Starting AI
+  gateway server") with port and path instead of all saying "Starting
+  HTTP server".
+
+## 0.118.0
+
+### Features
+
+- **Shared connection pooling via ClientRegistry.** Tasks with identical
+  credentials now automatically share the same authenticated client.
+  The runtime hashes credential fields into a `ClientKey` and deduplicates
+  at the worker level — no configuration needed. The first task to
+  initialise performs the actual authentication; all others wait on a
+  per-key mutex and reuse the result. Supported across Salesforce (REST,
+  SOAP, Bulk, Tooling, PubSub), BigQuery (query, job, storage_read,
+  storage_write), MSSQL, NATS (subscriber, publisher, kv_store), and
+  Object Store (read, write, list, move).
+
+### Dependencies
+
+- **salesforce_core 0.15.0.** Fixes a bug where `reconnect()` replaced
+  the `token_state` Arc instead of updating in-place, causing stale
+  tokens for cloned clients. Shared Salesforce clients now see refreshed
+  tokens immediately after reconnect.
+
+## 0.117.0
+
+### Features
+
+- **Startup jitter for all background tasks.** Every background task now
+  sleeps a random duration (up to `initial_backoff`) before its first
+  initialization attempt. This staggers connections across flows and
+  replicas to avoid thundering-herd login storms on external services.
+  Blocking tasks (`http_webhook`, `mcp_tool`, `ai_gateway`) and
+  `generate` tasks skip the jitter. The jitter is automatic and requires
+  no configuration.
+
+- **Exponential reconnect backoff for subscribers.** NATS JetStream and
+  Salesforce PubSub subscribers now use exponential backoff (capped at
+  5 minutes) when reconnecting after connection loss, replacing the
+  previous flat `initial_backoff` sleep. Each successful reconnect resets
+  the backoff.
+
+- **AGENTS.md.** Committed agent instructions (code quality standards and
+  architecture reference) to the repository root so they are shared
+  across all AI coding tools.
+
 ## 0.116.0
 
 ### Features

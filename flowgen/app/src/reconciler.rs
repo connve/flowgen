@@ -72,6 +72,7 @@ pub struct ReconcilerContext {
     pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
     pub filesystem_flow_names: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
+    pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
 }
 
 /// Runs the reconciler loop until `shutdown` is cancelled.
@@ -452,6 +453,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         ai_gateway_server: None,
         filesystem_flow_names: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
+        client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
     }
 }
 
@@ -463,7 +465,8 @@ fn build_flow(
     let flow_name = flow_config.flow.name.clone();
     let mut builder = crate::flow::FlowBuilder::new()
         .config(Arc::new(flow_config))
-        .cache(Arc::clone(&ctx.cache));
+        .cache(Arc::clone(&ctx.cache))
+        .client_registry(Arc::clone(&ctx.client_registry));
 
     if let Some(server) = &ctx.http_server {
         builder = builder.http_server(Arc::clone(server));
@@ -549,9 +552,9 @@ mod tests {
             ai_gateway_server: None,
             filesystem_flow_names: Arc::new(HashSet::new()),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
+            client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         };
 
-        // Default prefix is "flowgen.flows".
         let name = derive_flow_name("flowgen.flows.default-test", &ctx);
         assert_eq!(name, Some("default-test".to_string()));
     }
@@ -668,6 +671,7 @@ flow:
             ai_gateway_server: None,
             filesystem_flow_names: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
+            client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         }
     }
 

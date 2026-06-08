@@ -11,7 +11,7 @@ worker:
   mcp_server:
     enabled: true
     port: 3001
-    path: /mcp
+    path: /mcp/v1
     credentials_path: /path/to/credentials.json
 ```
 

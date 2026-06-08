@@ -47,7 +47,7 @@ worker:
   http_server:
     enabled: true
     port: 3000
-    path: /api/flowgen/workers
+    path: /api/flowgen/workers/v1
     credentials_path: /etc/flowgen/credentials/http.json
     auth:
       type: jwt
@@ -56,7 +56,7 @@ worker:
   mcp_server:
     enabled: true
     port: 3001
-    path: /mcp
+    path: /mcp/v1
     credentials_path: /etc/flowgen/credentials/mcp.json
 
   ai_gateway:
@@ -162,7 +162,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 |---|---|---|---|
 | `enabled` | bool | required | Required for `mcp_tool` tasks to register. |
 | `port` | int | `3001` | Listening port. |
-| `path` | string | `/mcp` | MCP endpoint path. |
+| `path` | string | `/mcp/v1` | MCP endpoint path. |
 | `credentials_path` | string | | Worker-level shared API key credentials. Individual tools can override. |
 
 ### `worker.retry`

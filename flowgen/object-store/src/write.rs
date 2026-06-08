@@ -100,6 +100,10 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Handles processing of individual events by writing them to object storage.
@@ -372,23 +376,35 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
             .map_err(|source| Error::ConfigRender { source })?;
 
         let path = init_config.path.ok_or(Error::MissingPath)?;
-        let mut client_builder = super::client::ClientBuilder::new().path(path);
-
-        if let Some(options) = &self.config.client_options {
-            client_builder = client_builder.options(options.clone());
-        }
-        if let Some(credentials_path) = &self.config.credentials_path {
-            client_builder = client_builder.credentials_path(credentials_path.clone());
-        }
-
-        let client = Arc::new(Mutex::new(
-            client_builder
-                .build()
-                .map_err(|source| Error::ObjectStoreClient { source })?
-                .connect()
-                .await
-                .map_err(|source| Error::ObjectStoreClient { source })?,
-        ));
+        let credentials_path = self.config.credentials_path.clone();
+        let client_options = self.config.client_options.clone();
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&(&path, &credentials_path)),
+                || async {
+                    let mut client_builder = super::client::ClientBuilder::new().path(path);
+                    if let Some(options) = client_options {
+                        client_builder = client_builder.options(options);
+                    }
+                    if let Some(credentials_path) = credentials_path {
+                        client_builder = client_builder.credentials_path(credentials_path);
+                    }
+                    let client = client_builder
+                        .build()
+                        .map_err(|source| Error::ObjectStoreClient { source })?
+                        .connect()
+                        .await
+                        .map_err(|source| Error::ObjectStoreClient { source })?;
+                    Ok(Mutex::new(client))
+                },
+            )
+            .await
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         let event_handler = EventHandler {
             client,
@@ -407,15 +423,18 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    error!(error = %e, "Failed to initialize writer");
-                    Err(tokio_retry::RetryError::transient(e))
+        let event_handler = match tokio_retry::Retry::spawn(
+            retry_config.init_strategy(self.task_context.startup_delay),
+            || async {
+                match self.init().await {
+                    Ok(handler) => Ok(handler),
+                    Err(e) => {
+                        error!(error = %e, "Failed to initialize writer");
+                        Err(tokio_retry::RetryError::transient(e))
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         {
             Ok(handler) => Arc::new(handler),

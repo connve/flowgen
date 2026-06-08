@@ -409,7 +409,7 @@ fn default_mcp_port() -> u16 {
 
 /// Default MCP endpoint path.
 fn default_mcp_path() -> String {
-    "/mcp".to_string()
+    "/mcp/v1".to_string()
 }
 
 /// MCP server configuration options.
@@ -480,7 +480,7 @@ fn default_http_port() -> u16 {
 
 /// Default webhook HTTP server path prefix.
 fn default_http_path() -> String {
-    "/api/flowgen/workers".to_string()
+    "/api/flowgen/workers/v1".to_string()
 }
 
 /// HTTP server configuration options.
@@ -491,7 +491,7 @@ pub struct HttpServerOptions {
     /// HTTP server port number. Defaults to 3000.
     #[serde(default = "default_http_port")]
     pub port: u16,
-    /// Path prefix for all webhook routes. Defaults to "/api/flowgen/workers".
+    /// Path prefix for all webhook routes. Defaults to "/api/flowgen/workers/v1".
     #[serde(default = "default_http_path")]
     pub path: String,
     /// Optional path to global credentials file for webhook authentication.
@@ -927,7 +927,7 @@ mod tests {
         let http_server_options = HttpServerOptions {
             enabled: false,
             port: 3000,
-            path: "/api/flowgen/workers".to_string(),
+            path: "/api/flowgen/workers/v1".to_string(),
             credentials_path: None,
             auth: None,
         };

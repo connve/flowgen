@@ -75,6 +75,10 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Handles individual query execution events.
@@ -232,22 +236,40 @@ impl Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let connection_string = init_config
-            .build_connection_string()
+        let credentials_path = init_config.credentials_path.clone();
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&(
+                    &credentials_path,
+                    init_config.max_connections,
+                    init_config.connection_timeout,
+                    init_config.query_timeout,
+                )),
+                || async {
+                    let connection_string = init_config
+                        .build_connection_string()
+                        .await
+                        .map_err(|source| Error::CredentialsLoad { source })?;
+                    Client::new(
+                        &connection_string,
+                        init_config.max_connections,
+                        init_config.connection_timeout,
+                        init_config.query_timeout,
+                    )
+                    .await
+                    .map_err(|source| Error::Client { source })
+                },
+            )
             .await
-            .map_err(|source| Error::CredentialsLoad { source })?;
-
-        let client = Client::new(
-            &connection_string,
-            init_config.max_connections,
-            init_config.connection_timeout,
-            init_config.query_timeout,
-        )
-        .await
-        .map_err(|source| Error::Client { source })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         let event_handler = EventHandler {
-            client: Arc::new(client),
+            client,
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
@@ -263,15 +285,18 @@ impl Runner for Processor {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    error!(error = %e, "Failed to initialize MSSQL query processor");
-                    Err(tokio_retry::RetryError::transient(e))
+        let event_handler = match tokio_retry::Retry::spawn(
+            retry_config.init_strategy(self.task_context.startup_delay),
+            || async {
+                match self.init().await {
+                    Ok(handler) => Ok(handler),
+                    Err(e) => {
+                        error!(error = %e, "Failed to initialize MSSQL query processor");
+                        Err(tokio_retry::RetryError::transient(e))
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         {
             Ok(handler) => Arc::new(handler),

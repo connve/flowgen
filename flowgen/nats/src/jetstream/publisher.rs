@@ -85,6 +85,10 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 pub struct EventHandler {
@@ -195,16 +199,36 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let client = crate::client::ClientBuilder::new()
-            .credentials_path(init_config.credentials_path.clone())
-            .url(init_config.url.clone())
-            .build()
-            .map_err(|source| Error::ClientAuth { source })?
-            .connect()
+        let nats_key = flowgen_core::client_registry::ClientKey::new(&(
+            &init_config.credentials_path,
+            &init_config.url,
+        ));
+        let jetstream_ctx = self
+            .task_context
+            .client_registry
+            .get_or_init(nats_key, || {
+                let credentials_path = init_config.credentials_path.clone();
+                let url = init_config.url.clone();
+                async move {
+                    let client = crate::client::ClientBuilder::new()
+                        .credentials_path(credentials_path)
+                        .url(url)
+                        .build()
+                        .map_err(|source| Error::ClientAuth { source })?
+                        .connect()
+                        .await
+                        .map_err(|source| Error::ClientAuth { source })?;
+                    client.jetstream.ok_or(Error::MissingClient)
+                }
+            })
             .await
-            .map_err(|source| Error::ClientAuth { source })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
-        if let Some(mut jetstream) = client.jetstream {
+        {
+            let mut jetstream = (*jetstream_ctx).clone();
             let stream_opts = self.config.stream.as_ref().ok_or_else(|| Error::NoStream)?;
 
             // Set timeout on JetStream context if configured.
@@ -229,8 +253,6 @@ impl flowgen_core::task::runner::Runner for Publisher {
             };
 
             Ok(event_handler)
-        } else {
-            Err(Error::MissingClient)
         }
     }
 
@@ -239,25 +261,28 @@ impl flowgen_core::task::runner::Runner for Publisher {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
-        let event_handler = match tokio_retry::Retry::spawn(retry_config.strategy(), || async {
-            match self.init().await {
-                Ok(handler) => Ok(handler),
-                Err(e) => {
-                    let is_retriable = !matches!(
-                        &e,
-                        Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
-                    );
+        let event_handler = match tokio_retry::Retry::spawn(
+            retry_config.init_strategy(self.task_context.startup_delay),
+            || async {
+                match self.init().await {
+                    Ok(handler) => Ok(handler),
+                    Err(e) => {
+                        let is_retriable = !matches!(
+                            &e,
+                            Error::ConfigRender { .. } | Error::NoStream | Error::MissingClient
+                        );
 
-                    if is_retriable {
-                        error!(error = %e, "Failed to initialize publisher");
-                        Err(tokio_retry::RetryError::transient(e))
-                    } else {
-                        error!(error = %e, "Non-retriable error");
-                        Err(tokio_retry::RetryError::permanent(e))
+                        if is_retriable {
+                            error!(error = %e, "Failed to initialize publisher");
+                            Err(tokio_retry::RetryError::transient(e))
+                        } else {
+                            error!(error = %e, "Non-retriable error");
+                            Err(tokio_retry::RetryError::permanent(e))
+                        }
                     }
                 }
-            }
-        })
+            },
+        )
         .await
         {
             Ok(handler) => Arc::new(handler),

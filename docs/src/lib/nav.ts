@@ -46,6 +46,7 @@ export const navigation: NavSection[] = [
 		title: 'NATS JetStream',
 		icon: '/icons/nats.svg',
 		items: [
+			{ title: 'Overview', href: '/nats' },
 			{ title: 'Subscriber', href: '/nats/subscriber' },
 			{ title: 'Publisher', href: '/nats/publisher' },
 			{ title: 'KV Store', href: '/nats/kv-store' }
@@ -55,6 +56,7 @@ export const navigation: NavSection[] = [
 		title: 'Salesforce',
 		icon: '/icons/salesforce.svg',
 		items: [
+			{ title: 'Overview', href: '/salesforce' },
 			{ title: 'PubSub API', href: '/salesforce/pubsub' },
 			{ title: 'REST API', href: '/salesforce/rest' },
 			{ title: 'Bulk API', href: '/salesforce/bulk' },
@@ -78,6 +80,7 @@ export const navigation: NavSection[] = [
 		title: 'Google Cloud',
 		icon: '/icons/gcp.svg',
 		items: [
+			{ title: 'Overview', href: '/gcp' },
 			{ title: 'BigQuery Query', href: '/gcp/bigquery-query' },
 			{ title: 'BigQuery Storage', href: '/gcp/bigquery-storage' },
 			{ title: 'BigQuery Jobs', href: '/gcp/bigquery-jobs' }
@@ -87,6 +90,7 @@ export const navigation: NavSection[] = [
 		title: 'HTTP',
 		icon: '/icons/http.svg',
 		items: [
+			{ title: 'Overview', href: '/http' },
 			{ title: 'Webhook', href: '/http/webhook' },
 			{ title: 'Request', href: '/http/request' }
 		]
@@ -94,17 +98,24 @@ export const navigation: NavSection[] = [
 	{
 		title: 'Object Store',
 		icon: '/icons/object-store.svg',
-		items: [{ title: 'Object Store', href: '/object-store/object-store' }]
+		items: [
+			{ title: 'Overview', href: '/object-store' },
+			{ title: 'Object Store', href: '/object-store/object-store' }
+		]
 	},
 	{
 		title: 'MSSQL',
 		icon: '/icons/mssql.svg',
-		items: [{ title: 'Query', href: '/mssql/query' }]
+		items: [
+			{ title: 'Overview', href: '/mssql' },
+			{ title: 'Query', href: '/mssql/query' }
+		]
 	},
 	{
 		title: 'AI',
 		icon: '/icons/ai.svg',
 		items: [
+			{ title: 'Overview', href: '/ai' },
 			{ title: 'AI Completion', href: '/ai/completion' },
 			{ title: 'AI Gateway', href: '/ai/gateway' },
 			{ title: 'MCP Tools', href: '/ai/mcp' }
@@ -113,12 +124,16 @@ export const navigation: NavSection[] = [
 	{
 		title: 'Git',
 		icon: '/icons/git.svg',
-		items: [{ title: 'Git Sync', href: '/git/sync' }]
+		items: [
+			{ title: 'Overview', href: '/git' },
+			{ title: 'Git Sync', href: '/git/sync' }
+		]
 	},
 	{
 		title: 'Core Tasks',
 		icon: '/icons/core.svg',
 		items: [
+			{ title: 'Overview', href: '/core' },
 			{ title: 'Script (Rhai)', href: '/core/script' },
 			{ title: 'Convert', href: '/core/convert' },
 			{ title: 'Iterate', href: '/core/iterate' },
