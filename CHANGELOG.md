@@ -39,7 +39,22 @@
   startup with a clear error. Credentials are loaded once at init and
   the token is embedded in the HTTPS URL for clone/pull operations.
 
+### Improvements
+
+- **Template rendering supports full object substitution.** A simple
+  path template like `"{{event.data}}"` in a payload field now renders
+  into the complete JSON object, preserving structure and types. This
+  allows templates to replace `from_event: true` on HTTP and Salesforce
+  payload configs. `from_event` still works but is now considered
+  deprecated in favour of the template approach.
+
 ### Fixes
+
+- **`parse_json` in Rhai scripts now supports arrays.** The built-in
+  Rhai `parse_json` only handles JSON objects at the root. The engine
+  now registers a custom override that uses serde, supporting both
+  arrays and objects. Fixes flows that load JSON array resources and
+  pass them to `iterate`.
 
 - **MCP Streamable HTTP spec compliance.** `notifications/initialized`
   now returns 202 Accepted instead of 200 OK. `ToolResult` serializes

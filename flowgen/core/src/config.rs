@@ -368,14 +368,136 @@ mod tests {
     }
 
     #[test]
-    fn test_render_sosl_braces() {
+    fn test_render_template_with_curly_braces() {
         let data = json!({"event": {"data": {"search_term": "Acme"}}});
 
-        let r = render_template(
-            "FIND { {{event.data.search_term}} } IN ALL FIELDS RETURNING Account",
-            &data,
-        )
-        .unwrap();
-        assert_eq!(r, "FIND { Acme } IN ALL FIELDS RETURNING Account");
+        let r =
+            render_template("FIND { {{event.data.search_term}} } IN ALL FIELDS", &data).unwrap();
+        assert_eq!(r, "FIND { Acme } IN ALL FIELDS");
+    }
+
+    // -- Template rendering as from_event replacement --------------------------
+    //
+    // These tests prove that a simple path template like "{{event.data}}" can
+    // substitute an entire JSON object into a config field, preserving structure.
+    // This allows templates to replace `from_event: true` on payload fields.
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct ObjectFieldConfig {
+        name: String,
+        payload: Option<serde_json::Map<String, serde_json::Value>>,
+    }
+
+    impl ConfigExt for ObjectFieldConfig {}
+
+    #[test]
+    fn test_render_object_template_into_map_field() {
+        let config = ObjectFieldConfig {
+            name: "test".to_string(),
+            payload: Some(
+                serde_json::from_value(json!({
+                    "placeholder": "{{event.data}}"
+                }))
+                .unwrap(),
+            ),
+        };
+
+        let data = json!({
+            "event": {
+                "data": {
+                    "Name": "Acme Corp",
+                    "Industry": "Technology",
+                    "Revenue": 1000000
+                }
+            }
+        });
+
+        let rendered = config.render(&data).unwrap();
+        assert_eq!(rendered.name, "test");
+
+        let payload = rendered.payload.unwrap();
+        let placeholder = payload.get("placeholder").unwrap();
+        assert_eq!(placeholder.get("Name").unwrap(), "Acme Corp");
+        assert_eq!(placeholder.get("Industry").unwrap(), "Technology");
+        assert_eq!(placeholder.get("Revenue").unwrap(), 1000000);
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(untagged)]
+    enum UntaggedPayload {
+        Template(String),
+        Fields(serde_json::Map<String, serde_json::Value>),
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct UntaggedPayloadConfig {
+        name: String,
+        payload: UntaggedPayload,
+    }
+
+    impl ConfigExt for UntaggedPayloadConfig {}
+
+    #[test]
+    fn test_render_object_template_into_untagged_enum() {
+        let config = UntaggedPayloadConfig {
+            name: "test".to_string(),
+            payload: UntaggedPayload::Template("{{event.data}}".to_string()),
+        };
+
+        let data = json!({
+            "event": {
+                "data": {
+                    "FirstName": "Jane",
+                    "LastName": "Doe",
+                    "Active": true
+                }
+            }
+        });
+
+        let rendered = config.render(&data).unwrap();
+        assert_eq!(rendered.name, "test");
+
+        match rendered.payload {
+            UntaggedPayload::Fields(map) => {
+                assert_eq!(map.get("FirstName").unwrap(), "Jane");
+                assert_eq!(map.get("LastName").unwrap(), "Doe");
+                assert_eq!(map.get("Active").unwrap(), true);
+            }
+            UntaggedPayload::Template(_) => {
+                panic!("Expected Fields variant after rendering, got Template");
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_array_template_preserves_array() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct ArrayConfig {
+            name: String,
+            records: serde_json::Value,
+        }
+        impl ConfigExt for ArrayConfig {}
+
+        let config = ArrayConfig {
+            name: "test".to_string(),
+            records: json!("{{event.data.batch}}"),
+        };
+
+        let data = json!({
+            "event": {
+                "data": {
+                    "batch": [
+                        {"id": 1, "name": "first"},
+                        {"id": 2, "name": "second"}
+                    ]
+                }
+            }
+        });
+
+        let rendered = config.render(&data).unwrap();
+        let records = rendered.records.as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].get("id").unwrap(), 1);
+        assert_eq!(records[1].get("name").unwrap(), "second");
     }
 }
