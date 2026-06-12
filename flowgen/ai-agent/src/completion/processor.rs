@@ -272,6 +272,7 @@ impl EventHandler {
                         // Intermediate chunks do not carry the completion signal.
                         let e = EventBuilder::new()
                             .data(EventData::Json(data))
+                            .subject(self.config.name.clone())
                             .task_id(self.task_id)
                             .task_type(self.task_type)
                             .build()
@@ -286,7 +287,8 @@ impl EventHandler {
                         accumulated_text = text;
                     }
                     AgentChunk::Error(err) => {
-                        error!(error = %err, "Streaming completion error.");
+                        // Logging only would hang the source until ack_timeout.
+                        return Err(Error::CompletionFailed(err.to_string()));
                     }
                 }
             }
@@ -302,6 +304,7 @@ impl EventHandler {
 
             let mut e = EventBuilder::new()
                 .data(EventData::Json(data))
+                .subject(self.config.name.clone())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
                 .build()
@@ -366,6 +369,7 @@ impl EventHandler {
 
         let mut event = EventBuilder::new()
             .data(EventData::Json(response_value))
+            .subject(self.config.name.clone())
             .task_id(self.task_id)
             .task_type(self.task_type)
             .build()
