@@ -742,6 +742,78 @@ mod tests {
         assert_eq!(counter_val, 2);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_count_one_with_long_interval_fires_once() {
+        let config = Arc::new(crate::task::generate::config::Subscriber {
+            name: "test".to_string(),
+            payload: None,
+            interval: Some(Duration::from_secs(60)),
+            cron: None,
+            count: Some(1),
+            ack_timeout: None,
+            retry: None,
+            ..Default::default()
+        });
+
+        let cache = Arc::new(crate::cache::memory::MemoryCache::new());
+
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Count One Interval Test".to_string()),
+        );
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let task_context = Arc::new(
+            crate::task::context::TaskContextBuilder::new()
+                .flow_name("test-flow".to_string())
+                .flow_labels(Some(labels))
+                .task_manager(task_manager)
+                .cache(cache.clone() as Arc<dyn crate::cache::Cache>)
+                .build()
+                .unwrap(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let subscriber = Subscriber {
+            config,
+            tx: Some(tx),
+            task_id: 1,
+            task_type: "test",
+            task_context,
+        };
+
+        let handle = tokio::spawn(async move {
+            let _ = subscriber.run().await;
+        });
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let event = rx.recv().await.expect("expected single event");
+        if let Some(shared_tx) = &event.completion_tx {
+            shared_tx.signal_completion(None);
+        }
+
+        let _ = handle.await;
+
+        tokio::time::advance(Duration::from_secs(600)).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "generate with count=1 must not emit a second event"
+        );
+
+        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(counter_val, 1);
+    }
+
     #[tokio::test]
     async fn test_count_skip_when_already_complete() {
         let config = Arc::new(crate::task::generate::config::Subscriber {

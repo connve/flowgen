@@ -50,6 +50,23 @@
 
 ### Fixes
 
+- **Source ack hung in fan-out / fan-in DAGs.** When two branches re-merged
+  at a buffer (or any other fan-in point), the source's completion channel
+  was sized by summing children's leaf counts, which double-counted
+  re-merged paths. The source then waited for more signals than there were
+  real leaves, never received a successful ack, and never incremented its
+  counter — a `generate` with `count: 1` fired every interval forever.
+  Leaf counting now deduplicates by leaf index.
+
+- **Buffer dropped acks when coalescing events from concurrent sources.**
+  When the buffer accumulated events from distinct sources (e.g. concurrent
+  webhook requests, parallel NATS deliveries), it kept only the last
+  event's completion handle and silently dropped the rest, so N-1 sources
+  per flush hung or saw their ack timeout fire. The buffer now collects
+  every distinct upstream and fans the downstream ack back out to all of
+  them. Events that share an upstream (single source fanned out and
+  re-merged) still pass through directly with no proxy overhead.
+
 - **`parse_json` in Rhai scripts now supports arrays.** The built-in
   Rhai `parse_json` only handles JSON objects at the root. The engine
   now registers a custom override that uses serde, supporting both
@@ -82,6 +99,15 @@
   identity ("Starting HTTP server", "Starting MCP server", "Starting AI
   gateway server") with port and path instead of all saying "Starting
   HTTP server".
+
+### Docs
+
+- **Inline vs external scripts.** Added guidance on when to keep Rhai
+  inline in YAML versus moving it to a `resources/scripts/*.rhai` file,
+  with the recommended project layout, a link to the official Rhai
+  Visual Studio Code extension, and a new `script_fan_in_join.yaml`
+  example showing a fan-in DAG joined by an external script. The example
+  runs against the dummy CSV data shipped in the repository.
 
 ## 0.118.0
 

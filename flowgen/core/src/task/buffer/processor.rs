@@ -5,7 +5,9 @@
 //! such as file writes, API calls, or columnar format conversions.
 
 use crate::config::ConfigExt;
-use crate::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
+use crate::event::{
+    new_completion_channel, Event, EventBuilder, EventData, EventExt, SharedCompletionTx,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -103,6 +105,52 @@ pub struct Processor {
     task_type: &'static str,
 }
 
+/// Adds an upstream completion tx to the absorbed set if not already present.
+/// Dedupes by Arc pointer so cloned-from-same-source events do not produce
+/// duplicate signals on flush. Same source = same Arc; concurrent sources =
+/// distinct Arcs.
+fn absorb_completion(absorbed: &mut Vec<SharedCompletionTx>, tx: SharedCompletionTx) {
+    let ptr = Arc::as_ptr(&tx);
+    if !absorbed.iter().any(|existing| Arc::as_ptr(existing) == ptr) {
+        absorbed.push(tx);
+    }
+}
+
+/// Builds the completion handle to attach to a flushed batch event.
+///
+/// - Zero absorbed upstreams: no completion to forward.
+/// - One absorbed upstream: pass it through directly — no proxy task needed.
+/// - Two or more distinct upstreams: create a proxy `CompletionState`, attach
+///   it to the flushed event, and spawn a task that fans the eventual ack
+///   signal back out to every absorbed upstream. This keeps the per-source
+///   ack contract intact when the buffer coalesces events from concurrent
+///   sources (e.g. parallel webhook requests).
+fn spawn_completion_proxy(
+    mut upstreams: Vec<SharedCompletionTx>,
+    downstream_leaf_count: usize,
+) -> Option<SharedCompletionTx> {
+    match upstreams.len() {
+        0 => None,
+        1 => upstreams.pop(),
+        _ => {
+            let (proxy_tx, proxy_rx) = new_completion_channel(downstream_leaf_count.max(1));
+            tokio::spawn(async move {
+                let payload = match proxy_rx.await {
+                    Ok(Ok(p)) => p,
+                    // Channel closed or completion errored — upstreams will
+                    // fall back to their own ack timeouts. Nothing useful we
+                    // can forward.
+                    _ => return,
+                };
+                for upstream in &upstreams {
+                    upstream.signal_completion(payload.clone());
+                }
+            });
+            Some(proxy_tx)
+        }
+    }
+}
+
 impl Processor {
     /// Flushes the buffer by emitting a single event containing all buffered events.
     ///
@@ -114,14 +162,19 @@ impl Processor {
     /// * `reason` - The reason this flush was triggered.
     /// * `partition_key` - Optional key that was used to group these events.
     /// * `meta` - Optional meta from the first event in the buffer to preserve.
-    /// * `completion_tx` - Optional completion channel from the last event in buffer.
+    /// * `upstream_completions` - Deduped completion channels from every distinct
+    ///   source event absorbed into this batch. The buffer attaches a single
+    ///   completion to the flushed event downstream; once that completion fires,
+    ///   it is fanned back out to every absorbed upstream so every source gets
+    ///   acked. When the buffer is itself a leaf, all upstreams are signalled
+    ///   directly.
     fn flush_buffer(
         &self,
         buffer: Vec<Value>,
         reason: FlushReason,
         partition_key: Option<String>,
         meta: Option<Map<String, Value>>,
-        completion_tx: Option<SharedCompletionTx>,
+        upstream_completions: Vec<SharedCompletionTx>,
     ) {
         if buffer.is_empty() {
             return;
@@ -131,6 +184,7 @@ impl Processor {
         let config_name = self.config.name.clone();
         let task_id = self.task_id;
         let task_type = self.task_type;
+        let leaf_count = self.task_context.leaf_count;
 
         // Spawn flush as background task to avoid blocking event receives.
         tokio::spawn(
@@ -170,16 +224,16 @@ impl Processor {
                     }
                 };
 
-                // Attach completion_tx from the last event in the buffer.
                 match tx {
                     Some(_) => {
-                        // Pass through to next task.
-                        event.completion_tx = completion_tx;
+                        event.completion_tx =
+                            spawn_completion_proxy(upstream_completions, leaf_count);
                     }
                     None => {
-                        // Leaf task: signal completion.
-                        if let Some(arc) = completion_tx.as_ref() {
-                            arc.signal_completion(event.data_as_json().ok());
+                        // Leaf task: signal every absorbed upstream directly.
+                        let payload = event.data_as_json().ok();
+                        for arc in &upstream_completions {
+                            arc.signal_completion(payload.clone());
                         }
                     }
                 }
@@ -216,7 +270,12 @@ impl Processor {
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
         let mut buffer_meta: Option<Map<String, Value>> = None;
-        let mut buffer_completion_tx: Option<SharedCompletionTx> = None;
+        // Distinct upstream completion handles absorbed by the current batch.
+        // Each source event carries its own `CompletionState`; concurrent
+        // sources (webhooks, NATS, MCP) produce distinct Arcs. The buffer must
+        // ack every one of them when the flush completes — keeping only the
+        // last would silently drop N-1 source acks per flush.
+        let mut buffer_completions: Vec<SharedCompletionTx> = Vec::new();
         let mut last_flush = Instant::now();
 
         loop {
@@ -252,22 +311,23 @@ impl Processor {
 
                             buffer.push(json_data);
 
-                            // Always capture completion_tx from latest event (last one wins).
-                            buffer_completion_tx = event.completion_tx.clone();
+                            if let Some(tx) = event.completion_tx {
+                                absorb_completion(&mut buffer_completions, tx);
+                            }
 
                             // Flush if buffer reached size limit.
                             if buffer.len() >= self.config.size {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                                 let flush_meta = buffer_meta.take();
-                                let flush_completion = buffer_completion_tx.take();
-                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta, flush_completion);
+                                let flush_completions = std::mem::take(&mut buffer_completions);
+                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta, flush_completions);
                                 last_flush = Instant::now();
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta, buffer_completion_tx);
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta, buffer_completions);
                             }
                             return Ok(());
                         }
@@ -278,8 +338,8 @@ impl Processor {
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                     let flush_meta = buffer_meta.take();
-                    let flush_completion = buffer_completion_tx.take();
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta, flush_completion);
+                    let flush_completions = std::mem::take(&mut buffer_completions);
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta, flush_completions);
                     last_flush = Instant::now();
                 }
             }
@@ -291,7 +351,10 @@ impl Processor {
         // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
         let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
         let mut buffer_metas: HashMap<String, Map<String, Value>> = HashMap::with_capacity(16);
-        let mut buffer_completions: HashMap<String, SharedCompletionTx> =
+        // Per-key list of distinct upstream completions to ack on flush. See
+        // `process_events_single` for why we keep all of them rather than
+        // the last.
+        let mut buffer_completions: HashMap<String, Vec<SharedCompletionTx>> =
             HashMap::with_capacity(16);
         let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
@@ -337,7 +400,6 @@ impl Processor {
                                 }
                             };
 
-                            // Capture completion_tx from event (last one wins per key).
                             let completion_tx = event.completion_tx.take();
 
                             // Get or create buffer for this key with pre-allocated capacity.
@@ -353,9 +415,8 @@ impl Processor {
                                     if let Some(meta) = event.meta {
                                         buffer_metas.insert(key.clone(), meta);
                                     }
-                                    // Store completion_tx for this key.
                                     if let Some(tx) = completion_tx {
-                                        buffer_completions.insert(key.clone(), tx);
+                                        buffer_completions.insert(key.clone(), vec![tx]);
                                     }
                                     last_flush_times.insert(key, Instant::now());
                                 }
@@ -366,16 +427,18 @@ impl Processor {
                                     let buffer = occupied.get_mut();
                                     buffer.push(json_data);
 
-                                    // Update completion_tx for this key (last one wins).
                                     if let Some(tx) = completion_tx {
-                                        buffer_completions.insert(key.clone(), tx);
+                                        let absorbed = buffer_completions
+                                            .entry(key.clone())
+                                            .or_default();
+                                        absorb_completion(absorbed, tx);
                                     }
 
                                     // Flush if this key's buffer reached size limit.
                                     if buffer.len() >= buffer_size {
                                         let buffer_to_flush = occupied.remove();
                                         let buffer_meta = buffer_metas.remove(&key);
-                                        let buffer_completion = buffer_completions.remove(&key);
+                                        let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
                                         self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta, buffer_completion);
                                         last_flush_times.insert(key, Instant::now());
                                     }
@@ -387,7 +450,7 @@ impl Processor {
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
                                     let buffer_meta = buffer_metas.remove(&key);
-                                    let buffer_completion = buffer_completions.remove(&key);
+                                    let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
                                     self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_meta, buffer_completion);
                                 }
                             }
@@ -413,7 +476,7 @@ impl Processor {
                         if let Some(buffer) = buffers.remove(&key) {
                             if !buffer.is_empty() {
                                 let buffer_meta = buffer_metas.remove(&key);
-                                let buffer_completion = buffer_completions.remove(&key);
+                                let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
                                 self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta, buffer_completion);
                             }
                         }
@@ -615,5 +678,396 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_absorb_completion_dedup() {
+        let (state_a, _rx_a) = new_completion_channel(1);
+        let (state_b, _rx_b) = new_completion_channel(1);
+
+        let mut absorbed = Vec::new();
+        absorb_completion(&mut absorbed, state_a.clone());
+        absorb_completion(&mut absorbed, state_a.clone());
+        absorb_completion(&mut absorbed, state_b.clone());
+        absorb_completion(&mut absorbed, state_a.clone());
+
+        assert_eq!(
+            absorbed.len(),
+            2,
+            "distinct Arcs kept, duplicates collapsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_signals_every_distinct_upstream() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 2,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let (state_a, mut rx_a) = new_completion_channel(1);
+        let (state_b, mut rx_b) = new_completion_channel(1);
+
+        let evt_a = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "a"})))
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_a)
+            .build()
+            .unwrap();
+        let evt_b = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "b"})))
+            .subject("b".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_b)
+            .build()
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        upstream_tx.send(evt_a).await.unwrap();
+        upstream_tx.send(evt_b).await.unwrap();
+
+        let flushed = downstream_rx.recv().await.expect("flush event");
+        let proxy_tx = flushed.completion_tx.expect("proxy completion attached");
+
+        proxy_tx.signal_completion(None);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut rx_a)
+                .await
+                .is_ok(),
+            "upstream A did not receive completion"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut rx_b)
+                .await
+                .is_ok(),
+            "upstream B did not receive completion"
+        );
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_flush_passes_single_upstream_through_directly() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 2,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let (shared_state, _rx) = new_completion_channel(1);
+        let shared_ptr = Arc::as_ptr(&shared_state);
+
+        let evt_a = EventBuilder::new()
+            .data(EventData::Json(json!({"branch": "a"})))
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(shared_state.clone())
+            .build()
+            .unwrap();
+        let evt_b = EventBuilder::new()
+            .data(EventData::Json(json!({"branch": "b"})))
+            .subject("b".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(shared_state)
+            .build()
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        upstream_tx.send(evt_a).await.unwrap();
+        upstream_tx.send(evt_b).await.unwrap();
+
+        let flushed = downstream_rx.recv().await.expect("flush event");
+        let attached = flushed
+            .completion_tx
+            .expect("upstream completion passed through");
+
+        assert_eq!(
+            Arc::as_ptr(&attached),
+            shared_ptr,
+            "single distinct upstream should pass through, not proxied"
+        );
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_absorb_completion_clone_preserves_identity() {
+        let (state, _rx) = new_completion_channel(1);
+
+        let mut absorbed = Vec::new();
+        for _ in 0..5 {
+            absorb_completion(&mut absorbed, state.clone());
+        }
+
+        assert_eq!(absorbed.len(), 1, "fan-out clones share identity");
+        assert_eq!(Arc::as_ptr(&absorbed[0]), Arc::as_ptr(&state));
+    }
+
+    #[tokio::test]
+    async fn test_flush_signals_three_concurrent_sources() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 3,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let (state_a, mut rx_a) = new_completion_channel(1);
+        let (state_b, mut rx_b) = new_completion_channel(1);
+        let (state_c, mut rx_c) = new_completion_channel(1);
+
+        let mk_event = |name: &'static str, state: SharedCompletionTx| {
+            EventBuilder::new()
+                .data(EventData::Json(json!({ "src": name })))
+                .subject(name.into())
+                .task_id(0)
+                .task_type("test")
+                .completion_tx(state)
+                .build()
+                .unwrap()
+        };
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        upstream_tx.send(mk_event("a", state_a)).await.unwrap();
+        upstream_tx.send(mk_event("b", state_b)).await.unwrap();
+        upstream_tx.send(mk_event("c", state_c)).await.unwrap();
+
+        let flushed = downstream_rx.recv().await.expect("flush event");
+        let proxy_tx = flushed.completion_tx.expect("proxy completion attached");
+
+        proxy_tx.signal_completion(Some(json!({"ok": true})));
+
+        for (label, rx) in [("a", &mut rx_a), ("b", &mut rx_b), ("c", &mut rx_c)] {
+            let result = match tokio::time::timeout(Duration::from_secs(1), rx).await {
+                Ok(Ok(Ok(payload))) => payload,
+                other => panic!("upstream {label} did not receive payload: {other:?}"),
+            };
+            assert_eq!(
+                result,
+                Some(json!({"ok": true})),
+                "upstream {label} payload mismatch"
+            );
+        }
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_leaf_buffer_signals_every_concurrent_source() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "leaf".to_string(),
+            size: 2,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let (state_a, mut rx_a) = new_completion_channel(1);
+        let (state_b, mut rx_b) = new_completion_channel(1);
+
+        let evt_a = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "a"})))
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_a)
+            .build()
+            .unwrap();
+        let evt_b = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "b"})))
+            .subject("b".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_b)
+            .build()
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        upstream_tx.send(evt_a).await.unwrap();
+        upstream_tx.send(evt_b).await.unwrap();
+
+        for (label, rx) in [("a", &mut rx_a), ("b", &mut rx_b)] {
+            match tokio::time::timeout(Duration::from_secs(1), rx).await {
+                Ok(Ok(Ok(_))) => {}
+                other => panic!("leaf upstream {label} did not complete: {other:?}"),
+            }
+        }
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_proxy_one_downstream_signal_acks_every_upstream() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 2,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let (state_a, mut rx_a) = new_completion_channel(1);
+        let (state_b, mut rx_b) = new_completion_channel(1);
+
+        let evt_a = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "a"})))
+            .subject("a".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_a)
+            .build()
+            .unwrap();
+        let evt_b = EventBuilder::new()
+            .data(EventData::Json(json!({"src": "b"})))
+            .subject("b".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state_b)
+            .build()
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        upstream_tx.send(evt_a).await.unwrap();
+        upstream_tx.send(evt_b).await.unwrap();
+
+        let flushed = downstream_rx.recv().await.expect("flush event");
+        let proxy = flushed.completion_tx.expect("proxy attached");
+
+        proxy.signal_completion(Some(json!({"ack": true})));
+
+        for (label, rx) in [("a", &mut rx_a), ("b", &mut rx_b)] {
+            let payload = match tokio::time::timeout(Duration::from_secs(1), rx).await {
+                Ok(Ok(Ok(p))) => p,
+                other => panic!("upstream {label} did not receive ack: {other:?}"),
+            };
+            assert_eq!(payload, Some(json!({"ack": true})));
+        }
+
+        drop(upstream_tx);
+        let _ = handle.await;
     }
 }

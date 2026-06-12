@@ -464,22 +464,29 @@ impl TaskRegistryBuilder {
         // channel stays open until every parent has finished.
         drop(inbound_tx);
 
-        // Compute the number of leaf tasks reachable from each task's output.
-        // Tasks are kept in topological order (parents always precede children)
-        // so a single reverse pass propagates leaf counts up the directed
-        // acyclic graph in linear time.
-        let mut downstream_leaves: Vec<usize> = vec![0; task_count];
+        // Compute the number of distinct leaf tasks reachable from each task's
+        // output. Tasks are kept in topological order (parents always precede
+        // children) so a single reverse pass propagates leaf sets up the
+        // directed acyclic graph. Summing child counts would double-count when
+        // two branches re-merge (e.g. fan-out -> buffer fan-in), inflating the
+        // source's completion expectation beyond the real number of leaves.
+        let mut reachable_leaves: Vec<std::collections::HashSet<usize>> =
+            vec![std::collections::HashSet::new(); task_count];
         for idx in (0..task_count).rev() {
             match children_per_parent.get(&idx) {
                 None => {
-                    // No children means this task is a leaf.
-                    downstream_leaves[idx] = 1;
+                    reachable_leaves[idx].insert(idx);
                 }
                 Some(children) => {
-                    downstream_leaves[idx] = children.iter().map(|&c| downstream_leaves[c]).sum();
+                    let mut set = std::collections::HashSet::new();
+                    for &c in children {
+                        set.extend(reachable_leaves[c].iter().copied());
+                    }
+                    reachable_leaves[idx] = set;
                 }
             }
         }
+        let downstream_leaves: Vec<usize> = reachable_leaves.iter().map(|s| s.len()).collect();
 
         let mut task_descriptors = Vec::with_capacity(task_count);
         for (idx, task_type) in tasks_config.iter().enumerate() {
@@ -2173,5 +2180,250 @@ mod tests {
         assert_eq!(registry.tasks[0].id, 0);
         assert_eq!(registry.tasks[1].id, 1);
         assert_eq!(registry.tasks[2].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_fan_out_fan_in() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "fan_out_fan_in".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("trigger", None),
+                    script_with_deps("read_a", Some(vec!["trigger"])),
+                    script_with_deps("convert_a", Some(vec!["read_a"])),
+                    script_with_deps("read_b", Some(vec!["trigger"])),
+                    script_with_deps("convert_b", Some(vec!["read_b"])),
+                    script_with_deps("buffer", Some(vec!["convert_a", "convert_b"])),
+                    script_with_deps("join", Some(vec!["buffer"])),
+                    script_with_deps("write", Some(vec!["join"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("write"), 1, "write is the only leaf");
+        assert_eq!(leaves("join"), 1);
+        assert_eq!(leaves("buffer"), 1);
+        assert_eq!(leaves("convert_a"), 1);
+        assert_eq!(leaves("convert_b"), 1);
+        assert_eq!(leaves("read_a"), 1);
+        assert_eq!(leaves("read_b"), 1);
+        assert_eq!(
+            leaves("trigger"),
+            1,
+            "trigger sees one terminal leaf, not two — both branches re-merge at buffer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_true_fan_out() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "fan_out".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("source", None),
+                    script_with_deps("leaf_a", Some(vec!["source"])),
+                    script_with_deps("leaf_b", Some(vec!["source"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("leaf_a"), 1);
+        assert_eq!(leaves("leaf_b"), 1);
+        assert_eq!(leaves("source"), 2, "two distinct downstream leaves");
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_nested_diamonds() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "nested_diamonds".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("src", None),
+                    script_with_deps("a1", Some(vec!["src"])),
+                    script_with_deps("a2", Some(vec!["src"])),
+                    script_with_deps("mid", Some(vec!["a1", "a2"])),
+                    script_with_deps("b1", Some(vec!["mid"])),
+                    script_with_deps("b2", Some(vec!["mid"])),
+                    script_with_deps("sink", Some(vec!["b1", "b2"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("sink"), 1);
+        assert_eq!(leaves("b1"), 1);
+        assert_eq!(leaves("b2"), 1);
+        assert_eq!(leaves("mid"), 1);
+        assert_eq!(leaves("a1"), 1);
+        assert_eq!(leaves("a2"), 1);
+        assert_eq!(
+            leaves("src"),
+            1,
+            "nested diamonds re-merge — naive sum would be 4"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_mixed_fan_out_and_re_merge() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "mixed".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("src", None),
+                    script_with_deps("a", Some(vec!["src"])),
+                    script_with_deps("b", Some(vec!["src"])),
+                    script_with_deps("c", Some(vec!["src"])),
+                    script_with_deps("merge", Some(vec!["a", "b"])),
+                    script_with_deps("leaf_x", Some(vec!["merge"])),
+                    script_with_deps("leaf_y", Some(vec!["c"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("leaf_x"), 1);
+        assert_eq!(leaves("leaf_y"), 1);
+        assert_eq!(leaves("merge"), 1);
+        assert_eq!(leaves("a"), 1);
+        assert_eq!(leaves("b"), 1);
+        assert_eq!(leaves("c"), 1);
+        assert_eq!(
+            leaves("src"),
+            2,
+            "merged branch counts once, independent branch adds the second leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_linear_chain() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "linear".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("t0", None),
+                    script_with_deps("t1", Some(vec!["t0"])),
+                    script_with_deps("t2", Some(vec!["t1"])),
+                    script_with_deps("t3", Some(vec!["t2"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        for task in &registry.tasks {
+            assert_eq!(
+                task.downstream_leaves,
+                1,
+                "{} should see 1 leaf",
+                task.task_type.name()
+            );
+        }
     }
 }

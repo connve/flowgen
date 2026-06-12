@@ -1,0 +1,70 @@
+flow:
+  name: script_fan_in_join
+  require_leader_election: true
+  tasks:
+
+    # Generate triggers the flow once after 10 seconds.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # --- SOURCE 1: Orders ---
+    # Reads the canonical orders dataset that ships with flowgen.
+    - object_store_read:
+        name: read_orders
+        path: file:///flowgen/examples/data/orders.csv
+        batch_size: 10000
+        has_header: true
+        depends_on: [trigger]
+
+    # Convert CSV rows to JSON for the join script.
+    - convert:
+        name: convert_orders
+        target_format: json
+        depends_on: [read_orders]
+
+    # --- SOURCE 2: Payment type lookup ---
+    # Small reference table used to enrich each order with a human-readable
+    # payment label. In a production flow this is typically a small
+    # warehouse lookup (BigQuery, Postgres, etc.) read with the same
+    # fan-in shape.
+    - object_store_read:
+        name: read_payment_types
+        path: file:///flowgen/examples/data/payment_types.csv
+        batch_size: 1000
+        has_header: true
+        depends_on: [trigger]
+
+    - convert:
+        name: convert_payment_types
+        target_format: json
+        depends_on: [read_payment_types]
+
+    # --- FAN-IN: buffer waits for both sources before flushing ---
+    # size: 2 means the buffer flushes as soon as both upstream batches
+    # have arrived. The downstream script receives both arrays in
+    # event.data.batch.
+    - buffer:
+        name: buffer_both_sources
+        size: 2
+        timeout: "1m"
+        depends_on: [convert_orders, convert_payment_types]
+
+    # --- JOIN: external Rhai script ---
+    # The join logic lives in resources/scripts/ for readability,
+    # version control, and IDE support (the Rhai extension picks up
+    # the .rhai extension). Inline this only for one-off transforms;
+    # anything longer than a few lines belongs in an external file.
+    - script:
+        name: join_orders_with_payment_labels
+        code:
+          resource: "scripts/orders_payment_label_join.rhai"
+        depends_on: [buffer_both_sources]
+
+    # Log the enriched output for inspection.
+    - log:
+        name: log_enriched_orders
+        level: info
+        structured: true
+        depends_on: [join_orders_with_payment_labels]

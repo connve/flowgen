@@ -24,7 +24,7 @@ Rhai is a sandboxed, embedded scripting language: it cannot perform IO, spawn pr
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `engine` | string | `rhai` | Script engine. Only `rhai` is supported today. |
-| `code` | string / resource | required | Script code — inline string or `{ resource: "path" }` to load from the resources directory. |
+| `code` | string / resource | required | Inline string or `{ resource: "path" }`. See [Inline vs external scripts](#inline-vs-external-scripts). |
 | `limits` | object | | Rhai engine resource limits (see below). Defaults bound a single script's CPU and memory so a misbehaving script cannot stall the worker. |
 | `depends_on` | list | | Upstream task names. See [Flows](/docs/flowgen/concepts/flows). |
 | `retry` | object | | Retry overrides. See [Retry](/docs/flowgen/concepts/retry). |
@@ -38,6 +38,44 @@ Rhai is a sandboxed, embedded scripting language: it cannot perform IO, spawn pr
 | `max_string_size` | int | `16777216` | Maximum string length in bytes (16 MiB default). |
 | `max_array_size` | int | `100000` | Maximum elements in an array. |
 | `max_map_size` | int | `100000` | Maximum entries in a map. |
+
+## Inline vs external scripts
+
+Both forms compile and run identically. Pick the one that keeps the YAML readable.
+
+- **Inline** (`code: |`) for short, single-use transformations of three lines or fewer.
+- **External** (`code: { resource: "scripts/foo.rhai" }`) for anything longer, anything shared across flows, and anything that benefits from a real editor.
+
+The external form lets the YAML stay focused on the wiring, keeps each script under its own `.rhai` file with proper diffs and syntax highlighting, and lets you share helpers across flows by checking in a `resources/scripts/` tree.
+
+### Project layout
+
+External scripts are resolved relative to the configured resources directory. The recommended layout puts the flow YAML next to the wiring and the scripts under `resources/scripts/`:
+
+```
+my-flows/
+├── my_flow.yaml
+└── resources/
+    └── scripts/
+        └── my_transform.rhai
+```
+
+```yaml
+- script:
+    name: my_transform
+    code:
+      resource: scripts/my_transform.rhai
+```
+
+The file content is rendered as a Handlebars template against the event before execution — see [Resources](/docs/flowgen/concepts/resources).
+
+### Editor support
+
+Rhai files use the `.rhai` extension. The official [Rhai extension for Visual Studio Code](https://marketplace.visualstudio.com/items?itemName=rhaiscript.vscode-rhai) adds syntax highlighting, bracket matching, and snippets.
+
+### Worked example
+
+The [`script_fan_in_join`](https://github.com/connve/flowgen/blob/main/examples/script/script_fan_in_join.yaml) flow shows the pattern end-to-end: two upstream sources fan into a buffer, and an [external Rhai file](https://github.com/connve/flowgen/blob/main/examples/resources/scripts/orders_payment_label_join.rhai) joins them. It runs against the dummy CSV data in the repository and needs no external services.
 
 ## What the script sees
 
@@ -229,16 +267,7 @@ event.data
       event.data
 ```
 
-**Load code from a resource file:**
-
-```yaml
-- script:
-    name: transform
-    code:
-      resource: scripts/transform.rhai
-```
-
-The file content is rendered as a Handlebars template against the event before execution — see [Resources](/docs/flowgen/concepts/resources).
+**Fan-in join with an external script:** see [`script_fan_in_join.yaml`](https://github.com/connve/flowgen/blob/main/examples/script/script_fan_in_join.yaml) for a complete flow that fans two upstream sources into a buffer and joins them with an external Rhai file.
 
 ## Logging
 
