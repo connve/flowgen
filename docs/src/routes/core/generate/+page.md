@@ -21,7 +21,7 @@ Produces events on a schedule. Source task — typically first in a flow.
 | `timezone` | string | `UTC` | Timezone for cron evaluation. |
 | `count` | int | | Max events to generate. Runs indefinitely if omitted. |
 | `allow_rerun` | bool | false | Reset the counter on restart. |
-| `ack_timeout` | duration | | Flow completion timeout. |
+| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before the next scheduled run. Generated events that fail or time out skip the cache update so the next run retries from the same timestamp. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

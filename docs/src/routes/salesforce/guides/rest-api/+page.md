@@ -183,7 +183,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
 ### MCP
@@ -207,7 +207,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
 ## MCP server configuration

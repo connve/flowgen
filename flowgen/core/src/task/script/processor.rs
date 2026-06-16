@@ -957,7 +957,7 @@ impl crate::task::runner::Runner for Processor {
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
                                 } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    arc.signal_completion(event.data_as_json().ok());
+                                    arc.signal_completion_with_error(err.to_string());
                                 }
                             }
                         }

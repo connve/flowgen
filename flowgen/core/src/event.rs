@@ -30,9 +30,10 @@ pub type CompletionTx = tokio::sync::oneshot::Sender<
 /// only when the last one signals. The payload delivered to the source is the
 /// last leaf's payload — earlier leaves' payloads are dropped.
 ///
-/// Leaves never call this with an error: failed tasks emit error events
-/// downstream instead, and the source falls back to its acknowledgement timeout
-/// when no completion arrives.
+/// A leaf can signal success via `signal_completion` or failure via
+/// `signal_completion_with_error`. The "last leaf wins" rule applies to both —
+/// a failing leaf that signals last delivers the error to the source even if
+/// sibling leaves succeeded, and vice versa.
 #[derive(Debug)]
 pub struct CompletionState {
     /// Number of leaves still expected to signal completion.
@@ -81,6 +82,32 @@ impl CompletionState {
         if let Ok(mut guard) = self.sender.lock() {
             if let Some(tx) = guard.take() {
                 tx.send(Ok(payload)).ok();
+            }
+        }
+    }
+
+    /// Signals completion from a leaf task with a failure message.
+    ///
+    /// Same last-leaf-wins semantics as [`signal_completion`](Self::signal_completion):
+    /// the leaf that brings the outstanding-leaf counter to zero delivers the
+    /// error to the source. The source (HTTP webhook, MCP) surfaces it to the
+    /// caller as a tool/request error instead of falling back to an opaque
+    /// acknowledgement timeout.
+    pub fn signal_completion_with_error(&self, error: String) {
+        let previous = self.remaining.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| match current {
+                0 => None,
+                n => Some(n - 1),
+            },
+        );
+        if !matches!(previous, Ok(1)) {
+            return;
+        }
+        if let Ok(mut guard) = self.sender.lock() {
+            if let Some(tx) = guard.take() {
+                tx.send(Err(error.into())).ok();
             }
         }
     }

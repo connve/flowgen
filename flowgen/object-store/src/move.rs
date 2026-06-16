@@ -464,11 +464,12 @@ impl Runner for MoveProcessor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Move failed after all retry attempts");
-                                // Emit error event downstream for error handling.
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
+                                } else if let Some(arc) = event.completion_tx.as_ref() {
+                                    arc.signal_completion_with_error(err.to_string());
                                 }
                             }
                         }
