@@ -12,7 +12,7 @@ rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { git = "https://github.com/connve/salesforce-rs", branch = "feat/is-retryable-errors" }
+salesforce_core = { version = "0.16.0" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }

@@ -3745,7 +3745,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5379,7 +5379,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5417,7 +5417,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6035,7 +6035,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "salesforce_core"
 version = "0.16.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fis-retryable-errors#26dc3ebaeab33de06e00d25a5469cebe3d62e813"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e19691025719e175143efd45f5b3845a9299f9e140eab25ae1abf65db66b3d85"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6057,7 +6058,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_bulkapi"
 version = "0.16.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fis-retryable-errors#26dc3ebaeab33de06e00d25a5469cebe3d62e813"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a07a3b7eda07180493e7137cfe80ba37a03c2e8bdae8e02edf06d8798687102"
 dependencies = [
  "bytes",
  "chrono",
@@ -6076,7 +6078,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_pubsubapi"
 version = "0.16.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fis-retryable-errors#26dc3ebaeab33de06e00d25a5469cebe3d62e813"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bd725940b32278d8f8befe18df4b1f6d49a58422da07cb6687017fbaaad030"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6100,7 +6103,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_restapi"
 version = "0.16.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fis-retryable-errors#26dc3ebaeab33de06e00d25a5469cebe3d62e813"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d2b96c8c9b02c582f4ded99141552e6a21218be1a34e413848fac6a7b8cb965"
 dependencies = [
  "bytes",
  "chrono",
@@ -6119,7 +6123,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_toolingapi"
 version = "0.16.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fis-retryable-errors#26dc3ebaeab33de06e00d25a5469cebe3d62e813"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dccf36f5034b7a967590e52eb2080951d1aa160c8b8d4ffadc4e8a4a4ecd8fa"
 dependencies = [
  "bytes",
  "chrono",
