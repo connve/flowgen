@@ -1,15 +1,15 @@
-//! Webhook role for the generic HTTP server.
+//! Endpoint role for the generic HTTP server.
 //!
-//! Defines the [`WebhookDispatcher`] and [`WebhookRegistration`] used to wire
-//! the worker's webhook traffic onto a `flowgen_core::http_server::HttpServer`.
+//! Defines the [`EndpointDispatcher`] and [`EndpointRegistration`] used to wire
+//! `http_endpoint` task traffic onto a `flowgen_core::http_server::HttpServer`.
 //! The server lifecycle, dispatch table, and hot-reload semantics live in
-//! `flowgen_core::http_server`; this module only owns the webhook-specific
+//! `flowgen_core::http_server`; this module only owns the endpoint-specific
 //! URL layout (a single catch-all under `<path>/{*endpoint}`) and the data
-//! shape carried per registered webhook.
+//! shape carried per registered endpoint.
 //!
 //! The actual per-request work — auth, body parsing, event creation,
-//! completion wait, response formatting — lives in `crate::webhook::dispatch`
-//! so the dispatcher logic stays colocated with the webhook config.
+//! completion wait, response formatting — lives in `crate::endpoint::dispatch`
+//! so the dispatcher logic stays colocated with the endpoint config.
 
 use axum::{
     body::Body,
@@ -24,22 +24,22 @@ use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServ
 use std::sync::Arc;
 
 /// Default port for the webhook HTTP server.
-pub const DEFAULT_WEBHOOK_PORT: u16 = 3000;
+pub const DEFAULT_ENDPOINT_PORT: u16 = 3000;
 
 /// Default path prefix for webhook routes.
-pub const DEFAULT_WEBHOOK_PATH: &str = "/api/flowgen/workers/v1";
+pub const DEFAULT_ENDPOINT_PATH: &str = "/api/flowgen/workers/v1";
 
 /// Convenience type alias for the webhook server.
-pub type WebhookServer = HttpServer<WebhookDispatcher>;
+pub type EndpointServer = HttpServer<EndpointDispatcher>;
 
 /// Dispatcher for webhook traffic.
 ///
 /// Wires a single catch-all route `<path>/{*endpoint}` and dispatches each
-/// request to a [`WebhookRegistration`] keyed by the resolved endpoint path.
-pub struct WebhookDispatcher;
+/// request to a [`EndpointRegistration`] keyed by the resolved endpoint path.
+pub struct EndpointDispatcher;
 
-impl Dispatcher for WebhookDispatcher {
-    type Registration = WebhookRegistration;
+impl Dispatcher for EndpointDispatcher {
+    type Registration = EndpointRegistration;
     type Extras = ();
 
     fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
@@ -54,9 +54,9 @@ impl Dispatcher for WebhookDispatcher {
 /// Handler for the catch-all webhook route. Looks the requested endpoint up
 /// in the dispatch table, validates the HTTP method against the registered
 /// webhook's configured method, and forwards to the per-webhook dispatcher
-/// in `crate::webhook`.
+/// in `crate::endpoint`.
 async fn dispatch_webhook(
-    State(state): State<DispatchState<WebhookRegistration>>,
+    State(state): State<DispatchState<EndpointRegistration>>,
     Path(endpoint): Path<String>,
     method: Method,
     headers: HeaderMap,
@@ -78,7 +78,7 @@ async fn dispatch_webhook(
             .into_response();
     }
 
-    crate::webhook::dispatch(&registration, headers, body).await
+    crate::endpoint::dispatch(&registration, headers, body).await
 }
 
 /// Compares an axum HTTP method against the config-declared method.
@@ -99,7 +99,7 @@ fn methods_match(req_method: &Method, configured: &crate::config::Method) -> boo
 /// `flow_name` lets the server bulk-deregister every webhook owned by a flow
 /// when the flow is stopped or hot-reloaded.
 #[derive(Clone)]
-pub struct WebhookRegistration {
+pub struct EndpointRegistration {
     /// Name of the flow that registered this webhook.
     pub flow_name: String,
     /// Full processor configuration. The dispatcher reads `method`,
@@ -124,7 +124,7 @@ pub struct WebhookRegistration {
     pub cancellation_token: tokio_util::sync::CancellationToken,
 }
 
-impl HasFlowName for WebhookRegistration {
+impl HasFlowName for EndpointRegistration {
     fn flow_name(&self) -> &str {
         &self.flow_name
     }
@@ -136,12 +136,12 @@ mod tests {
     use flowgen_core::registry::ResponseRegistry;
     use tokio::sync::mpsc;
 
-    fn test_registration(flow: &str, endpoint: &str) -> WebhookRegistration {
+    fn test_registration(flow: &str, endpoint: &str) -> EndpointRegistration {
         let (tx, _rx) = mpsc::channel(1);
         let mut config = crate::config::Processor::default();
         config.name = endpoint.to_string();
         config.method = crate::config::Method::Post;
-        WebhookRegistration {
+        EndpointRegistration {
             flow_name: flow.to_string(),
             config: Arc::new(config),
             credentials: None,
@@ -157,8 +157,8 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_WEBHOOK_PORT, 3000);
-        assert_eq!(DEFAULT_WEBHOOK_PATH, "/api/flowgen/workers/v1");
+        assert_eq!(DEFAULT_ENDPOINT_PORT, 3000);
+        assert_eq!(DEFAULT_ENDPOINT_PATH, "/api/flowgen/workers/v1");
     }
 
     #[test]
@@ -174,8 +174,8 @@ mod tests {
 
     #[test]
     fn new_creates_server_with_correct_path() {
-        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
-        assert_eq!(server.path(), DEFAULT_WEBHOOK_PATH);
+        let server = EndpointServer::new(DEFAULT_ENDPOINT_PATH.to_string());
+        assert_eq!(server.path(), DEFAULT_ENDPOINT_PATH);
         // Verify empty: try_register should succeed for any key.
         let reg = test_registration("probe_flow", "/probe");
         assert!(server.try_register("/probe".to_string(), reg).is_ok());
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn try_register_succeeds_for_new_route() {
-        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        let server = EndpointServer::new(DEFAULT_ENDPOINT_PATH.to_string());
         let reg = test_registration("flow_a", "/hook1");
         let result = server.try_register("/hook1".to_string(), reg);
         assert!(result.is_ok());
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn try_register_collision_returns_error() {
-        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        let server = EndpointServer::new(DEFAULT_ENDPOINT_PATH.to_string());
         let reg1 = test_registration("flow_a", "/hook1");
         let reg2 = test_registration("flow_b", "/hook1");
         assert!(server.try_register("/hook1".to_string(), reg1).is_ok());
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn deregister_flow_cleans_up_all_routes() {
-        let server = WebhookServer::new(DEFAULT_WEBHOOK_PATH.to_string());
+        let server = EndpointServer::new(DEFAULT_ENDPOINT_PATH.to_string());
         server.register("/hook1".to_string(), test_registration("flow_a", "/hook1"));
         server.register("/hook2".to_string(), test_registration("flow_a", "/hook2"));
         server.register("/hook3".to_string(), test_registration("flow_b", "/hook3"));

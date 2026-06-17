@@ -93,7 +93,7 @@ impl<R, E: Clone> Clone for DispatchState<R, E> {
 /// Per-role behaviour: how to wire HTTP routes to dispatch-table lookups.
 ///
 /// Implementors are typically zero-sized marker types (e.g.
-/// `WebhookDispatcher`) used as the type parameter of [`HttpServer<D>`].
+/// `EndpointDispatcher`) used as the type parameter of [`HttpServer<D>`].
 pub trait Dispatcher: Send + Sync + 'static {
     /// Per-role registration data inserted into the dispatch table.
     type Registration: Clone + HasFlowName + Send + Sync + 'static;

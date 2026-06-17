@@ -4,7 +4,7 @@ flow:
 
     # Webhook trigger to receive data for analysis.
     # POST to /api/flowgen/workers/webhook/analyze with JSON payload.
-    - http_webhook:
+    - http_endpoint:
         name: receive_data
         path: /analyze
 

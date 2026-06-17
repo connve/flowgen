@@ -2,7 +2,7 @@
 
 Flowgen provides HTTP tasks for both inbound and outbound traffic.
 
-- [Webhook](/docs/flowgen/http/webhook) — listens for incoming HTTP requests and injects them into the flow.
+- [Endpoint](/docs/flowgen/http/endpoint) — registers an HTTP route on the worker server and injects requests into the flow as events.
 - [Request](/docs/flowgen/http/request) — makes outbound HTTP requests with templated URL, headers, and payload.
 
 ## Credentials

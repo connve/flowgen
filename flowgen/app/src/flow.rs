@@ -70,9 +70,9 @@ pub enum Error {
     /// Error in HTTP request processor task.
     #[error(transparent)]
     HttpRequestProcessor(#[from] flowgen_http::request::Error),
-    /// Error in HTTP webhook processor task.
+    /// Error in HTTP endpoint processor task.
     #[error(transparent)]
-    HttpWebhookProcessor(#[from] flowgen_http::webhook::Error),
+    HttpEndpointProcessor(#[from] flowgen_http::endpoint::Error),
     /// Error in HTML scrape processor task.
     #[error(transparent)]
     HtmlScrapeProcessor(#[from] flowgen_html::scrape::processor::Error),
@@ -303,7 +303,7 @@ impl TaskRegistryBuilder {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
 
             let input_rx = if idx > 0 {
@@ -492,7 +492,7 @@ impl TaskRegistryBuilder {
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
@@ -514,7 +514,7 @@ pub struct Flow {
     /// The flow's static configuration, loaded from a file.
     pub config: Arc<FlowConfig>,
     /// An optional shared webhook HTTP server, passed in from the main application.
-    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
     /// An optional shared MCP server, passed in from the main application.
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// An optional shared AI gateway server, passed in from the main application.
@@ -569,7 +569,7 @@ impl Flow {
         let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
             matches!(
                 task,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             )
         });
 
@@ -594,13 +594,13 @@ impl Flow {
             return Ok(()); // Already initialized
         }
 
-        // Validate: Flow with http_webhook tasks requires HTTP server to be configured.
+        // Validate: Flow with http_endpoint tasks requires HTTP server to be configured.
         let has_webhook_tasks = self
             .config
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::llm_proxy(_)));
+            .any(|task| matches!(task, TaskType::http_endpoint(_) | TaskType::llm_proxy(_)));
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
@@ -1071,7 +1071,7 @@ impl Flow {
 async fn spawn_task(
     task_desc: TaskDescriptor,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
-    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
 ) -> Result<JoinHandle<Result<(), Error>>, Error> {
@@ -1248,12 +1248,12 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::http_webhook(config) => {
+        TaskType::http_endpoint(config) => {
             let config = Arc::new(config);
             let http_server = http_server.clone().ok_or(Error::HttpServerNotEnabled)?;
             tokio::spawn(
                 async move {
-                    let mut builder = flowgen_http::webhook::ProcessorBuilder::new()
+                    let mut builder = flowgen_http::endpoint::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
@@ -1799,7 +1799,7 @@ pub struct FlowBuilder {
     /// Optional flow configuration.
     config: Option<Arc<FlowConfig>>,
     /// Optional shared webhook HTTP server.
-    http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
     /// Optional shared MCP server.
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// Optional shared AI gateway server.
@@ -1829,7 +1829,7 @@ impl FlowBuilder {
     }
 
     /// Sets the shared webhook HTTP server.
-    pub fn http_server(mut self, server: Arc<flowgen_http::server::WebhookServer>) -> Self {
+    pub fn http_server(mut self, server: Arc<flowgen_http::server::EndpointServer>) -> Self {
         self.http_server = Some(server);
         self
     }
@@ -1951,9 +1951,9 @@ mod tests {
     #[test]
     fn test_flow_builder_http_server() {
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
-            flowgen_http::server::WebhookDispatcher,
+            flowgen_http::server::EndpointDispatcher,
         >::new(
-            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
         let builder = FlowBuilder::new().http_server(server.clone());
         assert!(builder.http_server.is_some());
@@ -1962,9 +1962,9 @@ mod tests {
     #[test]
     fn test_flow_builder_build_missing_config() {
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
-            flowgen_http::server::WebhookDispatcher,
+            flowgen_http::server::EndpointDispatcher,
         >::new(
-            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
 
         let result = FlowBuilder::new().http_server(server).build();
@@ -2008,9 +2008,9 @@ mod tests {
             },
         });
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
-            flowgen_http::server::WebhookDispatcher,
+            flowgen_http::server::EndpointDispatcher,
         >::new(
-            flowgen_http::server::DEFAULT_WEBHOOK_PATH.to_string()
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
@@ -2105,7 +2105,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![
-                    TaskType::http_webhook(flowgen_http::config::Processor::default()),
+                    TaskType::http_endpoint(flowgen_http::config::Processor::default()),
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                 ],

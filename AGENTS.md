@@ -142,7 +142,7 @@ retry:
 - Subscriber (infinite retry): `flowgen/salesforce/src/pubsubapi/subscriber.rs`
 - Subscriber (infinite retry): `flowgen/nats/src/jetstream/subscriber.rs`
 - Publisher (circuit breaker): `flowgen/salesforce/src/pubsubapi/publisher.rs`
-- Webhook (circuit breaker): `flowgen/http/src/webhook.rs`
+- HTTP endpoint (circuit breaker): `flowgen/http/src/endpoint.rs`
 
 #### EventData Types
 

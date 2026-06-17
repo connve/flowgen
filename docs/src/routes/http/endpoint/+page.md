@@ -1,6 +1,6 @@
-# HTTP Webhook
+# HTTP Endpoint
 
-Listens for incoming HTTP requests and injects them into the flow. Requires the HTTP server enabled in worker config.
+Registers an HTTP route on the worker's HTTP server. Each incoming request is injected into the flow as an event and the flow's response is returned to the caller. Supports `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. Requires `worker.http_server.enabled: true`.
 
 ## Configuration
 
@@ -12,7 +12,7 @@ worker:
 ```
 
 ```yaml
-- http_webhook:
+- http_endpoint:
     name: receive_order
     endpoint: /webhooks/orders
     method: POST
@@ -35,13 +35,13 @@ worker:
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
-## Example: Webhook with SSE streaming
+## Example: SSE streaming response
 
 ```yaml
 flow:
-  name: webhook_flow
+  name: streaming_endpoint
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: receive
         endpoint: /api/process
         method: POST

@@ -3,7 +3,7 @@ flow:
   tasks:
 
     # Receive email forwarder by Cloudflare Worker.
-    - http_webhook:
+    - http_endpoint:
         name: receive_requests
         credentials_path: /etc/cloudflare-emails/credentials.json
         method: POST

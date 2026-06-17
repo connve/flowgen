@@ -504,7 +504,7 @@ impl App {
         }
 
         // Create shared webhook HTTP server if enabled.
-        let http_server: Option<Arc<flowgen_http::server::WebhookServer>> = match app_config
+        let http_server: Option<Arc<flowgen_http::server::EndpointServer>> = match app_config
             .worker
             .as_ref()
             .and_then(|w| w.http_server.as_ref())
@@ -521,7 +521,7 @@ impl App {
                     None => None,
                 };
                 let server = flowgen_core::http_server::HttpServer::<
-                    flowgen_http::server::WebhookDispatcher,
+                    flowgen_http::server::EndpointDispatcher,
                 >::new(path)
                 .with_credentials_path(http_config.credentials_path.clone())
                 .with_auth_provider(auth_provider);
@@ -844,7 +844,7 @@ impl App {
                 .as_ref()
                 .and_then(|w| w.http_server.as_ref())
                 .map(|http| http.port)
-                .unwrap_or(flowgen_http::server::DEFAULT_WEBHOOK_PORT);
+                .unwrap_or(flowgen_http::server::DEFAULT_ENDPOINT_PORT);
             info!(port = configured_port, path = %http_server.path(), "Starting HTTP server");
             let http_server = Arc::clone(http_server);
             let span = tracing::Span::current();

@@ -1,6 +1,6 @@
-//! HTTP webhook processor for handling incoming requests.
+//! HTTP endpoint processor for handling incoming requests.
 //!
-//! Processes incoming HTTP webhook requests, extracting headers and payload
+//! Processes incoming HTTP endpoint requests, extracting headers and payload
 //! data and converting them into events for further processing in the pipeline.
 
 use axum::{body::Body, response::IntoResponse};
@@ -23,12 +23,12 @@ use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info};
 
-/// JSON key for HTTP headers in webhook events.
+/// JSON key for HTTP headers in endpoint events.
 const DEFAULT_HEADERS_KEY: &str = "headers";
-/// JSON key for HTTP payload in webhook events.
+/// JSON key for HTTP payload in endpoint events.
 const DEFAULT_PAYLOAD_KEY: &str = "payload";
 
-/// Errors that can occur during webhook processing.
+/// Errors that can occur during endpoint processing.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -71,7 +71,7 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
-    #[error("Flow completion failed or timed out for webhook request")]
+    #[error("Flow completion failed or timed out for endpoint request")]
     FlowCompletionFailed,
     #[error("Request body exceeds configured max_body_bytes limit of {limit} bytes")]
     BodyTooLarge { limit: usize },
@@ -88,10 +88,10 @@ impl IntoResponse for Error {
     }
 }
 
-/// Resolved init-time data for a webhook task.
+/// Resolved init-time data for a endpoint task.
 ///
 /// Returned by `Processor::init` and consumed by `Processor::run` to populate
-/// a [`crate::server::WebhookRegistration`]. Carries only the fields whose
+/// a [`crate::server::EndpointRegistration`]. Carries only the fields whose
 /// resolution requires file I/O or trait downcasts at init time; everything
 /// else needed by the dispatcher already lives on the `Processor` itself.
 ///
@@ -102,9 +102,9 @@ impl IntoResponse for Error {
 #[derive(Clone, Debug)]
 pub struct EventHandler {
     /// Pre-loaded endpoint authentication credentials (task-level path
-    /// overrides the global webhook server credentials path).
+    /// overrides the global endpoint server credentials path).
     credentials: Option<HttpCredentials>,
-    /// Shared response registry, used when the webhook is configured for
+    /// Shared response registry, used when the endpoint is configured for
     /// SSE streaming so the dispatcher can surface progress events back to
     /// the client.
     response_registry: Option<Arc<ResponseRegistry>>,
@@ -113,12 +113,12 @@ pub struct EventHandler {
     auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
-/// HTTP webhook processor.
+/// HTTP endpoint processor.
 #[derive(Debug)]
 pub struct Processor {
     /// Processor configuration.
     config: Arc<super::config::Processor>,
-    /// Event sender channel. Required for webhook tasks because they are
+    /// Event sender channel. Required for endpoint tasks because they are
     /// always sources — the builder rejects construction without a sender.
     tx: Sender<Event>,
     /// Task identifier.
@@ -129,10 +129,10 @@ pub struct Processor {
     task_type: &'static str,
     /// Shared response registry for SSE streaming.
     response_registry: Option<Arc<ResponseRegistry>>,
-    /// Shared webhook HTTP server. The processor inserts a `WebhookRegistration`
+    /// Shared endpoint HTTP server. The processor inserts a `EndpointRegistration`
     /// into this server during `run()`; the dispatcher routes inbound requests
     /// for the configured endpoint to it.
-    http_server: Arc<crate::server::WebhookServer>,
+    http_server: Arc<crate::server::EndpointServer>,
 }
 
 #[async_trait::async_trait]
@@ -187,7 +187,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize webhook processor");
+                        error!(error = %e, "Failed to initialize endpoint processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -201,7 +201,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
-        let registration = crate::server::WebhookRegistration {
+        let registration = crate::server::EndpointRegistration {
             flow_name: self.task_context.flow.name.clone(),
             config: Arc::clone(&self.config),
             credentials: event_handler.credentials.clone(),
@@ -224,7 +224,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 }
 
-/// Builder for HTTP webhook processor.
+/// Builder for HTTP endpoint processor.
 #[derive(Debug, Default)]
 pub struct ProcessorBuilder {
     /// Optional processor configuration.
@@ -239,8 +239,8 @@ pub struct ProcessorBuilder {
     task_type: Option<&'static str>,
     /// Shared response registry for SSE streaming.
     response_registry: Option<Arc<ResponseRegistry>>,
-    /// Shared webhook HTTP server.
-    http_server: Option<Arc<crate::server::WebhookServer>>,
+    /// Shared endpoint HTTP server.
+    http_server: Option<Arc<crate::server::EndpointServer>>,
 }
 
 impl ProcessorBuilder {
@@ -283,8 +283,8 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Sets the shared webhook HTTP server. Required.
-    pub fn http_server(mut self, server: Arc<crate::server::WebhookServer>) -> Self {
+    /// Sets the shared endpoint HTTP server. Required.
+    pub fn http_server(mut self, server: Arc<crate::server::EndpointServer>) -> Self {
         self.http_server = Some(server);
         self
     }
@@ -312,16 +312,16 @@ impl ProcessorBuilder {
     }
 }
 
-/// Per-request dispatcher for the static webhook catch-all route.
+/// Per-request dispatcher for the static endpoint catch-all route.
 ///
 /// Called by the HTTP server's catch-all handler after method validation.
 /// Reproduces the behaviour of `EventHandler::handle` / `handle_stream`
-/// against `&WebhookRegistration` so request-handling no longer requires a
-/// dedicated axum route per webhook. Branches on `registration.config.stream`
+/// against `&EndpointRegistration` so request-handling no longer requires a
+/// dedicated axum route per endpoint. Branches on `registration.config.stream`
 /// to either await flow completion and return 200/500, or open an SSE
 /// response stream backed by the response registry.
 pub async fn dispatch(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     headers: HeaderMap,
     body: Body,
 ) -> axum::response::Response<Body> {
@@ -329,14 +329,14 @@ pub async fn dispatch(
         dispatch_stream(registration, headers, body)
             .await
             .unwrap_or_else(|e| {
-                error!(error = %e, "Webhook stream dispatch failed");
+                error!(error = %e, "Endpoint stream dispatch failed");
                 e.into_response()
             })
     } else {
         match dispatch_blocking(registration, headers, body).await {
             Ok(status) => status.into_response(),
             Err(e) => {
-                error!(error = %e, "Webhook dispatch failed");
+                error!(error = %e, "Endpoint dispatch failed");
                 e.into_response()
             }
         }
@@ -395,7 +395,7 @@ fn validate_endpoint_auth(
 /// `config.auth.required` is true. Returns the resolved user context, or
 /// `None` when user auth is not required.
 async fn validate_user_auth(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     headers: &HeaderMap,
 ) -> Result<Option<flowgen_core::auth::UserContext>, Error> {
     match &registration.config.auth {
@@ -426,7 +426,7 @@ async fn validate_user_auth(
 /// JSON, projects configured headers into the event payload, and runs auth.
 /// Returns the event-payload `Value` and any user context.
 async fn parse_request(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     headers: &HeaderMap,
     body: Body,
 ) -> Result<(Value, Option<flowgen_core::auth::UserContext>), Error> {
@@ -474,7 +474,7 @@ async fn parse_request(
 /// leaf count and pushes it onto `registration.tx`. Returns the receiver the
 /// dispatcher waits on for flow completion.
 async fn inject_event(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     data: Value,
     meta: Option<serde_json::Map<String, Value>>,
 ) -> Result<CompletionRx, Error> {
@@ -506,7 +506,7 @@ async fn inject_event(
 /// completion (bounded by `ack_timeout` if configured), and returns
 /// `200 OK` on success or `500` on completion failure.
 async fn dispatch_blocking(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, Error> {
@@ -551,7 +551,7 @@ async fn dispatch_blocking(
 /// registry. Progress events from downstream tasks are forwarded as they
 /// arrive; the final completion result is sent as the last SSE message.
 async fn dispatch_stream(
-    registration: &crate::server::WebhookRegistration,
+    registration: &crate::server::EndpointRegistration,
     headers: HeaderMap,
     body: Body,
 ) -> Result<axum::response::Response<Body>, Error> {
@@ -595,9 +595,9 @@ async fn dispatch_stream(
     let completion_rx = inject_event(registration, data, Some(meta)).await?;
 
     info!(
-        webhook = %registration.config.name,
+        endpoint = %registration.config.name,
         correlation_id = %correlation_id,
-        "Streaming webhook request accepted."
+        "Streaming endpoint request accepted."
     );
 
     let registry = Arc::clone(&registration.response_registry);
@@ -756,8 +756,8 @@ mod tests {
     #[tokio::test]
     async fn test_processor_builder() {
         let config = Arc::new(crate::config::Processor {
-            name: "test_webhook".to_string(),
-            endpoint: "/webhook".to_string(),
+            name: "test_endpoint".to_string(),
+            endpoint: "/endpoint".to_string(),
             method: crate::config::Method::Post,
             payload: None,
             headers: None,
@@ -774,9 +774,9 @@ mod tests {
         let (tx, _rx) = mpsc::channel(100);
 
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
-            crate::server::WebhookDispatcher,
+            crate::server::EndpointDispatcher,
         >::new(
-            crate::server::DEFAULT_WEBHOOK_PATH.to_string()
+            crate::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
 
         // Success case.

@@ -6,7 +6,7 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 
 | Task family | Format | What it authenticates |
 |---|---|---|
-| `http_webhook`, `http_request`, `mcp_tool` | `HttpCredentials` (bearer / basic) | The HTTP request header. |
+| `http_endpoint`, `http_request`, `mcp_tool` | `HttpCredentials` (bearer / basic) | The HTTP request header. |
 | `nats_jetstream_*`, `nats_kv_store` | NATS credentials JSON | NATS server connection. |
 | `gcp_*` (BigQuery) | GCP service account JSON | Google Cloud APIs. |
 | `salesforce_*` | Salesforce credentials JSON | Salesforce REST / Pub/Sub / Bulk APIs. |
@@ -28,7 +28,7 @@ If you need to inject secrets at deploy time without writing them to disk, use a
 
 ## HTTP credentials
 
-The most common shared format is `HttpCredentials`, used by `http_webhook`, `http_request`, and similar tasks:
+The most common shared format is `HttpCredentials`, used by `http_endpoint`, `http_request`, and similar tasks:
 
 ```json
 {
@@ -65,7 +65,7 @@ Both fields are optional. If neither is set, no `Authorization` header is added.
 flow:
   name: secure_webhook
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: ingest
         endpoint: /events
         method: POST
@@ -85,7 +85,7 @@ worker:
     credentials_path: /etc/flowgen/credentials/http.json
 ```
 
-Individual `http_webhook` tasks override the worker default by setting their own `credentials_path`. This is useful when most webhooks share the same shared-secret token but a few endpoints have stricter requirements.
+Individual `http_endpoint` tasks override the worker default by setting their own `credentials_path`. This is useful when most webhooks share the same shared-secret token but a few endpoints have stricter requirements.
 
 ## User-level authentication is separate
 

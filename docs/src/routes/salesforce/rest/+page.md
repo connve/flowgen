@@ -171,7 +171,7 @@ query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id,
 flow:
   name: salesforce_search
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: trigger
         method: POST
         endpoint: /search

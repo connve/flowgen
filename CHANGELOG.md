@@ -100,7 +100,7 @@
 
 - **`ack_timeout` default documented.** The MCP `mcp_tool` task gained a
   fields table covering all configuration options. All five source-task
-  docs (`generate`, `http/webhook`, `nats/subscriber`, `salesforce/pubsub`,
+  docs (`generate`, `http/endpoint`, `nats/subscriber`, `salesforce/pubsub`,
   `ai/mcp`) now state the `ack_timeout` default as "wait indefinitely"
   with accurate per-source semantics.
 
@@ -108,6 +108,15 @@
   to `salesforce/rest` docs explaining how to append `*` inside the
   phrase to match prefixes. Example MCP/HTTP SOSL flows updated to use
   the wildcard form by default.
+
+### Breaking changes
+
+- **`http_webhook` task renamed to `http_endpoint`.** The old name was
+  misleading — the task handles any HTTP method (`GET`, `POST`, `PUT`,
+  `DELETE`, `PATCH`), not only callback webhooks. The new name matches
+  what the task actually does: it registers an endpoint on the worker's
+  HTTP server. No alias is provided; existing flows must rename the task
+  type. The docs route also moved from `/http/webhook` to `/http/endpoint`.
 
 ### Fixes
 

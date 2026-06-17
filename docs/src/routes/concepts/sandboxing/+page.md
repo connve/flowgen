@@ -8,7 +8,7 @@ LLM tool calls are code flowgen does not control. The model decides what to invo
 |---|---|
 | `ai_completion` with tools | **Recommended.** LLMs are vulnerable to prompt injection, and tool calls are LLM-generated code. Sandbox protects the host if a model is tricked into running a destructive tool. |
 | `script` (Rhai) | Not needed. Rhai is a sandboxed scripting language by design — no IO, no FFI, no host access except what flowgen explicitly exposes (`ctx.cache`, `ctx.resource`, built-in helpers). |
-| `http_webhook`, `http_request`, SQL queries, connector tasks | Not applicable. They make network calls or run against external systems; there is no local code execution to isolate. |
+| `http_endpoint`, `http_request`, SQL queries, connector tasks | Not applicable. They make network calls or run against external systems; there is no local code execution to isolate. |
 
 ## Configuring a sandbox
 

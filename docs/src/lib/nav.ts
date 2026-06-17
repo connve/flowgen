@@ -91,7 +91,7 @@ export const navigation: NavSection[] = [
 		icon: '/icons/http.svg',
 		items: [
 			{ title: 'Overview', href: '/http' },
-			{ title: 'Webhook', href: '/http/webhook' },
+			{ title: 'Endpoint', href: '/http/endpoint' },
 			{ title: 'Request', href: '/http/request' }
 		]
 	},

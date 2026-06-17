@@ -32,7 +32,7 @@ Total elapsed: about 15 minutes.
 
 Every background task sleeps a random duration (up to `initial_backoff`) before its first initialization attempt. This staggers connections across flows and replicas to avoid thundering-herd login storms on external services (e.g. Salesforce OAuth, database connection pools). The jitter is automatic and requires no configuration.
 
-Blocking tasks (`http_webhook`, `mcp_tool`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
+Blocking tasks (`http_endpoint`, `mcp_tool`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
 
 ## Two patterns
 
@@ -42,7 +42,7 @@ Flowgen applies retry differently depending on the task's role.
 
 Most tasks use the retry config as a circuit breaker. They retry up to `max_attempts` with exponential backoff and jitter; if every attempt fails, the task emits an error event downstream and the source learns the flow did not complete (acknowledgement is not delivered).
 
-This applies to: `script`, `convert`, `iterate`, `buffer`, `log`, `http_request`, `http_webhook`, `ai_completion`, `llm_proxy`, and every connector processor (database queries, object store operations, message publishers, and so on).
+This applies to: `script`, `convert`, `iterate`, `buffer`, `log`, `http_request`, `http_endpoint`, `ai_completion`, `llm_proxy`, and every connector processor (database queries, object store operations, message publishers, and so on).
 
 Failed events are not silently dropped. The error event carries `event.error` with the failure message, which downstream tasks can inspect and route to a dead-letter destination, an audit log, or an alerting endpoint.
 

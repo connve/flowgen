@@ -4,7 +4,7 @@ flow:
 
     # Webhook trigger to receive questions.
     # POST to /api/flowgen/workers/webhook/ask_question with JSON: {"question": "..."}
-    - http_webhook:
+    - http_endpoint:
         name: receive_question
         path: /ask_question
 

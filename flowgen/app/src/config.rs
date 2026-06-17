@@ -87,8 +87,8 @@ pub enum TaskType {
     generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
     http_request(flowgen_http::config::Processor),
-    /// HTTP webhook handler task.
-    http_webhook(flowgen_http::config::Processor),
+    /// HTTP endpoint task: exposes a route on the worker HTTP server.
+    http_endpoint(flowgen_http::config::Processor),
     /// HTML scrape task for extracting structured data using CSS selectors.
     html_scrape(flowgen_html::scrape::config::Processor),
     /// NATS JetStream subscriber task.
@@ -145,7 +145,7 @@ impl TaskType {
             TaskType::object_store(_) => "object_store",
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
-            TaskType::http_webhook(_) => "http_webhook",
+            TaskType::http_endpoint(_) => "http_endpoint",
             TaskType::html_scrape(_) => "html_scrape",
             TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
@@ -181,7 +181,7 @@ impl TaskType {
             TaskType::object_store(c) => &c.name,
             TaskType::generate(c) => &c.name,
             TaskType::http_request(c) => &c.name,
-            TaskType::http_webhook(c) => &c.name,
+            TaskType::http_endpoint(c) => &c.name,
             TaskType::html_scrape(c) => &c.name,
             TaskType::nats_jetstream_subscriber(c) => &c.name,
             TaskType::nats_jetstream_publisher(c) => &c.name,
@@ -217,7 +217,7 @@ impl TaskType {
             TaskType::object_store(c) => c.depends_on.as_ref(),
             TaskType::generate(c) => c.depends_on.as_ref(),
             TaskType::http_request(c) => c.depends_on.as_ref(),
-            TaskType::http_webhook(c) => c.depends_on.as_ref(),
+            TaskType::http_endpoint(c) => c.depends_on.as_ref(),
             TaskType::html_scrape(c) => c.depends_on.as_ref(),
             TaskType::nats_jetstream_subscriber(c) => c.depends_on.as_ref(),
             TaskType::nats_jetstream_publisher(c) => c.depends_on.as_ref(),
@@ -495,7 +495,7 @@ pub struct HttpServerOptions {
     #[serde(default = "default_http_path")]
     pub path: String,
     /// Optional path to global credentials file for webhook authentication.
-    /// Individual `http_webhook` tasks can override this with their own `credentials_path`.
+    /// Individual `http_endpoint` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional auth provider configuration for user identity resolution.
     /// Shared across all HTTP-facing tasks on this worker.

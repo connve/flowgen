@@ -130,7 +130,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `http_server` | object | | HTTP server for `http_webhook` tasks. |
+| `http_server` | object | | HTTP server for `http_endpoint` tasks. |
 | `mcp_server` | object | | MCP server for `mcp_tool` tasks. |
 | `ai_gateway` | object | | AI gateway server for any AI task that requires exposing a server endpoint. |
 | `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/flowgen/concepts/retry). |
@@ -140,7 +140,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Required for `http_webhook` tasks to start. |
+| `enabled` | bool | required | Required for `http_endpoint` tasks to start. |
 | `port` | int | `3000` | Listening port. |
 | `path` | string | | Optional path prefix applied to every registered route. |
 | `credentials_path` | string | | Worker-level shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |

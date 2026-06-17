@@ -67,7 +67,7 @@ pub struct ReconcilerContext {
     pub cache: Arc<dyn Cache>,
     pub app_config: Arc<crate::config::AppConfig>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    pub http_server: Option<Arc<flowgen_http::server::WebhookServer>>,
+    pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
     pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
     pub filesystem_flow_names: Arc<HashSet<String>>,
