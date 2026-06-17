@@ -109,8 +109,9 @@ impl Source {
         T: serde::Serialize,
     {
         match self {
-            // Inline content is already rendered by config.render(), return as-is.
-            Source::Inline(content) => Ok(content.clone()),
+            // Idempotent for callers that already rendered at init time; required for handle-time templating.
+            Source::Inline(content) => crate::config::render_template(content, template_data)
+                .map_err(|source| Error::TemplateRender { source }),
             // Resource content needs to be loaded and then rendered.
             Source::Resource { resource } => {
                 let loader = loader.ok_or(Error::ResourcePathNotConfigured)?;

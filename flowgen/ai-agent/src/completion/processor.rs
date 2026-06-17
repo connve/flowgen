@@ -4,8 +4,10 @@
 //! multiple AI providers through the Rig framework.
 
 use crate::agent::CompletionChunk as AgentChunk;
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
 use futures_util::StreamExt;
+use rig::tool::server::ToolServerHandle;
 use rig::tool::{rmcp::McpClientHandler, server::ToolServer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -79,6 +81,10 @@ pub enum Error {
     },
     #[error("Failed to connect to MCP server at {url}: {reason}")]
     McpConnection { url: String, reason: String },
+    #[error(
+        "Client registry type mismatch — same provider/model/credentials key used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Response structure for completion events.
@@ -133,6 +139,88 @@ pub struct Credentials {
     pub region: Option<String>,
 }
 
+/// Builds an `AgentClient` from a rendered config.
+///
+/// Loads credentials, applies optional provider tuning (temperature, max
+/// tokens, static context), attaches the shared MCP tool server handle if
+/// any, and returns a ready-to-use client. Used by `EventHandler::resolve_client`
+/// on a cache miss in the worker-wide client registry.
+async fn build_agent_client(
+    config: super::config::Processor,
+    tool_server_handle: Option<ToolServerHandle>,
+    task_context: &flowgen_core::task::context::TaskContext,
+    static_context: Option<Vec<flowgen_core::resource::Source>>,
+) -> Result<crate::agent::AgentClient, Error> {
+    let credentials =
+        match config.provider {
+            super::config::Provider::Custom => {
+                if let Some(path) = &config.credentials_path {
+                    Some(load_credentials(path).await?)
+                } else {
+                    None
+                }
+            }
+            _ => {
+                let path = config.credentials_path.as_ref().ok_or_else(|| {
+                    Error::MissingCredentialsPath {
+                        provider: format!("{:?}", config.provider),
+                    }
+                })?;
+                Some(load_credentials(path).await?)
+            }
+        };
+
+    let mut builder =
+        crate::agent::ClientBuilder::new(config.provider.clone(), config.model.clone());
+
+    if let Some(creds) = credentials {
+        builder = builder.credentials(creds);
+    }
+    if let Some(endpoint) = &config.endpoint {
+        builder = builder.endpoint(endpoint.clone());
+    }
+    if let Some(temp) = config.temperature {
+        builder = builder.temperature(temp);
+    }
+    if let Some(tokens) = config.max_tokens {
+        builder = builder.max_tokens(tokens);
+    }
+
+    if let Some(contexts) = static_context {
+        for (idx, context_source) in contexts.iter().enumerate() {
+            let resolved_text = context_source
+                .resolve(task_context.resource_loader.as_ref())
+                .await
+                .map_err(|source| Error::ResourceLoad { source })?;
+            builder = builder.static_context_document(rig::completion::Document {
+                id: format!("context_{idx}"),
+                text: resolved_text,
+                additional_props: std::collections::HashMap::new(),
+            });
+        }
+    }
+
+    if let Some(max_turns) = config.max_turns {
+        builder = builder.max_turns(max_turns);
+    }
+
+    if let Some(handle) = tool_server_handle {
+        builder = builder.tool_server_handle(handle);
+    }
+
+    builder
+        .build()
+        .map_err(|source| Error::AgentClient { source })
+}
+
+/// True if `err` represents an upstream HTTP 4xx (treated as permanent).
+///
+/// Rig surfaces provider errors as opaque strings; matched textually since
+/// the typed enum doesn't carry the status. Replace once rig exposes it.
+fn is_upstream_client_error(err: &Error) -> bool {
+    err.to_string().contains("Invalid status code 4")
+}
+
 /// Loads credentials from a JSON file.
 async fn load_credentials(path: &std::path::Path) -> Result<Credentials, Error> {
     let content = tokio::fs::read_to_string(path)
@@ -160,11 +248,65 @@ pub struct EventHandler {
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
-    /// AI agent client for generating completions.
-    client: crate::agent::AgentClient,
+    /// Shared MCP tool server, built once at init and cloned into each
+    /// per-key agent client. `None` when no MCP servers are configured.
+    tool_server_handle: Option<ToolServerHandle>,
 }
 
 impl EventHandler {
+    /// Builds an error message tagged with the rendered provider/model/endpoint
+    /// so the caller can tell which backend failed. Returns `None` if rendering
+    /// itself errors — the caller then falls back to the raw error string.
+    fn render_error_context(&self, event: &Event, err: &Error) -> Option<String> {
+        let event_value = serde_json::value::Value::try_from(event).ok()?;
+        let rendered = self.config.render(&event_value).ok()?;
+        let endpoint = rendered.endpoint.as_deref().unwrap_or("default");
+        Some(format!(
+            "{:?}/{} @ {}: {}",
+            rendered.provider, rendered.model, endpoint, err
+        ))
+    }
+
+    /// Resolves the agent client for this event.
+    ///
+    /// Renders the config against the event so per-event templated fields
+    /// (`endpoint`, `model`, `credentials_path`) become concrete values, then
+    /// looks the resulting `(provider, model, endpoint, credentials_path)` up
+    /// in the worker-wide client registry. The first event for a given key
+    /// pays the credential-load and client-build cost; subsequent events
+    /// reuse the cached `AgentClient`.
+    async fn resolve_client(&self, event: &Event) -> Result<Arc<crate::agent::AgentClient>, Error> {
+        let event_value = serde_json::value::Value::try_from(event)
+            .map_err(|source| Error::EventBuilder { source })?;
+        let rendered = self
+            .config
+            .render(&event_value)
+            .map_err(|source| Error::ConfigRender { source })?;
+
+        let key = flowgen_core::client_registry::ClientKey::new(&(
+            format!("{:?}", rendered.provider),
+            rendered.model.clone(),
+            rendered.endpoint.clone(),
+            rendered.credentials_path.clone(),
+        ));
+
+        let tool_server_handle = self.tool_server_handle.clone();
+        let task_context = Arc::clone(&self.task_context);
+        let static_context = self.config.static_context.clone();
+
+        self.task_context
+            .client_registry
+            .get_or_init(key, || async move {
+                build_agent_client(rendered, tool_server_handle, &task_context, static_context)
+                    .await
+            })
+            .await
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })
+    }
+
     /// Processes an event by generating a completion.
     ///
     /// Dispatches to streaming or non-streaming path based on config.
@@ -183,15 +325,14 @@ impl EventHandler {
     /// Non-streaming completion: waits for the full response and emits a single event.
     #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
+        let client = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
 
-            // Generate completion using the Rig agent client.
-            let completion_text = self
-                .client
+            let completion_text = client
                 .complete(&rendered_prompt, rendered_system_prompt.as_deref())
                 .await
                 .map_err(|source| Error::AgentClient { source })?;
@@ -225,11 +366,12 @@ impl EventHandler {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        let client = self.resolve_client(&event).await?;
+
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
 
-            let mut stream = self
-                .client
+            let mut stream = client
                 .complete_stream(&rendered_prompt, rendered_system_prompt.as_deref())
                 .await;
 
@@ -420,87 +562,27 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor by loading credentials and setting up the client.
+    /// Initializes the processor.
+    ///
+    /// Only sets up things that are independent of any individual event: the
+    /// shared MCP tool server (connected to configured MCP servers). Provider
+    /// credentials, endpoint, and model resolution are deferred to
+    /// [`EventHandler::resolve_client`] so per-event templating on those
+    /// fields works for routing-style flows.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
-        // Load credentials based on provider requirements.
-        let credentials = match self.config.provider {
-            super::config::Provider::Custom => {
-                // Custom providers are optional.
-                if let Some(path) = &self.config.credentials_path {
-                    Some(load_credentials(path).await?)
-                } else {
-                    None // Local providers like Ollama may not need credentials.
-                }
-            }
-            _ => {
-                // OpenAI, Anthropic, Google, Cohere all require credentials.
-                let path = self.config.credentials_path.as_ref().ok_or_else(|| {
-                    Error::MissingCredentialsPath {
-                        provider: format!("{:?}", self.config.provider),
-                    }
-                })?;
-
-                Some(load_credentials(path).await?)
-            }
-        };
-
-        // Build the agent client with provider, model, and optional parameters.
-        let mut builder = crate::agent::ClientBuilder::new(
-            self.config.provider.clone(),
-            self.config.model.clone(),
-        );
-
-        if let Some(creds) = credentials {
-            builder = builder.credentials(creds);
-        }
-
-        if let Some(endpoint) = &self.config.endpoint {
-            builder = builder.endpoint(endpoint.clone());
-        }
-
-        if let Some(temp) = self.config.temperature {
-            builder = builder.temperature(temp);
-        }
-
-        if let Some(tokens) = self.config.max_tokens {
-            builder = builder.max_tokens(tokens);
-        }
-
-        // Load static context documents for RAG (without event data - truly static).
-        if let Some(ref contexts) = self.config.static_context {
-            for (idx, context_source) in contexts.iter().enumerate() {
-                let resolved_text = context_source
-                    .resolve(self.task_context.resource_loader.as_ref())
-                    .await
-                    .map_err(|source| Error::ResourceLoad { source })?;
-
-                builder = builder.static_context_document(rig::completion::Document {
-                    id: format!("context_{idx}"),
-                    text: resolved_text,
-                    additional_props: std::collections::HashMap::new(),
-                });
-            }
-        }
-
-        // Set maximum agent turns for multi-turn conversations.
-        if let Some(max_turns) = self.config.max_turns {
-            builder = builder.max_turns(max_turns);
-        }
-
-        // Connect to MCP servers and register discovered tools.
-        if !self.config.mcp_servers.is_empty() {
-            let tool_server_handle = ToolServer::new().run();
+        let tool_server_handle = if self.config.mcp_servers.is_empty() {
+            None
+        } else {
+            let handle = ToolServer::new().run();
             let client_info = rmcp::model::ClientInfo::new(
                 rmcp::model::ClientCapabilities::default(),
                 rmcp::model::Implementation::from_build_env(),
             );
 
             for mcp_config in &self.config.mcp_servers {
-                let handler =
-                    McpClientHandler::new(client_info.clone(), tool_server_handle.clone());
+                let handler = McpClientHandler::new(client_info.clone(), handle.clone());
                 let mut transport_config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(mcp_config.url.as_str());
 
-                // Load credentials from file and set the authorization header.
                 if let Some(ref creds_path) = mcp_config.credentials_path {
                     let creds = flowgen_core::credentials::load_http_credentials(creds_path)
                         .await
@@ -527,26 +609,20 @@ impl flowgen_core::task::runner::Runner for Processor {
                 info!(url = %mcp_config.url, "Connected to MCP server and discovered tools.");
             }
 
-            builder = builder.tool_server_handle(tool_server_handle);
-        }
+            Some(handle)
+        };
 
-        let client = builder
-            .build()
-            .map_err(|source| Error::AgentClient { source })?;
-
-        let event_handler = EventHandler {
+        Ok(EventHandler {
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-            client,
-        };
-
-        Ok(event_handler)
+            tool_server_handle,
+        })
     }
 
-    #[tracing::instrument(skip(self), name = "task.run", fields(flow = %self.task_context.flow.name, task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
+    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
     async fn run(mut self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
@@ -585,7 +661,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     Ok(result) => Ok(result),
                                     Err(e) => {
                                         error!(error = %e, "Failed to generate completion");
-                                        Err(tokio_retry::RetryError::transient(e))
+                                        // Upstream 4xx (bad request, auth, quota) won't recover from retry.
+                                        if is_upstream_client_error(&e) {
+                                            Err(tokio_retry::RetryError::permanent(e))
+                                        } else {
+                                            Err(tokio_retry::RetryError::transient(e))
+                                        }
                                     }
                                 }
                             })
@@ -593,12 +674,16 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "Completion failed after all retry attempts");
+                                // Tag with provider/model so multi-backend proxies show which one failed.
+                                let context_msg = event_handler
+                                    .render_error_context(&event, &err)
+                                    .unwrap_or_else(|| err.to_string());
                                 let mut error_event = event.clone();
-                                error_event.error = Some(err.to_string());
+                                error_event.error = Some(context_msg.clone());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
                                 } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    arc.signal_completion_with_error(err.to_string());
+                                    arc.signal_completion_with_error(context_msg);
                                 }
                             }
                         }

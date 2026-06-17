@@ -585,7 +585,15 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     }));
                                                 }
                                             }
-                                            Err(tokio_retry::RetryError::transient(e))
+                                            let retryable = match &e {
+                                                Error::BulkApiQuery { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
+                                                Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
+                                            }
                                         }
                                     }
                                 })

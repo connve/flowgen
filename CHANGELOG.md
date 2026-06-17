@@ -48,6 +48,67 @@
   payload configs. `from_event` still works but is now considered
   deprecated in favour of the template approach.
 
+- **Per-event templating in `ai_completion`.** Credentials, endpoint, and
+  model fields are now resolved at handle time against the incoming event
+  instead of once at init. A single `ai_completion` task can route to
+  multiple providers based on event data, with clients keyed and reused
+  via the worker-wide `ClientRegistry`. Enables a consolidated LLM proxy
+  flow (one task fans out to z.ai, Moonshot, OpenAI, etc.) instead of
+  one flow per provider.
+
+- **Leaf-task errors surface to source.** Added `signal_completion_with_error`
+  to `CompletionState` so failed leaves deliver the underlying error to the
+  source (HTTP webhook, MCP tool call, AI gateway request) instead of
+  letting the source hang until `ack_timeout`. Wired across all 19
+  leaf-capable processors. MCP tool callers and HTTP/AI-gateway clients
+  now see the actual upstream error (Salesforce `MALFORMED_SEARCH`, LLM
+  provider 4xx body, etc.) instead of an opaque timeout.
+
+- **Fail-fast on upstream 4xx in Salesforce processors.** Adopts
+  `salesforce_core 0.16.0`'s new `is_retryable()` helper on every
+  `restapi`, `bulkapi`, `toolingapi`, `soapapi`, and `pubsubapi` error
+  type. Permanent failures (bad input, auth, malformed query) now exit
+  the retry loop immediately instead of being wrapped as transient. Same
+  classification added to `ai_completion` for upstream LLM 4xx responses
+  (text-matched against rig's error string until rig exposes a typed
+  status). HTTP 429 is treated as permanent for LLMs since rate-limit
+  recovery exceeds retry-loop timescales.
+
+- **SOSL phrase content auto-escape.** `salesforce_restapi_search` now
+  escapes SOSL reserved characters (`- ? & | ! { } [ ] ( ) ^ ~ * : \ " ' +`)
+  inside `FIND {"..."}` phrase clauses before sending the query. Search
+  terms with hyphens, ampersands, or other reserved characters work
+  without manual escaping or `MALFORMED_SEARCH` errors. Already-escaped
+  characters are passed through verbatim.
+
+- **AI gateway error surfacing.** OpenAI-compatible streaming responses
+  now emit `data: {"error": ...}` SSE frames when a leaf task fails;
+  non-streaming responses return HTTP 502 with the underlying message
+  instead of dropping the error and returning empty content.
+
+- **`Source::Inline` now renders against event data.** Inline content
+  passed through `Source::Inline::render()` previously assumed
+  `config.render()` had already substituted templates at init time and
+  returned the raw string. Processors that defer rendering to handle time
+  (e.g. `ai_completion`) need the actual substitution. Inline templates
+  without `{{...}}` syntax are unaffected (idempotent pass).
+
+- **Per-event logging downgraded to `debug!`.** `EventLogger` no longer
+  emits `info!` per event built — streaming LLM responses with hundreds
+  of token chunks no longer flood the log. Set `RUST_LOG=debug` to
+  restore the per-event detail.
+
+- **`ack_timeout` default documented.** The MCP `mcp_tool` task gained a
+  fields table covering all configuration options. All five source-task
+  docs (`generate`, `http/webhook`, `nats/subscriber`, `salesforce/pubsub`,
+  `ai/mcp`) now state the `ack_timeout` default as "wait indefinitely"
+  with accurate per-source semantics.
+
+- **SOSL prefix matching documented.** Added a "Prefix matching" section
+  to `salesforce/rest` docs explaining how to append `*` inside the
+  phrase to match prefixes. Example MCP/HTTP SOSL flows updated to use
+  the wildcard form by default.
+
 ### Fixes
 
 - **Source ack hung in fan-out / fan-in DAGs.** When two branches re-merged

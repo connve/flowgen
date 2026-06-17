@@ -300,18 +300,14 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                 }
                                             }
 
-                                            let is_permanent = matches!(
-                                                &e,
-                                                Error::SearchOperation { source }
-                                                    if matches!(source.as_ref(),
-                                                        salesforce_core::restapi::search::Error::SearchApi { source: inner }
-                                                            if !inner.is_retryable())
-                                            );
-
-                                            if is_permanent {
-                                                Err(tokio_retry::RetryError::permanent(e))
-                                            } else {
+                                            let retryable = match &e {
+                                                Error::SearchOperation { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
                                                 Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
                                             }
                                         }
                                     }

@@ -390,7 +390,9 @@ async fn dispatch_blocking(
             .map_err(|_| DispatchError::FlowCompletionFailed)?,
     };
 
-    let completion_data = result.map_err(|_| DispatchError::FlowCompletionFailed)?;
+    let completion_data = result.map_err(|e| DispatchError::FlowError {
+        message: e.to_string(),
+    })?;
 
     let content = completion_data
         .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
@@ -532,12 +534,31 @@ async fn dispatch_streaming(
             }
         };
 
-        if let Some(Ok(Ok(Some(data)))) = &result {
-            if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
-                let chunk =
-                    ChatCompletionChunk::content(&request_id, created, &model, content.to_string());
-                send_sse(&sse_tx, &chunk).await;
+        match &result {
+            Some(Ok(Ok(Some(data)))) => {
+                if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
+                    let chunk = ChatCompletionChunk::content(
+                        &request_id,
+                        created,
+                        &model,
+                        content.to_string(),
+                    );
+                    send_sse(&sse_tx, &chunk).await;
+                }
             }
+            Some(Ok(Err(e))) => {
+                // Surface leaf-task failure as an SSE error frame so the client sees the cause, not an empty stream.
+                let payload = OpenAiErrorResponse {
+                    error: OpenAiErrorDetail {
+                        message: e.to_string(),
+                        error_type: "server_error",
+                    },
+                };
+                if let Ok(json) = serde_json::to_string(&payload) {
+                    let _ = sse_tx.send(Ok(format!("data: {json}\n\n"))).await;
+                }
+            }
+            _ => {}
         }
 
         send_sse(
@@ -595,6 +616,8 @@ enum DispatchError {
     },
     #[error("Flow completion failed or timed out")]
     FlowCompletionFailed,
+    #[error("Flow error: {message}")]
+    FlowError { message: String },
 }
 
 /// OpenAI-compatible error response body.
@@ -627,7 +650,8 @@ impl DispatchError {
             | DispatchError::AuthProviderMissing => "authentication_error",
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
-            | DispatchError::FlowCompletionFailed => "server_error",
+            | DispatchError::FlowCompletionFailed
+            | DispatchError::FlowError { .. } => "server_error",
         }
     }
 }
@@ -648,6 +672,7 @@ impl IntoResponse for DispatchError {
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            DispatchError::FlowError { .. } => StatusCode::BAD_GATEWAY,
         };
         let body = OpenAiErrorResponse {
             error: OpenAiErrorDetail {

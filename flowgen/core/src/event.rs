@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::info;
+use tracing::debug;
 
 /// One-shot channel used by a flow source to wait for end-to-end completion.
 /// Carries an optional result payload for request-response flows (HTTP webhook, MCP).
@@ -216,7 +216,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
             }
 
             if self.fields.is_empty() {
-                info!(
+                debug!(
                     event.subject = %subject,
                     event.id = %event_id,
                 );
@@ -228,7 +228,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                info!(
+                debug!(
                     event.subject = %subject,
                     event.id = %event_id,
                     context = %field_str,

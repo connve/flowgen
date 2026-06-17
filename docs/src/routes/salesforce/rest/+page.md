@@ -146,6 +146,14 @@ SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars
 
 Inside the `{"..."}` phrase, the processor auto-escapes SOSL reserved characters (`- ? & | ! { } [ ] ( ) ^ ~ * : \ " ' +`) before sending the query, so search terms with hyphens, spaces, or other reserved characters work without manual escaping.
 
+### Prefix matching
+
+Phrase search matches whole tokens. To match terms that *start with* the search input (e.g. `test` should also find `test-rmp` and `Test Account 1`), append `*` inside the phrase:
+
+```yaml
+query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id, Name)'
+```
+
 ### Examples
 
 **Search with specific scope and field limits:**
