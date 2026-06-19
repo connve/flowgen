@@ -131,6 +131,8 @@ pub enum TaskType {
     llm_proxy(flowgen_ai_agent::ai_gateway::config::Processor),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
     git_sync(flowgen_git::sync::config::Processor),
+    /// OCI sync task for pulling flow artifacts from an OCI registry into the cache.
+    oci_sync(flowgen_oci::sync::config::Processor),
 }
 
 impl TaskType {
@@ -167,6 +169,7 @@ impl TaskType {
             TaskType::mcp_tool(_) => "mcp_tool",
             TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
+            TaskType::oci_sync(_) => "oci_sync",
         }
     }
 
@@ -203,6 +206,7 @@ impl TaskType {
             TaskType::mcp_tool(c) => &c.name,
             TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
+            TaskType::oci_sync(c) => &c.name,
         }
     }
 
@@ -239,6 +243,7 @@ impl TaskType {
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
             TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
+            TaskType::oci_sync(c) => c.depends_on.as_ref(),
         }
     }
 }

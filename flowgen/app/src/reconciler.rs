@@ -212,17 +212,9 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
 /// running and the error is logged. The new flow is fully ready before the old
 /// one is touched.
 async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) {
-    let flow_name = match derive_flow_name(key, ctx) {
-        Some(name) => name,
-        None => return,
-    };
-
-    if ctx.filesystem_flow_names.contains(&flow_name) {
-        warn!(
-            flow = %flow_name,
-            key = %key,
-            "Ignoring cache update: this flow is loaded from the filesystem and takes precedence."
-        );
+    // Gate by the cache prefix so non-flow keys are ignored entirely. The
+    // derived name is only used until we have the parsed yaml.
+    if derive_flow_name(key, ctx).is_none() {
         return;
     }
 
@@ -244,12 +236,16 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         return;
     }
 
-    if config.flow.name != flow_name {
-        error!(
+    // `flow.name` is the source of truth for flow identity. The cache key
+    // derived from the storage path is informational only and never gates
+    // loading.
+    let flow_name = config.flow.name.clone();
+
+    if ctx.filesystem_flow_names.contains(&flow_name) {
+        warn!(
+            flow = %flow_name,
             key = %key,
-            key_derived = %flow_name,
-            config_name = %config.flow.name,
-            "Flow name in config does not match cache key. Skipping."
+            "Ignoring cache update: this flow is loaded from the filesystem and takes precedence."
         );
         return;
     }

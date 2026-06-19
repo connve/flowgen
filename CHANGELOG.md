@@ -24,6 +24,16 @@
   translation. Multiple gateways can run on a single port, routed by the
   `model` field prefix.
 
+- **OCI artifact sync.** New `oci_sync` task pulls flow definitions from
+  an OCI registry (GHCR, ECR, GAR, Artifactory, Harbor) and emits one
+  event per layer. Output shape mirrors `git_sync` so bootstrap
+  pipelines can swap one for the other. Credentials auto-detect both
+  the flowgen-native `{username, password}` shape and the standard
+  Docker `config.json` (`kubernetes.io/dockerconfigjson`) payload — the
+  same Secret used as the pod's `imagePullSecrets` can authenticate
+  artifact pulls. Pure-Rust HTTPS stack via `oci-client`, no shell-out
+  to `oras` or `docker`.
+
 - **Versioned API paths.** Default MCP path changed from `/mcp` to
   `/mcp/v1` and default HTTP webhook path changed from
   `/api/flowgen/workers` to `/api/flowgen/workers/v1`, following the

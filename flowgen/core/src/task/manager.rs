@@ -55,23 +55,45 @@ fn spawn_renewal_task(
                         warn!(
                             task_id = %task_id,
                             current_holder = %holder,
-                            "Lost lease ownership, notifying flow"
+                            "Lost lease ownership, notifying flow and re-arming acquisition"
                         );
 
                         if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
                             debug!("Flow already terminated");
+                            break;
                         }
+
+                        // Hand off to an infinite-retry acquisition task so
+                        // this pod gets another shot at leadership when the
+                        // current holder yields. Without this the flow would
+                        // sit waiting on `leadership_rx.recv()` forever.
+                        spawn_acquisition_retry_task(
+                            task_id.clone(),
+                            lease_name.clone(),
+                            executor.clone(),
+                            current_revision.clone(),
+                            response_tx.clone(),
+                        );
                         break;
                     }
                     Ok(crate::executor::RenewalResult::LeaseDeleted) => {
                         warn!(
                             task_id = %task_id,
-                            "Lease was deleted, notifying flow"
+                            "Lease was deleted, notifying flow and re-arming acquisition"
                         );
 
                         if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
                             debug!("Flow already terminated");
+                            break;
                         }
+
+                        spawn_acquisition_retry_task(
+                            task_id.clone(),
+                            lease_name.clone(),
+                            executor.clone(),
+                            current_revision.clone(),
+                            response_tx.clone(),
+                        );
                         break;
                     }
                     Err(e) => {
@@ -481,5 +503,90 @@ impl TaskManagerBuilder {
             active_leases: Arc::new(Mutex::new(HashMap::new())),
             peer_registry: self.peer_registry,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::memory::MemoryCache;
+    use crate::executor::{Executor, LeaseConfig};
+    use std::time::Duration;
+
+    fn make_executor(holder: &str, cache: Arc<dyn crate::cache::Cache>) -> Arc<Executor> {
+        let config = LeaseConfig {
+            holder_identity: holder.to_string(),
+            lease_duration: Duration::from_secs(2),
+            renewal_interval: Duration::from_millis(100),
+            ..Default::default()
+        };
+        Arc::new(Executor::new(cache, config).unwrap())
+    }
+
+    /// Reproducer for the "lost-then-stranded" regression. When a renewal
+    /// loses ownership the renewal task previously just returned after
+    /// sending `NotLeader` — nobody re-armed acquisition, so the flow's
+    /// `leadership_rx.recv()` hung forever. The fix spawns an acquisition
+    /// retry task immediately after the lost-ownership notification.
+    ///
+    /// We exercise the fix by calling `spawn_renewal_task` directly against
+    /// a forged "wrong" current revision so the next renew tick definitely
+    /// returns `LostOwnership`, then assert two things:
+    ///
+    /// 1. The flow side receives `NotLeader`.
+    /// 2. Once the lease becomes acquirable again, the flow side receives
+    ///    `Leader` — proof the acquisition retry task was spawned.
+    #[tokio::test]
+    async fn renewal_re_arms_acquisition_after_lost_ownership() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+
+        let exec1 = make_executor("pod-1", cache.clone());
+        let exec2 = make_executor("pod-2", cache.clone());
+
+        // Pod 2 owns the lease — we want pod 1's renewal to lose immediately.
+        let res = exec2.acquire_lease("acct_nba").await.unwrap();
+        let pod2_revision = match res {
+            crate::executor::LeaseResult::Acquired { revision } => revision,
+            other => panic!("pod-2 should acquire fresh, got {other:?}"),
+        };
+
+        // Spawn a renewal task for pod 1 with a STALE revision. On the very
+        // next tick the renewal call will fail with RevisionMismatch and
+        // surface `LostOwnership`.
+        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+        let stale_revision = Arc::new(Mutex::new(pod2_revision.saturating_sub(1)));
+        spawn_renewal_task(
+            "acct_nba".to_string(),
+            "acct_nba".to_string(),
+            exec1.clone(),
+            stale_revision,
+            response_tx,
+        );
+
+        // 1. NotLeader must arrive within a couple of renewal intervals.
+        let not_leader = tokio::time::timeout(Duration::from_secs(2), response_rx.recv())
+            .await
+            .expect("must report NotLeader within renewal interval")
+            .expect("channel still open");
+        assert_eq!(not_leader, LeaderElectionResult::NotLeader);
+
+        // 2. Pod 2 releases. The fix has now installed an acquisition retry
+        // task on the same response channel; it should grab the free lease
+        // and emit Leader. Pre-fix nothing was spawned and this would hang.
+        exec2.release_lease("acct_nba").await.unwrap();
+
+        let became_leader = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match response_rx.recv().await {
+                    Some(LeaderElectionResult::Leader) => break true,
+                    Some(LeaderElectionResult::NotLeader) => continue,
+                    Some(LeaderElectionResult::NoElection) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .expect("manager must re-arm acquisition after lost ownership");
+        assert!(became_leader, "leadership channel closed prematurely");
     }
 }

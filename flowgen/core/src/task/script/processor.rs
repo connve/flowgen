@@ -878,6 +878,16 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        // YAML parser — needed by bootstrap flows that read user flows from
+        // disk/git and key them by `flow.name` rather than filename.
+        engine.register_fn(
+            "parse_yaml",
+            |yaml: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+                let value: Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
+                rhai::serde::to_dynamic(value).map_err(|e| e.to_string().into())
+            },
+        );
+
         let event_handler = EventHandler {
             code: script_code,
             tx: self.tx.clone(),

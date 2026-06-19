@@ -1,0 +1,28 @@
+[package]
+name = "flowgen_oci"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "flowgen_oci"
+path = "src/lib.rs"
+
+[dependencies]
+flowgen_core = { path = "../core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio-retry = { workspace = true }
+futures-util = { workspace = true }
+humantime-serde = { workspace = true }
+oci-client = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

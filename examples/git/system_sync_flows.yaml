@@ -1,0 +1,150 @@
+# Bootstrap flow: reconciles user flows from a Git repository into the
+# system NATS KV cache. Each tick pulls the repo, parses each yaml file
+# to extract `flow.name`, and writes one cache entry per flow keyed by
+# `flow.name`. Cache entries that no longer have a matching file in the
+# repo are deleted.
+#
+# Once running, user flows load from the cache via `flows.cache` in the
+# worker config — no ConfigMap mount required for them.
+#
+# Required:
+#   - /etc/flowgen/credentials/git.json with
+#       { "token": "<github_pat_or_gitlab_deploy_token>" }
+#   - /etc/nats/credentials.json for NATS KV writes.
+flow:
+  name: system_sync_flows
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: tick
+        interval: "30s"
+
+    # Works with any HTTPS Git host: GitHub, GitLab, Bitbucket, Gitea,
+    # self-hosted. SSH URLs are not supported — use HTTPS + token.
+    - git_sync:
+        name: pull_repo
+        repository_url: "https://git.example.com/your-org/your-flows.git"
+        branch: main
+        path: "flows/"
+        credentials_path: /etc/flowgen/credentials/git.json
+
+    # Aggregate the per-file events from `pull_repo` into a single
+    # batched event. The diff downstream needs the full present-set
+    # at once to detect which cache keys are missing from the repo.
+    - buffer:
+        name: collect_files
+        size: 10000
+        timeout: "5s"
+
+    # Stash the file batch in meta so it survives the next task which
+    # overwrites event.data with the cache listing.
+    - script:
+        name: stash_files
+        code: |
+          ctx.meta.file_batch = event.data.batch;
+          event
+
+    # Skip the rest of the pipeline when the repo commit has not moved
+    # since the last successful sync. The new commit is parked on meta
+    # and only persisted to ctx.cache once every downstream put and
+    # delete has completed, so a crash mid-tick keeps the next tick
+    # honest.
+    - script:
+        name: skip_if_unchanged
+        code: |
+          let current_commit = event.meta.file_batch[0].commit;
+          let last_synced = ctx.cache.get("last_synced_commit");
+          if last_synced == current_commit {
+              ()
+          } else {
+              ctx.meta.current_commit = current_commit;
+              event
+          }
+
+    - nats_kv_store:
+        name: list_existing
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: list
+        key_prefix: "flowgen.flows."
+
+    # Compute the diff: each file becomes a put keyed by `flow.name`,
+    # each cache key with no matching `flow.name` becomes a delete.
+    - script:
+        name: compute_diff
+        code: |
+          let files = event.meta.file_batch;
+          let existing = event.data.keys;
+          let present = #{};
+          let actions = [];
+          for file in files {
+              let parsed = parse_yaml(file.content);
+              let flow_name = parsed.flow.name;
+              let key = "flowgen.flows." + flow_name;
+              present[key] = true;
+              actions.push(#{
+                  action: "put",
+                  key: key,
+                  content: file.content,
+              });
+          }
+          for key in existing {
+              if present[key] != true {
+                  actions.push(#{
+                      action: "delete",
+                      key: key,
+                      content: "",
+                  });
+              }
+          }
+          actions
+
+    # The script processor fans the Rhai array out one event per element.
+    # Two filter scripts split the stream by action and drop non-matching
+    # events with `()`.
+    - script:
+        name: select_puts
+        code: |
+          if event.data.action == "put" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - script:
+        name: select_deletes
+        code: |
+          if event.data.action == "delete" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - nats_kv_store:
+        name: write_to_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: put
+        key: "{{event.data.key}}"
+        depends_on: [select_puts]
+
+    - nats_kv_store:
+        name: delete_from_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: delete
+        key: "{{event.data.key}}"
+        depends_on: [select_deletes]
+
+    # Persist the new commit only after both write branches have
+    # committed. Runs once per put and per delete, idempotent since
+    # they all write the same commit.
+    - script:
+        name: mark_synced
+        code: |
+          ctx.cache.put("last_synced_commit", event.meta.current_commit);
+          event
+        depends_on: [write_to_cache, delete_from_cache]

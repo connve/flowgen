@@ -67,6 +67,12 @@ gix = { version = "0.83", default-features = false, features = [
     "sha1",
     "max-performance-safe",
 ] }
+# Pure-Rust OCI registry client. Uses rustls under the hood, no shelling
+# out to `oras` or `docker`. Powers the `oci_sync` task that pulls flow
+# artifacts from container registries (GHCR, ECR, GAR, Artifactory etc).
+oci-client = { version = "0.17", default-features = false, features = [
+    "rustls-tls",
+] }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550
 async-nats = { git = "https://github.com/nats-io/nats.rs", rev = "7e6672c240a4a1bd7726d37ac7b52a290af6b690" }

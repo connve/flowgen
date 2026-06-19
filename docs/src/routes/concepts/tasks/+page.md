@@ -45,6 +45,7 @@ Processors receive events, do something with them, and emit events to the next t
 | `mssql_query` | Microsoft SQL Server queries. |
 | `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
 | `git_sync` | Clone/pull a Git repository and emit one event per file. |
+| `oci_sync` | Pull an OCI artifact from a registry and emit one event per layer. |
 | `ai_completion` | LLM completions from multiple providers. |
 | `llm_proxy` | Registers a flow as a backend on the AI gateway server. |
 | `mcp_tool` | Expose flows as MCP tools for LLM agents. |

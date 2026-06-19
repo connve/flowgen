@@ -2,6 +2,8 @@
 
 Clones or pulls a Git repository and emits one event per file. Downstream tasks decide what to do with the content — parse it, store it, transform it.
 
+Works with any HTTPS Git host: GitHub, GitLab, Bitbucket, Gitea, self-hosted. SSH URLs are not supported — use HTTPS + a token.
+
 Each event contains `{path, content, commit}` where `path` is relative to the scanned directory.
 
 ## Configuration
@@ -9,7 +11,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 ```yaml
 - git_sync:
     name: sync_flows
-    repository_url: "https://github.com/org/configs.git"
+    repository_url: "https://git.example.com/org/configs.git"
     branch: main
     path: "flows/"
     credentials_path: /etc/flowgen/credentials/git.json
@@ -40,7 +42,7 @@ flow:
 
     - git_sync:
         name: pull_repo
-        repository_url: "https://github.com/org/configs.git"
+        repository_url: "https://git.example.com/org/configs.git"
         path: "flows/"
         credentials_path: /etc/flowgen/credentials/git.json
 

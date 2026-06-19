@@ -22,6 +22,7 @@ flowgen_mssql = { path = "../mssql" }
 flowgen_ai_agent = { path = "../ai-agent" }
 flowgen_mcp = { path = "../mcp" }
 flowgen_git = { path = "../git" }
+flowgen_oci = { path = "../oci" }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
