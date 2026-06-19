@@ -44,8 +44,6 @@ pub enum Error {
     MissingCredentials,
     #[error("Custom provider requires endpoint configuration")]
     MissingEndpoint,
-    #[error("Provider not yet implemented: {provider}")]
-    ProviderNotImplemented { provider: String },
     #[error("OpenAI client creation failed: {source}")]
     OpenAIClient {
         #[source]
@@ -332,9 +330,6 @@ impl ClientBuilder {
                 })
             }
             Provider::Ollama | Provider::Custom => self.build_openai_compatible_provider(),
-            _ => Err(Error::ProviderNotImplemented {
-                provider: format!("{:?}", self.provider),
-            }),
         }
     }
 

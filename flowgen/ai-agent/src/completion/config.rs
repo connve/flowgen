@@ -132,6 +132,9 @@ pub struct McpServerConfig {
 impl ConfigExt for Processor {}
 
 /// AI provider options.
+///
+/// Providers not listed here can be reached via `Provider::Custom` with
+/// an OpenAI-compatible endpoint in front.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -142,29 +145,17 @@ pub enum Provider {
     Anthropic,
     /// Cohere provider.
     Cohere,
-    /// Google provider (Gemini models).
+    /// Google AI provider (Gemini API).
     Google,
-    /// Azure OpenAI provider.
-    Azure,
-    /// DeepSeek provider.
-    DeepSeek,
-    /// Galadriel provider.
-    Galadriel,
+    /// Google Vertex AI provider (uses Application Default Credentials).
+    VertexAi,
     /// Groq provider.
     Groq,
     /// Hugging Face provider.
     HuggingFace,
-    /// Hyperbolic provider.
-    Hyperbolic,
-    /// Llamafile provider.
-    Llamafile,
-    /// Mira provider.
-    Mira,
     /// Mistral provider.
     Mistral,
-    /// Moonshot provider.
-    Moonshot,
-    /// Ollama provider.
+    /// Ollama provider (OpenAI-compatible; requires `endpoint`).
     Ollama,
     /// OpenRouter provider.
     OpenRouter,
@@ -172,13 +163,9 @@ pub enum Provider {
     Perplexity,
     /// Together AI provider.
     Together,
-    /// Voyage AI provider (embeddings only).
-    VoyageAi,
     /// xAI (Grok) provider.
     Xai,
-    /// Google Vertex AI provider (uses service account credentials).
-    VertexAi,
-    /// Custom provider (requires custom endpoint configuration).
+    /// Custom OpenAI-compatible provider (requires `endpoint`).
     Custom,
 }
 
