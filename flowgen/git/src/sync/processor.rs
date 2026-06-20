@@ -122,8 +122,10 @@ pub struct EventHandler {
     /// `clone_path` from config, or the derived default
     /// `<temp>/<flow_name>/<task_name>`.
     clone_path: PathBuf,
-    /// HTTPS token loaded from the credentials file at init, if configured.
-    token: Option<String>,
+    /// HTTPS credentials loaded from the credentials file at init, if configured.
+    /// Surfaced to a gix credential helper at fetch time so the token never
+    /// embeds in the repository URL.
+    credentials: Option<Credentials>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -144,7 +146,7 @@ impl EventHandler {
             let commit = clone_or_pull(
                 &self.config.repository_url,
                 &self.config.branch,
-                self.token.as_deref(),
+                self.credentials.clone(),
                 &self.clone_path,
             )
             .await?;
@@ -242,18 +244,17 @@ impl EventHandler {
 async fn clone_or_pull(
     repository_url: &str,
     branch: &str,
-    token: Option<&str>,
+    credentials: Option<Credentials>,
     clone_path: &Path,
 ) -> Result<String, Error> {
-    let url = build_authenticated_url(repository_url, token);
+    let url = repository_url.to_string();
     let clone_path = clone_path.to_path_buf();
     let branch = branch.to_string();
-    let original_url = repository_url.to_string();
 
     let span = tracing::Span::current();
     task::spawn_blocking(move || {
         let _enter = span.enter();
-        sync_blocking(&url, &original_url, &branch, &clone_path)
+        sync_blocking(&url, &branch, credentials.as_ref(), &clone_path)
     })
     .await
     .map_err(|source| Error::JoinError { source })?
@@ -262,59 +263,111 @@ async fn clone_or_pull(
 /// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
 fn sync_blocking(
     url: &str,
-    original_url: &str,
     branch: &str,
+    credentials: Option<&Credentials>,
     path: &Path,
 ) -> Result<String, Error> {
     // gix expects the clone target's parent to exist. The derived default
     // path includes per-flow and per-task segments that are not pre-created
     // by the volume mount, so ensure the full path exists up front.
     std::fs::create_dir_all(path).map_err(|e| Error::Clone {
-        url: original_url.to_string(),
+        url: url.to_string(),
         source: Box::new(e),
     })?;
 
     if path.join(".git").exists() {
-        fetch_existing(path, original_url)?;
+        fetch_existing(path, url, credentials)?;
     } else {
-        shallow_clone(url, branch, path, original_url)?;
+        shallow_clone(url, branch, path, credentials)?;
     }
     head_commit(path)
 }
 
-/// Embeds a token in the URL userinfo segment when provided.
-fn build_authenticated_url(repository_url: &str, token: Option<&str>) -> String {
-    if let Some(token) = token {
-        if let Some(rest) = repository_url.strip_prefix("https://") {
-            return format!("https://{token}@{rest}");
-        }
-        if let Some(rest) = repository_url.strip_prefix("http://") {
-            return format!("http://{token}@{rest}");
+/// Username sent for basic auth when the user did not override it. Accepted
+/// by GitHub Personal Access Tokens and App installation tokens, GitLab
+/// personal and deploy tokens, and Bitbucket app passwords.
+const DEFAULT_TOKEN_USERNAME: &str = "x-access-token";
+
+/// Static credential helper: responds to gix's auth callback with our
+/// token, never embedding it in the repository URL or `.git/config`.
+///
+/// On `Get`, returns `{username, password=token}`. On `Store`/`Erase`,
+/// returns `None` so gix treats those as no-ops — we don't persist
+/// anything outside the in-memory copy.
+#[derive(Clone)]
+struct CredentialHelper {
+    username: String,
+    password: String,
+}
+
+impl CredentialHelper {
+    fn new(credentials: &Credentials) -> Self {
+        let username = match &credentials.username {
+            Some(u) => u.clone(),
+            None => DEFAULT_TOKEN_USERNAME.to_string(),
+        };
+        Self {
+            username,
+            password: credentials.token.clone(),
         }
     }
-    repository_url.to_string()
+
+    fn invoke(
+        &self,
+        action: gix::credentials::helper::Action,
+    ) -> Result<Option<gix::credentials::protocol::Outcome>, Box<gix::credentials::protocol::Error>>
+    {
+        match action {
+            gix::credentials::helper::Action::Get(ctx) => {
+                Ok(Some(gix::credentials::protocol::Outcome {
+                    identity: gix::sec::identity::Account {
+                        username: self.username.clone(),
+                        password: self.password.clone(),
+                        oauth_refresh_token: None,
+                    },
+                    next: ctx.into(),
+                }))
+            }
+            gix::credentials::helper::Action::Store(_)
+            | gix::credentials::helper::Action::Erase(_) => Ok(None),
+        }
+    }
 }
 
 /// Performs a shallow clone of a single branch.
-fn shallow_clone(url: &str, branch: &str, path: &Path, log_url: &str) -> Result<(), Error> {
+fn shallow_clone(
+    url: &str,
+    branch: &str,
+    path: &Path,
+    credentials: Option<&Credentials>,
+) -> Result<(), Error> {
     let mut prepare = gix::prepare_clone(url, path)
         .map_err(|e| Error::Clone {
-            url: log_url.to_string(),
+            url: url.to_string(),
             source: Box::new(e),
         })?
         .with_ref_name(Some(branch))
         .map_err(|e| Error::Clone {
-            url: log_url.to_string(),
+            url: url.to_string(),
             source: Box::new(e),
         })?
         .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
             std::num::NonZeroU32::MIN,
         ));
 
+    if let Some(creds) = credentials {
+        let helper = CredentialHelper::new(creds);
+        prepare = prepare.configure_connection(move |connection| {
+            let h = helper.clone();
+            connection.set_credentials(move |action| h.invoke(action).map_err(|e| *e));
+            Ok(())
+        });
+    }
+
     let (mut checkout, _outcome) = prepare
         .fetch_then_checkout(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
         .map_err(|e| Error::Clone {
-            url: log_url.to_string(),
+            url: url.to_string(),
             source: Box::new(e),
         })?;
 
@@ -329,7 +382,11 @@ fn shallow_clone(url: &str, branch: &str, path: &Path, log_url: &str) -> Result<
 
 /// Fetches the latest refs into an existing clone and resets HEAD to the
 /// remote tracking branch. Mirrors `git pull --ff-only` semantics.
-fn fetch_existing(path: &Path, log_url: &str) -> Result<(), Error> {
+fn fetch_existing(
+    path: &Path,
+    log_url: &str,
+    credentials: Option<&Credentials>,
+) -> Result<(), Error> {
     let repo = gix::open(path).map_err(|e| Error::OpenRepo {
         path: path.to_path_buf(),
         source: Box::new(e),
@@ -346,12 +403,18 @@ fn fetch_existing(path: &Path, log_url: &str) -> Result<(), Error> {
             source: Box::new(e),
         })?;
 
-    let connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(|e| Error::Fetch {
-            url: log_url.to_string(),
-            source: Box::new(e),
-        })?;
+    let mut connection =
+        remote
+            .connect(gix::remote::Direction::Fetch)
+            .map_err(|e| Error::Fetch {
+                url: log_url.to_string(),
+                source: Box::new(e),
+            })?;
+
+    if let Some(creds) = credentials {
+        let helper = CredentialHelper::new(creds);
+        connection.set_credentials(move |action| helper.invoke(action).map_err(|e| *e));
+    }
 
     let prepared = connection
         .prepare_fetch(gix::progress::Discard, Default::default())
@@ -411,7 +474,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             });
         }
 
-        let token = match &self.config.credentials_path {
+        let credentials = match &self.config.credentials_path {
             Some(path) => {
                 let content = tokio::fs::read_to_string(path).await.map_err(|source| {
                     Error::ReadCredentials {
@@ -424,7 +487,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         path: path.clone(),
                         source,
                     })?;
-                Some(creds.token)
+                Some(creds)
             }
             None => None,
         };
@@ -446,7 +509,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(EventHandler {
             config: Arc::clone(&self.config),
             clone_path,
-            token,
+            credentials,
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -831,30 +894,62 @@ mod tests {
         assert_eq!(fe.commit, cloned.commit);
     }
 
-    // ── build_authenticated_url ─────────────────────────────────────
+    // ── credential helper ───────────────────────────────────────────
 
     #[test]
-    fn build_url_no_token() {
-        let url = build_authenticated_url("https://github.com/org/repo.git", None);
-        assert_eq!(url, "https://github.com/org/repo.git");
+    fn credential_helper_default_username() {
+        let creds = Credentials {
+            token: "ghp_secret".to_string(),
+            username: None,
+        };
+        let helper = CredentialHelper::new(&creds);
+        let action = gix::credentials::helper::Action::get_for_url("https://github.com/org/repo");
+        let outcome = helper
+            .invoke(action)
+            .expect("helper must not error")
+            .expect("Get must return Some");
+        assert_eq!(outcome.identity.username, DEFAULT_TOKEN_USERNAME);
+        assert_eq!(outcome.identity.password, "ghp_secret");
     }
 
     #[test]
-    fn build_url_token_https() {
-        let url = build_authenticated_url("https://github.com/org/repo.git", Some("ghp_tok123"));
-        assert_eq!(url, "https://ghp_tok123@github.com/org/repo.git");
+    fn credential_helper_explicit_username() {
+        let creds = Credentials {
+            token: "glpat-xyz".to_string(),
+            username: Some("oauth2".to_string()),
+        };
+        let helper = CredentialHelper::new(&creds);
+        let action = gix::credentials::helper::Action::get_for_url("https://gitlab.com/org/repo");
+        let outcome = helper
+            .invoke(action)
+            .expect("helper must not error")
+            .expect("Get must return Some");
+        assert_eq!(outcome.identity.username, "oauth2");
+        assert_eq!(outcome.identity.password, "glpat-xyz");
     }
 
     #[test]
-    fn build_url_token_http() {
-        let url = build_authenticated_url("http://git.internal/org/repo.git", Some("tok"));
-        assert_eq!(url, "http://tok@git.internal/org/repo.git");
+    fn credential_helper_store_is_noop() {
+        let creds = Credentials {
+            token: "tok".to_string(),
+            username: None,
+        };
+        let helper = CredentialHelper::new(&creds);
+        let store = gix::credentials::helper::Action::Store("payload".into());
+        let outcome = helper.invoke(store).expect("helper must not error");
+        assert!(outcome.is_none(), "Store must be a no-op");
     }
 
     #[test]
-    fn build_url_token_non_http_passthrough() {
-        let url = build_authenticated_url("git@github.com:org/repo.git", Some("tok"));
-        assert_eq!(url, "git@github.com:org/repo.git");
+    fn credential_helper_erase_is_noop() {
+        let creds = Credentials {
+            token: "tok".to_string(),
+            username: None,
+        };
+        let helper = CredentialHelper::new(&creds);
+        let erase = gix::credentials::helper::Action::Erase("payload".into());
+        let outcome = helper.invoke(erase).expect("helper must not error");
+        assert!(outcome.is_none(), "Erase must be a no-op");
     }
 
     // ── Builder Validation ──────────────────────────────────────────

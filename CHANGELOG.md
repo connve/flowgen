@@ -46,8 +46,13 @@
 - **Git sync refactor.** Removed SSH auth support (`GitAuth`,
   `GitAuthType` enums) in favour of a simpler `credentials_path` field
   pointing to a JSON file with an HTTPS token. SSH URLs are rejected at
-  startup with a clear error. Credentials are loaded once at init and
-  the token is embedded in the HTTPS URL for clone/pull operations.
+  startup with a clear error. The token is presented through a gix
+  credential helper that responds to the server's `WWW-Authenticate`
+  challenge — it never appears in the repository URL, in `.git/config`,
+  or in logs. The credentials JSON now also accepts an optional
+  `username` field (defaults to `x-access-token`) for hosts that
+  require a specific literal username (GitLab OAuth tokens, Bitbucket
+  Cloud token-auth).
 
 ### Improvements
 
