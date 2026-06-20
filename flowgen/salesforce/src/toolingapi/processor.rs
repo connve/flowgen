@@ -12,29 +12,35 @@ use tracing::{error, Instrument};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Error sending event message: {source}")]
+    #[error("Failed to send event message to next task: {source}")]
     SendMessage {
         #[source]
         source: flowgen_core::event::Error,
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error(transparent)]
-    SalesforceAuth(#[from] salesforce_core::client::Error),
+    #[error("Salesforce authentication error: {source}")]
+    SalesforceAuth {
+        #[source]
+        source: salesforce_core::client::Error,
+    },
     #[error("Tooling API error: {source}")]
     ToolingApi {
         #[source]
         source: Box<salesforce_core::toolingapi::Error>,
     },
-    #[error("Serialization error: {source}")]
+    #[error("Failed to serialize or deserialize data: {source}")]
     SerdeExt {
         #[source]
         source: flowgen_core::serde::Error,
     },
     #[error(transparent)]
     EventError(#[from] flowgen_core::event::Error),
-    #[error(transparent)]
-    ConfigRender(#[from] flowgen_core::config::Error),
+    #[error("Failed to render configuration template: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -47,6 +53,10 @@ pub enum Error {
         #[source]
         source: salesforce_core::toolingapi::Error,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Event handler for processing individual Tooling API requests.
@@ -73,7 +83,10 @@ impl EventHandler {
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let event_value = serde_json::value::Value::try_from(event.as_ref())?;
-            let config = self.config.render(&event_value)?;
+            let config = self
+                .config
+                .render(&event_value)
+                .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute operation based on type.
             match config.operation {
@@ -177,24 +190,47 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self.config.render(&serde_json::json!({}))?;
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
 
-        let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(init_config.credentials_path.clone())
-            .build()?
-            .connect()
-            .await?;
+        let credentials_path = init_config.credentials_path.clone();
+        let sfdc_client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&credentials_path),
+                || async {
+                    let client = salesforce_core::client::Builder::new()
+                        .credentials_path(credentials_path)
+                        .build()
+                        .map_err(|e| Error::SalesforceAuth { source: e })?
+                        .connect()
+                        .await
+                        .map_err(|e| Error::SalesforceAuth { source: e })?;
+                    Ok(tokio::sync::Mutex::new(client))
+                },
+            )
+            .await
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
-        let tooling_client = salesforce_core::toolingapi::ClientBuilder::new(sfdc_client.clone())
-            .build()
-            .map_err(|e| Error::ToolingClientBuild { source: e })?;
+        let tooling_client = {
+            let guard = sfdc_client.lock().await;
+            salesforce_core::toolingapi::ClientBuilder::new(guard.clone())
+                .build()
+                .map_err(|e| Error::ToolingClientBuild { source: e })?
+        };
 
         let event_handler = EventHandler {
             config: Arc::clone(&self.config),
             current_task_id: self.task_id,
             tx: self.tx.clone(),
             client: Arc::new(tooling_client),
-            sfdc_client: Arc::new(tokio::sync::Mutex::new(sfdc_client)),
+            sfdc_client,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
         };
@@ -241,7 +277,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
                                             error!(error = %e, "Failed to process Tooling API operation");
-                                            let needs_reconnect = matches!(&e, Error::SalesforceAuth(_))
+                                            let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
                                                 || matches!(&e,
                                                     Error::ToolingApi { source }
                                                         if matches!(source.as_ref(), salesforce_core::toolingapi::Error::Auth { .. })
@@ -254,9 +290,9 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     (*sfdc_client).reconnect().await
                                                 {
                                                     error!(error = %reconnect_err, "Failed to reconnect");
-                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth(
-                                                        reconnect_err,
-                                                    )));
+                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth {
+                                                        source: reconnect_err,
+                                                    }));
                                                 }
                                             }
                                             Err(tokio_retry::RetryError::transient(e))

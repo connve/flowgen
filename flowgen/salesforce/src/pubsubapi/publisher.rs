@@ -80,6 +80,10 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Event handler for processing and publishing events to Salesforce Pub/Sub.
@@ -260,16 +264,34 @@ impl flowgen_core::task::runner::Runner for Publisher {
             source: flowgen_core::service::Error::MissingEndpoint(),
         })?;
 
-        let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(init_config.credentials_path.clone())
-            .build()
-            .map_err(|e| Error::Auth { source: e })?
-            .connect()
+        let credentials_path = init_config.credentials_path.clone();
+        let sfdc_client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&credentials_path),
+                || async {
+                    let client = salesforce_core::client::Builder::new()
+                        .credentials_path(credentials_path)
+                        .build()
+                        .map_err(|e| Error::Auth { source: e })?
+                        .connect()
+                        .await
+                        .map_err(|e| Error::Auth { source: e })?;
+                    Ok(tokio::sync::Mutex::new(client))
+                },
+            )
             .await
-            .map_err(|e| Error::Auth { source: e })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
-        let pubsub = salesforce_core::pubsubapi::Client::new(channel, sfdc_client)
-            .map_err(|e| Error::PubSub { source: e })?;
+        let pubsub = {
+            let guard = sfdc_client.lock().await;
+            salesforce_core::pubsubapi::Client::new(channel, guard.clone())
+                .map_err(|e| Error::PubSub { source: e })?
+        };
 
         let pubsub = Arc::new(Mutex::new(pubsub));
 

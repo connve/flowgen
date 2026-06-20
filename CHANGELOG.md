@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.118.0
+
+### Features
+
+- **Shared connection pooling via ClientRegistry.** Tasks with identical
+  credentials now automatically share the same authenticated client.
+  The runtime hashes credential fields into a `ClientKey` and deduplicates
+  at the worker level — no configuration needed. The first task to
+  initialise performs the actual authentication; all others wait on a
+  per-key mutex and reuse the result. Supported across Salesforce (REST,
+  SOAP, Bulk, Tooling, PubSub), BigQuery (query, job, storage_read,
+  storage_write), MSSQL, NATS (subscriber, publisher, kv_store), and
+  Object Store (read, write, list, move).
+
+### Dependencies
+
+- **salesforce_core 0.15.0.** Fixes a bug where `reconnect()` replaced
+  the `token_state` Arc instead of updating in-place, causing stale
+  tokens for cloned clients. Shared Salesforce clients now see refreshed
+  tokens immediately after reconnect.
+
 ## 0.117.0
 
 ### Features

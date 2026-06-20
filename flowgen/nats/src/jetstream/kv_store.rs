@@ -182,6 +182,10 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 // --- Event Handler ---
@@ -374,16 +378,33 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let client = crate::client::ClientBuilder::new()
-            .credentials_path(config.credentials_path.clone())
-            .url(config.url.clone())
-            .build()
-            .map_err(|source| Error::Client { source })?
-            .connect()
+        let nats_key =
+            flowgen_core::client_registry::ClientKey::new(&(&config.credentials_path, &config.url));
+        let jetstream_ctx = self
+            .task_context
+            .client_registry
+            .get_or_init(nats_key, || {
+                let credentials_path = config.credentials_path.clone();
+                let url = config.url.clone();
+                async move {
+                    let client = crate::client::ClientBuilder::new()
+                        .credentials_path(credentials_path)
+                        .url(url)
+                        .build()
+                        .map_err(|source| Error::Client { source })?
+                        .connect()
+                        .await
+                        .map_err(|source| Error::Client { source })?;
+                    client.jetstream.ok_or(Error::MissingJetStream)
+                }
+            })
             .await
-            .map_err(|source| Error::Client { source })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
-        let jetstream = client.jetstream.ok_or(Error::MissingJetStream)?;
+        let jetstream = (*jetstream_ctx).clone();
 
         // Open the bucket if it exists; only create it when missing.
         // Avoids configuration collisions when another component (the

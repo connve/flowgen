@@ -82,6 +82,10 @@ pub enum Error {
     },
     #[error("Managed subscription requires durable_consumer_options to be configured")]
     MissingManagedSubscriptionConfig,
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 /// Processes events from a single Salesforce Pub/Sub topic.
@@ -553,18 +557,36 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             source: flowgen_core::service::Error::MissingEndpoint(),
         })?;
 
-        // Authenticate with Salesforce.
-        let sfdc_client = salesforce_core::client::Builder::new()
-            .credentials_path(init_config.credentials_path.clone())
-            .build()
-            .map_err(|e| Error::Auth { source: e })?
-            .connect()
+        // Authenticate with Salesforce (shared via client registry).
+        let credentials_path = init_config.credentials_path.clone();
+        let sfdc_client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&credentials_path),
+                || async {
+                    let client = salesforce_core::client::Builder::new()
+                        .credentials_path(credentials_path)
+                        .build()
+                        .map_err(|e| Error::Auth { source: e })?
+                        .connect()
+                        .await
+                        .map_err(|e| Error::Auth { source: e })?;
+                    Ok(tokio::sync::Mutex::new(client))
+                },
+            )
             .await
-            .map_err(|e| Error::Auth { source: e })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         // Create Pub/Sub context.
-        let pubsub = salesforce_core::pubsubapi::Client::new(channel, sfdc_client)
-            .map_err(|e| Error::PubSub { source: e })?;
+        let pubsub = {
+            let guard = sfdc_client.lock().await;
+            salesforce_core::pubsubapi::Client::new(channel, guard.clone())
+                .map_err(|e| Error::PubSub { source: e })?
+        };
         let pubsub = Arc::new(Mutex::new(pubsub));
 
         // Create event handler.

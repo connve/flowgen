@@ -9,12 +9,10 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 ```yaml
 - git_sync:
     name: sync_flows
-    repository_url: "git@github.com:org/configs.git"
+    repository_url: "https://github.com/org/configs.git"
     branch: main
     path: "flows/"
-    auth:
-      type: ssh
-      ssh_key_path: /etc/git/deploy-key
+    credentials_path: /etc/flowgen/credentials/git.json
 ```
 
 ### Fields
@@ -22,22 +20,13 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `repository_url` | string | required | Git repository URL (SSH or HTTPS). |
+| `repository_url` | string | required | Git repository URL (HTTPS). |
 | `branch` | string | `main` | Branch to track. |
 | `path` | string | | Directory within the repo to scan. All files under this path are emitted. |
 | `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
-| `auth` | object | `none` | Authentication configuration (see below). |
+| `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
-
-### Authentication
-
-| Field | Type | Description |
-|---|---|---|
-| `type` | string | `none`, `ssh`, or `token`. |
-| `ssh_key_path` | string | Path to SSH private key (for `ssh` type). |
-| `ssh_known_hosts_path` | string | Path to known_hosts file (for `ssh` type). |
-| `token` | string | Token for HTTPS auth (for `token` type). |
 
 ## Example: Sync flows from Git to NATS KV
 
@@ -51,11 +40,9 @@ flow:
 
     - git_sync:
         name: pull_repo
-        repository_url: "git@github.com:org/configs.git"
+        repository_url: "https://github.com/org/configs.git"
         path: "flows/"
-        auth:
-          type: ssh
-          ssh_key_path: /etc/git/deploy-key
+        credentials_path: /etc/flowgen/credentials/git.json
 
     - script:
         name: normalize_key

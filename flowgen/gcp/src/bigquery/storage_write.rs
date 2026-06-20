@@ -109,6 +109,10 @@ pub enum Error {
     FieldExpectedObject { field: String, actual_value: String },
     #[error("Row write failed with errors")]
     RowWriteError,
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
 }
 
 impl From<flowgen_core::event::Error> for Error {
@@ -617,19 +621,30 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials = crate::resolve_credentials(&init_config.credentials_path)
+        let credentials_path = init_config.credentials_path.clone();
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(
+                flowgen_core::client_registry::ClientKey::new(&credentials_path),
+                || async {
+                    let credentials = crate::resolve_credentials(&credentials_path)
+                        .await
+                        .map_err(|source| Error::ClientAuth { source })?;
+                    let (client_config, _project_id) =
+                        ClientConfig::new_with_credentials(credentials)
+                            .await
+                            .map_err(|source| Error::ClientCreation { source })?;
+                    Client::new(client_config)
+                        .await
+                        .map_err(|source| Error::ClientConnection { source })
+                },
+            )
             .await
-            .map_err(|source| Error::ClientAuth { source })?;
-
-        let (client_config, _project_id) = ClientConfig::new_with_credentials(credentials)
-            .await
-            .map_err(|source| Error::ClientCreation { source })?;
-
-        let client = Arc::new(
-            Client::new(client_config)
-                .await
-                .map_err(|source| Error::ClientConnection { source })?,
-        );
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         // Fetch table schema to build proto descriptor for Storage Write API.
         let table_info = client

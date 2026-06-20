@@ -52,6 +52,11 @@ pub struct TaskContext {
     pub leaf_count: usize,
     /// Optional startup delay for staggering task initialization across replicas.
     pub startup_delay: Option<std::time::Duration>,
+    /// Shared client registry for deduplicating connections to external services.
+    ///
+    /// Tasks with identical credentials automatically share the same authenticated
+    /// client, avoiding redundant login/auth calls that can hit rate limits.
+    pub client_registry: std::sync::Arc<crate::client_registry::ClientRegistry>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -78,6 +83,7 @@ impl std::fmt::Debug for TaskContext {
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
             .field("cancellation_token", &"<CancellationToken>")
+            .field("client_registry", &"<ClientRegistry>")
             .finish()
     }
 }
@@ -107,6 +113,8 @@ pub struct TaskContextBuilder {
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
     /// Number of leaf tasks in the flow. Defaults to one when not set.
     leaf_count: Option<usize>,
+    /// Shared client registry for connection pooling.
+    client_registry: Option<std::sync::Arc<crate::client_registry::ClientRegistry>>,
 }
 
 impl TaskContextBuilder {
@@ -230,6 +238,15 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the shared client registry for connection pooling across tasks.
+    pub fn client_registry(
+        mut self,
+        client_registry: std::sync::Arc<crate::client_registry::ClientRegistry>,
+    ) -> Self {
+        self.client_registry = Some(client_registry);
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -253,9 +270,20 @@ impl TaskContextBuilder {
             response_registry: self.response_registry,
             resource_loader: self.resource_loader,
             retry: self.retry,
-            cancellation_token: self.cancellation_token.unwrap_or_default(),
-            leaf_count: self.leaf_count.unwrap_or(1),
+            cancellation_token: match self.cancellation_token {
+                Some(token) => token,
+                None => tokio_util::sync::CancellationToken::new(),
+            },
+            #[allow(clippy::manual_unwrap_or)]
+            leaf_count: match self.leaf_count {
+                Some(count) => count,
+                None => 1,
+            },
             startup_delay: None,
+            client_registry: match self.client_registry {
+                Some(registry) => registry,
+                None => std::sync::Arc::new(crate::client_registry::ClientRegistry::new()),
+            },
         })
     }
 }
