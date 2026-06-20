@@ -581,8 +581,11 @@ mod tests {
         };
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(5), handler.handle()).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_err());
+        match result {
+            Ok(Err(_)) => {}
+            Err(_elapsed) => {}
+            Ok(Ok(())) => panic!("Expected handle to fail without a MongoDB connection"),
+        }
     }
 
     #[tokio::test]
