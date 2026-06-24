@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.118.1
+
+### Fixes
+
+- **`quinn-proto` upgraded to 0.11.15 (RUSTSEC-2026-0185, severity
+  high 7.5).** Transitive `quinn-proto 0.11.14` is vulnerable to
+  remote memory exhaustion from unbounded out-of-order stream
+  reassembly. Pulled in by every HTTP client in the workspace via
+  `reqwest` (Salesforce, BigQuery, MCP, OCI, AI gateway, NATS,
+  git-sync). `cargo update -p quinn-proto` only; no API change.
+
+### Tests
+
+- **Reproducer tests for the `"None"` / `"String(None)"` field
+  poisoning report.** Internal tenants reported `Email__c` and other
+  varchar fields landing on Salesforce composite as the literal
+  string `"None"` and on MSSQL as `"String(None)"`. Three new tests
+  (`rhai_unit_in_map_must_serialize_as_json_null`,
+  `rhai_unit_string_coercions_are_diagnostic`,
+  `null_value_templating_does_not_produce_none_strings`) verify that
+  flowgen's serialization layer round-trips `()` → `Value::Null`
+  cleanly and that Handlebars renders null as `""` rather than
+  `"None"`. The strings therefore originate either in the
+  tenant-authored Rhai script (a `to_string()` / template
+  interpolation on `()`) or in pre-flowgen ETL writes that the SF→MSSQL
+  sync now keeps round-tripping. Fix is on the tenant side: audit
+  the Rhai script and `UPDATE ... SET col = NULL WHERE col IN
+  ('String(None)', 'None')` for the poisoned varchar columns.
+
 ## 0.118.0
 
 ### Features

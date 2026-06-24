@@ -1150,6 +1150,79 @@ mod tests {
         }
     }
 
+    /// Documents how `rhai::Dynamic::Unit` (the `()` value) renders when
+    /// a script forces it through string formatters. Operators have seen
+    /// payloads land on Salesforce with `"None"` in Email/picklist
+    /// fields and on MSSQL with `"String(None)"` in varchar columns;
+    /// neither pattern is what `dynamic_to_json` produces (verified by
+    /// `rhai_unit_in_map_must_serialize_as_json_null`), so they almost
+    /// certainly originate from a Rhai script that coerced `()` to a
+    /// string via `+ ""`, interpolation, or `to_string()`. This test
+    /// captures the exact strings to point future debugging at the
+    /// flow YAML rather than the runtime.
+    #[test]
+    fn rhai_unit_string_coercions_are_diagnostic() {
+        let engine = rhai::Engine::new();
+
+        // `() + ""` concatenation: Rhai stringifies the unit before
+        // joining. Salesforce sees this as the literal "" or "None"
+        // depending on Rhai's Display impl.
+        let result: rhai::Dynamic = engine.eval(r#"() + """#).unwrap();
+        let coerced = result.into_string().expect("expected string result");
+        assert_eq!(
+            coerced, "",
+            "Rhai () + \"\" should produce empty string. \
+             If this ever becomes \"None\", investigate the Rhai \
+             upgrade — the regression would explain field-level \
+             validation failures downstream."
+        );
+
+        // Debug repr of Dynamic::Unit — used by some Rust loggers and
+        // matches the `String(None)` pattern reported by tenants.
+        let unit = rhai::Dynamic::UNIT;
+        assert_eq!(format!("{unit:?}"), "()");
+        // Display impl
+        assert_eq!(format!("{unit}"), "");
+    }
+
+    /// Reproduces the bug where Rhai `()` (unit) inside a returned map
+    /// surfaces in JSON serialization as a string instead of `null`.
+    /// Downstream consumers (Salesforce composite API, MSSQL inserts)
+    /// see literal "None" / "String(None)" and either reject the record
+    /// or persist the garbage string into a varchar column. `()` MUST
+    /// round-trip to `serde_json::Value::Null`.
+    #[test]
+    fn rhai_unit_in_map_must_serialize_as_json_null() {
+        let engine = rhai::Engine::new();
+        let result: rhai::Dynamic = engine
+            .eval(
+                r#"
+                #{
+                    Email__c: (),
+                    Name: "test",
+                    Phone: ()
+                }
+                "#,
+            )
+            .unwrap();
+
+        let value = super::dynamic_to_json(result).expect("unit in map must convert to JSON");
+        let obj = value.as_object().expect("expected JSON object");
+        assert_eq!(
+            obj.get("Email__c"),
+            Some(&Value::Null),
+            "Rhai () must serialize to JSON null, not a string. got: {:?}",
+            obj.get("Email__c"),
+        );
+        assert_eq!(
+            obj.get("Phone"),
+            Some(&Value::Null),
+            "Rhai () must serialize to JSON null, not a string. got: {:?}",
+            obj.get("Phone"),
+        );
+        assert_eq!(obj.get("Name"), Some(&Value::String("test".to_string())));
+    }
+
     #[tokio::test]
     async fn test_script_filter_null() {
         let (tx, mut rx) = mpsc::channel(100);

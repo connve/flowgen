@@ -342,6 +342,51 @@ mod tests {
         std::env::remove_var("TEST_DATASET");
     }
 
+    /// Documents how the templating layer handles `null` values, since
+    /// tenants have reported strings like "None" landing in downstream
+    /// payloads (Salesforce composite, MSSQL inserts). For a simple
+    /// `{{path}}` template the resolver preserves type and returns
+    /// `Value::Null` directly — downstream consumers can then choose
+    /// how to handle it. For a string-embedded template
+    /// (`prefix-{{path}}-suffix`) Handlebars renders null as an empty
+    /// string, never as the literal "None" or "null". This nails
+    /// flowgen out as the source of those strings — they originate in
+    /// the flow author's Rhai script (e.g. via custom `to_string()`)
+    /// or in a non-Rust downstream system that wraps null in `String(...)`
+    /// when it shows up in an error message.
+    #[test]
+    fn null_value_templating_does_not_produce_none_strings() {
+        let data = json!({
+            "event": {
+                "data": {
+                    "Email__c": null,
+                    "Name": "test"
+                }
+            }
+        });
+
+        // Simple `{{path}}` template hits the type-preserving fast path
+        // — `render_with_value` rendering it gives "" because
+        // Handlebars stringifies the resolved JSON null. Inside a
+        // serialized container it would surface as `null` instead, but
+        // this layer only returns the final string.
+        let result = render_with_value("{{event.data.Email__c}}", &data).unwrap();
+        assert_eq!(
+            result, "",
+            "null path must render to empty string, never to \
+             literal \"None\" or \"null\""
+        );
+
+        // Embedded template: same expectation. Handlebars renders the
+        // null as empty inside the surrounding literal.
+        let result = render_with_value("prefix-{{event.data.Email__c}}-suffix", &data).unwrap();
+        assert_eq!(result, "prefix--suffix");
+
+        // Sanity: non-null values render normally.
+        let result = render_with_value("{{event.data.Name}}", &data).unwrap();
+        assert_eq!(result, "test");
+    }
+
     #[test]
     fn test_config_render_with_env_and_event_vars() {
         std::env::set_var("TEST_BASE_URL", "https://api.example.com");
