@@ -233,11 +233,7 @@ impl TaskContextBuilder {
                 Some(token) => token,
                 None => tokio_util::sync::CancellationToken::new(),
             },
-            #[allow(clippy::manual_unwrap_or)]
-            leaf_count: match self.leaf_count {
-                Some(count) => count,
-                None => 1,
-            },
+            leaf_count: self.leaf_count.unwrap_or(1),
             startup_delay: None,
             client_registry: match self.client_registry {
                 Some(registry) => registry,

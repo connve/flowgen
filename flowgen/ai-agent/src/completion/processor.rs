@@ -411,7 +411,11 @@ impl EventHandler {
                         let data = serde_json::to_value(&chunk_event)
                             .map_err(|source| Error::SerdeJson { source })?;
 
-                        // Intermediate chunks do not carry the completion signal.
+                        // Intermediate chunks do not carry the completion signal,
+                        // and we route through `send_silent` because per-token
+                        // logging would flood the operator on streamed responses.
+                        // The final chunk below still goes through `send_with_logging`
+                        // so completion stays observable.
                         let e = EventBuilder::new()
                             .data(EventData::Json(data))
                             .subject(self.config.name.clone())
@@ -420,7 +424,7 @@ impl EventHandler {
                             .build()
                             .map_err(|source| Error::EventBuilder { source })?;
 
-                        e.send_with_logging(self.tx.as_ref())
+                        e.send_silent(self.tx.as_ref())
                             .await
                             .map_err(|source| Error::SendMessage { source })?;
                         index += 1;
@@ -606,7 +610,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         reason: e.to_string(),
                     })?;
 
-                info!(url = %mcp_config.url, "Connected to MCP server and discovered tools.");
+                info!(url = %mcp_config.url, "Connected to MCP server and discovered tools");
             }
 
             Some(handle)

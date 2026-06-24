@@ -210,7 +210,10 @@ impl EventHandler {
                     }
                 }
 
+                let short_commit = commit.get(..7).unwrap_or(commit.as_str());
                 e.send_with_logging(self.tx.as_ref())
+                    .context("path", &file_event.path)
+                    .context("commit", short_commit)
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
             }
@@ -528,7 +531,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize git sync processor.");
+                        error!(error = %e, "Failed to initialize git sync processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -551,7 +554,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                             match handler.handle(event.clone()).await {
                                 Ok(()) => Ok(()),
                                 Err(e) => {
-                                    error!(error = %e, "Git sync failed.");
+                                    error!(error = %e, "Git sync failed");
                                     Err(tokio_retry::RetryError::transient(e))
                                 }
                             }
@@ -559,7 +562,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .await;
 
                         if let Err(e) = result {
-                            error!(error = %e, "Git sync exhausted all retry attempts.");
+                            error!(error = %e, "Git sync exhausted all retry attempts");
                         }
                     });
                     handlers.push(handle);

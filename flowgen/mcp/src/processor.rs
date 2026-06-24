@@ -115,7 +115,7 @@ impl Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize MCP tool processor.");
+                        error!(error = %e, "Failed to initialize MCP tool processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }

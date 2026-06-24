@@ -104,7 +104,7 @@ impl EventHandler {
                     warn!(
                         index = i,
                         errors = %errors,
-                        "Composite operation completed with one or more failures."
+                        "Composite operation completed with one or more failures"
                     );
                 }
             }

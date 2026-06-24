@@ -126,7 +126,7 @@ impl Cache {
                     Err(_) => {
                         tracing::warn!(
                             "NATS server does not support limit_markers (requires 2.11+), \
-                             creating KV bucket without per-key TTL support."
+                             creating KV bucket without per-key TTL support"
                         );
                         jetstream
                             .create_key_value(async_nats::jetstream::kv::Config {

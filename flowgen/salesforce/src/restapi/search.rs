@@ -252,7 +252,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize SOSL search processor.");
+                        error!(error = %e, "Failed to initialize SOSL search processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -280,7 +280,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!(error = %e, "Failed to process SOSL search.");
+                                            error!(error = %e, "Failed to process SOSL search");
                                             let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
                                                 || matches!(&e,
                                                     Error::SearchOperation { source }
@@ -293,7 +293,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                 if let Err(reconnect_err) =
                                                     (*sfdc_client).reconnect().await
                                                 {
-                                                    error!(error = %reconnect_err, "Failed to reconnect.");
+                                                    error!(error = %reconnect_err, "Failed to reconnect");
                                                     return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth {
                                                         source: reconnect_err,
                                                     }));
@@ -315,7 +315,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(error = %err, "SOSL search failed after all retry attempts.");
+                                    error!(error = %err, "SOSL search failed after all retry attempts");
                                     let mut error_event = event_clone.clone();
                                     error_event.error = Some(err.to_string());
                                     if let Some(ref tx) = event_handler.tx {

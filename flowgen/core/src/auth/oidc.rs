@@ -56,7 +56,7 @@ impl OidcProvider {
         info!(
             issuer = %discovery.issuer,
             jwks_uri = %discovery.jwks_uri,
-            "OIDC discovery complete."
+            "OIDC discovery complete"
         );
 
         // Verify the discovered JWKS endpoint is reachable.

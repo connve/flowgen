@@ -1,11 +1,15 @@
-# Bootstrap flow: reconciles user flows from an OCI artifact into the
-# system NATS KV cache. Each tick pulls the artifact, parses each yaml
-# layer to extract `flow.name`, and writes one cache entry per flow
-# keyed by `flow.name`. Cache entries that no longer have a matching
-# layer in the artifact are deleted.
+# Bootstrap flow: reconciles resource files (sql, soql, json, txt, etc.)
+# from an OCI artifact into the system NATS KV cache. Each tick pulls
+# the artifact, writes one cache entry per layer keyed by its file path
+# under `flowgen.resources.`, and deletes cache entries no longer
+# present in the artifact.
 #
-# Once running, user flows load from the cache via `flows.cache` in the
-# worker config — no ConfigMap mount required for them.
+# Once running, the runtime `ResourceLoader` reads files back via
+# `ctx.resource.get("<path>")` from scripts and through the same key
+# from processors that accept `resource: <path>`.
+#
+# Pair with `system_sync_flows.yaml` so flow YAML changes and resource
+# changes can be redeployed independently.
 #
 # Required:
 #   - /etc/flowgen/credentials/registry.json with either
@@ -13,7 +17,7 @@
 #     or a Docker config.json payload (kubernetes.io/dockerconfigjson).
 #   - /etc/nats/credentials.json for NATS KV writes.
 flow:
-  name: system_sync_flows
+  name: system_sync_resources
   require_leader_election: true
   tasks:
 
@@ -21,23 +25,16 @@ flow:
         name: tick
         interval: "30s"
 
-    # Works with any OCI registry: GHCR, ECR, GAR, ACR, Artifactory,
-    # Harbor, Docker Hub, Quay, self-hosted.
     - oci_sync:
         name: pull_repo
-        artifact: "registry.example.com/your-org/your-flows:prod"
+        artifact: "registry.example.com/your-org/your-resources:prod"
         credentials_path: /etc/flowgen/credentials/registry.json
 
-    # Aggregate the per-layer events from `pull_repo` into a single
-    # batched event. The diff downstream needs the full present-set
-    # at once to detect which cache keys are missing from the artifact.
     - buffer:
         name: collect_layers
         size: 10000
         timeout: "5s"
 
-    # Stash the layer batch in meta so it survives the next task which
-    # overwrites event.data with the cache listing.
     - script:
         name: stash_layers
         code: |
@@ -49,16 +46,13 @@ flow:
         credentials_path: /etc/nats/credentials.json
         bucket: flowgen_system
         operation: list
-        key_prefix: "flowgen.flows."
+        key_prefix: "flowgen.resources."
 
     # Short-circuit only when nothing has drifted: the artifact digest
     # matches the last successful sync AND the cache key count matches
     # the layer count from the artifact. Anything else (new digest, key
     # missing from cache, extra stale key) drops through so compute_diff
-    # runs and converges the cache back to the artifact state. Without
-    # the drift check, an out-of-band delete of a `flowgen.flows.*` key
-    # would never be repaired until an operator cleared
-    # `last_synced_digest` by hand.
+    # runs and converges the cache back to the artifact state.
     - script:
         name: skip_if_in_sync
         code: |
@@ -73,8 +67,8 @@ flow:
               event
           }
 
-    # Compute the diff: each layer becomes a put keyed by `flow.name`,
-    # each cache key with no matching `flow.name` becomes a delete.
+    # Compute the diff: each layer becomes a put keyed by its path,
+    # each cache key with no matching layer becomes a delete.
     - script:
         name: compute_diff
         code: |
@@ -83,9 +77,7 @@ flow:
           let present = #{};
           let actions = [];
           for layer in layers {
-              let parsed = parse_yaml(layer.content);
-              let flow_name = parsed.flow.name;
-              let key = "flowgen.flows." + flow_name;
+              let key = "flowgen.resources." + layer.path;
               present[key] = true;
               actions.push(#{
                   action: "put",
@@ -107,16 +99,13 @@ flow:
     # Log every action (put or delete) at info so a stuck or surprising
     # diff is visible without `RUST_LOG=debug`. `include_meta` is left
     # at its default of false because `stash_layers` parked the full
-    # layer batch — including YAML content — on meta to survive
+    # layer batch — including resource content — on meta to survive
     # `list_existing`, and we do not want that dumped into every log
     # line.
     - log:
         name: log_actions
         level: info
 
-    # The script processor fans the Rhai array out one event per element.
-    # Two filter scripts split the stream by action and drop non-matching
-    # events with `()`.
     - script:
         name: select_puts
         code: |
@@ -153,9 +142,6 @@ flow:
         key: "{{event.data.key}}"
         depends_on: [select_deletes]
 
-    # Persist the new digest only after both write branches have
-    # committed. Runs once per put and per delete, idempotent since
-    # they all write the same digest.
     - script:
         name: mark_synced
         code: |

@@ -64,7 +64,15 @@ pub enum Error {
 
 /// All dependencies the reconciler needs to build and start replacement flows.
 pub struct ReconcilerContext {
+    /// System cache. Watched for flow YAML changes and used for stale-entry
+    /// cleanup, leader-election leases, and other cluster-wide coordination
+    /// state. Passed to rebuilt flows as their `system_cache`.
     pub cache: Arc<dyn Cache>,
+    /// Runtime cache. Holds per-flow state (replay IDs, counters, last-run
+    /// timestamps) and is exposed to user scripts via `ctx.cache`. Passed
+    /// to rebuilt flows as their `cache`. May be the same `Arc` as
+    /// `cache` in in-memory deployments.
+    pub runtime_cache: Arc<dyn Cache>,
     pub app_config: Arc<crate::config::AppConfig>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
@@ -95,7 +103,7 @@ pub async fn run(
         };
         reconcile_batch(batch, &ctx).await;
     }
-    info!("Hot-reload reconciler stopped.");
+    info!("Hot-reload reconciler stopped");
 }
 
 /// Deletes cache keys whose derived flow name matches a filesystem-managed flow.
@@ -119,7 +127,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
     let keys = match ctx.cache.list_keys(prefix).await {
         Ok(k) => k,
         Err(e) => {
-            warn!(error = %e, "Failed to list cache keys for stale entry cleanup.");
+            warn!(error = %e, "Failed to list cache keys for stale entry cleanup");
             return;
         }
     };
@@ -134,13 +142,13 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
             info!(
                 flow = %flow_name,
                 key = %key,
-                "Deleting stale cache entry superseded by filesystem flow."
+                "Deleting stale cache entry superseded by filesystem flow"
             );
             if let Err(e) = ctx.cache.delete(&key).await {
                 warn!(
                     key = %key,
                     error = %e,
-                    "Failed to delete stale cache key."
+                    "Failed to delete stale cache key"
                 );
             }
         }
@@ -231,7 +239,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         error!(
             key = %key,
             error = %reason,
-            "Hot-reloaded flow config failed validation. Skipping."
+            "Hot-reloaded flow config failed validation, skipping"
         );
         return;
     }
@@ -245,7 +253,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         warn!(
             flow = %flow_name,
             key = %key,
-            "Ignoring cache update: this flow is loaded from the filesystem and takes precedence."
+            "Ignoring cache update: this flow is loaded from the filesystem and takes precedence"
         );
         return;
     }
@@ -294,6 +302,8 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         .cancellation_token()
         .unwrap_or_else(tokio_util::sync::CancellationToken::new);
 
+    let task_manager = new_flow.task_manager();
+
     let join_handle = new_flow.run();
 
     // Stop the old flow and bulk-deregister its server entries.
@@ -308,9 +318,10 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
                     cancellation_token,
                     join_handle,
                     from_filesystem: false,
+                    task_manager,
                 },
             );
-            info!(flow = %flow_name, key = %key, "Flow hot-reloaded.");
+            info!(flow = %flow_name, key = %key, "Flow hot-reloaded");
         }
         Err(_) => {
             error!(error = %Error::RegistryWriteFailed);
@@ -329,17 +340,24 @@ async fn reconcile_delete(key: &str, ctx: &ReconcilerContext) {
         warn!(
             flow = %flow_name,
             key = %key,
-            "Ignoring cache delete: this flow is loaded from the filesystem."
+            "Ignoring cache delete: this flow is loaded from the filesystem"
         );
         return;
     }
 
     stop_and_deregister(&flow_name, ctx).await;
-    info!(flow = %flow_name, key = %key, "Flow removed via hot-reload.");
+    info!(flow = %flow_name, key = %key, "Flow removed via hot-reload");
 }
 
 /// Cancels a running flow, awaits its shutdown, and deregisters its HTTP routes
 /// and MCP tools from the shared servers.
+///
+/// Also aborts the old flow's lease renewal background task via the
+/// `TaskManager` it carries. Skipping this step would leave the renewer alive
+/// in tokio after the `Flow` (and its `TaskManager`) is dropped; that orphan
+/// keeps writing renewals to the lease key and races the replacement flow's
+/// renewer under the same pod-level holder identity, producing endless
+/// "Lost lease ownership during renewal" warnings against `current_holder=self`.
 async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     let old_handle = match ctx.flow_registry.write() {
         Ok(mut registry) => registry.remove(flow_name),
@@ -363,8 +381,16 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     {
         warn!(
             flow = %flow_name,
-            "Flow did not stop within 30 seconds; proceeding with deregistration."
+            "Flow did not stop within 30 seconds, proceeding with deregistration"
         );
+    }
+
+    // Abort the lease renewer for this flow without touching the lease key in
+    // the cache: the replacement flow has already taken over renewal under
+    // the same pod-level holder identity, and the lease must stay claimed
+    // continuously across the swap.
+    if let Some(task_manager) = &old.task_manager {
+        task_manager.unregister(flow_name).await;
     }
 
     // Deregister every webhook, MCP tool, and AI gateway entry owned by this
@@ -382,7 +408,9 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
 
 /// Derives a flow name from a cache key by stripping the configured flow prefix.
 ///
-/// Returns `None` and logs a warning if the key does not match the expected prefix format.
+/// The remainder is returned verbatim — it is the same `flow.name` the sync
+/// bootstrap appended when writing the key, so registry lookups on delete
+/// events round-trip cleanly for any character `flow.name` permits.
 fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
     let prefix = ctx
         .app_config
@@ -393,9 +421,9 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
         .unwrap_or("flowgen.flows");
 
     key.strip_prefix(&format!("{prefix}."))
-        .map(|s| s.replace('.', "-"))
+        .map(str::to_string)
         .or_else(|| {
-            warn!(key = %key, "Watch event key does not match flow prefix '{prefix}'; ignoring.");
+            warn!(key = %key, prefix = %prefix, "Watch event key does not match flow prefix, ignoring");
             None
         })
 }
@@ -440,8 +468,10 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         telemetry: None,
     };
 
+    let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
     ReconcilerContext {
-        cache: Arc::new(MemoryCache::new()),
+        cache: Arc::clone(&shared),
+        runtime_cache: shared,
         app_config: Arc::new(app_config),
         resource_loader: None,
         http_server: None,
@@ -461,7 +491,8 @@ fn build_flow(
     let flow_name = flow_config.flow.name.clone();
     let mut builder = crate::flow::FlowBuilder::new()
         .config(Arc::new(flow_config))
-        .cache(Arc::clone(&ctx.cache))
+        .cache(Arc::clone(&ctx.runtime_cache))
+        .system_cache(Arc::clone(&ctx.cache))
         .client_registry(Arc::clone(&ctx.client_registry));
 
     if let Some(server) = &ctx.http_server {
@@ -513,10 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_flow_name_converts_dots_to_dashes() {
+    fn derive_flow_name_preserves_dots() {
         let ctx = test_context("flowgen.flows");
         let name = derive_flow_name("flowgen.flows.my.nested.flow", &ctx);
-        assert_eq!(name, Some("my-nested-flow".to_string()));
+        assert_eq!(name, Some("my.nested.flow".to_string()));
     }
 
     #[test]
@@ -539,8 +570,10 @@ mod tests {
             telemetry: None,
         };
 
+        let shared: Arc<dyn Cache> = Arc::new(flowgen_core::cache::memory::MemoryCache::new());
         let ctx = ReconcilerContext {
-            cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
+            cache: Arc::clone(&shared),
+            runtime_cache: shared,
             app_config: Arc::new(app_config),
             resource_loader: None,
             http_server: None,
@@ -658,8 +691,10 @@ flow:
             telemetry: None,
         };
 
+        let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
         ReconcilerContext {
-            cache: Arc::new(MemoryCache::new()),
+            cache: Arc::clone(&shared),
+            runtime_cache: shared,
             app_config: Arc::new(app_config),
             resource_loader: None,
             http_server: None,
@@ -739,11 +774,13 @@ flow:
     }
 
     #[tokio::test]
-    async fn cleanup_stale_cache_entries_handles_dot_to_dash_conversion() {
-        let fs_flows = HashSet::from(["nested-flow-name".to_string()]);
+    async fn cleanup_stale_cache_entries_matches_dotted_flow_names() {
+        // Filesystem flow named with literal dots — the derived flow name
+        // must round-trip exactly so the cache entry is recognised as
+        // shadowed and removed.
+        let fs_flows = HashSet::from(["nested.flow.name".to_string()]);
         let ctx = test_context_with_fs_flows("flowgen.flows", fs_flows);
 
-        // Cache key uses dots; derive_flow_name converts to dashes.
         ctx.cache
             .put(
                 "flowgen.flows.nested.flow.name",

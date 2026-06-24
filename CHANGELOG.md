@@ -10,7 +10,103 @@
   File system events are debounced to avoid churn during multi-file
   saves. HTTP server registrations (webhooks, MCP tools, AI gateway
   proxies) are deregistered per-flow before restart so stale entries
-  never linger.
+  never linger. The reconciler also calls
+  `TaskManager::unregister(flow_name)` on the old flow before swapping
+  in the replacement, which aborts that flow's lease renewal background
+  task without touching the lease key in NATS. Without this step the
+  old renewer survived the `Flow` drop in tokio and kept writing
+  renewals to `lease.<flow_name>` under the same pod-level
+  `holder_identity`, racing the replacement flow's renewer and
+  producing endless `Lost lease ownership during renewal` warnings
+  whose `current_holder` was the pod itself.
+
+- **System cache separated from runtime cache.** Leader-election
+  leases now live in the system bucket (typically `flowgen_system`)
+  instead of the runtime bucket (`flowgen_cache`). The runtime bucket
+  is what user scripts reach through `ctx.cache`; keeping leases out
+  of it removes the risk of a script overwriting a coordination key,
+  and lets the two buckets carry different retention policies (short
+  history plus per-message TTL for leases, longer retention for
+  per-flow state like replay IDs and counters). `FlowBuilder` now
+  requires both `cache` and `system_cache`; in single-binary or
+  in-memory deployments the same `Arc` is passed for both, so the
+  separation is opt-in by configuration. Existing NATS deployments
+  should drop the stale `lease.*` keys from the runtime bucket after
+  upgrade; they are no longer renewed and will linger as dead
+  entries until manually removed.
+
+- **`Event::Display` drops `None` fields from the pretty output.**
+  The pretty-printer used by the `log` task (and any `format!("{event}")`
+  call) now omits `id`, `meta`, and `error` when they are `None`
+  instead of emitting `"id": null`, `"meta": null`, `"error": null`.
+  Industry-standard structured-log convention (`omitempty`, serde
+  `skip_serializing_if = "Option::is_none"`, Pydantic
+  `exclude_none=True`) — null fields are noise that bloats log
+  storage and forces query parsers to handle `field == null` vs
+  `field missing` as distinct cases. Always-present fields
+  (`subject`, `data`, `timestamp`, `task_id`, `task_type`) keep
+  appearing on every line.
+
+- **`log` task drops `event.meta` from output by default.** Added
+  `include_meta: bool` (default `false`) on the `log` task config.
+  Meta is in-flow context for downstream tasks — stashed batches,
+  correlation ids, per-event state — and tends to dwarf the data
+  payload in any log line that prints it. With `include_meta: false`
+  the log target sees only `subject`, `data`, `id`, `timestamp`,
+  `task_id`, `task_type`, and `error`; meta still rides the
+  pass-through event downstream unchanged. Operators that actually
+  want meta in the log line opt in explicitly with `include_meta:
+  true`. This unblocks observability for the system-sync bootstrap
+  flows, which stash the full git batch (including file contents)
+  in meta so `compute_diff` can read it after `nats_kv_store list`
+  overwrites `event.data`.
+
+- **Bootstrap sync flows self-heal on cache drift.** The
+  `system_sync_flows` and `system_sync_resources` bootstrap flows
+  in `local/flowgen.yaml` replaced their `skip_if_unchanged`
+  short-circuit with `skip_if_in_sync`, which also checks that the
+  cache key count matches the file count from the repo. Previously
+  the bootstrap stamped `last_synced_commit` once it had written
+  any keys and then short-circuited every subsequent tick on commit
+  match alone — so any out-of-band deletion of a `flowgen.flows.*`
+  or `flowgen.resources.*` key left the cache permanently missing
+  that entry until an operator manually cleared `last_synced_commit`.
+  The new check forces a full diff whenever the key count diverges,
+  and the per-tick `log_actions` task makes every action
+  (`put`/`delete`) visible at `info!` so a stuck pipeline is no
+  longer silent.
+
+- **`git_sync` emits include file path and short commit as log
+  context.** The per-file `send_with_logging` call in
+  `flowgen/git/src/sync/processor.rs` attaches `path=<file>` and
+  `commit=<7-char hash>` via `EventLogger::context`, so every
+  `event.subject=pull_repo` line names the file and revision
+  instead of just the event id. Makes git-sync activity readable
+  at a glance and lines up with the bootstrap's per-action log
+  output for end-to-end traceability.
+
+- **`EventExt::send_silent` for streaming hot paths.** Per-event logging
+  via `send_with_logging` remains the default and stays at `info!` so
+  operators see event flow without `RUST_LOG=debug`. Streaming processors
+  whose intermediates would flood the log (the `ai_completion` per-token
+  chunk path) now route through a new `send_silent` method, with the
+  final chunk still going through `send_with_logging` so completion is
+  observable. The MCP tool dispatch in `mcp/server.rs` also moves to
+  `send_silent` because it already emits a richer `MCP tool invoked`
+  info line of its own; previously it used a raw `tx.send` to dodge
+  the double log. `grep -rn send_silent` lists every place we
+  suppress event-flow visibility.
+
+- **`#[allow(...)]` attributes banned workspace-wide.** Workspace
+  `Cargo.toml` declares `[workspace.lints.clippy] allow_attributes =
+  "deny"` and every crate opts in via `[lints] workspace = true`.
+  Suppressing a lint now requires `#[expect(lint, reason = "...")]`,
+  which turns into an error if the lint stops firing — dead
+  suppressions surface automatically instead of rotting into the
+  codebase. The one legitimate suppression
+  (`flowgen/app/src/config.rs`'s `TaskType` enum, whose lowercase
+  variants are YAML tags) has been migrated to `#[expect]` with a
+  reason.
 
 - **Generic HTTP server infrastructure.** Webhooks, MCP, and AI gateway
   now share a single `HttpServer<D>` type parameterised by a `Dispatcher`
@@ -108,11 +204,6 @@
   (e.g. `ai_completion`) need the actual substitution. Inline templates
   without `{{...}}` syntax are unaffected (idempotent pass).
 
-- **Per-event logging downgraded to `debug!`.** `EventLogger` no longer
-  emits `info!` per event built — streaming LLM responses with hundreds
-  of token chunks no longer flood the log. Set `RUST_LOG=debug` to
-  restore the per-event detail.
-
 - **`ack_timeout` default documented.** The MCP `mcp_tool` task gained a
   fields table covering all configuration options. All five source-task
   docs (`generate`, `http/endpoint`, `nats/subscriber`, `salesforce/pubsub`,
@@ -126,6 +217,22 @@
 
 ### Breaking changes
 
+- **Lease cache keys preserve the flow name as written.** The task
+  manager used to lowercase the flow name and convert underscores to
+  hyphens when building the lease key (`flow.name`
+  `salesforce_pubsubapi_account_subscriber` →
+  `lease.salesforce-pubsubapi-account-subscriber`). The transform was
+  a left-over from when the executor wrote to Kubernetes Lease
+  objects, which require RFC 1123 DNS-safe names; the current NATS KV
+  backend has no such constraint, and `validate_name` already keeps
+  `flow.name` in a NATS-safe character set. The lease key is now
+  built verbatim, so it matches what shows up in tracing fields,
+  cache-prefix flow keys, and operator-facing logs. Existing
+  deployments will see new lease keys appear after upgrade; the old
+  `lease.<dashed>` entries linger as zombies until their TTL expires
+  (60 s by default) and can be removed manually with
+  `nats kv del flowgen_system lease.<old-name>` if desired.
+
 - **`http_webhook` task renamed to `http_endpoint`.** The old name was
   misleading — the task handles any HTTP method (`GET`, `POST`, `PUT`,
   `DELETE`, `PATCH`), not only callback webhooks. The new name matches
@@ -134,6 +241,14 @@
   type. The docs route also moved from `/http/webhook` to `/http/endpoint`.
 
 ### Fixes
+
+- **Dead dot-to-dash conversion in hot-reload key parsing removed.** The
+  reconciler's cache-key-to-flow-name derivation rewrote every dot in
+  the key suffix to a dash — a defensive transform left over from an
+  earlier shape of the code. `validate_name` already rejects `.` in
+  `flow.name` at config load, so the transform never had input to act
+  on, but it would have silently broken round-trip if validation were
+  ever loosened. The suffix is now returned verbatim.
 
 - **Source ack hung in fan-out / fan-in DAGs.** When two branches re-merged
   at a buffer (or any other fan-in point), the source's completion channel
@@ -184,6 +299,24 @@
   identity ("Starting HTTP server", "Starting MCP server", "Starting AI
   gateway server") with port and path instead of all saying "Starting
   HTTP server".
+
+- **Subscriber cancellation no longer hangs reconciler tear-down.** The
+  salesforce pubsub, NATS jetstream, and `generate` (cron) subscribers
+  spawned their reconnect loop into a detached `tokio::spawn` whose
+  `JoinHandle` was dropped on the floor. When the hot-reload reconciler
+  cancelled a flow's token, the running task was orphaned and kept
+  hammering the upstream — the 30s deregistration timeout would always
+  fire and stale subscribers would continue logging errors long after
+  the flow's cache entry was deleted. `run()` now drives the loop
+  directly and wraps every `await` (init, handle, backoff sleeps) in
+  `tokio::select!` with the cancellation token so cancellation
+  interrupts mid-backoff instead of waiting out the full delay.
+
+- **Log message style consistency.** Stripped trailing periods from
+  ~40 log messages across the codebase and converted internal
+  `". Skipping."`-style sentence breaks into single-sentence-with-comma
+  form, matching the convention "sentence (no period), structured
+  fields after". `...` ellipses on shutdown messages are preserved.
 
 ### Docs
 

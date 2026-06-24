@@ -1,18 +1,22 @@
-# Bootstrap flow: reconciles user flows from a Git repository into the
-# system NATS KV cache. Each tick pulls the repo, parses each yaml file
-# to extract `flow.name`, and writes one cache entry per flow keyed by
-# `flow.name`. Cache entries that no longer have a matching file in the
-# repo are deleted.
+# Bootstrap flow: reconciles resource files (sql, soql, json, txt, etc.)
+# from a Git repository into the system NATS KV cache. Each tick pulls
+# the repo, writes one cache entry per file keyed by its relative path
+# under `flowgen.resources.`, and deletes cache entries no longer
+# present in the repo.
 #
-# Once running, user flows load from the cache via `flows.cache` in the
-# worker config — no ConfigMap mount required for them.
+# Once running, the runtime `ResourceLoader` reads files back via
+# `ctx.resource.get("<path>")` from scripts and through the same key
+# from processors that accept `resource: <path>`.
+#
+# Pair with `system_sync_flows.yaml` so flow YAML changes and resource
+# changes can be redeployed independently.
 #
 # Required:
 #   - /etc/flowgen/credentials/git.json with
 #       { "token": "<github_pat_or_gitlab_deploy_token>" }
 #   - /etc/nats/credentials.json for NATS KV writes.
 flow:
-  name: system_sync_flows
+  name: system_sync_resources
   require_leader_election: true
   tasks:
 
@@ -20,25 +24,18 @@ flow:
         name: tick
         interval: "30s"
 
-    # Works with any HTTPS Git host: GitHub, GitLab, Bitbucket, Gitea,
-    # self-hosted. SSH URLs are not supported — use HTTPS + token.
     - git_sync:
         name: pull_repo
         repository_url: "https://git.example.com/your-org/your-flows.git"
         branch: main
-        path: "flows/"
+        path: "resources/"
         credentials_path: /etc/flowgen/credentials/git.json
 
-    # Aggregate the per-file events from `pull_repo` into a single
-    # batched event. The diff downstream needs the full present-set
-    # at once to detect which cache keys are missing from the repo.
     - buffer:
         name: collect_files
         size: 10000
         timeout: "5s"
 
-    # Stash the file batch in meta so it survives the next task which
-    # overwrites event.data with the cache listing.
     - script:
         name: stash_files
         code: |
@@ -50,16 +47,13 @@ flow:
         credentials_path: /etc/nats/credentials.json
         bucket: flowgen_system
         operation: list
-        key_prefix: "flowgen.flows."
+        key_prefix: "flowgen.resources."
 
     # Short-circuit only when nothing has drifted: the repo commit
     # matches the last successful sync AND the cache key count matches
     # the file count from the repo. Anything else (new commit, key
     # missing from cache, extra stale key) drops through so compute_diff
-    # runs and converges the cache back to the repo state. Without the
-    # drift check, an out-of-band delete of a `flowgen.flows.*` key
-    # would never be repaired until an operator cleared
-    # `last_synced_commit` by hand.
+    # runs and converges the cache back to the repo state.
     - script:
         name: skip_if_in_sync
         code: |
@@ -74,8 +68,8 @@ flow:
               event
           }
 
-    # Compute the diff: each file becomes a put keyed by `flow.name`,
-    # each cache key with no matching `flow.name` becomes a delete.
+    # Compute the diff: each file becomes a put keyed by its path,
+    # each cache key with no matching file becomes a delete.
     - script:
         name: compute_diff
         code: |
@@ -84,9 +78,7 @@ flow:
           let present = #{};
           let actions = [];
           for file in files {
-              let parsed = parse_yaml(file.content);
-              let flow_name = parsed.flow.name;
-              let key = "flowgen.flows." + flow_name;
+              let key = "flowgen.resources." + file.path;
               present[key] = true;
               actions.push(#{
                   action: "put",
@@ -108,17 +100,13 @@ flow:
     # Log every action (put or delete) at info so a stuck or surprising
     # diff is visible without `RUST_LOG=debug`. `include_meta` is left
     # at its default of false because `stash_files` parked the full
-    # file batch — including YAML content — on meta to survive
+    # file batch — including resource content — on meta to survive
     # `list_existing`, and we do not want that dumped into every log
-    # line. Set `include_meta: true` here when debugging the meta
-    # itself.
+    # line.
     - log:
         name: log_actions
         level: info
 
-    # The script processor fans the Rhai array out one event per element.
-    # Two filter scripts split the stream by action and drop non-matching
-    # events with `()`.
     - script:
         name: select_puts
         code: |
@@ -155,9 +143,6 @@ flow:
         key: "{{event.data.key}}"
         depends_on: [select_deletes]
 
-    # Persist the new commit only after both write branches have
-    # committed. Runs once per put and per delete, idempotent since
-    # they all write the same commit.
     - script:
         name: mark_synced
         code: |

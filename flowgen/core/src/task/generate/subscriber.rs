@@ -14,7 +14,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::mpsc::Sender, time};
-use tracing::{error, warn, Instrument};
+use tracing::{error, warn};
 
 /// System information included in generated events for time-based filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +191,10 @@ impl EventHandler {
             // Sleep until it's time to generate the next event.
             if next_run_time > now {
                 let sleep_duration = next_run_time - now;
-                time::sleep(Duration::from_secs(sleep_duration)).await;
+                tokio::select! {
+                    _ = time::sleep(Duration::from_secs(sleep_duration)) => {}
+                    _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                }
             }
 
             // Get current time after sleeping (actual execution time).
@@ -324,9 +327,11 @@ impl crate::task::runner::Runner for Subscriber {
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
+        let cancellation_token = self.task_context.cancellation_token.clone();
 
-        // Spawn task init.
-        let event_handler = match tokio_retry::Retry::spawn(
+        // Initialise with retry. Cancellation during init returns early so the
+        // task tears down without waiting for the retry strategy to exhaust.
+        let init_future = tokio_retry::Retry::spawn(
             retry_config.init_strategy(self.task_context.startup_delay),
             || async {
                 match self.init().await {
@@ -337,35 +342,38 @@ impl crate::task::runner::Runner for Subscriber {
                     }
                 }
             },
-        )
-        .await
-        {
-            Ok(handler) => handler,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        // Spawn event handler task.
-        let retry_strategy = retry_config.strategy();
-        tokio::spawn(
-            async move {
-                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                    event_handler
-                        .handle()
-                        .await
-                        .map_err(tokio_retry::RetryError::transient)
-                })
-                .await;
-
-                if let Err(e) = result {
-                    error!(error = %e, "Generate failed after all retry attempts");
-                }
-            }
-            .instrument(tracing::Span::current()),
         );
 
-        Ok(())
+        let event_handler = tokio::select! {
+            _ = cancellation_token.cancelled() => return Ok(()),
+            result = init_future => match result {
+                Ok(handler) => handler,
+                Err(e) => return Err(e),
+            },
+        };
+
+        // Drive the cron loop. Cancellation also short-circuits the long
+        // inter-tick sleeps inside `handle()` via the same token.
+        let retry_strategy = retry_config.strategy();
+        let handle_future = tokio_retry::Retry::spawn(retry_strategy, || async {
+            event_handler
+                .handle()
+                .await
+                .map_err(tokio_retry::RetryError::transient)
+        });
+
+        tokio::select! {
+            _ = cancellation_token.cancelled() => Ok(()),
+            result = handle_future => {
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        error!(error = %e, "Generate failed after all retry attempts");
+                        Ok(())
+                    }
+                }
+            }
+        }
     }
 }
 

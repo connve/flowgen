@@ -63,7 +63,7 @@ impl JwtProvider {
 
         let jwks = if let Some(ref url) = config.jwks_url {
             let jwks = fetch_jwks(url).await?;
-            info!(url = %url, keys = jwks.keys.len(), "Fetched JWKS keys for JWT validation.");
+            info!(url = %url, keys = jwks.keys.len(), "Fetched JWKS keys for JWT validation");
             Some(Arc::new(RwLock::new(jwks)))
         } else {
             None

@@ -69,7 +69,10 @@ pub struct Flow {
 /// various flowgen worker crates. Task configurations are embedded
 /// within each variant.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[allow(non_camel_case_types)]
+// YAML configs reference task types by their lowercase tag (e.g. `convert:`,
+// `script:`). The serde-driven variant naming therefore has to use the same
+// shape — Rust's CamelCase convention does not apply to this public API.
+#[expect(non_camel_case_types, reason = "variant names are YAML tags")]
 pub enum TaskType {
     /// Data conversion task.
     convert(flowgen_core::task::convert::config::Processor),

@@ -58,7 +58,7 @@ pub fn spawn(
                 }
             }
         }
-        info!("Hot-reload watcher stopped.");
+        info!("Hot-reload watcher stopped");
     })
 }
 
@@ -80,7 +80,7 @@ async fn run_watch_loop(
             source,
         })?;
 
-    info!(prefix = %prefix, "Hot-reload watcher subscribed.");
+    info!(prefix = %prefix, "Hot-reload watcher subscribed");
 
     loop {
         tokio::select! {
@@ -88,7 +88,7 @@ async fn run_watch_loop(
             event = stream.next() => {
                 match event {
                     None => {
-                        warn!(prefix = %prefix, "Watch stream ended unexpectedly; reconnecting.");
+                        warn!(prefix = %prefix, "Watch stream ended unexpectedly, reconnecting");
                         return Err(Error::WatchStreamEnded { prefix: prefix.to_string() });
                     }
                     Some(Err(source)) => {

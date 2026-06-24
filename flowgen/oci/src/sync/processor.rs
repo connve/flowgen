@@ -349,7 +349,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize OCI sync processor.");
+                        error!(error = %e, "Failed to initialize OCI sync processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -379,7 +379,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                             | Error::ParseCredentials { .. }
                                             | Error::InvalidLayerEncoding { .. }
                                     );
-                                    error!(error = %e, "OCI sync failed.");
+                                    error!(error = %e, "OCI sync failed");
                                     if is_permanent {
                                         Err(tokio_retry::RetryError::permanent(e))
                                     } else {
@@ -391,7 +391,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .await;
 
                         if let Err(err) = result {
-                            error!(error = %err, "OCI sync exhausted all retry attempts.");
+                            error!(error = %err, "OCI sync exhausted all retry attempts");
                             let mut error_event = event_clone.clone();
                             error_event.error = Some(err.to_string());
                             if let Some(ref tx) = handler.tx {

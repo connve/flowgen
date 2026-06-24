@@ -53,3 +53,6 @@ reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

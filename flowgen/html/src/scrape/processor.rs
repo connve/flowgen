@@ -328,7 +328,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 retry_config.init_strategy(self.task_context.startup_delay),
                 || async {
                     self.init().await.map_err(|e| {
-                        error!(error = %e, "Failed to initialize HTML scrape processor.");
+                        error!(error = %e, "Failed to initialize HTML scrape processor");
                         tokio_retry::RetryError::transient(e)
                     })
                 },
@@ -347,14 +347,14 @@ impl flowgen_core::task::runner::Runner for Processor {
                         async move {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 event_handler.handle(event.clone()).await.map_err(|e| {
-                                    error!(error = %e, "Failed to scrape HTML.");
+                                    error!(error = %e, "Failed to scrape HTML");
                                     tokio_retry::RetryError::transient(e)
                                 })
                             })
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "HTML scrape failed after all retry attempts.");
+                                error!(error = %err, "HTML scrape failed after all retry attempts");
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {

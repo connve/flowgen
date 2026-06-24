@@ -9,9 +9,11 @@ use tracing::{debug, error, info, warn, Instrument};
 /// Tracks a running flow.
 ///
 /// Held in the flow registry so the reconciler knows how to stop a flow
-/// cleanly: cancel its tasks, await the join handle, and bulk-deregister any
-/// webhook / MCP tool / AI gateway entries the flow owns from the shared
-/// servers (via each server's own `deregister_flow(flow_name)`).
+/// cleanly: cancel its tasks, await the join handle, deregister the flow's
+/// lease background task from the `TaskManager` so the renewer stops bumping
+/// the lease key, and bulk-deregister any webhook / MCP tool / AI gateway
+/// entries the flow owns from the shared servers (via each server's own
+/// `deregister_flow(flow_name)`).
 pub struct FlowHandle {
     /// Token used to signal the flow's tasks to stop gracefully.
     pub cancellation_token: tokio_util::sync::CancellationToken,
@@ -20,6 +22,14 @@ pub struct FlowHandle {
     /// True when the flow was loaded from the filesystem at startup.
     /// Cache-sourced reload events must not overwrite filesystem flows.
     pub from_filesystem: bool,
+    /// `TaskManager` owning this flow's lease renewal background task.
+    ///
+    /// Required at shutdown / hot-reload so the renewer can be aborted via
+    /// `TaskManager::unregister(flow_name)`. Without this the spawned tokio
+    /// task survives the `Flow` drop and keeps writing renewals to the lease
+    /// key, racing the replacement flow's renewer under the same pod-level
+    /// holder identity.
+    pub task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
 }
 
 /// Errors that can occur during application execution.
@@ -265,7 +275,7 @@ impl App {
                         error!(
                             key = %key,
                             error = %reason,
-                            "Flow config from cache failed name validation. Skipping."
+                            "Flow config from cache failed name validation, skipping"
                         );
                         continue;
                     }
@@ -276,7 +286,7 @@ impl App {
                     error!(
                         key = %key,
                         error = %source,
-                        "Failed to deserialize flow config from cache. Skipping."
+                        "Failed to deserialize flow config from cache, skipping"
                     );
                 }
             }
@@ -373,7 +383,7 @@ impl App {
                                     error!(
                                         path = %path.display(),
                                         error = %reason,
-                                        "Flow config failed name validation. Skipping this flow."
+                                        "Flow config failed name validation, skipping this flow"
                                     );
                                     return None;
                                 }
@@ -489,14 +499,14 @@ impl App {
                 warn!(
                     flow = %cache_flow.flow.name,
                     key = %cache_key,
-                    "Cache flow shadowed by a filesystem flow with the same name. Deleting stale cache entry."
+                    "Cache flow shadowed by a filesystem flow with the same name, deleting stale cache entry"
                 );
                 if let Some((ref cache, _)) = system_cache {
                     if let Err(e) = cache.delete(&cache_key).await {
                         warn!(
                             key = %cache_key,
                             error = %e,
-                            "Failed to delete shadowed cache key."
+                            "Failed to delete shadowed cache key"
                         );
                     }
                 }
@@ -545,7 +555,7 @@ impl App {
         });
 
         if has_mcp_tools && !mcp_enabled {
-            warn!("Flows contain mcp_tool tasks but mcp_server is not enabled in config. MCP tools will not be registered.");
+            warn!("Flows contain mcp_tool tasks but mcp_server is not enabled in config, MCP tools will not be registered");
         }
 
         let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled {
@@ -615,7 +625,7 @@ impl App {
             .unwrap_or(false);
 
         if has_ai_gateway_tasks && !ai_gateway_enabled {
-            warn!("Flows contain llm_proxy tasks but worker.ai_gateway is not enabled. LLM proxy endpoints will not be registered.");
+            warn!("Flows contain llm_proxy tasks but worker.ai_gateway is not enabled, LLM proxy endpoints will not be registered");
         }
 
         let ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>> =
@@ -751,6 +761,18 @@ impl App {
         // identical credentials (e.g. same Salesforce org) reuse the same client.
         let client_registry = Arc::new(flowgen_core::client_registry::ClientRegistry::new());
 
+        // Resolve the system cache used for leader-election leases. When a
+        // dedicated system bucket is configured (the production NATS path)
+        // it lives in its own `Arc` separate from the runtime `cache`,
+        // keeping lease keys out of user-script reach and letting the two
+        // buckets carry different retention policies. Otherwise (in-memory
+        // single-binary, or NATS without a system bucket) we reuse the
+        // runtime cache so the executor still has somewhere to write.
+        let executor_cache: Arc<dyn flowgen_core::cache::Cache> = system_cache
+            .as_ref()
+            .map(|(c, _)| Arc::clone(c))
+            .unwrap_or_else(|| Arc::clone(&cache));
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -759,6 +781,7 @@ impl App {
             let mut flow_builder = super::flow::FlowBuilder::new()
                 .config(Arc::new(config))
                 .cache(Arc::clone(&cache))
+                .system_cache(Arc::clone(&executor_cache))
                 .client_registry(Arc::clone(&client_registry));
 
             if let Some(server) = http_server {
@@ -920,6 +943,8 @@ impl App {
                 .cancellation_token()
                 .unwrap_or_else(tokio_util::sync::CancellationToken::new);
 
+            let task_manager = flow.task_manager();
+
             let join_handle = flow.run();
 
             if let Ok(mut registry) = flow_registry.write() {
@@ -929,6 +954,7 @@ impl App {
                         cancellation_token,
                         join_handle,
                         from_filesystem,
+                        task_manager,
                     },
                 );
             }
@@ -937,13 +963,14 @@ impl App {
         // Spawn the hot-reload watcher and reconciler if the system cache supports watching.
         // The watcher subscribes to flow key changes and the reconciler applies them.
         let watcher_shutdown = tokio_util::sync::CancellationToken::new();
-        if let Some((cache, cache_opts)) = &system_cache {
+        let runtime_cache = Arc::clone(&cache);
+        if let Some((system_cache_arc, cache_opts)) = &system_cache {
             let prefix = cache_opts.prefix.clone();
             let (watch_tx, watch_rx) =
                 tokio::sync::mpsc::channel::<flowgen_core::cache::WatchEvent>(256);
 
             let watcher_handle = crate::watcher::spawn(
-                Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>,
+                Arc::clone(system_cache_arc) as Arc<dyn flowgen_core::cache::Cache>,
                 prefix.clone(),
                 watch_tx,
                 watcher_shutdown.clone(),
@@ -951,7 +978,8 @@ impl App {
             background_handles.push(watcher_handle);
 
             let reconciler_ctx = crate::reconciler::ReconcilerContext {
-                cache: Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>,
+                cache: Arc::clone(system_cache_arc) as Arc<dyn flowgen_core::cache::Cache>,
+                runtime_cache: Arc::clone(&runtime_cache),
                 app_config: Arc::clone(&app_config),
                 resource_loader: resource_loader.clone(),
                 http_server: http_server.clone(),
@@ -966,8 +994,6 @@ impl App {
                 crate::reconciler::run(watch_rx, reconciler_ctx, reconciler_shutdown).await;
             });
             background_handles.push(reconciler_handle);
-
-            info!(prefix = %prefix, "Hot-reload watcher and reconciler started.");
         }
 
         // Wait for shutdown signal. In production, flows run indefinitely until shutdown.

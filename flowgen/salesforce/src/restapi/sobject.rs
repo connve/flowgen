@@ -89,7 +89,7 @@ impl EventHandler {
                 .unwrap_or(serde_json::Value::Null);
             warn!(
                 errors = %errors,
-                "SObject operation completed with failure."
+                "SObject operation completed with failure"
             );
         }
     }

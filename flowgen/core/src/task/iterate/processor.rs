@@ -331,7 +331,7 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Iterate failed after all retry attempts.");
+                                error!(error = %err, "Iterate failed after all retry attempts");
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {

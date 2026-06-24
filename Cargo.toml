@@ -3,6 +3,15 @@ members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 
+[workspace.lints.clippy]
+# Ban `#[allow(clippy::...)]` and `#[allow(...)]` attributes outright.
+# Warnings flag real modelling problems; the rule across this codebase is
+# to fix the underlying code rather than silence the lint. Anything that
+# genuinely needs to suppress a lint should use `#[expect(...)]` with a
+# reason instead, which surfaces dead suppressions when the lint stops
+# firing.
+allow_attributes = "deny"
+
 [workspace.package]
 version = "0.119.0"
 authors = ["CONNVE"]

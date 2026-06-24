@@ -302,7 +302,7 @@ async fn handle_tools_call(
     match execute_tool_call(state, headers, &request).await {
         Ok(response) => response,
         Err(e) => {
-            error!(error = %e, "Tool call failed.");
+            error!(error = %e, "Tool call failed");
             let code = match &e {
                 Error::InvalidParams { .. } => -32602,
                 Error::UnknownTool { .. } => -32602,
@@ -382,15 +382,19 @@ async fn execute_tool_call(
         .build()
         .map_err(|source| Error::EventBuild { source })?;
 
-    tool_tx
-        .send(event)
+    // The dedicated `MCP tool invoked` log below carries richer fields
+    // than the generic event line, so the event itself goes through
+    // `send_silent` to avoid two near-duplicate entries per call.
+    use flowgen_core::event::EventExt;
+    event
+        .send_silent(Some(&tool_tx))
         .await
         .map_err(|e| Error::PipelineSend(e.to_string()))?;
 
     info!(
         tool = %params.name,
         correlation_id = %correlation_id,
-        "MCP tool invoked."
+        "MCP tool invoked"
     );
 
     let response_registry = Arc::clone(&state.extras.response_registry);
@@ -485,7 +489,7 @@ async fn execute_tool_call(
             };
 
             tracing::Span::current().record("outcome", outcome);
-            info!(outcome = outcome, "MCP tool execution completed.");
+            info!(outcome = outcome, "MCP tool execution completed");
 
             if let Some(completion) = result {
                 let final_event = completion_to_result_event(request_id, completion);

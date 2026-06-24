@@ -597,7 +597,7 @@ async fn dispatch_stream(
     info!(
         endpoint = %registration.config.name,
         correlation_id = %correlation_id,
-        "Streaming endpoint request accepted."
+        "Streaming endpoint request accepted"
     );
 
     let registry = Arc::clone(&registration.response_registry);
@@ -687,7 +687,7 @@ async fn dispatch_stream(
         .header(axum::http::header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
         .map_err(|e| {
-            error!(error = %e, "Failed to build SSE response.");
+            error!(error = %e, "Failed to build SSE response");
             Error::FlowCompletionFailed
         })
 }

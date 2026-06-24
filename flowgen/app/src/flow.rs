@@ -522,8 +522,18 @@ pub struct Flow {
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// An optional shared AI gateway server, passed in from the main application.
     ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-    /// Shared cache, passed in from the main application.
+    /// Shared runtime cache, passed in from the main application. Holds
+    /// per-flow state (replay IDs, counters, last-run timestamps, business
+    /// data) and is exposed to user scripts via `ctx.cache`.
     cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// System cache, passed in from the main application. Holds cluster-wide
+    /// coordination state (lease keys for leader election). Kept separate
+    /// from the runtime `cache` so user scripts cannot reach lease keys, and
+    /// so retention policies can differ (short history plus per-message TTL
+    /// for leases, longer retention for per-flow state). In single-binary
+    /// or in-memory deployments this is the same `Arc` as `cache`; the
+    /// separation is enforced only by the operator in the main config.
+    system_cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
@@ -621,9 +631,12 @@ impl Flow {
             return Err(Error::McpServerNotEnabled);
         }
 
-        // Create an Executor with the cache for lease management.
+        // Create an Executor backed by the system cache. Lease keys must
+        // stay isolated from user-script-accessible runtime cache to keep
+        // coordination state outside any flow's reach.
         let lease_config = flowgen_core::executor::LeaseConfig::default();
-        let executor = flowgen_core::executor::Executor::new(self.cache.clone(), lease_config)?;
+        let executor =
+            flowgen_core::executor::Executor::new(self.system_cache.clone(), lease_config)?;
         let executor = Arc::new(executor);
 
         let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
@@ -1828,8 +1841,11 @@ pub struct FlowBuilder {
     mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     /// Optional shared AI gateway server.
     ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-    /// Shared cache instance.
+    /// Shared runtime cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+    /// System cache instance. Backs the executor's lease store and is kept
+    /// out of user-script reach. Required at build time.
+    system_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration.
@@ -1873,9 +1889,19 @@ impl FlowBuilder {
         self
     }
 
-    /// Sets the shared cache instance.
+    /// Sets the shared runtime cache instance.
     pub fn cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Sets the system cache instance used for leader-election leases.
+    ///
+    /// In multi-bucket deployments this points at a separate bucket from
+    /// the runtime cache; in single-binary or in-memory deployments it may
+    /// share the same underlying `Arc`.
+    pub fn system_cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
+        self.system_cache = Some(cache);
         self
     }
 
@@ -1924,6 +1950,9 @@ impl FlowBuilder {
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
+            system_cache: self
+                .system_cache
+                .ok_or_else(|| Error::MissingBuilderAttribute("system_cache".to_string()))?,
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
@@ -2013,7 +2042,11 @@ mod tests {
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
 
-        let result = FlowBuilder::new().config(flow_config).cache(cache).build();
+        let result = FlowBuilder::new()
+            .config(flow_config)
+            .cache(cache.clone())
+            .system_cache(cache)
+            .build();
 
         assert!(result.is_ok());
         let flow = result.unwrap();
@@ -2042,7 +2075,8 @@ mod tests {
         let result = FlowBuilder::new()
             .config(flow_config.clone())
             .http_server(server)
-            .cache(cache)
+            .cache(cache.clone())
+            .system_cache(cache)
             .build();
 
         assert!(result.is_ok());

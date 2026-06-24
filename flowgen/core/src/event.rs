@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::debug;
+use tracing::info;
 
 /// One-shot channel used by a flow source to wait for end-to-end completion.
 /// Carries an optional result payload for request-response flows (HTTP webhook, MCP).
@@ -216,7 +216,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
             }
 
             if self.fields.is_empty() {
-                debug!(
+                info!(
                     event.subject = %subject,
                     event.id = %event_id,
                 );
@@ -228,7 +228,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                debug!(
+                info!(
                     event.subject = %subject,
                     event.id = %event_id,
                     context = %field_str,
@@ -265,6 +265,22 @@ pub trait EventExt {
         self,
         tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
     ) -> EventLogger<'a>;
+
+    /// Sends the event downstream without emitting a log line.
+    ///
+    /// Use this only on streaming hot paths where per-event logs would
+    /// drown the operator — token-by-token LLM chunks, SSE proxy frames,
+    /// and similar high-cardinality intermediates. The terminal/final
+    /// event of such a stream should still go through `send_with_logging`
+    /// so completion stays observable in the default log stream.
+    ///
+    /// The `_silent` suffix is deliberate: `send_with_logging` is the
+    /// default, opt-out is explicit at the call site, and a simple grep
+    /// for `send_silent` lists every place we suppress event-flow visibility.
+    fn send_silent<'a>(
+        self,
+        tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>>;
 }
 
 impl EventExt for Event {
@@ -277,6 +293,18 @@ impl EventExt for Event {
             tx,
             fields: Vec::new(),
         }
+    }
+
+    fn send_silent<'a>(
+        self,
+        tx: Option<&'a tokio::sync::mpsc::Sender<Event>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(tx) = tx {
+                tx.send(self).await.map_err(|_| Error::SendMessage)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -406,19 +434,38 @@ impl std::fmt::Display for Event {
         let event_data = serde_json::Value::try_from(&self.data)
             .unwrap_or_else(|_| serde_json::json!(format!("{:?}", self.data)));
 
-        let event_json = serde_json::json!({
-            "subject": self.subject,
-            "data": event_data,
-            "id": self.id,
-            "timestamp": self.timestamp,
-            "task_id": self.task_id,
-            "task_type": self.task_type,
-            "meta": self.meta,
-            "error": self.error,
-        });
+        // Build the pretty-print body field-by-field so optional fields
+        // (`id`, `meta`, `error`) only appear when they actually carry a
+        // value. Otherwise every log line gets littered with `"meta":
+        // null` etc., which is noise that matches no industry convention
+        // for structured logs.
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "subject".to_string(),
+            serde_json::Value::String(self.subject.clone()),
+        );
+        obj.insert("data".to_string(), event_data);
+        if let Some(id) = &self.id {
+            obj.insert("id".to_string(), serde_json::Value::String(id.clone()));
+        }
+        obj.insert("timestamp".to_string(), serde_json::json!(self.timestamp));
+        obj.insert("task_id".to_string(), serde_json::json!(self.task_id));
+        obj.insert(
+            "task_type".to_string(),
+            serde_json::Value::String(self.task_type.to_string()),
+        );
+        if let Some(meta) = &self.meta {
+            obj.insert("meta".to_string(), serde_json::Value::Object(meta.clone()));
+        }
+        if let Some(error) = &self.error {
+            obj.insert(
+                "error".to_string(),
+                serde_json::Value::String(error.clone()),
+            );
+        }
 
-        let formatted =
-            serde_json::to_string_pretty(&event_json).unwrap_or_else(|_| format!("{self:?}"));
+        let formatted = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
+            .unwrap_or_else(|_| format!("{self:?}"));
 
         write!(f, "{formatted}")
     }

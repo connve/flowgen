@@ -442,7 +442,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize NATS KV store processor.");
+                        error!(error = %e, "Failed to initialize NATS KV store processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -465,7 +465,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                             match handler.handle(event.clone()).await {
                                 Ok(()) => Ok(()),
                                 Err(e) => {
-                                    error!(error = %e, "KV store operation failed.");
+                                    error!(error = %e, "KV store operation failed");
                                     Err(tokio_retry::RetryError::transient(e))
                                 }
                             }
@@ -473,7 +473,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .await;
 
                         if let Err(e) = result {
-                            error!(error = %e, "KV store operation exhausted all retry attempts.");
+                            error!(error = %e, "KV store operation exhausted all retry attempts");
                         }
                     });
                     handlers.push(handle);

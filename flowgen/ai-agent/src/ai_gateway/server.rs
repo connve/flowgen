@@ -452,7 +452,7 @@ async fn dispatch_streaming(
     info!(
         gateway = %registration.config.name,
         correlation_id = %correlation_id,
-        "Streaming AI gateway request accepted."
+        "Streaming AI gateway request accepted"
     );
 
     let registry = Arc::clone(&registration.response_registry);
@@ -468,7 +468,7 @@ async fn dispatch_streaming(
             match chunk.to_sse() {
                 Ok(data) => tx.send(Ok(data)).await.is_ok(),
                 Err(e) => {
-                    error!(error = %e, "Failed to serialize SSE chunk.");
+                    error!(error = %e, "Failed to serialize SSE chunk");
                     true
                 }
             }
