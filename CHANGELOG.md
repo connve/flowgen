@@ -4,6 +4,56 @@
 
 ### Features
 
+- **`buffer` flushes on upstream completion signal.** New
+  `flush_on_completion: bool` field on the `buffer` task config
+  (default `false`). When set, the buffer flushes immediately upon
+  receiving an event that carries an upstream completion handle,
+  instead of waiting for `size` or `timeout`. Sources that emit a
+  known-finite batch (`git_sync`, `oci_sync`) already attach the
+  completion handle to the final event in the batch, so the buffer
+  now sees the end of the batch deterministically and forwards a
+  complete view downstream. Previously the buffer relied on
+  `timeout` alone — picking an artifact pull that took longer than
+  `timeout` produced a partial batch, which the bootstrap's
+  `compute_diff` mistook for "those files no longer exist" and
+  emitted spurious delete actions, oscillating the cache. The flag
+  is honoured by both buffer code paths (`process_events_single`
+  and `process_events_keyed`); the bootstrap sync flows do not use
+  `partition_key`, so the first cut that only patched the keyed
+  path went unused in production. The bootstrap sync flows in
+  `local/flowgen.yaml` and the four `examples/{git,oci}/system_sync_*`
+  flows opt into the new flag.
+
+- **`oci_sync` integration test against a real registry.** New
+  `flowgen/oci/tests/sync_integration.rs` stands up a
+  `registry:2.8.3` container via `testcontainers`, pushes a
+  multi-layer artifact that mirrors the tenant-connve GHCR layout
+  (empty config + N file layers, each tagged with its relative path
+  in `org.opencontainers.image.title`), drives a single tick
+  through `oci_sync`, and asserts: one downstream event per file
+  layer, in upstream push order, with the `completion_tx` handle
+  attached to the final event only. This catches the class of bugs
+  the bootstrap oscillation belonged to — anything that breaks the
+  end-of-batch contract between `oci_sync` and the downstream
+  buffer surfaces here, instead of in production logs. `oci_sync`'s
+  `init` also gained a small loopback-host check that switches to
+  plain HTTP when the artifact reference points at `127.0.0.1`,
+  `localhost`, or `[::1]`, so this test (and any future
+  registry-backed test) can run without TLS termination.
+
+- **`nats_kv_store list` can include current values.** New
+  `include_values: bool` field on the `nats_kv_store` config
+  (default `false`). When set with `operation: list`, the result
+  carries a `values: { key: content }` map alongside `keys` so
+  downstream scripts can diff incoming content against what is
+  already in cache and skip identity puts. Without this, every
+  bootstrap tick wrote every flow YAML even when the content was
+  unchanged; every put bumped the NATS KV revision and fired a
+  watcher hot-reload on every pod, which in turn raced
+  leader-election leases. The bootstrap `compute_diff` now consults
+  `event.data.values[key]` and only emits a `put` action when the
+  cached content differs from the new content.
+
 - **Config hot-reload.** Flowgen now watches the config directory for
   changes and automatically reconciles flows without restarting. Added
   flows start, removed flows stop, and modified flows are restarted.
@@ -326,6 +376,34 @@
   Visual Studio Code extension, and a new `script_fan_in_join.yaml`
   example showing a fan-in DAG joined by an external script. The example
   runs against the dummy CSV data shipped in the repository.
+## 0.118.1
+
+### Fixes
+
+- **`quinn-proto` upgraded to 0.11.15 (RUSTSEC-2026-0185, severity
+  high 7.5).** Transitive `quinn-proto 0.11.14` is vulnerable to
+  remote memory exhaustion from unbounded out-of-order stream
+  reassembly. Pulled in by every HTTP client in the workspace via
+  `reqwest` (Salesforce, BigQuery, MCP, OCI, AI gateway, NATS,
+  git-sync). `cargo update -p quinn-proto` only; no API change.
+
+### Tests
+
+- **Reproducer tests for the `"None"` / `"String(None)"` field
+  poisoning report.** Internal tenants reported `Email__c` and other
+  varchar fields landing on Salesforce composite as the literal
+  string `"None"` and on MSSQL as `"String(None)"`. Three new tests
+  (`rhai_unit_in_map_must_serialize_as_json_null`,
+  `rhai_unit_string_coercions_are_diagnostic`,
+  `null_value_templating_does_not_produce_none_strings`) verify that
+  flowgen's serialization layer round-trips `()` → `Value::Null`
+  cleanly and that Handlebars renders null as `""` rather than
+  `"None"`. The strings therefore originate either in the
+  tenant-authored Rhai script (a `to_string()` / template
+  interpolation on `()`) or in pre-flowgen ETL writes that the SF→MSSQL
+  sync now keeps round-tripping. Fix is on the tenant side: audit
+  the Rhai script and `UPDATE ... SET col = NULL WHERE col IN
+  ('String(None)', 'None')` for the poisoned varchar columns.
 
 ## 0.118.0
 

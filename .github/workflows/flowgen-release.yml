@@ -226,12 +226,13 @@ jobs:
           VERSION="${{ needs.detect-version.outputs.version }}"
           ARCHIVE="${{ matrix.name }}-${VERSION}.tar.gz"
           tar -czf "$ARCHIVE" flowgen
+          sha256sum "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.detect-version.outputs.tag }}" "${{ env.ARCHIVE }}" --clobber
+        run: gh release upload "${{ needs.detect-version.outputs.tag }}" "${{ env.ARCHIVE }}" "${{ env.ARCHIVE }}.sha256" --clobber
 
   build-macos-binaries:
     needs: [detect-version, create-release]
@@ -268,9 +269,75 @@ jobs:
           VERSION="${{ needs.detect-version.outputs.version }}"
           ARCHIVE="${{ matrix.name }}-${VERSION}.tar.gz"
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" flowgen
+          shasum -a 256 "$ARCHIVE" | awk '{print $1}' > "$ARCHIVE.sha256"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.detect-version.outputs.tag }}" "${{ env.ARCHIVE }}" --clobber
+        run: gh release upload "${{ needs.detect-version.outputs.tag }}" "${{ env.ARCHIVE }}" "${{ env.ARCHIVE }}.sha256" --clobber
+
+  bump-homebrew:
+    needs: [detect-version, extract-linux-binaries, build-macos-binaries]
+    if: needs.detect-version.outputs.version-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SHA256 checksums from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.detect-version.outputs.tag }}
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          mkdir -p sums
+          cd sums
+          for name in flowgen-darwin-arm64 flowgen-darwin-amd64 flowgen-linux-arm64 flowgen-linux-amd64; do
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "${name}-${VERSION}.tar.gz.sha256"
+          done
+
+      - name: Compute SHA env vars
+        id: shas
+        run: |
+          echo "darwin_arm64=$(cat sums/flowgen-darwin-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "darwin_amd64=$(cat sums/flowgen-darwin-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(cat sums/flowgen-linux-arm64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+          echo "linux_amd64=$(cat sums/flowgen-linux-amd64-${{ needs.detect-version.outputs.version }}.tar.gz.sha256)" >> $GITHUB_OUTPUT
+
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: connve/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Render formula from template
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+          DARWIN_ARM64: ${{ steps.shas.outputs.darwin_arm64 }}
+          DARWIN_AMD64: ${{ steps.shas.outputs.darwin_amd64 }}
+          LINUX_ARM64: ${{ steps.shas.outputs.linux_arm64 }}
+          LINUX_AMD64: ${{ steps.shas.outputs.linux_amd64 }}
+        run: |
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA_DARWIN_ARM64__/${DARWIN_ARM64}/g" \
+            -e "s/__SHA_DARWIN_AMD64__/${DARWIN_AMD64}/g" \
+            -e "s/__SHA_LINUX_ARM64__/${LINUX_ARM64}/g" \
+            -e "s/__SHA_LINUX_AMD64__/${LINUX_AMD64}/g" \
+            Formula/flowgen.rb.tmpl > Formula/flowgen.rb
+          cat Formula/flowgen.rb
+
+      - name: Commit and push formula
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.detect-version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet Formula/flowgen.rb; then
+            echo "No formula changes."
+            exit 0
+          fi
+          git add Formula/flowgen.rb
+          git commit -m "flowgen ${VERSION}"
+          git push

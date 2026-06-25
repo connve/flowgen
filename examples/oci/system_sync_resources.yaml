@@ -34,6 +34,7 @@ flow:
         name: collect_layers
         size: 10000
         timeout: "5s"
+        flush_on_completion: true
 
     - script:
         name: stash_layers
@@ -47,6 +48,11 @@ flow:
         bucket: flowgen_system
         operation: list
         key_prefix: "flowgen.resources."
+        # Include current values so compute_diff can skip put actions
+        # when the resource in cache already matches — every put bumps
+        # the KV revision and fires a watcher hot-reload on every pod,
+        # which races leader-election leases.
+        include_values: true
 
     # Short-circuit only when nothing has drifted: the artifact digest
     # matches the last successful sync AND the cache key count matches
@@ -74,16 +80,23 @@ flow:
         code: |
           let layers = event.meta.layer_batch;
           let existing = event.data.keys;
+          let current = event.data.values;
           let present = #{};
           let actions = [];
           for layer in layers {
               let key = "flowgen.resources." + layer.path;
               present[key] = true;
-              actions.push(#{
-                  action: "put",
-                  key: key,
-                  content: layer.content,
-              });
+              // Skip puts when the cache already holds the same
+              // resource — every revision bump triggers a watcher
+              // hot-reload on every pod, which races leader-election
+              // leases.
+              if current[key] != layer.content {
+                  actions.push(#{
+                      action: "put",
+                      key: key,
+                      content: layer.content,
+                  });
+              }
           }
           for key in existing {
               if present[key] != true {
@@ -96,16 +109,6 @@ flow:
           }
           actions
 
-    # Log every action (put or delete) at info so a stuck or surprising
-    # diff is visible without `RUST_LOG=debug`. `include_meta` is left
-    # at its default of false because `stash_layers` parked the full
-    # layer batch — including resource content — on meta to survive
-    # `list_existing`, and we do not want that dumped into every log
-    # line.
-    - log:
-        name: log_actions
-        level: info
-
     - script:
         name: select_puts
         code: |
@@ -114,7 +117,7 @@ flow:
           } else {
               ()
           }
-        depends_on: [log_actions]
+        depends_on: [compute_diff]
 
     - script:
         name: select_deletes
@@ -124,7 +127,7 @@ flow:
           } else {
               ()
           }
-        depends_on: [log_actions]
+        depends_on: [compute_diff]
 
     - nats_kv_store:
         name: write_to_cache

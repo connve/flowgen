@@ -23,9 +23,13 @@ futures-util = { workspace = true }
 humantime-serde = { workspace = true }
 oci-client = { workspace = true }
 base64 = { workspace = true }
+testcontainers = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+integration-tests = ["dep:testcontainers"]
 
 [lints]
 workspace = true

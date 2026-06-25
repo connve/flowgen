@@ -321,8 +321,20 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let auth = load_auth(self.config.credentials_path.as_ref(), reference.registry()).await?;
 
+        // Loopback hosts (used by integration tests against a local
+        // registry container) do not serve TLS. Anything else stays on
+        // HTTPS, matching production registries.
+        let registry = reference.registry();
+        let protocol = if registry.starts_with("127.0.0.1")
+            || registry.starts_with("localhost")
+            || registry.starts_with("[::1]")
+        {
+            ClientProtocol::Http
+        } else {
+            ClientProtocol::Https
+        };
         let client = Client::new(ClientConfig {
-            protocol: ClientProtocol::Https,
+            protocol,
             ..Default::default()
         });
 

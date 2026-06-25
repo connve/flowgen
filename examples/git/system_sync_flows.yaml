@@ -36,6 +36,7 @@ flow:
         name: collect_files
         size: 10000
         timeout: "5s"
+        flush_on_completion: true
 
     # Stash the file batch in meta so it survives the next task which
     # overwrites event.data with the cache listing.
@@ -51,6 +52,11 @@ flow:
         bucket: flowgen_system
         operation: list
         key_prefix: "flowgen.flows."
+        # Include current values so compute_diff can skip put actions
+        # when the YAML in cache already matches — every put bumps the
+        # KV revision and fires a watcher hot-reload on every pod,
+        # which races leader-election leases.
+        include_values: true
 
     # Short-circuit only when nothing has drifted: the repo commit
     # matches the last successful sync AND the cache key count matches
@@ -81,6 +87,7 @@ flow:
         code: |
           let files = event.meta.file_batch;
           let existing = event.data.keys;
+          let current = event.data.values;
           let present = #{};
           let actions = [];
           for file in files {
@@ -88,11 +95,16 @@ flow:
               let flow_name = parsed.flow.name;
               let key = "flowgen.flows." + flow_name;
               present[key] = true;
-              actions.push(#{
-                  action: "put",
-                  key: key,
-                  content: file.content,
-              });
+              // Skip puts when the cache already holds the same YAML —
+              // every revision bump triggers a watcher hot-reload on
+              // every pod, which races leader-election leases.
+              if current[key] != file.content {
+                  actions.push(#{
+                      action: "put",
+                      key: key,
+                      content: file.content,
+                  });
+              }
           }
           for key in existing {
               if present[key] != true {
@@ -105,20 +117,6 @@ flow:
           }
           actions
 
-    # Log every action (put or delete) at info so a stuck or surprising
-    # diff is visible without `RUST_LOG=debug`. `include_meta` is left
-    # at its default of false because `stash_files` parked the full
-    # file batch — including YAML content — on meta to survive
-    # `list_existing`, and we do not want that dumped into every log
-    # line. Set `include_meta: true` here when debugging the meta
-    # itself.
-    - log:
-        name: log_actions
-        level: info
-
-    # The script processor fans the Rhai array out one event per element.
-    # Two filter scripts split the stream by action and drop non-matching
-    # events with `()`.
     - script:
         name: select_puts
         code: |
@@ -127,7 +125,7 @@ flow:
           } else {
               ()
           }
-        depends_on: [log_actions]
+        depends_on: [compute_diff]
 
     - script:
         name: select_deletes
@@ -137,7 +135,7 @@ flow:
           } else {
               ()
           }
-        depends_on: [log_actions]
+        depends_on: [compute_diff]
 
     - nats_kv_store:
         name: write_to_cache

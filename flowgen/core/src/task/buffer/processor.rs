@@ -66,6 +66,9 @@ enum FlushReason {
     Timeout,
     /// Shutdown signal received.
     Shutdown,
+    /// An incoming event carried a completion signal and the buffer
+    /// was configured with `flush_on_completion`.
+    Completion,
 }
 
 /// Output structure for flushed buffer data.
@@ -311,16 +314,31 @@ impl Processor {
 
                             buffer.push(json_data);
 
+                            // Sources that emit a known-finite batch attach
+                            // a completion handle to the final event in the
+                            // batch. When `flush_on_completion` is set, that
+                            // is also the cue to flush the buffer right
+                            // away instead of waiting for `size`/`timeout`.
+                            let trigger_completion_flush =
+                                self.config.flush_on_completion && event.completion_tx.is_some();
+
                             if let Some(tx) = event.completion_tx {
                                 absorb_completion(&mut buffer_completions, tx);
                             }
 
-                            // Flush if buffer reached size limit.
-                            if buffer.len() >= self.config.size {
+                            // Flush if buffer reached size limit OR the
+                            // upstream source signalled completion.
+                            let reached_size = buffer.len() >= self.config.size;
+                            if reached_size || trigger_completion_flush {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                                 let flush_meta = buffer_meta.take();
                                 let flush_completions = std::mem::take(&mut buffer_completions);
-                                self.flush_buffer(flush_buffer, FlushReason::Size, None, flush_meta, flush_completions);
+                                let reason = if reached_size {
+                                    FlushReason::Size
+                                } else {
+                                    FlushReason::Completion
+                                };
+                                self.flush_buffer(flush_buffer, reason, None, flush_meta, flush_completions);
                                 last_flush = Instant::now();
                             }
                         }
@@ -401,11 +419,18 @@ impl Processor {
                             };
 
                             let completion_tx = event.completion_tx.take();
+                            // Sources that emit a known-finite batch attach
+                            // a completion handle to the final event in the
+                            // batch. When `flush_on_completion` is set, that
+                            // is also the cue to flush the buffer right
+                            // away instead of waiting for `size`/`timeout`.
+                            let trigger_completion_flush =
+                                self.config.flush_on_completion && completion_tx.is_some();
 
                             // Get or create buffer for this key with pre-allocated capacity.
                             use std::collections::hash_map::Entry;
                             let buffer_size = self.config.size;
-                            match buffers.entry(rendered_key.clone()) {
+                            let flushed_key = match buffers.entry(rendered_key.clone()) {
                                 Entry::Vacant(vacant) => {
                                     let key = vacant.key().clone();
                                     let mut buffer = Vec::with_capacity(buffer_size);
@@ -418,7 +443,12 @@ impl Processor {
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), vec![tx]);
                                     }
-                                    last_flush_times.insert(key, Instant::now());
+                                    last_flush_times.insert(key.clone(), Instant::now());
+                                    if trigger_completion_flush {
+                                        Some(key)
+                                    } else {
+                                        None
+                                    }
                                 }
                                 Entry::Occupied(mut occupied) => {
                                     // Get key before any mutable borrows.
@@ -440,8 +470,29 @@ impl Processor {
                                         let buffer_meta = buffer_metas.remove(&key);
                                         let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
                                         self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta, buffer_completion);
-                                        last_flush_times.insert(key, Instant::now());
+                                        last_flush_times.insert(key.clone(), Instant::now());
+                                        None
+                                    } else if trigger_completion_flush {
+                                        Some(key)
+                                    } else {
+                                        None
                                     }
+                                }
+                            };
+
+                            if let Some(key) = flushed_key {
+                                if let Some(buffer_to_flush) = buffers.remove(&key) {
+                                    let buffer_meta = buffer_metas.remove(&key);
+                                    let buffer_completion =
+                                        buffer_completions.remove(&key).unwrap_or_default();
+                                    self.flush_buffer(
+                                        buffer_to_flush,
+                                        FlushReason::Completion,
+                                        Some(key.clone()),
+                                        buffer_meta,
+                                        buffer_completion,
+                                    );
+                                    last_flush_times.insert(key, Instant::now());
                                 }
                             }
                         }
@@ -648,6 +699,7 @@ mod tests {
             size: 100,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -708,6 +760,7 @@ mod tests {
             size: 2,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -786,6 +839,7 @@ mod tests {
             size: 2,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -870,6 +924,7 @@ mod tests {
             size: 3,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -943,6 +998,7 @@ mod tests {
             size: 2,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -1008,6 +1064,7 @@ mod tests {
             size: 2,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         });
@@ -1066,6 +1123,149 @@ mod tests {
             };
             assert_eq!(payload, Some(json!({"ack": true})));
         }
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn flush_on_completion_waits_for_last_event_in_batch() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 10000,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            flush_on_completion: true,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        for i in 0..5 {
+            let evt = EventBuilder::new()
+                .data(EventData::Json(json!({ "i": i })))
+                .subject("layer".into())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap();
+            upstream_tx.send(evt).await.unwrap();
+        }
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), downstream_rx.recv())
+                .await
+                .is_err(),
+            "buffer flushed before the completion-bearing event arrived",
+        );
+
+        let (state, _rx) = new_completion_channel(1);
+        let last = EventBuilder::new()
+            .data(EventData::Json(json!({ "i": 5 })))
+            .subject("layer".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state)
+            .build()
+            .unwrap();
+        upstream_tx.send(last).await.unwrap();
+
+        let flushed = tokio::time::timeout(Duration::from_secs(1), downstream_rx.recv())
+            .await
+            .expect("buffer must flush after final event")
+            .expect("downstream channel closed");
+
+        let data = flushed.data_as_json().unwrap();
+        let batch = data["batch"].as_array().unwrap();
+        assert_eq!(
+            batch.len(),
+            6,
+            "completion flush must include every event the source emitted, got {batch:?}"
+        );
+        for (i, item) in batch.iter().enumerate() {
+            assert_eq!(
+                item["i"].as_u64().unwrap(),
+                i as u64,
+                "batch order must match upstream emit order"
+            );
+        }
+
+        drop(upstream_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn flush_on_completion_off_does_not_flush_on_completion() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "test".to_string(),
+            size: 10000,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            flush_on_completion: false,
+            depends_on: None,
+            retry: None,
+        });
+
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        let (state, _rx) = new_completion_channel(1);
+        let evt = EventBuilder::new()
+            .data(EventData::Json(json!({ "i": 0 })))
+            .subject("layer".into())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(state)
+            .build()
+            .unwrap();
+        upstream_tx.send(evt).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), downstream_rx.recv())
+                .await
+                .is_err(),
+            "flush_on_completion is off — completion_tx must not trigger a flush",
+        );
 
         drop(upstream_tx);
         let _ = handle.await;

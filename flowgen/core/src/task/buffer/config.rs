@@ -51,6 +51,17 @@ pub struct Processor {
     /// When specified, events are partitioned by the rendered key value and each partition
     /// is buffered and flushed independently based on size and timeout.
     pub partition_key: Option<String>,
+    /// When true, flush as soon as an incoming event carries a
+    /// completion signal from its upstream source. Sources that emit a
+    /// known-finite batch (`git_sync`, `oci_sync`) attach the
+    /// completion handle to the final event in the batch; with this
+    /// flag set, the buffer treats that as "no more events coming
+    /// from this batch" and flushes immediately instead of waiting
+    /// for `size` or `timeout`. Avoids tuning timeout against the
+    /// slowest layer pull when the source already knows when it's
+    /// done. Defaults to false to keep existing flows unchanged.
+    #[serde(default)]
+    pub flush_on_completion: bool,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -78,6 +89,7 @@ mod tests {
             size: 100,
             timeout: Some(Duration::from_secs(30)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         };
@@ -99,6 +111,7 @@ mod tests {
             size: 75,
             timeout: Some(Duration::from_secs(10)),
             partition_key: None,
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         };
@@ -114,6 +127,7 @@ mod tests {
             size: 75,
             timeout: Some(Duration::from_secs(30)),
             partition_key: Some("{{event.data.program_id}}.{{event.data.country}}".to_string()),
+            flush_on_completion: false,
             depends_on: None,
             retry: None,
         };
