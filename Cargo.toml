@@ -13,7 +13,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.119.0"
+version = "0.120.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -21,7 +21,7 @@ rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { version = "0.16.0" }
+salesforce_core = { version = "0.17.0" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }

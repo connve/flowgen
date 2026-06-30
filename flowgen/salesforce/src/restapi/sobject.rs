@@ -2,6 +2,7 @@
 //!
 //! Handles SObject CRUD operations: create, get, get_by_external_id, update, upsert, and delete.
 
+use super::config::{ALLOW_SAVE_VALUE, DUPLICATE_RULE_HEADER};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use std::sync::Arc;
@@ -171,13 +172,13 @@ impl EventHandler {
     ) -> Result<(), Error> {
         let data = self.get_payload_data(config, event_data)?;
 
-        let response = self
-            .client
-            .create(&config.sobject_type, data.clone())
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
+        let mut builder = self.client.create(&config.sobject_type, data.clone());
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        let response = builder.send().await.map_err(|e| Error::RestApiOperation {
+            source: Box::new(e),
+        })?;
 
         let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
             source: flowgen_core::serde::Error::Serde { source: e },
@@ -221,13 +222,13 @@ impl EventHandler {
     ) -> Result<(), Error> {
         let record_id = config.record_id.as_ref().ok_or(Error::MissingRecordId)?;
 
-        let record = self
-            .client
-            .get(&config.sobject_type, record_id, config.fields.as_deref())
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
+        let mut builder = self.client.get(&config.sobject_type, record_id);
+        if let Some(fields) = config.fields.as_deref() {
+            builder = builder.fields(fields);
+        }
+        let record = builder.send().await.map_err(|e| Error::RestApiOperation {
+            source: Box::new(e),
+        })?;
 
         let mut e = EventBuilder::new()
             .data(EventData::Json(record))
@@ -273,18 +274,17 @@ impl EventHandler {
             .as_ref()
             .ok_or(Error::MissingExternalId)?;
 
-        let record = self
-            .client
-            .get_by_external_id(
-                &config.sobject_type,
-                external_id_field,
-                external_id_value,
-                config.fields.as_deref(),
-            )
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
+        let mut builder = self.client.get_by_external_id(
+            &config.sobject_type,
+            external_id_field,
+            external_id_value,
+        );
+        if let Some(fields) = config.fields.as_deref() {
+            builder = builder.fields(fields);
+        }
+        let record = builder.send().await.map_err(|e| Error::RestApiOperation {
+            source: Box::new(e),
+        })?;
 
         // Extract ID from record if available.
         let record_id = record
@@ -332,12 +332,15 @@ impl EventHandler {
         let record_id = config.record_id.as_ref().ok_or(Error::MissingRecordId)?;
         let data = self.get_payload_data(config, event_data)?;
 
-        self.client
-            .update(&config.sobject_type, record_id, data.clone())
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
+        let mut builder = self
+            .client
+            .update(&config.sobject_type, record_id, data.clone());
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        builder.send().await.map_err(|e| Error::RestApiOperation {
+            source: Box::new(e),
+        })?;
 
         // Salesforce update API returns nothing on success.
         // Send empty event to maintain event chain.
@@ -391,12 +394,9 @@ impl EventHandler {
         // Try to get existing record by external ID.
         let existing_record = self
             .client
-            .get_by_external_id(
-                &config.sobject_type,
-                external_id_field,
-                external_id_value,
-                Some("Id"),
-            )
+            .get_by_external_id(&config.sobject_type, external_id_field, external_id_value)
+            .fields("Id")
+            .send()
             .await;
 
         match existing_record {
@@ -414,12 +414,15 @@ impl EventHandler {
                     })?
                     .to_string();
 
-                self.client
-                    .update(&config.sobject_type, &record_id, data.clone())
-                    .await
-                    .map_err(|e| Error::RestApiOperation {
-                        source: Box::new(e),
-                    })?;
+                let mut builder =
+                    self.client
+                        .update(&config.sobject_type, &record_id, data.clone());
+                if config.allow_duplicate_save {
+                    builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+                }
+                builder.send().await.map_err(|e| Error::RestApiOperation {
+                    source: Box::new(e),
+                })?;
 
                 // Salesforce update API returns nothing on success.
                 // Send empty event to maintain event chain.
@@ -453,13 +456,13 @@ impl EventHandler {
             }
             Err(_) => {
                 // Record doesn't exist, create it.
-                let response = self
-                    .client
-                    .create(&config.sobject_type, data.clone())
-                    .await
-                    .map_err(|e| Error::RestApiOperation {
-                        source: Box::new(e),
-                    })?;
+                let mut builder = self.client.create(&config.sobject_type, data.clone());
+                if config.allow_duplicate_save {
+                    builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+                }
+                let response = builder.send().await.map_err(|e| Error::RestApiOperation {
+                    source: Box::new(e),
+                })?;
 
                 let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
                     source: flowgen_core::serde::Error::Serde { source: e },
@@ -506,6 +509,7 @@ impl EventHandler {
 
         self.client
             .delete(&config.sobject_type, record_id)
+            .send()
             .await
             .map_err(|e| Error::RestApiOperation {
                 source: Box::new(e),

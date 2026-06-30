@@ -97,7 +97,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -108,7 +108,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -849,7 +849,7 @@ version = "3.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "519bd3116aeeb42d5372c29d982d16d0170d3d4a5ed85fc7dd91642ffff3c67c"
 dependencies = [
- "darling 0.20.11",
+ "darling 0.23.0",
  "ident_case",
  "prettyplease",
  "proc-macro2",
@@ -1664,7 +1664,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "arrow",
  "atty",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -3951,7 +3951,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4206,7 +4206,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4730,7 +4730,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5701,7 +5701,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5739,7 +5739,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6275,7 +6275,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6334,7 +6334,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6369,9 +6369,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e19691025719e175143efd45f5b3845a9299f9e140eab25ae1abf65db66b3d85"
+checksum = "508390b69174bb044918624357ccd3a96eaae184c4fcba19d3c9842f56f504cc"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6392,9 +6392,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a07a3b7eda07180493e7137cfe80ba37a03c2e8bdae8e02edf06d8798687102"
+checksum = "24a2d0029459e4183df128cd85b8f6a84b0e005ea43249b691fa660a2fc79a1a"
 dependencies = [
  "bytes",
  "chrono",
@@ -6412,9 +6412,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27bd725940b32278d8f8befe18df4b1f6d49a58422da07cb6687017fbaaad030"
+checksum = "247654860d6759c9641312725d6c593b699fe35dfa7097941779979f171119db"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6437,9 +6437,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d2b96c8c9b02c582f4ded99141552e6a21218be1a34e413848fac6a7b8cb965"
+checksum = "375d392e327bc6636ac5b7d97a7fce20f68e3766ae1a51cce17a98a43c2aa9c5"
 dependencies = [
  "bytes",
  "chrono",
@@ -6457,9 +6457,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dccf36f5034b7a967590e52eb2080951d1aa160c8b8d4ffadc4e8a4a4ecd8fa"
+checksum = "dcf5fb0e47ebfdc38c58c2ee6d284a503ca3f90a687620e373da0ce144d0a227"
 dependencies = [
  "bytes",
  "chrono",
@@ -7040,7 +7040,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7227,7 +7227,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8393,7 +8393,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

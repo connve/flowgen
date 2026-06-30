@@ -21,5 +21,11 @@ flow:
         sobject_type: "{{event.data.sobject_type}}"
         external_id_field: "{{event.data.external_id_field}}"
         external_id_value: "{{event.data.external_id_value}}"
+        # Override Salesforce duplicate-detection rules per request
+        # (header: Sforce-Duplicate-Rule-Header: allowSave=true). Most
+        # tenants need this on Account / Lead / Contact, where the
+        # default rule action is "Block" — without it, creates and
+        # updates that match an existing record silently fail.
+        allow_duplicate_save: true
         payload:
           from_event: true
