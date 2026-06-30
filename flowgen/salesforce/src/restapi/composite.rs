@@ -1,3 +1,4 @@
+use super::config::{ALLOW_SAVE_VALUE, DUPLICATE_RULE_HEADER};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use salesforce_core::restapi::{
@@ -206,10 +207,12 @@ impl EventHandler {
             records: composite_records?,
         };
 
-        let response = self
-            .client
-            .composite()
-            .create_records(&request)
+        let mut builder = self.client.composite().create_records(&request);
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        let response = builder
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),
@@ -268,6 +271,7 @@ impl EventHandler {
             .client
             .composite()
             .get_records(sobject_type, &request)
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),
@@ -331,10 +335,12 @@ impl EventHandler {
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
-        let response = self
-            .client
-            .composite()
-            .update_records(&request)
+        let mut builder = self.client.composite().update_records(&request);
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        let response = builder
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),
@@ -406,10 +412,15 @@ impl EventHandler {
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
-        let response = self
-            .client
-            .composite()
-            .upsert_records(sobject_type, external_id_field, &request)
+        let mut builder =
+            self.client
+                .composite()
+                .upsert_records(sobject_type, external_id_field, &request);
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        let response = builder
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),
@@ -456,10 +467,12 @@ impl EventHandler {
         let ids = config.ids.as_ref().ok_or(Error::MissingIds)?;
 
         let ids_str = ids.join(",");
-        let response = self
-            .client
-            .composite()
-            .delete_records(&ids_str, config.all_or_none)
+        let mut builder = self.client.composite().delete_records(&ids_str);
+        if let Some(all_or_none) = config.all_or_none {
+            builder = builder.all_or_none(all_or_none);
+        }
+        let response = builder
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),
@@ -525,10 +538,15 @@ impl EventHandler {
             records: tree_records?,
         };
 
-        let response = self
+        let mut builder = self
             .client
             .composite()
-            .create_record_tree(sobject_type, &request)
+            .create_record_tree(sobject_type, &request);
+        if config.allow_duplicate_save {
+            builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
+        }
+        let response = builder
+            .send()
             .await
             .map_err(|e| Error::CompositeApiOperation {
                 source: Box::new(e),

@@ -50,6 +50,7 @@ Single-record operations: create, get, get_by_external_id, update, upsert, delet
 | `fields` | string | | Comma-separated field list (for get). |
 | `external_id_field` | string | | External ID field name (for upsert, get_by_external_id). |
 | `external_id_value` | string | | External ID value. Supports templating. |
+| `allow_duplicate_save` | bool | `false` | Send `Sforce-Duplicate-Rule-Header: allowSave=true` so the request bypasses Salesforce duplicate-detection rules. See [Duplicate-rule override](#duplicate-rule-override). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -109,8 +110,35 @@ Batch operations on multiple records: create, get, update, upsert, delete, tree.
 | `fields` | list | | Field list (for get). |
 | `external_id_field` | string | | External ID field (for upsert). |
 | `all_or_none` | bool | | Atomic transaction — all succeed or all fail. |
+| `allow_duplicate_save` | bool | `false` | Send `Sforce-Duplicate-Rule-Header: allowSave=true` so the batch bypasses Salesforce duplicate-detection rules. See [Duplicate-rule override](#duplicate-rule-override). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+## Duplicate-rule override
+
+Salesforce ships duplicate detection rules with a default action of **Block** on standard SObjects (Account, Lead, Contact). When a request tries to create or update a record that matches an existing one on a rule-watched field (e.g. `Email`, `Phone`, `Name`), the call returns a 200 OK but the record is rejected with `DUPLICATES_DETECTED` in the per-record errors array — silently from the caller's perspective.
+
+Set `allow_duplicate_save: true` on the task to attach the [`Sforce-Duplicate-Rule-Header: allowSave=true`](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/headers_duplicaterulesheader.htm) header to the request. Salesforce will then save the record and surface a duplicate warning instead of blocking the write.
+
+```yaml
+- salesforce_restapi_composite:
+    name: upsert_contacts
+    operation: upsert
+    credentials_path: /etc/salesforce/credentials.json
+    sobject_type: Contact
+    external_id_field: ExternalId__c
+    all_or_none: true
+    allow_duplicate_save: true
+    payload:
+      from_event: true
+```
+
+The flag applies to write operations only:
+
+- `salesforce_restapi_sobject`: `create`, `update`, `upsert`
+- `salesforce_restapi_composite`: `create`, `update`, `upsert`, `tree`
+
+It is a no-op on `get`, `get_by_external_id`, and `delete`.
 
 ## SOSL Search
 

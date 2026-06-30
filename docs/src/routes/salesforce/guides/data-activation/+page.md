@@ -97,6 +97,12 @@ The same task supports all SObject Collection operations:
 
 When `all_or_none: true`, the entire batch succeeds or fails atomically. If any record fails validation, no records are committed. Set to `false` to allow partial success — successfully validated records are committed while failed records return errors.
 
+### allow_duplicate_save
+
+Salesforce duplicate detection rules ship with a default **Block** action on Account / Lead / Contact, so a `create` or `upsert` that matches an existing record on a rule-watched field (`Email`, `Phone`, …) is silently rejected with `DUPLICATES_DETECTED` in the per-record errors array.
+
+Set `allow_duplicate_save: true` to attach `Sforce-Duplicate-Rule-Header: allowSave=true` to the request. Salesforce then saves the record and downgrades the duplicate to a warning. See [Duplicate-rule override](/docs/flowgen/salesforce/rest#duplicate-rule-override) for details.
+
 ## Platform event publisher
 
 Publish platform events to Salesforce to trigger automation — Salesforce Flows, Process Builder, or Apex triggers that subscribe to the event.

@@ -40,5 +40,11 @@ flow:
         sobject_type: Contact
         external_id_field: ExternalId__c
         all_or_none: true
+        # Salesforce ships "Block" as the default action on Contact
+        # duplicate rules. Without this flag, upserts that match an
+        # existing record on a non-external-id field (Email, Phone)
+        # silently fail. Opt in to override the rule per request via
+        # the Sforce-Duplicate-Rule-Header: allowSave=true header.
+        allow_duplicate_save: true
         payload:
           from_event: true

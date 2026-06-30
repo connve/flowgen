@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "atty",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -6028,9 +6028,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278a53c2f977dc827b3ceaa2dfade3104dc8f892874c19b6dff9872f3395a81f"
+version = "0.17.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6051,9 +6050,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e2bfb6f54584f8b4fb33192137f103d03369526ec7f81ab607a8aa7a129b2a"
+version = "0.17.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
 dependencies = [
  "bytes",
  "chrono",
@@ -6071,9 +6069,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca651943790601d7c2eae3d92196ea4531ab0cdbdef7311e7a10af20408ea171"
+version = "0.17.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6096,9 +6093,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad19d461803b8864397ed15318ebfd42647ae250942c88edee59e002f381b117"
+version = "0.17.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
 dependencies = [
  "bytes",
  "chrono",
@@ -6116,9 +6112,8 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6d4a293fd03d0012e807447e27e3ba0a9161225882bdd993c4f94711940204c"
+version = "0.17.0"
+source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
 dependencies = [
  "bytes",
  "chrono",
