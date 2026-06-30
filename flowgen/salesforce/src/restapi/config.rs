@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
+/// Salesforce request header that overrides duplicate-detection rules.
+/// `allowSave=true` lets create / update / upsert through even when a
+/// duplicate rule would otherwise block it. Set on the request when
+/// `allow_duplicate_save: true` is opted in by the flow author.
+pub const DUPLICATE_RULE_HEADER: &str = "Sforce-Duplicate-Rule-Header";
+pub const ALLOW_SAVE_VALUE: &str = "allowSave=true";
+
 /// SObject CRUD operations.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +126,15 @@ pub struct SObject {
     #[serde(default)]
     pub external_id_value: Option<String>,
 
+    /// Send `Sforce-Duplicate-Rule-Header: allowSave=true` so Salesforce
+    /// accepts a record even when a duplicate detection rule would
+    /// normally block it. Default duplicate rules ship as "Block" on
+    /// Account/Lead/Contact, so without this flag composite/create
+    /// calls silently no-op on duplicates. Applies to create, update,
+    /// and upsert.
+    #[serde(default)]
+    pub allow_duplicate_save: bool,
+
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -172,6 +188,15 @@ pub struct Composite {
 
     #[serde(default)]
     pub all_or_none: Option<bool>,
+
+    /// Send `Sforce-Duplicate-Rule-Header: allowSave=true` so Salesforce
+    /// accepts a record even when a duplicate detection rule would
+    /// normally block it. Default duplicate rules ship as "Block" on
+    /// Account/Lead/Contact, so without this flag composite create /
+    /// update / upsert silently no-op on duplicates. Applies to
+    /// create, update, upsert, and tree.
+    #[serde(default)]
+    pub allow_duplicate_save: bool,
 
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.

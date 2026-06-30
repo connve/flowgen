@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.119.0
+
+### Features
+
+- **`Sforce-Duplicate-Rule-Header: allowSave=true` support on REST
+  and Composite operations.** New `allow_duplicate_save: bool` field
+  (default `false`) on both `salesforce_restapi_sobject` and
+  `salesforce_restapi_composite` task configs. When set, the
+  underlying request carries the header so Salesforce accepts the
+  record even when a duplicate detection rule would normally block
+  it. Salesforce ships "Block" as the default action on
+  Account / Lead / Contact duplicate rules, so without this flag
+  composite create / update / upsert silently no-op on duplicates
+  — a tenant report flagged exactly this. Applies to `create`,
+  `update`, `upsert`, and `tree` on composite; `create`, `update`,
+  and `upsert` on sobject.
+
+### Dependencies
+
+- **salesforce_core 0.17.0.** Migrated to the new request-builder
+  API: every REST and Composite operation now returns a builder
+  that accepts per-call headers via `.header(name, value)` and is
+  dispatched with `.send().await`. Replaces the previous flat
+  `client.create(...).await` style. The migration was mechanical
+  on flowgen's side (14 call sites in `restapi/sobject.rs` and
+  `restapi/composite.rs`); the upstream change unblocks any
+  Salesforce request header (`Sforce-Auto-Assign`,
+  `Sforce-Call-Options`, `Sforce-Mru`, …), of which
+  `Sforce-Duplicate-Rule-Header` is the first one exposed through
+  the YAML config.
+
 ## 0.118.1
 
 ### Fixes

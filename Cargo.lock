@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "atty",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.118.1"
+version = "0.119.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -6028,9 +6028,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278a53c2f977dc827b3ceaa2dfade3104dc8f892874c19b6dff9872f3395a81f"
+checksum = "508390b69174bb044918624357ccd3a96eaae184c4fcba19d3c9842f56f504cc"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6051,9 +6051,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e2bfb6f54584f8b4fb33192137f103d03369526ec7f81ab607a8aa7a129b2a"
+checksum = "24a2d0029459e4183df128cd85b8f6a84b0e005ea43249b691fa660a2fc79a1a"
 dependencies = [
  "bytes",
  "chrono",
@@ -6071,9 +6071,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca651943790601d7c2eae3d92196ea4531ab0cdbdef7311e7a10af20408ea171"
+checksum = "247654860d6759c9641312725d6c593b699fe35dfa7097941779979f171119db"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6096,9 +6096,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad19d461803b8864397ed15318ebfd42647ae250942c88edee59e002f381b117"
+checksum = "375d392e327bc6636ac5b7d97a7fce20f68e3766ae1a51cce17a98a43c2aa9c5"
 dependencies = [
  "bytes",
  "chrono",
@@ -6116,9 +6116,9 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.15.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6d4a293fd03d0012e807447e27e3ba0a9161225882bdd993c4f94711940204c"
+checksum = "dcf5fb0e47ebfdc38c58c2ee6d284a503ca3f90a687620e373da0ce144d0a227"
 dependencies = [
  "bytes",
  "chrono",
