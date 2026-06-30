@@ -6029,7 +6029,8 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "salesforce_core"
 version = "0.17.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "508390b69174bb044918624357ccd3a96eaae184c4fcba19d3c9842f56f504cc"
 dependencies = [
  "futures-util",
  "oauth2",
@@ -6051,7 +6052,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_bulkapi"
 version = "0.17.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24a2d0029459e4183df128cd85b8f6a84b0e005ea43249b691fa660a2fc79a1a"
 dependencies = [
  "bytes",
  "chrono",
@@ -6070,7 +6072,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_pubsubapi"
 version = "0.17.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "247654860d6759c9641312725d6c593b699fe35dfa7097941779979f171119db"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6094,7 +6097,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_restapi"
 version = "0.17.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "375d392e327bc6636ac5b7d97a7fce20f68e3766ae1a51cce17a98a43c2aa9c5"
 dependencies = [
  "bytes",
  "chrono",
@@ -6113,7 +6117,8 @@ dependencies = [
 [[package]]
 name = "salesforce_core_toolingapi"
 version = "0.17.0"
-source = "git+https://github.com/connve/salesforce-rs?branch=feat%2Fsfdc-allow-dups-header#05920b4cf022083030e72db4753391300af1c4f4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf5fb0e47ebfdc38c58c2ee6d284a503ca3f90a687620e373da0ce144d0a227"
 dependencies = [
  "bytes",
  "chrono",
