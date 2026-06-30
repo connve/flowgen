@@ -187,6 +187,15 @@ pub enum Error {
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
+    /// Error in Mongo Reader task.
+    #[error(transparent)]
+    MongoReaderError(#[from] flowgen_mongo::reader::Error),
+    /// Error in Mongo Writer task.
+    #[error(transparent)]
+    MongoWriterError(#[from] flowgen_mongo::writer::Error),
+    /// Error in Mongo Reader task.
+    #[error(transparent)]
+    MongoChangeStreamError(#[from] flowgen_mongo::change_stream::Error),
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -1614,6 +1623,71 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
+
+        TaskType::mongo_reader(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_mongo::reader::ReaderBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
+        TaskType::mongo_writer(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_mongo::writer::WriterBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
+        TaskType::mongo_change_stream(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_mongo::change_stream::ChangeStreamReaderBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
         TaskType::nats_kv_store(config) => {
             let config = Arc::new(config);
             tokio::spawn(
