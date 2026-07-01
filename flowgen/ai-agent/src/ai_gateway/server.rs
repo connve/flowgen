@@ -205,13 +205,16 @@ async fn dispatch_chat_completions(
         .messages
         .iter()
         .find(|m| m.is_system())
-        .map(|m| m.content.clone());
+        .and_then(|m| m.content.clone());
 
     let user_messages: Vec<&Message> = request.messages.iter().filter(|m| !m.is_system()).collect();
 
+    // Skip messages without textual content (assistant tool-call
+    // messages, tool-role replies) when synthesising the flat prompt
+    // string that non-passthrough flows expect.
     let prompt = user_messages
         .iter()
-        .map(|m| m.content.as_str())
+        .filter_map(|m| m.content.as_deref())
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -219,6 +222,10 @@ async fn dispatch_chat_completions(
     let created = chrono::Utc::now().timestamp();
     let is_stream = request.stream;
 
+    // Preserve the flat prompt/system_prompt shape for existing
+    // non-passthrough flows, and pass the full OpenAI-shape payload
+    // alongside so a tool-passthrough `ai_completion` can reach for
+    // `messages` / `tools` / `tool_choice` without losing information.
     let data = serde_json::json!({
         "prompt": prompt,
         "system_prompt": system_prompt,
@@ -226,6 +233,9 @@ async fn dispatch_chat_completions(
         "temperature": request.temperature,
         "max_tokens": request.max_tokens,
         "stream": is_stream,
+        "messages": request.messages,
+        "tools": request.tools,
+        "tool_choice": request.tool_choice,
     });
 
     let mut meta = serde_json::Map::new();
@@ -394,11 +404,30 @@ async fn dispatch_blocking(
         message: e.to_string(),
     })?;
 
-    let content = completion_data
-        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
-        .unwrap_or_default();
+    // Downstream serialises `CompletionResponse` — read `text` for the
+    // completion string and `tool_calls` for passthrough. Fall back to
+    // `content` for legacy leaf tasks that emit their own shape.
+    let text = match completion_data.as_ref() {
+        Some(v) => match v.get("text").or_else(|| v.get("content")) {
+            Some(c) => match c.as_str() {
+                Some(s) => s.to_string(),
+                None => String::new(),
+            },
+            None => String::new(),
+        },
+        None => String::new(),
+    };
+    let tool_calls: Vec<crate::ai_gateway::config::ToolCall> =
+        match completion_data.as_ref().and_then(|v| v.get("tool_calls")) {
+            Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                .map_err(|source| DispatchError::MalformedToolCalls { source })?,
+            _ => Vec::new(),
+        };
 
-    let response = ChatCompletionResponse::new(request_id, created, model, content);
+    let response = match tool_calls.is_empty() {
+        true => ChatCompletionResponse::new(request_id, created, model, text),
+        false => ChatCompletionResponse::with_tool_calls(request_id, created, model, tool_calls),
+    };
     Ok(axum::Json(response).into_response())
 }
 
@@ -534,16 +563,53 @@ async fn dispatch_streaming(
             }
         };
 
+        let mut emitted_tool_calls = false;
         match &result {
             Some(Ok(Ok(Some(data)))) => {
-                if let Some(content) = data.get("content").and_then(|c| c.as_str()) {
-                    let chunk = ChatCompletionChunk::content(
+                // Legacy shape uses `content`; `CompletionChunk` uses
+                // `text`. Read either so old and new emitters coexist.
+                let text = match data.get("text").or_else(|| data.get("content")) {
+                    Some(c) => match c.as_str() {
+                        Some(s) => s.to_string(),
+                        None => String::new(),
+                    },
+                    None => String::new(),
+                };
+                if !text.is_empty() {
+                    let chunk = ChatCompletionChunk::content(&request_id, created, &model, text);
+                    send_sse(&sse_tx, &chunk).await;
+                }
+                let tool_calls: Vec<crate::ai_gateway::config::ToolCall> =
+                    match data.get("tool_calls") {
+                        Some(v) if !v.is_null() => match serde_json::from_value(v.clone()) {
+                            Ok(list) => list,
+                            Err(e) => {
+                                error!(error = %e, "Malformed tool_calls in downstream event");
+                                Vec::new()
+                            }
+                        },
+                        _ => Vec::new(),
+                    };
+                for (idx, call) in tool_calls.into_iter().enumerate() {
+                    emitted_tool_calls = true;
+                    let idx = idx as u32;
+                    let open = ChatCompletionChunk::tool_call_open(
                         &request_id,
                         created,
                         &model,
-                        content.to_string(),
+                        idx,
+                        call.id.clone(),
+                        call.function.name.clone(),
                     );
-                    send_sse(&sse_tx, &chunk).await;
+                    send_sse(&sse_tx, &open).await;
+                    let args = ChatCompletionChunk::tool_call_arguments(
+                        &request_id,
+                        created,
+                        &model,
+                        idx,
+                        call.function.arguments.clone(),
+                    );
+                    send_sse(&sse_tx, &args).await;
                 }
             }
             Some(Ok(Err(e))) => {
@@ -561,11 +627,11 @@ async fn dispatch_streaming(
             _ => {}
         }
 
-        send_sse(
-            &sse_tx,
-            &ChatCompletionChunk::stop(&request_id, created, &model),
-        )
-        .await;
+        let final_chunk = match emitted_tool_calls {
+            true => ChatCompletionChunk::stop_tool_calls(&request_id, created, &model),
+            false => ChatCompletionChunk::stop(&request_id, created, &model),
+        };
+        send_sse(&sse_tx, &final_chunk).await;
         let _ = sse_tx.send(Ok(SSE_DONE.to_string())).await;
     });
 
@@ -618,6 +684,11 @@ enum DispatchError {
     FlowCompletionFailed,
     #[error("Flow error: {message}")]
     FlowError { message: String },
+    #[error("Downstream tool_calls payload is malformed: {source}")]
+    MalformedToolCalls {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// OpenAI-compatible error response body.
@@ -651,7 +722,8 @@ impl DispatchError {
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed
-            | DispatchError::FlowError { .. } => "server_error",
+            | DispatchError::FlowError { .. }
+            | DispatchError::MalformedToolCalls { .. } => "server_error",
         }
     }
 }
@@ -671,7 +743,8 @@ impl IntoResponse for DispatchError {
             | DispatchError::AuthProviderMissing => StatusCode::UNAUTHORIZED,
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
-            | DispatchError::FlowCompletionFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            | DispatchError::FlowCompletionFailed
+            | DispatchError::MalformedToolCalls { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             DispatchError::FlowError { .. } => StatusCode::BAD_GATEWAY,
         };
         let body = OpenAiErrorResponse {

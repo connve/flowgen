@@ -91,6 +91,18 @@ pub struct Processor {
     /// Enable streaming mode (sends chunks as separate events).
     #[serde(default)]
     pub stream: bool,
+    /// Bypass rig's `Agent` tool-execution loop and forward
+    /// caller-supplied `tools`/`tool_choice` straight to the upstream
+    /// provider. Tool invocations returned by the model are surfaced
+    /// verbatim as `tool_calls` on the response instead of being
+    /// executed in-process. Use this when a client (e.g. opencode,
+    /// Claude Desktop) will execute the tools itself and only needs
+    /// the AI gateway as a protocol proxy. Requires the client to
+    /// supply `tools: [...]` in the request body; a request without
+    /// tools follows the normal completion path even when this flag
+    /// is on.
+    #[serde(default)]
+    pub tool_passthrough: bool,
     /// Optional MCP server URLs to connect to for tool discovery.
     /// The agent will connect to each MCP server, discover available tools,
     /// and make them callable during completions. Supports both flowgen's
@@ -188,6 +200,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,
@@ -227,6 +240,7 @@ mod tests {
             ]),
             max_turns: Some(5),
             stream: true,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,
@@ -272,6 +286,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,
@@ -295,6 +310,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: true,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,
@@ -325,6 +341,7 @@ mod tests {
             static_context: None,
             max_turns: None,
             stream: false,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,
@@ -359,6 +376,7 @@ mod tests {
             ]),
             max_turns: Some(3),
             stream: false,
+            tool_passthrough: false,
             mcp_servers: vec![],
             sandbox: Default::default(),
             depends_on: None,

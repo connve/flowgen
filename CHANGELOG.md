@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.121.0
+
+### Features
+
+- **AI gateway tool-use passthrough.** New `tool_passthrough:
+  bool` field on the `ai_completion` task config (default
+  `false`). When set, the processor bypasses rig's agent loop and
+  forwards the request's `tools` and `tool_choice` verbatim to the
+  upstream provider; tool invocations returned by the model surface
+  as `tool_calls` on the response instead of being executed
+  in-process. Unblocks opencode, Claude Desktop, and any other
+  OpenAI-tool-use SDK from driving models through the flowgen AI
+  gateway — before this the `tools:` block was silently dropped by
+  serde and the model never saw it. Passthrough is a no-op when the
+  request omits `tools`, so a single flow serves both tool-using
+  and plain chat clients. Works across every provider flowgen
+  supports (13 rig-backed providers + `provider: custom`) via a
+  provider-agnostic `Passthrough` trait with a blanket impl over
+  `rig::client::CompletionClient`; no per-provider dispatch code.
+
+  OpenAI wire types (`Message`, `ToolDefinition`, `ToolCall`,
+  `ChatCompletionRequest`, `ChatCompletionResponse`,
+  `Delta.tool_calls`, `ToolCallDelta`) added to
+  `flowgen/ai-agent/src/ai_gateway/config.rs`. Conversion between
+  the OpenAI shape and rig's provider-agnostic completion types
+  lives in the new `flowgen/ai-agent/src/completion/passthrough.rs`
+  module. Streaming path emits an open-delta + arguments-delta pair
+  per tool call plus `finish_reason: "tool_calls"` on the final
+  chunk, matching OpenAI's incremental tool-call SSE format.
+
+  The `local/flows/ai-gateway/llm-proxy.yaml` proxy opts in.
+
 ## 0.120.1
 
 ### Build

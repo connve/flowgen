@@ -9,6 +9,7 @@ pub mod agent;
 /// AI completion processor for generating responses using LLMs.
 pub mod completion {
     pub mod config;
+    pub mod passthrough;
     pub mod processor;
 }
 

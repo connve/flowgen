@@ -3,7 +3,10 @@
 //! Provides unified client creation for different AI providers through the Rig framework.
 //!
 //! Uses an enum-based pattern as recommended by Rig's official examples for handling
-//! multiple providers without the deprecated CompletionClientDyn trait.
+//! multiple providers without the deprecated CompletionClientDyn trait. Provider-agnostic
+//! operations (tool-use passthrough) are implemented via a local `Passthrough` trait
+//! with a blanket impl over `rig::client::CompletionClient`, so the enum dispatch is
+//! one call per variant instead of a duplicated body per provider.
 
 use crate::completion::config::Provider;
 use crate::completion::processor::Credentials;
@@ -11,8 +14,11 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::client::CompletionClient as RigCompletionClientTrait;
-use rig::completion::{Document, Prompt};
+use rig::completion::{
+    CompletionError, CompletionModel, CompletionRequest, Document, Prompt, Usage,
+};
 use rig::message::ToolChoice;
+use rig::streaming::StreamedAssistantContent as RigStreamedContent;
 use rig::streaming::StreamedAssistantContent;
 use rig::streaming::StreamingPrompt;
 use rig::tool::server::ToolServerHandle;
@@ -105,6 +111,11 @@ pub enum Error {
     CompletionRequest {
         #[source]
         source: rig::completion::PromptError,
+    },
+    #[error("Completion passthrough failed: {source}")]
+    CompletionPassthrough {
+        #[source]
+        source: rig::completion::CompletionError,
     },
 }
 
@@ -491,6 +502,95 @@ struct AgentParams<'a> {
     additional_params: &'a Option<Value>,
 }
 
+/// Provider-agnostic response returned by tool-use passthrough.
+///
+/// Drops the provider-specific `raw_response` so a single type flows
+/// out of `AgentClient::completion_passthrough` regardless of provider.
+pub struct PassthroughResponse {
+    pub choice: rig::OneOrMany<rig::completion::AssistantContent>,
+    pub usage: Usage,
+}
+
+/// Provider-agnostic streaming event carried out of tool-use
+/// passthrough. Mirrors the subset of `rig::StreamedAssistantContent`
+/// the AI gateway cares about — text deltas and complete tool calls;
+/// reasoning and provider-native items are dropped.
+pub enum PassthroughStreamEvent {
+    Text(String),
+    ToolCall(rig::completion::message::ToolCall),
+    Done,
+}
+
+/// One-shot completion that skips rig's agent loop.
+///
+/// Blanket-implemented for every rig `CompletionClient`, so the enum
+/// dispatch in `ProviderClient::completion_passthrough` reduces to a
+/// single call per variant.
+trait Passthrough {
+    async fn passthrough(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<PassthroughResponse, CompletionError>;
+
+    async fn passthrough_stream(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
+        >,
+        CompletionError,
+    >;
+}
+
+impl<C> Passthrough for C
+where
+    C: RigCompletionClientTrait,
+    C::CompletionModel: CompletionModel,
+    <C::CompletionModel as CompletionModel>::StreamingResponse: 'static,
+{
+    async fn passthrough(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<PassthroughResponse, CompletionError> {
+        let cm = self.completion_model(model);
+        let resp = cm.completion(request).await?;
+        Ok(PassthroughResponse {
+            choice: resp.choice,
+            usage: resp.usage,
+        })
+    }
+
+    async fn passthrough_stream(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
+        >,
+        CompletionError,
+    > {
+        let cm = self.completion_model(model);
+        let stream = cm.stream(request).await?;
+        let mapped = stream.map(|item| match item {
+            Ok(RigStreamedContent::Text(text)) => Ok(PassthroughStreamEvent::Text(text.text)),
+            Ok(RigStreamedContent::ToolCall { tool_call, .. }) => {
+                Ok(PassthroughStreamEvent::ToolCall(tool_call))
+            }
+            Ok(RigStreamedContent::Final(_)) => Ok(PassthroughStreamEvent::Done),
+            // Drop reasoning and delta fragments — the gateway only
+            // needs text and complete tool calls.
+            Ok(_) => Ok(PassthroughStreamEvent::Text(String::new())),
+            Err(e) => Err(e),
+        });
+        Ok(Box::pin(mapped))
+    }
+}
+
 /// Provider client enum - stores the client (built once), not the agent.
 ///
 /// We build agents on-demand per request so we can apply dynamic system prompts.
@@ -566,6 +666,59 @@ impl ProviderClient {
             Self::Perplexity(client) => dispatch_build_agent!(Perplexity, client, params),
             Self::HuggingFace(client) => dispatch_build_agent!(HuggingFace, client, params),
             Self::VertexAi(client) => dispatch_build_agent!(VertexAi, client, params),
+        }
+    }
+
+    /// One-shot completion that skips rig's agent loop, delegating to
+    /// each provider's `Passthrough` blanket impl.
+    async fn completion_passthrough(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<PassthroughResponse, CompletionError> {
+        match self {
+            Self::OpenAi(client) => client.passthrough(model, request).await,
+            Self::OpenAiCompat(client) => client.passthrough(model, request).await,
+            Self::Anthropic(client) => client.passthrough(model, request).await,
+            Self::Cohere(client) => client.passthrough(model, request).await,
+            Self::Gemini(client) => client.passthrough(model, request).await,
+            Self::Mistral(client) => client.passthrough(model, request).await,
+            Self::Groq(client) => client.passthrough(model, request).await,
+            Self::Together(client) => client.passthrough(model, request).await,
+            Self::Xai(client) => client.passthrough(model, request).await,
+            Self::OpenRouter(client) => client.passthrough(model, request).await,
+            Self::Perplexity(client) => client.passthrough(model, request).await,
+            Self::HuggingFace(client) => client.passthrough(model, request).await,
+            Self::VertexAi(client) => client.passthrough(model, request).await,
+        }
+    }
+
+    /// Streaming counterpart to `completion_passthrough`. Returns a
+    /// boxed stream that yields provider-agnostic events.
+    async fn completion_stream_passthrough(
+        &self,
+        model: &str,
+        request: CompletionRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
+        >,
+        CompletionError,
+    > {
+        match self {
+            Self::OpenAi(client) => client.passthrough_stream(model, request).await,
+            Self::OpenAiCompat(client) => client.passthrough_stream(model, request).await,
+            Self::Anthropic(client) => client.passthrough_stream(model, request).await,
+            Self::Cohere(client) => client.passthrough_stream(model, request).await,
+            Self::Gemini(client) => client.passthrough_stream(model, request).await,
+            Self::Mistral(client) => client.passthrough_stream(model, request).await,
+            Self::Groq(client) => client.passthrough_stream(model, request).await,
+            Self::Together(client) => client.passthrough_stream(model, request).await,
+            Self::Xai(client) => client.passthrough_stream(model, request).await,
+            Self::OpenRouter(client) => client.passthrough_stream(model, request).await,
+            Self::Perplexity(client) => client.passthrough_stream(model, request).await,
+            Self::HuggingFace(client) => client.passthrough_stream(model, request).await,
+            Self::VertexAi(client) => client.passthrough_stream(model, request).await,
         }
     }
 }
@@ -754,5 +907,37 @@ impl AgentClient {
     /// Returns the model identifier.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// One-shot completion that skips rig's agent loop. Used by the AI
+    /// gateway to forward client-supplied `tools` verbatim: the model
+    /// sees the tools, returns `tool_calls`, and we hand them back
+    /// without executing anything ourselves.
+    pub async fn completion_passthrough(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<PassthroughResponse, Error> {
+        self.client
+            .completion_passthrough(&self.model, request)
+            .await
+            .map_err(|source| Error::CompletionPassthrough { source })
+    }
+
+    /// Streaming counterpart to `completion_passthrough`. Yields a
+    /// provider-agnostic stream that the gateway maps to the OpenAI
+    /// SSE format on the way out.
+    pub async fn completion_stream_passthrough(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn Stream<Item = Result<PassthroughStreamEvent, CompletionError>> + Send>,
+        >,
+        Error,
+    > {
+        self.client
+            .completion_stream_passthrough(&self.model, request)
+            .await
+            .map_err(|source| Error::CompletionPassthrough { source })
     }
 }

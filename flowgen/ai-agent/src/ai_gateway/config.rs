@@ -17,8 +17,14 @@ pub const OBJECT_CHAT_COMPLETION_CHUNK: &str = "chat.completion.chunk";
 pub const ROLE_ASSISTANT: &str = "assistant";
 /// Role for system messages.
 pub const ROLE_SYSTEM: &str = "system";
+/// Role for tool result messages sent back to the model.
+pub const ROLE_TOOL: &str = "tool";
 /// Finish reason when generation completes normally.
 pub const FINISH_REASON_STOP: &str = "stop";
+/// Finish reason when the model stops because it wants to invoke tools.
+pub const FINISH_REASON_TOOL_CALLS: &str = "tool_calls";
+/// Tool `type` value per OpenAI tool-use spec.
+pub const TOOL_TYPE_FUNCTION: &str = "function";
 /// SSE terminator per OpenAI streaming specification.
 pub const SSE_DONE: &str = "data: [DONE]\n\n";
 
@@ -100,7 +106,7 @@ impl ConfigExt for Processor {}
 pub struct ChatCompletionRequest {
     /// Model identifier requested by the client.
     pub model: Option<String>,
-    /// Conversation messages (system, user, assistant).
+    /// Conversation messages (system, user, assistant, tool).
     pub messages: Vec<Message>,
     /// Sampling temperature (0.0-2.0).
     pub temperature: Option<f32>,
@@ -109,23 +115,48 @@ pub struct ChatCompletionRequest {
     /// Whether to stream the response as SSE chunks.
     #[serde(default)]
     pub stream: bool,
+    /// Client-supplied tool definitions the model is allowed to invoke.
+    /// Forwarded verbatim to the upstream provider when the gateway is
+    /// configured for tool passthrough.
+    #[serde(default)]
+    pub tools: Option<Vec<ToolDefinition>>,
+    /// Tool selection strategy (`"auto"`, `"none"`, `"required"`, or an
+    /// object referencing a specific function). Passed through unchanged.
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// Chat message with role and content.
+///
+/// `content` is optional because OpenAI permits assistant messages that
+/// carry only `tool_calls` (no text), and tool-role messages carry results
+/// separately. On the wire an omitted / `null` content is legitimate.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
-    /// Message role: "system", "user", or "assistant".
+    /// Message role: `system`, `user`, `assistant`, or `tool`.
     pub role: String,
-    /// Message text content.
-    pub content: String,
+    /// Message text content. `None` when `tool_calls` is present, or on a
+    /// tool-role message before the caller inlines the tool result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Tool invocations the assistant wants to perform. Present only on
+    /// assistant messages returned by a model in tool-use mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Identifier of the tool call this message answers. Present only on
+    /// tool-role follow-up messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
-    /// Create an assistant response message.
+    /// Create an assistant response message carrying text content.
     pub fn assistant(content: String) -> Self {
         Self {
             role: ROLE_ASSISTANT.to_string(),
-            content,
+            content: Some(content),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -133,6 +164,53 @@ impl Message {
     pub fn is_system(&self) -> bool {
         self.role == ROLE_SYSTEM
     }
+}
+
+/// Client-supplied tool definition, matching OpenAI's function-calling
+/// schema. The gateway forwards these to the upstream provider unchanged.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolDefinition {
+    /// Tool kind. OpenAI currently defines only `"function"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Function metadata (name, description, JSON Schema parameters).
+    pub function: ToolFunction,
+}
+
+/// Function definition inside a `ToolDefinition`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolFunction {
+    /// Function name the model uses to invoke this tool.
+    pub name: String,
+    /// Optional natural-language description shown to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// JSON Schema describing the function's parameters.
+    pub parameters: serde_json::Value,
+}
+
+/// Model-emitted tool invocation returned inside an assistant `Message`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolCall {
+    /// Unique identifier the client echoes back in the tool-role reply.
+    pub id: String,
+    /// Tool kind — matches `ToolDefinition::kind`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Called function (name + JSON-encoded arguments string).
+    pub function: ToolCallFunction,
+}
+
+/// Function invocation payload inside a `ToolCall`.
+///
+/// `arguments` is a JSON-encoded **string** per the OpenAI spec, not a
+/// parsed object; downstream code parses it lazily when it needs the args.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolCallFunction {
+    /// Function name selected by the model.
+    pub name: String,
+    /// JSON-encoded argument object as a raw string.
+    pub arguments: String,
 }
 
 // --- OpenAI response types (non-streaming) ---
@@ -166,6 +244,35 @@ impl ChatCompletionResponse {
                 index: 0,
                 message: Message::assistant(content),
                 finish_reason: FINISH_REASON_STOP,
+            }],
+            usage: None,
+        }
+    }
+
+    /// Create a response whose assistant message only carries tool
+    /// invocations (no text). `finish_reason` is set to `"tool_calls"`
+    /// so tool-aware clients treat the turn as a request for tool
+    /// execution rather than a normal completion.
+    pub fn with_tool_calls(
+        id: String,
+        created: i64,
+        model: String,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self {
+            id,
+            object: OBJECT_CHAT_COMPLETION,
+            created,
+            model,
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: ROLE_ASSISTANT.to_string(),
+                    content: None,
+                    tool_calls,
+                    tool_call_id: None,
+                },
+                finish_reason: FINISH_REASON_TOOL_CALLS,
             }],
             usage: None,
         }
@@ -224,6 +331,7 @@ impl ChatCompletionChunk {
                 delta: Delta {
                     role: None,
                     content: Some(content),
+                    tool_calls: Vec::new(),
                 },
                 finish_reason: None,
             }],
@@ -242,6 +350,7 @@ impl ChatCompletionChunk {
                 delta: Delta {
                     role: Some(ROLE_ASSISTANT.to_string()),
                     content: None,
+                    tool_calls: Vec::new(),
                 },
                 finish_reason: None,
             }],
@@ -260,8 +369,100 @@ impl ChatCompletionChunk {
                 delta: Delta {
                     role: None,
                     content: None,
+                    tool_calls: Vec::new(),
                 },
                 finish_reason: Some(FINISH_REASON_STOP),
+            }],
+        }
+    }
+
+    /// Create a chunk that opens a tool-call delta with `id` and
+    /// function name. Emitted once per tool call at the start of the
+    /// call's argument stream.
+    pub fn tool_call_open(
+        id: &str,
+        created: i64,
+        model: &str,
+        index: u32,
+        call_id: String,
+        function_name: String,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            object: OBJECT_CHAT_COMPLETION_CHUNK,
+            created,
+            model: model.to_string(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    tool_calls: vec![ToolCallDelta {
+                        index,
+                        id: Some(call_id),
+                        kind: Some(TOOL_TYPE_FUNCTION.to_string()),
+                        function: Some(ToolCallDeltaFunction {
+                            name: Some(function_name),
+                            arguments: String::new(),
+                        }),
+                    }],
+                },
+                finish_reason: None,
+            }],
+        }
+    }
+
+    /// Create a chunk that carries an arguments fragment for a
+    /// previously-opened tool call (identified by `index`).
+    pub fn tool_call_arguments(
+        id: &str,
+        created: i64,
+        model: &str,
+        index: u32,
+        arguments: String,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            object: OBJECT_CHAT_COMPLETION_CHUNK,
+            created,
+            model: model.to_string(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    tool_calls: vec![ToolCallDelta {
+                        index,
+                        id: None,
+                        kind: None,
+                        function: Some(ToolCallDeltaFunction {
+                            name: None,
+                            arguments,
+                        }),
+                    }],
+                },
+                finish_reason: None,
+            }],
+        }
+    }
+
+    /// Create the final chunk with `finish_reason: "tool_calls"`,
+    /// signalling the client that the model stopped because it wants
+    /// tools invoked.
+    pub fn stop_tool_calls(id: &str, created: i64, model: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            object: OBJECT_CHAT_COMPLETION_CHUNK,
+            created,
+            model: model.to_string(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    tool_calls: Vec::new(),
+                },
+                finish_reason: Some(FINISH_REASON_TOOL_CALLS),
             }],
         }
     }
@@ -292,6 +493,49 @@ pub struct Delta {
     /// Incremental text content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Incremental tool-call additions carried inside this delta.
+    /// Present only on passthrough streams where the model returns
+    /// tool invocations. Multiple calls disambiguated by `index`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallDelta>,
+}
+
+/// Incremental tool-call fragment inside a streaming `Delta`.
+///
+/// Rig hands us a fully-formed `ToolCall` in a single item, so in
+/// practice we emit two deltas per call: one carrying `id` + `name`
+/// with empty `arguments`, then one carrying the JSON-encoded
+/// `arguments` string. Clients aggregate by `index`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallDelta {
+    /// Zero-based index disambiguating parallel tool calls in a
+    /// single assistant turn.
+    pub index: u32,
+    /// Present on the opening delta for a tool call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Present on the opening delta; matches `ToolCall::kind`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "type")]
+    pub kind: Option<String>,
+    /// Present when carrying either the function name (opening
+    /// delta) or an arguments fragment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<ToolCallDeltaFunction>,
+}
+
+/// Function payload inside a `ToolCallDelta`.
+///
+/// Either field can be absent depending on which fragment the delta
+/// represents; the wire format skips missing ones.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallDeltaFunction {
+    /// Function name, present only on the opening delta of a tool call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Fragment of JSON-encoded arguments. Empty string on the
+    /// opening delta; carries the full JSON payload on the
+    /// arguments-carrying delta.
+    pub arguments: String,
 }
 
 #[cfg(test)]
@@ -381,10 +625,14 @@ mod tests {
         assert_eq!(req.model, None);
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, "user");
-        assert_eq!(req.messages[0].content, "Hello");
+        assert_eq!(req.messages[0].content.as_deref(), Some("Hello"));
+        assert!(req.messages[0].tool_calls.is_empty());
+        assert_eq!(req.messages[0].tool_call_id, None);
         assert_eq!(req.temperature, None);
         assert_eq!(req.max_tokens, None);
         assert!(!req.stream);
+        assert!(req.tools.is_none());
+        assert!(req.tool_choice.is_none());
     }
 
     #[test]
@@ -420,20 +668,26 @@ mod tests {
     fn message_assistant_factory() {
         let msg = Message::assistant("Hello there".to_string());
         assert_eq!(msg.role, ROLE_ASSISTANT);
-        assert_eq!(msg.content, "Hello there");
+        assert_eq!(msg.content.as_deref(), Some("Hello there"));
+        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.tool_call_id, None);
     }
 
     #[test]
     fn message_is_system() {
         let system = Message {
             role: ROLE_SYSTEM.to_string(),
-            content: "system msg".to_string(),
+            content: Some("system msg".to_string()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         };
         assert!(system.is_system());
 
         let user = Message {
             role: "user".to_string(),
-            content: "user msg".to_string(),
+            content: Some("user msg".to_string()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         };
         assert!(!user.is_system());
 
@@ -458,7 +712,7 @@ mod tests {
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].index, 0);
         assert_eq!(resp.choices[0].message.role, ROLE_ASSISTANT);
-        assert_eq!(resp.choices[0].message.content, "Hello!");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
         assert_eq!(resp.choices[0].finish_reason, FINISH_REASON_STOP);
         assert!(resp.usage.is_none());
     }
@@ -541,6 +795,7 @@ mod tests {
         let delta = Delta {
             role: None,
             content: Some("text".to_string()),
+            tool_calls: Vec::new(),
         };
         let v = serde_json::to_value(&delta).unwrap();
         assert!(!v.as_object().unwrap().contains_key("role"));
@@ -552,8 +807,108 @@ mod tests {
         let delta = Delta {
             role: None,
             content: None,
+            tool_calls: Vec::new(),
         };
         let v = serde_json::to_value(&delta).unwrap();
         assert!(v.as_object().unwrap().is_empty());
+    }
+
+    // --- Tool-use passthrough types ---
+
+    #[test]
+    fn chat_request_deser_with_tools() {
+        let json = r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "list files"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run a shell command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+                }
+            }],
+            "tool_choice": "auto"
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let tools = req.tools.expect("tools present");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].kind, TOOL_TYPE_FUNCTION);
+        assert_eq!(tools[0].function.name, "bash");
+        assert_eq!(
+            tools[0].function.description.as_deref(),
+            Some("run a shell command")
+        );
+        assert_eq!(req.tool_choice, Some(serde_json::json!("auto")));
+    }
+
+    #[test]
+    fn assistant_message_with_tool_calls_and_no_content_roundtrips() {
+        let json = r#"{
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}
+            }]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, ROLE_ASSISTANT);
+        assert_eq!(msg.content, None);
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.tool_calls[0].id, "call_1");
+        assert_eq!(msg.tool_calls[0].kind, TOOL_TYPE_FUNCTION);
+        assert_eq!(msg.tool_calls[0].function.name, "bash");
+        assert_eq!(msg.tool_calls[0].function.arguments, r#"{"cmd":"ls"}"#);
+
+        let back = serde_json::to_value(&msg).unwrap();
+        assert!(back.get("content").is_none(), "null content is skipped");
+        assert!(back.get("tool_call_id").is_none());
+    }
+
+    #[test]
+    fn tool_role_reply_deserializes() {
+        let json = r#"{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "file1\nfile2"
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, ROLE_TOOL);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(msg.content.as_deref(), Some("file1\nfile2"));
+        assert!(msg.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn chat_response_with_tool_calls_shape() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            kind: TOOL_TYPE_FUNCTION.to_string(),
+            function: ToolCallFunction {
+                name: "bash".to_string(),
+                arguments: r#"{"cmd":"ls"}"#.to_string(),
+            },
+        }];
+        let resp = ChatCompletionResponse::with_tool_calls(
+            "resp-1".to_string(),
+            1700000000,
+            "gpt-4".to_string(),
+            tool_calls,
+        );
+        assert_eq!(resp.choices[0].finish_reason, FINISH_REASON_TOOL_CALLS);
+        assert_eq!(resp.choices[0].message.content, None);
+        assert_eq!(resp.choices[0].message.tool_calls.len(), 1);
+
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+        assert!(
+            v["choices"][0]["message"].get("content").is_none(),
+            "assistant tool-call message serialises without a content field",
+        );
+        assert_eq!(
+            v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "bash"
+        );
     }
 }

@@ -30,6 +30,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `static_context` | list | | RAG documents (inline strings or `resource:` references) always available to the agent. |
 | `max_turns` | int | unlimited | Maximum recursive agent turns. Prevents runaway tool-calling loops. |
 | `mcp_servers` | list | | MCP server URLs for tool discovery. The agent connects to each, discovers tools, and makes them callable during completion. |
+| `tool_passthrough` | bool | `false` | Skip rig's agent loop and forward caller-supplied `tools` verbatim to the upstream provider. See [Tool-use passthrough](#tool-use-passthrough). |
 | `sandbox` | object | | Sandbox config for tool execution (nsjail). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
@@ -137,6 +138,32 @@ Optional per-server auth uses the same credentials JSON format as `http_request`
       - url: "https://tools.example.com/mcp"
         credentials_path: /etc/flowgen/credentials/mcp_tools.json
 ```
+
+## Tool-use passthrough
+
+When `tool_passthrough: true`, the task bypasses rig's agent loop and forwards caller-supplied `tools` and `tool_choice` (from the request body) directly to the upstream provider. Tool invocations returned by the model surface as `tool_calls` on the response instead of being executed in-process. The client — typically opencode, Claude Desktop, or any OpenAI-tool-use SDK — runs the tools locally and posts the results back as `role: "tool"` follow-up messages.
+
+Use this mode when flowgen is the AI gateway for a tool-executing client. Leave it `false` for agent-mode flows that execute tools themselves via [`mcp_servers`](#example-mcp-tool-calling) or inline definitions.
+
+```yaml
+- llm_proxy:
+    name: proxy
+
+- ai_completion:
+    name: forward
+    provider: custom
+    endpoint: "{{event.data.endpoint}}"
+    model: "{{event.data.routed_model}}"
+    credentials_path: "{{event.data.credentials_path}}"
+    prompt: "{{event.data.prompt}}"
+    system_prompt: "{{event.data.system_prompt}}"
+    tool_passthrough: true
+    stream: true
+```
+
+Passthrough is a no-op when the request omits `tools`: the flow follows the normal completion path so a single `ai_completion` task can serve both tool-using and plain chat clients without a second flow.
+
+Works across every provider flowgen supports (OpenAI, Anthropic, Cohere, Gemini, Mistral, Groq, Together, xAI, OpenRouter, Perplexity, HuggingFace, VertexAI, and any OpenAI-compatible endpoint via `provider: custom`). Provider-native quirks in the tool schema — Anthropic's `tool_use` block, Google's parallel-call ordering — are handled by the underlying rig client without any per-provider config here.
 
 ## Sandbox
 
