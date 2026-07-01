@@ -405,7 +405,10 @@ fn shallow_clone(
         let helper = CredentialHelper::new(creds);
         prepare = prepare.configure_connection(move |connection| {
             let h = helper.clone();
-            connection.set_credentials(move |action| Ok(h.invoke(action)));
+            let auth = move |action| -> Result<_, gix::credentials::protocol::Error> {
+                Ok(h.invoke(action))
+            };
+            connection.set_credentials(auth);
             Ok(())
         });
     }
@@ -459,7 +462,10 @@ fn fetch_existing(
 
     if let Some(creds) = credentials {
         let helper = CredentialHelper::new(creds);
-        connection.set_credentials(move |action| Ok(helper.invoke(action)));
+        let auth = move |action| -> Result<_, gix::credentials::protocol::Error> {
+            Ok(helper.invoke(action))
+        };
+        connection.set_credentials(auth);
     }
 
     let prepared = connection
