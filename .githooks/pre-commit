@@ -1,22 +1,29 @@
 #!/bin/sh
-# Pre-commit hook to automatically format code and run clippy
+# Pre-commit hook to automatically format code and run clippy.
+#
+# Pins to the `stable` toolchain explicitly so this hook agrees with
+# CI even when a developer's default `rustup` toolchain is nightly.
+# The repo's `rust-toolchain.toml` already selects stable, so this is
+# belt-and-suspenders — if that file is missing or overridden, we
+# still lint against the same clippy version CI enforces.
+TOOLCHAIN=stable
 
 echo "Running cargo fmt..."
-cargo fmt --all
+cargo "+$TOOLCHAIN" fmt --all
 
 # Add any formatted files back to the commit
 git diff --name-only --cached | grep '\.rs$' | xargs git add
 
-echo "Running cargo clippy..."
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+echo "Running cargo clippy (+$TOOLCHAIN)..."
+cargo "+$TOOLCHAIN" clippy --workspace --all-targets --all-features -- -D warnings
 if [ $? -ne 0 ]; then
     echo ""
     echo "Error: Clippy found issues. Please fix them before committing."
     exit 1
 fi
 
-echo "Running cargo test..."
-cargo test --workspace
+echo "Running cargo test (+$TOOLCHAIN)..."
+cargo "+$TOOLCHAIN" test --workspace
 if [ $? -ne 0 ]; then
     echo ""
     echo "Error: Tests failed. Please fix them before committing."

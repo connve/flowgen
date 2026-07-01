@@ -378,6 +378,24 @@ impl CredentialHelper {
             | gix::credentials::helper::Action::Erase(_) => None,
         }
     }
+
+    /// Builds a gix `set_credentials` callback. The return type is
+    /// dictated by the gix API; `Err` is unreachable in practice
+    /// because [`Self::invoke`] never fails.
+    #[expect(
+        clippy::result_large_err,
+        reason = "gix::Connection::set_credentials fixes the Result shape"
+    )]
+    fn into_gix_callback(
+        self,
+    ) -> impl FnMut(
+        gix::credentials::helper::Action,
+    ) -> Result<
+        Option<gix::credentials::protocol::Outcome>,
+        gix::credentials::protocol::Error,
+    > {
+        move |action| Ok(self.invoke(action))
+    }
 }
 
 /// Performs a shallow clone of a single branch.
@@ -404,11 +422,7 @@ fn shallow_clone(
     if let Some(creds) = credentials {
         let helper = CredentialHelper::new(creds);
         prepare = prepare.configure_connection(move |connection| {
-            let h = helper.clone();
-            let auth = move |action| -> Result<_, gix::credentials::protocol::Error> {
-                Ok(h.invoke(action))
-            };
-            connection.set_credentials(auth);
+            connection.set_credentials(helper.clone().into_gix_callback());
             Ok(())
         });
     }
@@ -462,10 +476,7 @@ fn fetch_existing(
 
     if let Some(creds) = credentials {
         let helper = CredentialHelper::new(creds);
-        let auth = move |action| -> Result<_, gix::credentials::protocol::Error> {
-            Ok(helper.invoke(action))
-        };
-        connection.set_credentials(auth);
+        connection.set_credentials(helper.into_gix_callback());
     }
 
     let prepared = connection

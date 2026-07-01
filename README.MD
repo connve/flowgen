@@ -40,6 +40,20 @@ docker run \
 3. Update the flow path in `config.yaml`
 4. Run with `cargo run`
 
+The repo pins its Rust toolchain via `rust-toolchain.toml` — `rustup`
+picks it up automatically, so `cargo` in this checkout uses the same
+`stable` version CI enforces (no need to remember `+stable` flags).
+
+Enable the shared pre-commit hook (fmt + clippy + tests + audit) after
+cloning:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+The hook lives in [`.githooks/pre-commit`](.githooks/pre-commit) and is
+versioned with the repo so all contributors run the same checks.
+
 ### Testing
 
 ```bash
