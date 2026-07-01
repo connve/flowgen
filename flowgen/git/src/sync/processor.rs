@@ -362,21 +362,20 @@ impl CredentialHelper {
     fn invoke(
         &self,
         action: gix::credentials::helper::Action,
-    ) -> Result<Option<gix::credentials::protocol::Outcome>, Box<gix::credentials::protocol::Error>>
-    {
+    ) -> Option<gix::credentials::protocol::Outcome> {
         match action {
             gix::credentials::helper::Action::Get(ctx) => {
-                Ok(Some(gix::credentials::protocol::Outcome {
+                Some(gix::credentials::protocol::Outcome {
                     identity: gix::sec::identity::Account {
                         username: self.username.clone(),
                         password: self.password.clone(),
                         oauth_refresh_token: None,
                     },
                     next: ctx.into(),
-                }))
+                })
             }
             gix::credentials::helper::Action::Store(_)
-            | gix::credentials::helper::Action::Erase(_) => Ok(None),
+            | gix::credentials::helper::Action::Erase(_) => None,
         }
     }
 }
@@ -406,7 +405,7 @@ fn shallow_clone(
         let helper = CredentialHelper::new(creds);
         prepare = prepare.configure_connection(move |connection| {
             let h = helper.clone();
-            connection.set_credentials(move |action| h.invoke(action).map_err(|e| *e));
+            connection.set_credentials(move |action| Ok(h.invoke(action)));
             Ok(())
         });
     }
@@ -460,7 +459,7 @@ fn fetch_existing(
 
     if let Some(creds) = credentials {
         let helper = CredentialHelper::new(creds);
-        connection.set_credentials(move |action| helper.invoke(action).map_err(|e| *e));
+        connection.set_credentials(move |action| Ok(helper.invoke(action)));
     }
 
     let prepared = connection
@@ -952,10 +951,7 @@ mod tests {
         };
         let helper = CredentialHelper::new(&creds);
         let action = gix::credentials::helper::Action::get_for_url("https://github.com/org/repo");
-        let outcome = helper
-            .invoke(action)
-            .expect("helper must not error")
-            .expect("Get must return Some");
+        let outcome = helper.invoke(action).expect("Get must return Some");
         assert_eq!(outcome.identity.username, DEFAULT_TOKEN_USERNAME);
         assert_eq!(outcome.identity.password, "ghp_secret");
     }
@@ -968,10 +964,7 @@ mod tests {
         };
         let helper = CredentialHelper::new(&creds);
         let action = gix::credentials::helper::Action::get_for_url("https://gitlab.com/org/repo");
-        let outcome = helper
-            .invoke(action)
-            .expect("helper must not error")
-            .expect("Get must return Some");
+        let outcome = helper.invoke(action).expect("Get must return Some");
         assert_eq!(outcome.identity.username, "oauth2");
         assert_eq!(outcome.identity.password, "glpat-xyz");
     }
@@ -984,8 +977,7 @@ mod tests {
         };
         let helper = CredentialHelper::new(&creds);
         let store = gix::credentials::helper::Action::Store("payload".into());
-        let outcome = helper.invoke(store).expect("helper must not error");
-        assert!(outcome.is_none(), "Store must be a no-op");
+        assert!(helper.invoke(store).is_none(), "Store must be a no-op");
     }
 
     #[test]
@@ -996,8 +988,7 @@ mod tests {
         };
         let helper = CredentialHelper::new(&creds);
         let erase = gix::credentials::helper::Action::Erase("payload".into());
-        let outcome = helper.invoke(erase).expect("helper must not error");
-        assert!(outcome.is_none(), "Erase must be a no-op");
+        assert!(helper.invoke(erase).is_none(), "Erase must be a no-op");
     }
 
     // ── Builder Validation ──────────────────────────────────────────
