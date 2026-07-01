@@ -8,6 +8,57 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
 
+/// SOSL reserved characters that must be backslash-escaped inside a phrase
+/// search (`FIND {"..."}`). Hyphens, ampersands, and the like otherwise abort
+/// the parser with `MALFORMED_SEARCH`.
+const SOSL_RESERVED: &[char] = &[
+    '\\', '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\'',
+];
+
+/// Auto-escapes phrase-search content in a rendered SOSL query so user input
+/// containing reserved characters doesn't crash the Salesforce parser.
+///
+/// Finds every `{"..."}` clause, then within the phrase escapes any [`SOSL_RESERVED`]
+/// char that isn't already backslash-escaped. Outside of phrase clauses the
+/// query is left untouched so the static parts (`RETURNING Account(...)`, etc.)
+/// keep working.
+fn escape_sosl_phrases(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    let mut rest = query;
+    while let Some(open) = rest.find("{\"") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        match after_open.find("\"}") {
+            Some(close) => {
+                out.push_str("{\"");
+                let phrase = &after_open[..close];
+                let mut chars = phrase.chars();
+                while let Some(ch) = chars.next() {
+                    if ch == '\\' {
+                        out.push('\\');
+                        if let Some(next) = chars.next() {
+                            out.push(next);
+                        }
+                    } else {
+                        if SOSL_RESERVED.contains(&ch) {
+                            out.push('\\');
+                        }
+                        out.push(ch);
+                    }
+                }
+                out.push_str("\"}");
+                rest = &after_open[close + 2..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Errors for Salesforce SOSL search operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -85,9 +136,10 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|e| Error::ConfigRender { source: e })?;
 
+            let query = escape_sosl_phrases(&config.query);
             let response =
                 self.client
-                    .search(&config.query)
+                    .search(&query)
                     .await
                     .map_err(|e| Error::SearchOperation {
                         source: Box::new(e),
@@ -200,7 +252,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize SOSL search processor.");
+                        error!(error = %e, "Failed to initialize SOSL search processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -228,7 +280,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!(error = %e, "Failed to process SOSL search.");
+                                            error!(error = %e, "Failed to process SOSL search");
                                             let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
                                                 || matches!(&e,
                                                     Error::SearchOperation { source }
@@ -241,24 +293,35 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                 if let Err(reconnect_err) =
                                                     (*sfdc_client).reconnect().await
                                                 {
-                                                    error!(error = %reconnect_err, "Failed to reconnect.");
+                                                    error!(error = %reconnect_err, "Failed to reconnect");
                                                     return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth {
                                                         source: reconnect_err,
                                                     }));
                                                 }
                                             }
-                                            Err(tokio_retry::RetryError::transient(e))
+
+                                            let retryable = match &e {
+                                                Error::SearchOperation { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
+                                                Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
+                                            }
                                         }
                                     }
                                 })
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(error = %err, "SOSL search failed after all retry attempts.");
+                                    error!(error = %err, "SOSL search failed after all retry attempts");
                                     let mut error_event = event_clone.clone();
                                     error_event.error = Some(err.to_string());
                                     if let Some(ref tx) = event_handler.tx {
                                         tx.send(error_event).await.ok();
+                                    } else if let Some(arc) = event_clone.completion_tx.as_ref() {
+                                        arc.signal_completion_with_error(err.to_string());
                                     }
                                 }
                             }
@@ -362,6 +425,67 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::super::config::Search;
+    use super::escape_sosl_phrases;
+
+    // ── SOSL phrase escaping ─────────────────────────────────────────
+
+    #[test]
+    fn escape_phrase_with_hyphen() {
+        let q = r#"FIND {"acm-p"} IN ALL FIELDS RETURNING Account(Id, Name)"#;
+        let escaped = escape_sosl_phrases(q);
+        assert_eq!(
+            escaped,
+            r#"FIND {"acm\-p"} IN ALL FIELDS RETURNING Account(Id, Name)"#
+        );
+    }
+
+    #[test]
+    fn escape_leaves_outside_phrase_untouched() {
+        let q = r#"FIND {"abc"} IN ALL FIELDS RETURNING Account(Id, Name)"#;
+        assert_eq!(escape_sosl_phrases(q), q);
+    }
+
+    #[test]
+    fn escape_multiple_reserved_chars() {
+        let q = r#"FIND {"a&b|c?d!e"} RETURNING Account"#;
+        assert_eq!(
+            escape_sosl_phrases(q),
+            r#"FIND {"a\&b\|c\?d\!e"} RETURNING Account"#
+        );
+    }
+
+    #[test]
+    fn escape_does_not_double_escape() {
+        let q = r#"FIND {"foo\-bar"} RETURNING Account"#;
+        assert_eq!(escape_sosl_phrases(q), q);
+    }
+
+    #[test]
+    fn escape_preserves_utf8_outside_phrase() {
+        let q = r#"FIND {"café"} RETURNING Account(Naïve)"#;
+        assert_eq!(
+            escape_sosl_phrases(q),
+            r#"FIND {"café"} RETURNING Account(Naïve)"#
+        );
+    }
+
+    #[test]
+    fn escape_empty_phrase() {
+        let q = r#"FIND {""} RETURNING Account"#;
+        assert_eq!(escape_sosl_phrases(q), q);
+    }
+
+    #[test]
+    fn escape_unterminated_phrase_is_passthrough() {
+        let q = r#"FIND {"unterminated"#;
+        assert_eq!(escape_sosl_phrases(q), q);
+    }
+
+    #[test]
+    fn escape_brace_search_without_quotes_untouched() {
+        let q = r#"FIND {Acme} RETURNING Account"#;
+        assert_eq!(escape_sosl_phrases(q), q);
+    }
 
     // ── Config Deserialization ───────────────────────────────────────
 

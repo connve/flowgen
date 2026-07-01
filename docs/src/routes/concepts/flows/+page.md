@@ -10,7 +10,7 @@ flow:
   require_leader_election: true
   parallel_instances: 1
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: source
         # ...
 
@@ -40,7 +40,7 @@ By default, tasks run as a linear chain — each task receives events from the p
 flow:
   name: linear_example
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: ingest
         endpoint: /events
         method: POST
@@ -78,7 +78,7 @@ One source feeding multiple branches that run in parallel:
 flow:
   name: fan_out_example
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: ingest
         endpoint: /events
         method: POST
@@ -133,7 +133,7 @@ flow:
 flow:
   name: mixed
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: ingest
         endpoint: /events
         method: POST

@@ -391,7 +391,15 @@ impl flowgen_core::task::runner::Runner for Publisher {
                                                     }
                                                 }
                                             }
-                                            Err(tokio_retry::RetryError::transient(e))
+                                            let retryable = match &e {
+                                                Error::PubSub { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
+                                                Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
+                                            }
                                         }
                                     }
                                 })
@@ -399,6 +407,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
                                 if let Err(err) = result {
                                     error!(error = %err, "Failed to publish message after all retry attempts");
+                                    let mut error_event = event.clone();
+                                    error_event.error = Some(err.to_string());
+                                    if let Some(ref tx) = event_handler.tx {
+                                        tx.send(error_event).await.ok();
+                                    } else if let Some(arc) = event.completion_tx.as_ref() {
+                                        arc.signal_completion_with_error(err.to_string());
+                                    }
                                 }
                             }
                             .instrument(tracing::Span::current()),

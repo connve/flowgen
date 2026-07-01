@@ -14,7 +14,7 @@ Subscribers are source tasks that ingest data into the flow. They connect to ext
 |---|---|
 | `nats_jetstream_subscriber` | Consumes messages from a NATS JetStream stream with durable consumers. |
 | `salesforce_pubsubapi_subscriber` | Subscribes to Salesforce Platform Events via gRPC. |
-| `http_webhook` | Listens for incoming HTTP requests and converts them to events. |
+| `http_endpoint` | Listens for incoming HTTP requests and converts them to events. |
 | `generate` | Produces events on a schedule (cron or interval). |
 
 Subscribers appear as the first task in a flow. They manage acknowledgment — a message is only acked when the entire downstream flow completes successfully.
@@ -45,8 +45,9 @@ Processors receive events, do something with them, and emit events to the next t
 | `mssql_query` | Microsoft SQL Server queries. |
 | `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
 | `git_sync` | Clone/pull a Git repository and emit one event per file. |
+| `oci_sync` | Pull an OCI artifact from a registry and emit one event per layer. |
 | `ai_completion` | LLM completions from multiple providers. |
-| `ai_gateway` | OpenAI-compatible chat completions endpoint. |
+| `llm_proxy` | Registers a flow as a backend on the AI gateway server. |
 | `mcp_tool` | Expose flows as MCP tools for LLM agents. |
 
 ## Task wiring

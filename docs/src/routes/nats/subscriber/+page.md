@@ -33,7 +33,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 | `max_deliver` | int | | Max delivery attempts before discarding. |
 | `delay` | duration | | Delay between fetch requests. |
 | `throttle` | duration | | Delay between individual messages. |
-| `ack_timeout` | duration | | Acknowledgment timeout. |
+| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before letting JetStream redeliver. Also applied to the JetStream context timeout and the consumer `ack_wait`. |
 | `backoff` | list | | Redelivery backoff schedule (list of durations). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |

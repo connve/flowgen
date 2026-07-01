@@ -30,3 +30,7 @@ tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
 uuid = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }
+[lints]
+workspace = true

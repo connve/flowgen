@@ -34,3 +34,6 @@ serde_avro_fast = { workspace = true }
 async-trait.workspace = true
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
+
+[lints]
+workspace = true

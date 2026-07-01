@@ -211,7 +211,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize SOAP API merge processor.");
+                        error!(error = %e, "Failed to initialize SOAP API merge processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -239,7 +239,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     match event_handler.handle(event_clone.clone()).await {
                                         Ok(result) => Ok(result),
                                         Err(e) => {
-                                            error!(error = %e, "Failed to process SOAP merge operation.");
+                                            error!(error = %e, "Failed to process SOAP merge operation");
                                             let needs_reconnect =
                                                 matches!(&e, Error::SalesforceAuth { .. });
 
@@ -249,7 +249,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                 if let Err(reconnect_err) =
                                                     (*sfdc_client).reconnect().await
                                                 {
-                                                    error!(error = %reconnect_err, "Failed to reconnect.");
+                                                    error!(error = %reconnect_err, "Failed to reconnect");
                                                     return Err(
                                                         tokio_retry::RetryError::transient(
                                                             Error::SalesforceAuth {
@@ -259,18 +259,28 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     );
                                                 }
                                             }
-                                            Err(tokio_retry::RetryError::transient(e))
+                                            let retryable = match &e {
+                                                Error::MergeOperation { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
+                                                Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
+                                            }
                                         }
                                     }
                                 })
                                 .await;
 
                                 if let Err(err) = result {
-                                    error!(error = %err, "SOAP merge operation failed after all retry attempts.");
+                                    error!(error = %err, "SOAP merge operation failed after all retry attempts");
                                     let mut error_event = event_clone.clone();
                                     error_event.error = Some(err.to_string());
                                     if let Some(ref tx) = event_handler.tx {
                                         tx.send(error_event).await.ok();
+                                    } else if let Some(arc) = event_clone.completion_tx.as_ref() {
+                                        arc.signal_completion_with_error(err.to_string());
                                     }
                                 }
                             }

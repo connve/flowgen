@@ -2,26 +2,37 @@
 
 OpenAI-compatible chat completions endpoint. Proxies requests through a flowgen flow, enabling pre/post processing, logging, and tool execution.
 
-Exposes a `/v1/chat/completions` endpoint that accepts the OpenAI request format and streams responses as Server-Sent Events.
+Exposes a `/v1/chat/completions` endpoint that accepts the OpenAI request format and streams responses as Server-Sent Events. Routes requests to registered `llm_proxy` backends based on the `model` field (`model: "<proxy-name>/<downstream-model>"`).
 
-## Configuration
+## Server configuration
 
-```yaml
-- ai_gateway:
-    name: gateway
-    credentials_path: /path/to/credentials.json
-```
-
-The AI gateway task requires the HTTP server to be enabled in the worker config:
+The AI gateway runs as its own HTTP server, independent of the webhook HTTP server and MCP server:
 
 ```yaml
 worker:
-  http_server:
+  ai_gateway:
     enabled: true
-    port: 3000
+    port: 3002
+    path: /v1
+    # credentials_path: /etc/flowgen/credentials/ai.json
 ```
 
-Requests are sent to `POST /v1/chat/completions` with the standard OpenAI chat format.
+## Task configuration
+
+```yaml
+- llm_proxy:
+    name: gateway
+    protocol: openai
+    credentials_path: /path/to/credentials.json
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | required | Unique proxy name used in model routing (`<name>/<model>`). |
+| `protocol` | string | `openai` | Wire protocol for the proxy endpoint. Currently only `openai`. |
+| `credentials_path` | string | null | Path to credentials file for endpoint authentication. |
+
+Requests are sent to `POST /v1/chat/completions` with the standard OpenAI chat format. Use `<proxy-name>/<downstream-model>` as the `model` value to route to a specific proxy backend.
 
 ## Output
 

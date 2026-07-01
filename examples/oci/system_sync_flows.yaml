@@ -1,0 +1,163 @@
+# Bootstrap flow: reconciles user flows from an OCI artifact into the
+# system NATS KV cache. Each tick pulls the artifact, parses each yaml
+# layer to extract `flow.name`, and writes one cache entry per flow
+# keyed by `flow.name`. Cache entries that no longer have a matching
+# layer in the artifact are deleted.
+#
+# Once running, user flows load from the cache via `flows.cache` in the
+# worker config — no ConfigMap mount required for them.
+#
+# Required:
+#   - /etc/flowgen/credentials/registry.json with either
+#       { "username": "...", "password": "..." }
+#     or a Docker config.json payload (kubernetes.io/dockerconfigjson).
+#   - /etc/nats/credentials.json for NATS KV writes.
+flow:
+  name: system_sync_flows
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: tick
+        interval: "30s"
+
+    # Works with any OCI registry: GHCR, ECR, GAR, ACR, Artifactory,
+    # Harbor, Docker Hub, Quay, self-hosted.
+    - oci_sync:
+        name: pull_repo
+        artifact: "registry.example.com/your-org/your-flows:prod"
+        credentials_path: /etc/flowgen/credentials/registry.json
+
+    # Aggregate the per-layer events from `pull_repo` into a single
+    # batched event. The diff downstream needs the full present-set
+    # at once to detect which cache keys are missing from the artifact.
+    - buffer:
+        name: collect_layers
+        size: 10000
+        timeout: "5s"
+        flush_on_completion: true
+
+    # Stash the layer batch in meta so it survives the next task which
+    # overwrites event.data with the cache listing.
+    - script:
+        name: stash_layers
+        code: |
+          ctx.meta.layer_batch = event.data.batch;
+          event
+
+    - nats_kv_store:
+        name: list_existing
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: list
+        key_prefix: "flowgen.flows."
+        # Include current values so compute_diff can skip put actions
+        # when the YAML in cache already matches — every put bumps the
+        # KV revision and fires a watcher hot-reload on every pod,
+        # which races leader-election leases.
+        include_values: true
+
+    # Short-circuit only when nothing has drifted: the artifact digest
+    # matches the last successful sync AND the cache key count matches
+    # the layer count from the artifact. Anything else (new digest, key
+    # missing from cache, extra stale key) drops through so compute_diff
+    # runs and converges the cache back to the artifact state. Without
+    # the drift check, an out-of-band delete of a `flowgen.flows.*` key
+    # would never be repaired until an operator cleared
+    # `last_synced_digest` by hand.
+    - script:
+        name: skip_if_in_sync
+        code: |
+          let current_digest = event.meta.layer_batch[0].artifact_digest;
+          let last_synced = ctx.cache.get("last_synced_digest");
+          let layer_count = event.meta.layer_batch.len();
+          let key_count = event.data.keys.len();
+          if last_synced == current_digest && layer_count == key_count {
+              ()
+          } else {
+              ctx.meta.current_digest = current_digest;
+              event
+          }
+
+    # Compute the diff: each layer becomes a put keyed by `flow.name`,
+    # each cache key with no matching `flow.name` becomes a delete.
+    - script:
+        name: compute_diff
+        code: |
+          let layers = event.meta.layer_batch;
+          let existing = event.data.keys;
+          let current = event.data.values;
+          let present = #{};
+          let actions = [];
+          for layer in layers {
+              let parsed = parse_yaml(layer.content);
+              let flow_name = parsed.flow.name;
+              let key = "flowgen.flows." + flow_name;
+              present[key] = true;
+              // Skip puts when the cache already holds the same YAML —
+              // every revision bump triggers a watcher hot-reload on
+              // every pod, which races leader-election leases.
+              if current[key] != layer.content {
+                  actions.push(#{
+                      action: "put",
+                      key: key,
+                      content: layer.content,
+                  });
+              }
+          }
+          for key in existing {
+              if present[key] != true {
+                  actions.push(#{
+                      action: "delete",
+                      key: key,
+                      content: "",
+                  });
+              }
+          }
+          actions
+
+    - script:
+        name: select_puts
+        code: |
+          if event.data.action == "put" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - script:
+        name: select_deletes
+        code: |
+          if event.data.action == "delete" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - nats_kv_store:
+        name: write_to_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: put
+        key: "{{event.data.key}}"
+        depends_on: [select_puts]
+
+    - nats_kv_store:
+        name: delete_from_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: delete
+        key: "{{event.data.key}}"
+        depends_on: [select_deletes]
+
+    # Persist the new digest only after both write branches have
+    # committed. Runs once per put and per delete, idempotent since
+    # they all write the same digest.
+    - script:
+        name: mark_synced
+        code: |
+          ctx.cache.put("last_synced_digest", event.meta.current_digest);
+          event
+        depends_on: [write_to_cache, delete_from_cache]

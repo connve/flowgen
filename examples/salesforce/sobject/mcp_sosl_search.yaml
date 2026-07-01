@@ -18,10 +18,14 @@ flow:
           properties:
             search_term:
               type: string
-              description: "Search term to find across all fields"
+              minLength: 2
+              description: "Search term to find across all fields. Must be at least 2 characters."
           required: [search_term]
 
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        # Trailing `*` enables prefix matching so `acme` finds `acme-corp` etc.
+        # Drop the `*` for exact-token phrase matching. See:
+        # https://connve.com/docs/flowgen/salesforce/rest#prefix-matching
+        query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'

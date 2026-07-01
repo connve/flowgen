@@ -3,8 +3,17 @@ members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 
+[workspace.lints.clippy]
+# Ban `#[allow(clippy::...)]` and `#[allow(...)]` attributes outright.
+# Warnings flag real modelling problems; the rule across this codebase is
+# to fix the underlying code rather than silence the lint. Anything that
+# genuinely needs to suppress a lint should use `#[expect(...)]` with a
+# reason instead, which surfaces dead suppressions when the lint stops
+# firing.
+allow_attributes = "deny"
+
 [workspace.package]
-version = "0.119.0"
+version = "0.120.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -67,6 +76,12 @@ gix = { version = "0.83", default-features = false, features = [
     "sha1",
     "max-performance-safe",
 ] }
+# Pure-Rust OCI registry client. Uses rustls under the hood, no shelling
+# out to `oras` or `docker`. Powers the `oci_sync` task that pulls flow
+# artifacts from container registries (GHCR, ECR, GAR, Artifactory etc).
+oci-client = { version = "0.17", default-features = false, features = [
+    "rustls-tls",
+] }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550
 async-nats = { git = "https://github.com/nats-io/nats.rs", rev = "7e6672c240a4a1bd7726d37ac7b52a290af6b690" }
@@ -95,6 +110,7 @@ humantime = { version = "2.1" }
 humantime-serde = { version = "1.1" }
 croner = { version = "3.0.1" }
 dashmap = { version = "6.1" }
+tower = { version = "0.5", features = ["util"] }
 # Pinned to avoid 0.2.17 which has a non-exhaustive match compile error on recent Rust toolchains.
 native-tls = { version = "=0.2.16" }
 opentelemetry = { version = "0.27" }
@@ -114,3 +130,4 @@ schemars = { version = "1.2" }
 scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 walkdir = { version = "2.5" }
+testcontainers = { version = "0.27" }

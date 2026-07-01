@@ -17,7 +17,7 @@ flow:
   name: salesforce_merge
   tasks:
 
-    - http_webhook:
+    - http_endpoint:
         name: receive_request
         method: POST
         endpoint: /salesforce/merge

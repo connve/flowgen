@@ -105,7 +105,7 @@ impl EventHandler {
                     warn!(
                         index = i,
                         errors = %errors,
-                        "Composite operation completed with one or more failures."
+                        "Composite operation completed with one or more failures"
                     );
                 }
             }
@@ -691,7 +691,8 @@ impl flowgen_core::task::runner::Runner for Processor {
                                             error!(error = %e, "Failed to process Composite API operation");
                                             let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
                                                 || matches!(&e,
-                                                    Error::CompositeApiOperation { .. }
+                                                    Error::CompositeApiOperation { source }
+                                                        if matches!(source.as_ref(), salesforce_core::restapi::composite::Error::Auth { .. })
                                                 );
 
                                             if needs_reconnect {
@@ -706,7 +707,16 @@ impl flowgen_core::task::runner::Runner for Processor {
                                                     }));
                                                 }
                                             }
-                                            Err(tokio_retry::RetryError::transient(e))
+
+                                            let retryable = match &e {
+                                                Error::CompositeApiOperation { source } => source.is_retryable(),
+                                                _ => true,
+                                            };
+                                            if retryable {
+                                                Err(tokio_retry::RetryError::transient(e))
+                                            } else {
+                                                Err(tokio_retry::RetryError::permanent(e))
+                                            }
                                         }
                                     }
                                 })
@@ -714,11 +724,12 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                                 if let Err(err) = result {
                                     error!(error = %err, "Composite API operation failed after all retry attempts");
-                                    // Emit error event downstream for error handling.
                                     let mut error_event = event_clone.clone();
                                     error_event.error = Some(err.to_string());
                                     if let Some(ref tx) = event_handler.tx {
                                         tx.send(error_event).await.ok();
+                                    } else if let Some(arc) = event_clone.completion_tx.as_ref() {
+                                        arc.signal_completion_with_error(err.to_string());
                                     }
                                 }
                             }

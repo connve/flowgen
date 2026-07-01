@@ -13,7 +13,7 @@ The flow logic is identical regardless of the entrypoint. Swap the source task t
 <Mermaid chart={`
 graph LR
   subgraph Entrypoints
-    HTTP[http_webhook]
+    HTTP[http_endpoint]
     MCP[mcp_tool]
   end
   HTTP --> OP[Salesforce operation]
@@ -40,7 +40,7 @@ flow:
   name: salesforce_sobject_lookup
   tasks:
 
-    - http_webhook:
+    - http_endpoint:
         name: receive_request
         method: POST
         endpoint: /salesforce/lookup
@@ -105,7 +105,7 @@ flow:
   name: salesforce_sobject_upsert
   tasks:
 
-    - http_webhook:
+    - http_endpoint:
         name: receive_request
         method: POST
         endpoint: /salesforce/upsert
@@ -175,7 +175,7 @@ flow:
   name: salesforce_sosl_search
   tasks:
 
-    - http_webhook:
+    - http_endpoint:
         name: receive_request
         method: POST
         endpoint: /salesforce/search
@@ -183,7 +183,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
 ### MCP
@@ -207,7 +207,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'
 ```
 
 ## MCP server configuration
@@ -219,7 +219,7 @@ worker:
   mcp_server:
     enabled: true
     port: 3001
-    path: /mcp
+    path: /mcp/v1
     credentials_path: /etc/mcp/api-keys.json
 ```
 

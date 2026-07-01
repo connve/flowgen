@@ -163,13 +163,23 @@ Execute [SOSL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/
 
 ### Templating the search term
 
-SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars only treats double `{{` as special, a single `{` is a literal character. This means `{{{event.data.term}}}` is parsed as literal `{` + `{{event.data.term}}` + literal `}`.
+SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars only treats double `{{` as special, a single `{` is a literal character. Wrap the templated term in double quotes to make it a phrase search, then use single-quoted YAML so the inner `"` doesn't need escaping:
 
 ```yaml
 - salesforce_restapi_search:
     name: dynamic_search
     credentials_path: /etc/salesforce/credentials.json
-    query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, FirstName, LastName, Email)"
+    query: 'FIND {"{{event.data.search_term}}"} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, FirstName, LastName, Email)'
+```
+
+Inside the `{"..."}` phrase, the processor auto-escapes SOSL reserved characters (`- ? & | ! { } [ ] ( ) ^ ~ * : \ " ' +`) before sending the query, so search terms with hyphens, spaces, or other reserved characters work without manual escaping.
+
+### Prefix matching
+
+Phrase search matches whole tokens. To match terms that *start with* the search input (e.g. `test` should also find `test-rmp` and `Test Account 1`), append `*` inside the phrase:
+
+```yaml
+query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id, Name)'
 ```
 
 ### Examples
@@ -189,7 +199,7 @@ SOSL wraps the search term in curly braces (`FIND {term} ...`). Since Handlebars
 flow:
   name: salesforce_search
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: trigger
         method: POST
         endpoint: /search
@@ -197,7 +207,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: $SALESFORCE_CREDENTIALS_PATH
-        query: "FIND {{{event.data.term}}} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, Email)"
+        query: 'FIND {"{{event.data.term}}"} IN ALL FIELDS RETURNING Account(Id, Name), Contact(Id, Email)'
 
     - log:
         name: log_results

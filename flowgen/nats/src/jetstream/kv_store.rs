@@ -50,6 +50,15 @@ pub struct Config {
     pub key: Option<String>,
     /// Key prefix for list operations (supports templating).
     pub key_prefix: Option<String>,
+    /// For `list` operations: also include each key's current value in
+    /// the output under `values`. Defaults to false to keep list cheap.
+    /// Use when downstream needs to compare existing content against new
+    /// content (idempotency / diff against current state) — avoids a
+    /// separate `get` per key. Values are decoded as UTF-8 strings; keys
+    /// whose payload is not valid UTF-8 are omitted from `values` and
+    /// still appear in `keys`.
+    #[serde(default)]
+    pub include_values: bool,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -104,6 +113,11 @@ pub struct ListResult {
     pub count: usize,
     /// Prefix that was used for filtering.
     pub prefix: String,
+    /// Per-key values, present only when `include_values: true` is set
+    /// on the config. Missing for normal list operations to keep the
+    /// payload small. Keys whose payload is not valid UTF-8 are omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Result of a KV delete operation.
@@ -329,10 +343,35 @@ impl EventHandler {
             }
         }
 
+        // When include_values is set, fetch each key's current value so
+        // downstream scripts can diff against new content without firing
+        // a separate `get` per key. One round-trip per key still — NATS
+        // KV has no native multi-get — but stays inside this processor
+        // instead of forcing the caller to fan out N tasks.
+        let values = if config.include_values {
+            let mut map = std::collections::HashMap::with_capacity(keys.len());
+            for key in &keys {
+                if let Some(bytes) = self
+                    .store
+                    .get(key)
+                    .await
+                    .map_err(|source| Error::KvEntry { source })?
+                {
+                    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                        map.insert(key.clone(), text);
+                    }
+                }
+            }
+            Some(map)
+        } else {
+            None
+        };
+
         let result = ListResult {
             count: keys.len(),
             keys,
             prefix: prefix.to_string(),
+            values,
         };
         serde_json::to_value(&result).map_err(|source| Error::SerdeJson { source })
     }
@@ -442,7 +481,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 match self.init().await {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
-                        error!(error = %e, "Failed to initialize NATS KV store processor.");
+                        error!(error = %e, "Failed to initialize NATS KV store processor");
                         Err(tokio_retry::RetryError::transient(e))
                     }
                 }
@@ -465,7 +504,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                             match handler.handle(event.clone()).await {
                                 Ok(()) => Ok(()),
                                 Err(e) => {
-                                    error!(error = %e, "KV store operation failed.");
+                                    error!(error = %e, "KV store operation failed");
                                     Err(tokio_retry::RetryError::transient(e))
                                 }
                             }
@@ -473,7 +512,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                         .await;
 
                         if let Err(e) = result {
-                            error!(error = %e, "KV store operation exhausted all retry attempts.");
+                            error!(error = %e, "KV store operation exhausted all retry attempts");
                         }
                     });
                     handlers.push(handle);
@@ -665,6 +704,7 @@ mod tests {
             operation: Operation::Put,
             key: Some("k".to_string()),
             key_prefix: None,
+            include_values: false,
             depends_on: Some(vec!["a".to_string()]),
             retry: None,
         };
@@ -740,6 +780,7 @@ mod tests {
             keys: vec!["a".to_string(), "b".to_string()],
             count: 2,
             prefix: "".to_string(),
+            values: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["count"], 2);
@@ -747,6 +788,8 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0], "a");
         assert_eq!(keys[1], "b");
+        // values omitted when not opted in.
+        assert!(v.get("values").is_none());
     }
 
     #[test]
@@ -755,11 +798,26 @@ mod tests {
             keys: vec![],
             count: 0,
             prefix: "p.".to_string(),
+            values: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["count"], 0);
         assert_eq!(v["keys"].as_array().unwrap().len(), 0);
         assert_eq!(v["prefix"], "p.");
+    }
+
+    #[test]
+    fn list_result_with_values_serializes_map() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("k1".to_string(), "v1".to_string());
+        let r = ListResult {
+            keys: vec!["k1".to_string()],
+            count: 1,
+            prefix: "".to_string(),
+            values: Some(map),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["values"]["k1"], "v1");
     }
 
     #[test]

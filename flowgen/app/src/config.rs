@@ -69,7 +69,10 @@ pub struct Flow {
 /// various flowgen worker crates. Task configurations are embedded
 /// within each variant.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[allow(non_camel_case_types)]
+// YAML configs reference task types by their lowercase tag (e.g. `convert:`,
+// `script:`). The serde-driven variant naming therefore has to use the same
+// shape — Rust's CamelCase convention does not apply to this public API.
+#[expect(non_camel_case_types, reason = "variant names are YAML tags")]
 pub enum TaskType {
     /// Data conversion task.
     convert(flowgen_core::task::convert::config::Processor),
@@ -87,8 +90,8 @@ pub enum TaskType {
     generate(flowgen_core::task::generate::config::Subscriber),
     /// HTTP request task.
     http_request(flowgen_http::config::Processor),
-    /// HTTP webhook handler task.
-    http_webhook(flowgen_http::config::Processor),
+    /// HTTP endpoint task: exposes a route on the worker HTTP server.
+    http_endpoint(flowgen_http::config::Processor),
     /// HTML scrape task for extracting structured data using CSS selectors.
     html_scrape(flowgen_html::scrape::config::Processor),
     /// NATS JetStream subscriber task.
@@ -127,10 +130,12 @@ pub enum TaskType {
     ai_completion(flowgen_ai_agent::completion::config::Processor),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
     mcp_tool(flowgen_mcp::config::Processor),
-    /// AI gateway — OpenAI-compatible chat completions endpoint.
-    ai_gateway(flowgen_ai_agent::ai_gateway::config::Processor),
+    /// LLM proxy task — registers a flow as a backend on the AI gateway server.
+    llm_proxy(flowgen_ai_agent::ai_gateway::config::Processor),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
     git_sync(flowgen_git::sync::config::Processor),
+    /// OCI sync task for pulling flow artifacts from an OCI registry into the cache.
+    oci_sync(flowgen_oci::sync::config::Processor),
 }
 
 impl TaskType {
@@ -145,7 +150,7 @@ impl TaskType {
             TaskType::object_store(_) => "object_store",
             TaskType::generate(_) => "generate",
             TaskType::http_request(_) => "http_request",
-            TaskType::http_webhook(_) => "http_webhook",
+            TaskType::http_endpoint(_) => "http_endpoint",
             TaskType::html_scrape(_) => "html_scrape",
             TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
             TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
@@ -165,8 +170,9 @@ impl TaskType {
             TaskType::nats_kv_store(_) => "nats_kv_store",
             TaskType::ai_completion(_) => "ai_completion",
             TaskType::mcp_tool(_) => "mcp_tool",
-            TaskType::ai_gateway(_) => "ai_gateway",
+            TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
+            TaskType::oci_sync(_) => "oci_sync",
         }
     }
 
@@ -181,7 +187,7 @@ impl TaskType {
             TaskType::object_store(c) => &c.name,
             TaskType::generate(c) => &c.name,
             TaskType::http_request(c) => &c.name,
-            TaskType::http_webhook(c) => &c.name,
+            TaskType::http_endpoint(c) => &c.name,
             TaskType::html_scrape(c) => &c.name,
             TaskType::nats_jetstream_subscriber(c) => &c.name,
             TaskType::nats_jetstream_publisher(c) => &c.name,
@@ -201,8 +207,9 @@ impl TaskType {
             TaskType::nats_kv_store(c) => &c.name,
             TaskType::ai_completion(c) => &c.name,
             TaskType::mcp_tool(c) => &c.name,
-            TaskType::ai_gateway(c) => &c.name,
+            TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
+            TaskType::oci_sync(c) => &c.name,
         }
     }
 
@@ -217,7 +224,7 @@ impl TaskType {
             TaskType::object_store(c) => c.depends_on.as_ref(),
             TaskType::generate(c) => c.depends_on.as_ref(),
             TaskType::http_request(c) => c.depends_on.as_ref(),
-            TaskType::http_webhook(c) => c.depends_on.as_ref(),
+            TaskType::http_endpoint(c) => c.depends_on.as_ref(),
             TaskType::html_scrape(c) => c.depends_on.as_ref(),
             TaskType::nats_jetstream_subscriber(c) => c.depends_on.as_ref(),
             TaskType::nats_jetstream_publisher(c) => c.depends_on.as_ref(),
@@ -237,8 +244,9 @@ impl TaskType {
             TaskType::nats_kv_store(c) => c.depends_on.as_ref(),
             TaskType::ai_completion(c) => c.depends_on.as_ref(),
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
-            TaskType::ai_gateway(c) => c.depends_on.as_ref(),
+            TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
+            TaskType::oci_sync(c) => c.depends_on.as_ref(),
         }
     }
 }
@@ -271,6 +279,10 @@ pub struct WorkerConfig {
     pub http_server: Option<HttpServerOptions>,
     /// Optional MCP server configuration for exposing flows as MCP tools.
     pub mcp_server: Option<McpServerOptions>,
+    /// Optional AI gateway configuration for OpenAI-compatible chat completion endpoints.
+    /// Runs on its own port so the surface can later migrate to gRPC or WebSocket
+    /// independently of the webhook HTTP server.
+    pub ai_gateway: Option<AiGatewayOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Per-edge event channel capacity in events (defaults to 10,000).
@@ -405,7 +417,7 @@ fn default_mcp_port() -> u16 {
 
 /// Default MCP endpoint path.
 fn default_mcp_path() -> String {
-    "/mcp".to_string()
+    "/mcp/v1".to_string()
 }
 
 /// MCP server configuration options.
@@ -423,6 +435,60 @@ pub struct McpServerOptions {
     /// Optional path to global credentials file for API key authentication.
     /// Individual `mcp_tool` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider configuration for user identity resolution.
+    /// Shared across all `mcp_tool` flows on this worker.
+    pub auth: Option<flowgen_core::auth::AuthConfig>,
+}
+
+/// Default AI gateway port.
+fn default_ai_gateway_port() -> u16 {
+    3002
+}
+
+/// Default AI gateway path prefix.
+///
+/// `/v1` matches the de-facto OpenAI-compatible convention used by vLLM, Ollama,
+/// LiteLLM, OpenRouter, and the OpenAI SDKs. Clients configure `base_url=http://host/v1`
+/// and reach `POST /v1/chat/completions` and `GET /v1/models` directly.
+fn default_ai_gateway_path() -> String {
+    "/v1".to_string()
+}
+
+/// AI gateway server configuration options.
+///
+/// Exposes registered AI gateway flows as a single OpenAI-compatible endpoint.
+/// Routing across gateways is driven by the `model` field of the request body
+/// (`model: "<gateway-name>/<downstream-model>"`), so OpenAI clients work with
+/// stock `base_url` configuration and no per-gateway URL changes.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct AiGatewayOptions {
+    /// Whether the AI gateway server is enabled. Must be explicitly enabled by
+    /// the admin for `llm_proxy` tasks to be registered.
+    pub enabled: bool,
+    /// AI gateway port number. Defaults to 3002.
+    #[serde(default = "default_ai_gateway_port")]
+    pub port: u16,
+    /// Path prefix for AI gateway routes. Defaults to "/v1".
+    /// The chat completion endpoint is served at `<path>/chat/completions` and
+    /// the model list at `<path>/models`.
+    #[serde(default = "default_ai_gateway_path")]
+    pub path: String,
+    /// Optional path to global credentials file for API key authentication.
+    /// Individual `llm_proxy` tasks can override this with their own `credentials_path`.
+    pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional auth provider configuration for user identity resolution.
+    /// Shared across all AI gateway flows on this worker.
+    pub auth: Option<flowgen_core::auth::AuthConfig>,
+}
+
+/// Default webhook HTTP server port.
+fn default_http_port() -> u16 {
+    3000
+}
+
+/// Default webhook HTTP server path prefix.
+fn default_http_path() -> String {
+    "/api/flowgen/workers/v1".to_string()
 }
 
 /// HTTP server configuration options.
@@ -430,12 +496,14 @@ pub struct McpServerOptions {
 pub struct HttpServerOptions {
     /// Whether HTTP server is enabled.
     pub enabled: bool,
-    /// Optional HTTP server port number (defaults to 3000).
-    pub port: Option<u16>,
-    /// Optional path prefix for all routes (e.g., "/api/flowgen/workers").
-    pub path: Option<String>,
+    /// HTTP server port number. Defaults to 3000.
+    #[serde(default = "default_http_port")]
+    pub port: u16,
+    /// Path prefix for all webhook routes. Defaults to "/api/flowgen/workers/v1".
+    #[serde(default = "default_http_path")]
+    pub path: String,
     /// Optional path to global credentials file for webhook authentication.
-    /// Individual `http_webhook` tasks can override this with their own `credentials_path`.
+    /// Individual `http_endpoint` tasks can override this with their own `credentials_path`.
     pub credentials_path: Option<std::path::PathBuf>,
     /// Optional auth provider configuration for user identity resolution.
     /// Shared across all HTTP-facing tasks on this worker.
@@ -618,6 +686,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -651,6 +720,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -681,6 +751,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -712,6 +783,7 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: None,
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -848,28 +920,28 @@ mod tests {
     fn test_http_server_options_creation() {
         let http_server_options = HttpServerOptions {
             enabled: true,
-            port: Some(8080),
-            path: None,
+            port: 8080,
+            path: "/workers".to_string(),
             credentials_path: None,
             auth: None,
         };
 
         assert!(http_server_options.enabled);
-        assert_eq!(http_server_options.port, Some(8080));
+        assert_eq!(http_server_options.port, 8080);
     }
 
     #[test]
     fn test_http_server_options_without_port() {
         let http_server_options = HttpServerOptions {
             enabled: false,
-            port: None,
-            path: None,
+            port: 3000,
+            path: "/api/flowgen/workers/v1".to_string(),
             credentials_path: None,
             auth: None,
         };
 
         assert!(!http_server_options.enabled);
-        assert!(http_server_options.port.is_none());
+        assert_eq!(http_server_options.port, 3000);
     }
 
     #[test]
@@ -885,12 +957,13 @@ mod tests {
             worker: Some(WorkerConfig {
                 http_server: Some(HttpServerOptions {
                     enabled: true,
-                    port: Some(8080),
-                    path: Some("/workers".to_string()),
+                    port: 8080,
+                    path: "/workers".to_string(),
                     credentials_path: None,
                     auth: None,
                 }),
                 mcp_server: None,
+                ai_gateway: None,
                 retry: None,
                 event_buffer_size: None,
             }),
@@ -905,8 +978,8 @@ mod tests {
             .as_ref()
             .unwrap();
         assert!(http_server.enabled);
-        assert_eq!(http_server.port, Some(8080));
-        assert_eq!(http_server.path, Some("/workers".to_string()));
+        assert_eq!(http_server.port, 8080);
+        assert_eq!(http_server.path, "/workers");
     }
 
     #[test]

@@ -64,6 +64,16 @@ pub enum Error {
         #[source]
         source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
     },
+    #[error("KV watch subscription error: {source}")]
+    KVWatch {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
+    },
+    #[error("KV watch stream error: {source}")]
+    KVWatchStream {
+        #[source]
+        source: async_nats::error::Error<async_nats::jetstream::kv::WatcherErrorKind>,
+    },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
 }
@@ -116,7 +126,7 @@ impl Cache {
                     Err(_) => {
                         tracing::warn!(
                             "NATS server does not support limit_markers (requires 2.11+), \
-                             creating KV bucket without per-key TTL support."
+                             creating KV bucket without per-key TTL support"
                         );
                         jetstream
                             .create_key_value(async_nats::jetstream::kv::Config {
@@ -393,6 +403,53 @@ impl flowgen_core::cache::Cache for Cache {
         }
         Ok(keys)
     }
+
+    /// Subscribes to key changes under the given prefix.
+    ///
+    /// Uses NATS KV watch without history replay — startup load via `list_keys` already
+    /// handles the initial state, so we only want events that arrive after the watcher starts.
+    async fn watch(
+        &self,
+        prefix: &str,
+    ) -> Result<
+        futures_util::stream::BoxStream<
+            'static,
+            Result<flowgen_core::cache::WatchEvent, flowgen_core::cache::Error>,
+        >,
+        flowgen_core::cache::Error,
+    > {
+        use async_nats::jetstream::kv::Operation;
+        use futures_util::StreamExt;
+
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?
+            .clone();
+
+        // Append the NATS wildcard so the watch covers all keys under the prefix.
+        let subject = format!("{prefix}.>");
+        let watcher = store.watch(subject).await.map_err(|e| {
+            flowgen_core::cache::CacheError::WatchFailed(Box::new(Error::KVWatch { source: e }))
+        })?;
+
+        let stream = watcher.map(|result| match result {
+            Err(e) => Err(flowgen_core::cache::CacheError::WatchFailed(Box::new(
+                Error::KVWatchStream { source: e },
+            ))),
+            Ok(entry) => match entry.operation {
+                Operation::Put => Ok(flowgen_core::cache::WatchEvent::Put {
+                    key: entry.key,
+                    value: entry.value,
+                }),
+                Operation::Delete | Operation::Purge => {
+                    Ok(flowgen_core::cache::WatchEvent::Delete { key: entry.key })
+                }
+            },
+        });
+
+        Ok(stream.boxed())
+    }
 }
 
 /// Builder for [`Cache`] instances.
@@ -474,5 +531,90 @@ impl CacheBuilder {
             tombstone_ttl: self.tombstone_ttl,
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Error Display formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_missing_builder_attribute_display() {
+        let err = Error::MissingBuilderAttribute("credentials_path".to_string());
+        assert_eq!(
+            err.to_string(),
+            "Missing required builder attribute: credentials_path"
+        );
+    }
+
+    #[test]
+    fn error_missing_kv_store_display() {
+        let err = Error::MissingKVStore;
+        assert_eq!(err.to_string(), "Missing required value KV Store");
+    }
+
+    #[test]
+    fn error_missing_jetstream_context_display() {
+        let err = Error::MissingJetStreamContext;
+        assert_eq!(err.to_string(), "Missing required value JetStream Context");
+    }
+
+    // -----------------------------------------------------------------------
+    // CacheBuilder
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builder_build_fails_without_credentials_path() {
+        let result = CacheBuilder::new().build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("credentials_path"));
+    }
+
+    #[test]
+    fn builder_build_succeeds_with_credentials_path() {
+        let cache = CacheBuilder::new()
+            .credentials_path(PathBuf::from("/etc/nats/creds"))
+            .build()
+            .unwrap();
+        assert_eq!(cache.credentials_path, PathBuf::from("/etc/nats/creds"));
+        assert_eq!(cache.url, crate::client::DEFAULT_NATS_URL);
+        assert!(cache.store.is_none());
+        assert!(cache.jetstream.is_none());
+    }
+
+    #[test]
+    fn builder_sets_url() {
+        let cache = CacheBuilder::new()
+            .credentials_path(PathBuf::from("/creds"))
+            .url("nats://custom:4222".to_string())
+            .build()
+            .unwrap();
+        assert_eq!(cache.url, "nats://custom:4222");
+    }
+
+    #[test]
+    fn builder_sets_history() {
+        let cache = CacheBuilder::new()
+            .credentials_path(PathBuf::from("/creds"))
+            .history(5)
+            .build()
+            .unwrap();
+        assert_eq!(cache.history, Some(5));
+    }
+
+    #[test]
+    fn builder_sets_tombstone_ttl() {
+        let ttl = Duration::from_secs(7200);
+        let cache = CacheBuilder::new()
+            .credentials_path(PathBuf::from("/creds"))
+            .tombstone_ttl(ttl)
+            .build()
+            .unwrap();
+        assert_eq!(cache.tombstone_ttl, Some(ttl));
     }
 }

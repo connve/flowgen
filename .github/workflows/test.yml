@@ -51,3 +51,24 @@ jobs:
         cargo build --verbose
         cargo test --verbose
         cargo fmt --all
+
+  # Runs `#[ignore]`-marked integration tests that spin up real
+  # containers via testcontainers (currently: `oci_sync` against
+  # `registry:2.8.3`). Separated from the main suite so a registry
+  # image pull hiccup does not fail the fast unit-test job.
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    - name: Install system dependencies
+      run: |
+        sudo apt update -qq
+        sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    - name: Run oci_sync integration tests
+      run: cargo test -p flowgen_oci --test sync_integration -- --ignored --nocapture

@@ -44,8 +44,6 @@ pub enum Error {
     MissingCredentials,
     #[error("Custom provider requires endpoint configuration")]
     MissingEndpoint,
-    #[error("Provider not yet implemented: {provider}")]
-    ProviderNotImplemented { provider: String },
     #[error("OpenAI client creation failed: {source}")]
     OpenAIClient {
         #[source]
@@ -332,9 +330,6 @@ impl ClientBuilder {
                 })
             }
             Provider::Ollama | Provider::Custom => self.build_openai_compatible_provider(),
-            _ => Err(Error::ProviderNotImplemented {
-                provider: format!("{:?}", self.provider),
-            }),
         }
     }
 
@@ -345,15 +340,17 @@ impl ClientBuilder {
     }
 
     fn build_openai_compatible(self, endpoint: String) -> Result<AgentClient, Error> {
-        // Helper for building OpenAI-compatible clients (Ollama, LM Studio, custom endpoints).
-        // Credentials are optional for local providers that don't require authentication.
+        // Third-party servers implement classic chat completions, not the
+        // Responses API; `.completions_api()` routes through the right path.
+        // Credentials are optional for local providers without auth.
         let api_key = self.credentials.map(|c| c.api_key).unwrap_or_default();
 
         let client = rig::providers::openai::Client::builder()
             .api_key(&api_key)
             .base_url(&endpoint)
             .build()
-            .map_err(|source| Error::OpenAIClient { source })?;
+            .map_err(|source| Error::OpenAIClient { source })?
+            .completions_api();
 
         Ok(AgentClient {
             provider: self.provider,
@@ -369,7 +366,7 @@ impl ClientBuilder {
             max_turns: self.max_turns,
             output_schema: self.output_schema,
             additional_params: self.additional_params,
-            client: ProviderClient::OpenAi(client), // OpenAI-compatible API
+            client: ProviderClient::OpenAiCompat(client),
         })
     }
 }
@@ -499,6 +496,8 @@ struct AgentParams<'a> {
 /// We build agents on-demand per request so we can apply dynamic system prompts.
 enum ProviderClient {
     OpenAi(rig::providers::openai::Client),
+    /// Third-party OpenAI-compatible server using classic `/v1/chat/completions`.
+    OpenAiCompat(rig::providers::openai::CompletionsClient),
     Anthropic(rig::providers::anthropic::Client),
     Cohere(rig::providers::cohere::Client),
     Gemini(rig::providers::gemini::Client),
@@ -555,6 +554,7 @@ impl ProviderClient {
     fn build_agent(&self, params: &AgentParams) -> AgentEnum {
         match self {
             Self::OpenAi(client) => dispatch_build_agent!(OpenAi, client, params),
+            Self::OpenAiCompat(client) => dispatch_build_agent!(OpenAiCompat, client, params),
             Self::Anthropic(client) => dispatch_build_agent!(Anthropic, client, params),
             Self::Cohere(client) => dispatch_build_agent!(Cohere, client, params),
             Self::Gemini(client) => dispatch_build_agent!(Gemini, client, params),
@@ -573,6 +573,7 @@ impl ProviderClient {
 /// Agent enum for executing prompts (built on-demand per request).
 enum AgentEnum {
     OpenAi(Agent<rig::providers::openai::responses_api::ResponsesCompletionModel>),
+    OpenAiCompat(Agent<rig::providers::openai::completion::CompletionModel>),
     Anthropic(Agent<rig::providers::anthropic::completion::CompletionModel>),
     Cohere(Agent<rig::providers::cohere::CompletionModel>),
     Gemini(Agent<rig::providers::gemini::CompletionModel>),
@@ -591,6 +592,7 @@ impl AgentEnum {
     async fn prompt(self, prompt: &str) -> Result<String, rig::completion::PromptError> {
         match self {
             Self::OpenAi(agent) => agent.prompt(prompt).await,
+            Self::OpenAiCompat(agent) => agent.prompt(prompt).await,
             Self::Anthropic(agent) => agent.prompt(prompt).await,
             Self::Cohere(agent) => agent.prompt(prompt).await,
             Self::Gemini(agent) => agent.prompt(prompt).await,
@@ -629,6 +631,7 @@ impl AgentEnum {
 
         match self {
             Self::OpenAi(agent) => map_stream!(agent, prompt),
+            Self::OpenAiCompat(agent) => map_stream!(agent, prompt),
             Self::Anthropic(agent) => map_stream!(agent, prompt),
             Self::Cohere(agent) => map_stream!(agent, prompt),
             Self::Gemini(agent) => map_stream!(agent, prompt),

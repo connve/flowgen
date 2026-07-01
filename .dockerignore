@@ -6,3 +6,7 @@ docker
 .gitmodules
 /target
 /examples
+/vendor
+/local
+/docs
+**/*.md

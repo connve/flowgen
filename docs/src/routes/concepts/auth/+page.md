@@ -65,7 +65,7 @@ For each incoming request, flowgen sends `Authorization: Bearer <token>` to `val
 Setting `auth` on the worker enables the provider but does not force every task to require a token. Each HTTP-facing task opts in individually:
 
 ```yaml
-- http_webhook:
+- http_endpoint:
     name: secure_endpoint
     endpoint: /admin/events
     method: POST
@@ -123,7 +123,7 @@ The shape of `event.meta.auth`:
 A webhook can require both a worker-shared bearer secret (`credentials_path`) **and** a user-level JWT (`auth.required: true`). Both checks must pass. The shared secret is for service-to-service authentication (the caller proves they are an authorised service); the JWT identifies the end user.
 
 ```yaml
-- http_webhook:
+- http_endpoint:
     name: secure_endpoint
     endpoint: /events
     method: POST

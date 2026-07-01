@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::pin;
 use tokio::{sync::mpsc::Sender, time};
 use tokio_stream::StreamExt;
-use tracing::{error, warn, Instrument};
+use tracing::{error, warn};
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -369,84 +369,87 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
+        let cancellation_token = self.task_context.cancellation_token.clone();
+        let mut reconnect_backoff = retry_config.reconnect_strategy();
 
-        tokio::spawn(
-            async move {
-                let mut reconnect_backoff = retry_config.reconnect_strategy();
+        let nats_key = flowgen_core::client_registry::ClientKey::new(&(
+            &self.config.credentials_path,
+            &self.config.url,
+        ));
 
-                let nats_key = flowgen_core::client_registry::ClientKey::new(&(
-                    &self.config.credentials_path,
-                    &self.config.url,
-                ));
+        // Infinite retry loop: subscribers must maintain connectivity indefinitely.
+        loop {
+            if cancellation_token.is_cancelled() {
+                return Ok(());
+            }
 
-                // Infinite retry loop: subscribers must maintain connectivity indefinitely.
-                loop {
-                    // Initialize with circuit breaker to detect permanent errors (bad config, filter mismatch, etc.).
-                    let event_handler = match tokio_retry::Retry::spawn(retry_config.init_strategy(self.task_context.startup_delay), || async {
-                        match self.init().await {
-                            Ok(handler) => Ok(handler),
-                            Err(e) => {
-                                let is_retriable = !matches!(&e, Error::ConsumerFilterMismatch { .. });
-
-                                if is_retriable {
-                                    error!(error = %e, "Subscriber initialization failed");
-                                    Err(tokio_retry::RetryError::transient(e))
-                                } else {
-                                    error!(error = %e, "Permanent initialization error");
-                                    Err(tokio_retry::RetryError::permanent(e))
-                                }
-                            }
-                        }
-                    })
-                    .await
-                    {
-                        Ok(handler) => {
-                            reconnect_backoff = retry_config.reconnect_strategy();
-                            handler
-                        }
+            // Initialize with circuit breaker to detect permanent errors (bad config, filter mismatch, etc.).
+            let init_future = tokio_retry::Retry::spawn(
+                retry_config.init_strategy(self.task_context.startup_delay),
+                || async {
+                    match self.init().await {
+                        Ok(handler) => Ok(handler),
                         Err(e) => {
-                            let delay = match reconnect_backoff.next() {
-                            Some(d) => d,
-                            None => retry_config.initial_backoff,
-                        };
-                            error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                    };
+                            let is_retriable = !matches!(&e, Error::ConsumerFilterMismatch { .. });
 
-                    // Run event loop until failure, then reinitialize.
-                    match event_handler.handle().await {
-                        Ok(()) => {
-                            if self.task_context.cancellation_token.is_cancelled() {
-                                return;
+                            if is_retriable {
+                                error!(error = %e, "Subscriber initialization failed");
+                                Err(tokio_retry::RetryError::transient(e))
+                            } else {
+                                error!(error = %e, "Permanent initialization error");
+                                Err(tokio_retry::RetryError::permanent(e))
                             }
-                            warn!("Subscriber lost connectivity, reinitializing");
-                        }
-                        Err(e) => {
-                            if self.task_context.cancellation_token.is_cancelled() {
-                                return;
-                            }
-                            error!(error = %e, "Subscriber lost connectivity, reinitializing");
                         }
                     }
+                },
+            );
 
-                    // Evict the cached NATS client so the next init() creates a fresh connection
-                    // instead of reusing the dead one from the registry.
-                    self.task_context.client_registry.remove(&nats_key).await;
-
-                    let delay = match reconnect_backoff.next() {
+            let event_handler = tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                result = init_future => match result {
+                    Ok(handler) => {
+                        reconnect_backoff = retry_config.reconnect_strategy();
+                        handler
+                    }
+                    Err(e) => {
+                        let delay = match reconnect_backoff.next() {
                             Some(d) => d,
                             None => retry_config.initial_backoff,
                         };
-                    tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
-                    tokio::time::sleep(delay).await;
-                }
-            }
-            .instrument(tracing::Span::current()),
-        );
+                        error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = cancellation_token.cancelled() => return Ok(()),
+                        }
+                        continue;
+                    }
+                },
+            };
 
-        Ok(())
+            // Run event loop until failure, then reinitialize.
+            let handle_future = event_handler.handle();
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                result = handle_future => match result {
+                    Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
+                    Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
+                },
+            }
+
+            // Evict the cached NATS client so the next init() creates a fresh connection
+            // instead of reusing the dead one from the registry.
+            self.task_context.client_registry.remove(&nats_key).await;
+
+            let delay = match reconnect_backoff.next() {
+                Some(d) => d,
+                None => retry_config.initial_backoff,
+            };
+            tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = cancellation_token.cancelled() => return Ok(()),
+            }
+        }
     }
 }
 

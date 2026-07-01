@@ -26,6 +26,10 @@ Discovers every `.yaml`/`.yml`/`.json` file under the path and runs them with an
 ```yaml
 flows:
   path: /etc/flowgen/flows/
+  cache:
+    enabled: true
+    prefix: flowgen.flows
+    db_name: flowgen_system
 
 cache:
   enabled: true
@@ -43,7 +47,7 @@ worker:
   http_server:
     enabled: true
     port: 3000
-    path: /api/flowgen/workers
+    path: /api/flowgen/workers/v1
     credentials_path: /etc/flowgen/credentials/http.json
     auth:
       type: jwt
@@ -52,8 +56,14 @@ worker:
   mcp_server:
     enabled: true
     port: 3001
-    path: /mcp
+    path: /mcp/v1
     credentials_path: /etc/flowgen/credentials/mcp.json
+
+  ai_gateway:
+    enabled: true
+    port: 3002
+    path: /v1
+    credentials_path: /etc/flowgen/credentials/ai.json
 
   retry:
     max_attempts: 10
@@ -120,8 +130,9 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `http_server` | object | | HTTP server for `http_webhook` and `ai_gateway` tasks. |
+| `http_server` | object | | HTTP server for `http_endpoint` tasks. |
 | `mcp_server` | object | | MCP server for `mcp_tool` tasks. |
+| `ai_gateway` | object | | AI gateway server for any AI task that requires exposing a server endpoint. |
 | `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/flowgen/concepts/retry). |
 | `event_buffer_size` | int | `10000` | Capacity of each inter-task event channel (in events). When full the upstream task blocks until the downstream task drains a slot. |
 
@@ -129,10 +140,20 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Required for `http_webhook` and `ai_gateway` tasks to start. |
+| `enabled` | bool | required | Required for `http_endpoint` tasks to start. |
 | `port` | int | `3000` | Listening port. |
 | `path` | string | | Optional path prefix applied to every registered route. |
 | `credentials_path` | string | | Worker-level shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |
+| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+
+### `worker.ai_gateway`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | required | Required for `llm_proxy` tasks to be registered. |
+| `port` | int | `3002` | Listening port, independent of the webhook HTTP server. |
+| `path` | string | `/v1` | Path prefix for AI gateway routes. The chat completions endpoint is served at `<path>/chat/completions`. |
+| `credentials_path` | string | | Path to global credentials file. Individual `llm_proxy` tasks can override. |
 | `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
 ### `worker.mcp_server`
@@ -141,7 +162,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 |---|---|---|---|
 | `enabled` | bool | required | Required for `mcp_tool` tasks to register. |
 | `port` | int | `3001` | Listening port. |
-| `path` | string | `/mcp` | MCP endpoint path. |
+| `path` | string | `/mcp/v1` | MCP endpoint path. |
 | `credentials_path` | string | | Worker-level shared API key credentials. Individual tools can override. |
 
 ### `worker.retry`

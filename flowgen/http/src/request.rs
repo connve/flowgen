@@ -391,10 +391,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                                         );
 
                                         if is_permanent {
-                                            error!(error = %e, "HTTP request failed with client error, skipping retries.");
+                                            error!(error = %e, "HTTP request failed with client error, skipping retries");
                                             Err(tokio_retry::RetryError::permanent(e))
                                         } else {
-                                            error!(error = %e, "Failed to process HTTP request.");
+                                            error!(error = %e, "Failed to process HTTP request");
                                             Err(tokio_retry::RetryError::transient(e))
                                         }
                                     }
@@ -403,13 +403,13 @@ impl flowgen_core::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "HTTP request failed after all retry attempts.");
-                                // Emit error event downstream so scripts can route
-                                // to DLQ, audit tables, or other error handlers.
+                                error!(error = %err, "HTTP request failed after all retry attempts");
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
+                                } else if let Some(arc) = event.completion_tx.as_ref() {
+                                    arc.signal_completion_with_error(err.to_string());
                                 }
                             }
                         }

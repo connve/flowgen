@@ -54,6 +54,12 @@ ctx.meta.version = "2.0";
 // Metadata is preserved in downstream tasks
 ```
 
+## Inline vs External Scripts
+
+For guidance on when to inline a script versus loading it from a
+`resources/scripts/*.rhai` file, the recommended project layout, and editor
+support, see the [Script task documentation](https://connve.com/docs/flowgen/core/script).
+
 ## Examples
 
 ### Basic Examples
@@ -107,6 +113,17 @@ Loading scripts from external files for reusability and version control.
 - Stateful processing (running totals, aggregations)
 - User behavior tracking (frequency analysis)
 - Comprehensive metadata for observability
+
+#### `script_fan_in_join.yaml`
+**Use Case:** Joining two upstream batches in a fan-in DAG
+- Two `object_store_read` sources feed into a `buffer` (size: 2)
+- External script from `resources/scripts/orders_payment_label_join.rhai`
+- Mirrors the production pattern of joining a main table with a lookup table
+  (e.g. orders + payment type labels, customers + reference data)
+- The script discriminates the two upstream batches by inspecting a field
+  on the first row, since arrival order at the buffer is not guaranteed
+- Demonstrates why complex join logic belongs in an external file rather
+  than inline in the YAML
 
 ## Common Patterns
 

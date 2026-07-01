@@ -1,7 +1,7 @@
 # Search Salesforce records using SOSL.
 #
 # Accepts a search term via webhook, executes a SOSL query, and returns
-# matching records. Swap http_webhook for mcp_tool to expose as an MCP tool.
+# matching records. Swap http_endpoint for mcp_tool to expose as an MCP tool.
 #
 # Required:
 #   - /etc/sfdc/credentials.json
@@ -9,7 +9,7 @@ flow:
   name: salesforce_sosl_search
   tasks:
 
-    - http_webhook:
+    - http_endpoint:
         name: receive_request
         method: POST
         endpoint: /salesforce/search
@@ -17,4 +17,7 @@ flow:
     - salesforce_restapi_search:
         name: sosl_search
         credentials_path: /etc/sfdc/credentials.json
-        query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)"
+        # Trailing `*` enables prefix matching so `acme` finds `acme-corp` etc.
+        # Drop the `*` for exact-token phrase matching. See:
+        # https://connve.com/docs/flowgen/salesforce/rest#prefix-matching
+        query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id, Name, Industry), Contact(Id, FirstName, LastName, Email)'

@@ -1,0 +1,154 @@
+# Bootstrap flow: reconciles resource files (sql, soql, json, txt, etc.)
+# from a Git repository into the system NATS KV cache. Each tick pulls
+# the repo, writes one cache entry per file keyed by its relative path
+# under `flowgen.resources.`, and deletes cache entries no longer
+# present in the repo.
+#
+# Once running, the runtime `ResourceLoader` reads files back via
+# `ctx.resource.get("<path>")` from scripts and through the same key
+# from processors that accept `resource: <path>`.
+#
+# Pair with `system_sync_flows.yaml` so flow YAML changes and resource
+# changes can be redeployed independently.
+#
+# Required:
+#   - /etc/flowgen/credentials/git.json with
+#       { "token": "<github_pat_or_gitlab_deploy_token>" }
+#   - /etc/nats/credentials.json for NATS KV writes.
+flow:
+  name: system_sync_resources
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: tick
+        interval: "30s"
+
+    - git_sync:
+        name: pull_repo
+        repository_url: "https://git.example.com/your-org/your-flows.git"
+        branch: main
+        path: "resources/"
+        credentials_path: /etc/flowgen/credentials/git.json
+
+    - buffer:
+        name: collect_files
+        size: 10000
+        timeout: "5s"
+        flush_on_completion: true
+
+    - script:
+        name: stash_files
+        code: |
+          ctx.meta.file_batch = event.data.batch;
+          event
+
+    - nats_kv_store:
+        name: list_existing
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: list
+        key_prefix: "flowgen.resources."
+        # Include current values so compute_diff can skip put actions
+        # when the resource in cache already matches — every put bumps
+        # the KV revision and fires a watcher hot-reload on every pod,
+        # which races leader-election leases.
+        include_values: true
+
+    # Short-circuit only when nothing has drifted: the repo commit
+    # matches the last successful sync AND the cache key count matches
+    # the file count from the repo. Anything else (new commit, key
+    # missing from cache, extra stale key) drops through so compute_diff
+    # runs and converges the cache back to the repo state.
+    - script:
+        name: skip_if_in_sync
+        code: |
+          let current_commit = event.meta.file_batch[0].commit;
+          let last_synced = ctx.cache.get("last_synced_commit");
+          let file_count = event.meta.file_batch.len();
+          let key_count = event.data.keys.len();
+          if last_synced == current_commit && file_count == key_count {
+              ()
+          } else {
+              ctx.meta.current_commit = current_commit;
+              event
+          }
+
+    # Compute the diff: each file becomes a put keyed by its path,
+    # each cache key with no matching file becomes a delete.
+    - script:
+        name: compute_diff
+        code: |
+          let files = event.meta.file_batch;
+          let existing = event.data.keys;
+          let current = event.data.values;
+          let present = #{};
+          let actions = [];
+          for file in files {
+              let key = "flowgen.resources." + file.path;
+              present[key] = true;
+              // Skip puts when the cache already holds the same
+              // resource — every revision bump triggers a watcher
+              // hot-reload on every pod, which races leader-election
+              // leases.
+              if current[key] != file.content {
+                  actions.push(#{
+                      action: "put",
+                      key: key,
+                      content: file.content,
+                  });
+              }
+          }
+          for key in existing {
+              if present[key] != true {
+                  actions.push(#{
+                      action: "delete",
+                      key: key,
+                      content: "",
+                  });
+              }
+          }
+          actions
+
+    - script:
+        name: select_puts
+        code: |
+          if event.data.action == "put" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - script:
+        name: select_deletes
+        code: |
+          if event.data.action == "delete" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - nats_kv_store:
+        name: write_to_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: put
+        key: "{{event.data.key}}"
+        depends_on: [select_puts]
+
+    - nats_kv_store:
+        name: delete_from_cache
+        credentials_path: /etc/nats/credentials.json
+        bucket: flowgen_system
+        operation: delete
+        key: "{{event.data.key}}"
+        depends_on: [select_deletes]
+
+    - script:
+        name: mark_synced
+        code: |
+          ctx.cache.put("last_synced_commit", event.meta.current_commit);
+          event
+        depends_on: [write_to_cache, delete_from_cache]

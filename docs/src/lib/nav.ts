@@ -91,7 +91,7 @@ export const navigation: NavSection[] = [
 		icon: '/icons/http.svg',
 		items: [
 			{ title: 'Overview', href: '/http' },
-			{ title: 'Webhook', href: '/http/webhook' },
+			{ title: 'Endpoint', href: '/http/endpoint' },
 			{ title: 'Request', href: '/http/request' }
 		]
 	},
@@ -127,6 +127,14 @@ export const navigation: NavSection[] = [
 		items: [
 			{ title: 'Overview', href: '/git' },
 			{ title: 'Git Sync', href: '/git/sync' }
+		]
+	},
+	{
+		title: 'OCI',
+		icon: '/icons/git.svg',
+		items: [
+			{ title: 'Overview', href: '/oci' },
+			{ title: 'OCI Sync', href: '/oci/sync' }
 		]
 	},
 	{

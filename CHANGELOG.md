@@ -1,5 +1,411 @@
 # Changelog
 
+## 0.120.0
+
+### Features
+
+- **`buffer` flushes on upstream completion signal.** New
+  `flush_on_completion: bool` field on the `buffer` task config
+  (default `false`). When set, the buffer flushes immediately upon
+  receiving an event that carries an upstream completion handle,
+  instead of waiting for `size` or `timeout`. Sources that emit a
+  known-finite batch (`git_sync`, `oci_sync`) already attach the
+  completion handle to the final event in the batch, so the buffer
+  now sees the end of the batch deterministically and forwards a
+  complete view downstream. Previously the buffer relied on
+  `timeout` alone — picking an artifact pull that took longer than
+  `timeout` produced a partial batch, which the bootstrap's
+  `compute_diff` mistook for "those files no longer exist" and
+  emitted spurious delete actions, oscillating the cache. The flag
+  is honoured by both buffer code paths (`process_events_single`
+  and `process_events_keyed`); the bootstrap sync flows do not use
+  `partition_key`, so the first cut that only patched the keyed
+  path went unused in production. The bootstrap sync flows in
+  `local/flowgen.yaml` and the four `examples/{git,oci}/system_sync_*`
+  flows opt into the new flag.
+
+- **`oci_sync` and `git_sync` skip the pull when nothing changed.**
+  Each tick now compares a cheap signature against the last
+  successful run before re-fetching content. `oci_sync` keeps the
+  artifact's manifest digest in the shared cache under
+  `flow.{flow}.oci_digest.{artifact}`; the change signal is a plain
+  HTTP HEAD against the manifest URL (`fetch_manifest_digest`), so
+  a cache hit costs one zero-body request — no manifest JSON, no
+  config blob, no layer blobs. If the HEAD digest matches, the
+  source emits only the upstream completion signal.
+  `git_sync` keeps the HEAD commit hash under
+  `flow.{flow}.git_head.{repo}`; if the post-fetch hash matches, the
+  file walk is skipped. Works for both mutable tags
+  (`ghcr.io/org/flows:prod`) and immutable digests
+  (`…@sha256:abcd`) — the manifest digest is authoritative in
+  either case, so re-tagging `:prod` to a new release still
+  triggers a pull. The signature is persisted only after every
+  downstream event for the tick has been sent, so a mid-batch
+  failure causes the next tick to re-emit the full set
+  (idempotency mirrors `salesforce::pubsubapi::subscriber`'s
+  replay_id handling). A tenant reported 4.7K identical blob pulls
+  against a single GHCR artifact before this landed; the OCI fix
+  collapses that to one manifest HEAD per tick once the cache is
+  warm. Both tasks accept `force_pull: true` to bypass the cache
+  for the operator case where the downstream cache was mutated
+  out of band and needs re-seeding.
+
+- **`oci_sync` integration test against a real registry.** New
+  `flowgen/oci/tests/sync_integration.rs` stands up a
+  `registry:2.8.3` container via `testcontainers`, pushes a
+  multi-layer artifact that mirrors the tenant-connve GHCR layout
+  (empty config + N file layers, each tagged with its relative path
+  in `org.opencontainers.image.title`), drives a single tick
+  through `oci_sync`, and asserts: one downstream event per file
+  layer, in upstream push order, with the `completion_tx` handle
+  attached to the final event only. This catches the class of bugs
+  the bootstrap oscillation belonged to — anything that breaks the
+  end-of-batch contract between `oci_sync` and the downstream
+  buffer surfaces here, instead of in production logs. `oci_sync`'s
+  `init` also gained a small loopback-host check that switches to
+  plain HTTP when the artifact reference points at `127.0.0.1`,
+  `localhost`, or `[::1]`, so this test (and any future
+  registry-backed test) can run without TLS termination. The test
+  is marked `#[ignore]` so the default `cargo test` skips it on
+  machines without a Docker daemon; a dedicated `test-integration`
+  job in `.github/workflows/test.yml` runs it on every PR via
+  `cargo test -- --ignored`.
+
+- **`nats_kv_store list` can include current values.** New
+  `include_values: bool` field on the `nats_kv_store` config
+  (default `false`). When set with `operation: list`, the result
+  carries a `values: { key: content }` map alongside `keys` so
+  downstream scripts can diff incoming content against what is
+  already in cache and skip identity puts. Without this, every
+  bootstrap tick wrote every flow YAML even when the content was
+  unchanged; every put bumped the NATS KV revision and fired a
+  watcher hot-reload on every pod, which in turn raced
+  leader-election leases. The bootstrap `compute_diff` now consults
+  `event.data.values[key]` and only emits a `put` action when the
+  cached content differs from the new content.
+
+- **Config hot-reload.** Flowgen now watches the config directory for
+  changes and automatically reconciles flows without restarting. Added
+  flows start, removed flows stop, and modified flows are restarted.
+  File system events are debounced to avoid churn during multi-file
+  saves. HTTP server registrations (webhooks, MCP tools, AI gateway
+  proxies) are deregistered per-flow before restart so stale entries
+  never linger. The reconciler also calls
+  `TaskManager::unregister(flow_name)` on the old flow before swapping
+  in the replacement, which aborts that flow's lease renewal background
+  task without touching the lease key in NATS. Without this step the
+  old renewer survived the `Flow` drop in tokio and kept writing
+  renewals to `lease.<flow_name>` under the same pod-level
+  `holder_identity`, racing the replacement flow's renewer and
+  producing endless `Lost lease ownership during renewal` warnings
+  whose `current_holder` was the pod itself.
+
+- **System cache separated from runtime cache.** Leader-election
+  leases now live in the system bucket (typically `flowgen_system`)
+  instead of the runtime bucket (`flowgen_cache`). The runtime bucket
+  is what user scripts reach through `ctx.cache`; keeping leases out
+  of it removes the risk of a script overwriting a coordination key,
+  and lets the two buckets carry different retention policies (short
+  history plus per-message TTL for leases, longer retention for
+  per-flow state like replay IDs and counters). `FlowBuilder` now
+  requires both `cache` and `system_cache`; in single-binary or
+  in-memory deployments the same `Arc` is passed for both, so the
+  separation is opt-in by configuration. Existing NATS deployments
+  should drop the stale `lease.*` keys from the runtime bucket after
+  upgrade; they are no longer renewed and will linger as dead
+  entries until manually removed.
+
+- **`Event::Display` drops `None` fields from the pretty output.**
+  The pretty-printer used by the `log` task (and any `format!("{event}")`
+  call) now omits `id`, `meta`, and `error` when they are `None`
+  instead of emitting `"id": null`, `"meta": null`, `"error": null`.
+  Industry-standard structured-log convention (`omitempty`, serde
+  `skip_serializing_if = "Option::is_none"`, Pydantic
+  `exclude_none=True`) — null fields are noise that bloats log
+  storage and forces query parsers to handle `field == null` vs
+  `field missing` as distinct cases. Always-present fields
+  (`subject`, `data`, `timestamp`, `task_id`, `task_type`) keep
+  appearing on every line.
+
+- **`log` task drops `event.meta` from output by default.** Added
+  `include_meta: bool` (default `false`) on the `log` task config.
+  Meta is in-flow context for downstream tasks — stashed batches,
+  correlation ids, per-event state — and tends to dwarf the data
+  payload in any log line that prints it. With `include_meta: false`
+  the log target sees only `subject`, `data`, `id`, `timestamp`,
+  `task_id`, `task_type`, and `error`; meta still rides the
+  pass-through event downstream unchanged. Operators that actually
+  want meta in the log line opt in explicitly with `include_meta:
+  true`. This unblocks observability for the system-sync bootstrap
+  flows, which stash the full git batch (including file contents)
+  in meta so `compute_diff` can read it after `nats_kv_store list`
+  overwrites `event.data`.
+
+- **Bootstrap sync flows self-heal on cache drift.** The
+  `system_sync_flows` and `system_sync_resources` bootstrap flows
+  in `local/flowgen.yaml` replaced their `skip_if_unchanged`
+  short-circuit with `skip_if_in_sync`, which also checks that the
+  cache key count matches the file count from the repo. Previously
+  the bootstrap stamped `last_synced_commit` once it had written
+  any keys and then short-circuited every subsequent tick on commit
+  match alone — so any out-of-band deletion of a `flowgen.flows.*`
+  or `flowgen.resources.*` key left the cache permanently missing
+  that entry until an operator manually cleared `last_synced_commit`.
+  The new check forces a full diff whenever the key count diverges,
+  and the per-tick `log_actions` task makes every action
+  (`put`/`delete`) visible at `info!` so a stuck pipeline is no
+  longer silent.
+
+- **`git_sync` emits include file path and short commit as log
+  context.** The per-file `send_with_logging` call in
+  `flowgen/git/src/sync/processor.rs` attaches `path=<file>` and
+  `commit=<7-char hash>` via `EventLogger::context`, so every
+  `event.subject=pull_repo` line names the file and revision
+  instead of just the event id. Makes git-sync activity readable
+  at a glance and lines up with the bootstrap's per-action log
+  output for end-to-end traceability.
+
+- **`EventExt::send_silent` for streaming hot paths.** Per-event logging
+  via `send_with_logging` remains the default and stays at `info!` so
+  operators see event flow without `RUST_LOG=debug`. Streaming processors
+  whose intermediates would flood the log (the `ai_completion` per-token
+  chunk path) now route through a new `send_silent` method, with the
+  final chunk still going through `send_with_logging` so completion is
+  observable. The MCP tool dispatch in `mcp/server.rs` also moves to
+  `send_silent` because it already emits a richer `MCP tool invoked`
+  info line of its own; previously it used a raw `tx.send` to dodge
+  the double log. `grep -rn send_silent` lists every place we
+  suppress event-flow visibility.
+
+- **`#[allow(...)]` attributes banned workspace-wide.** Workspace
+  `Cargo.toml` declares `[workspace.lints.clippy] allow_attributes =
+  "deny"` and every crate opts in via `[lints] workspace = true`.
+  Suppressing a lint now requires `#[expect(lint, reason = "...")]`,
+  which turns into an error if the lint stops firing — dead
+  suppressions surface automatically instead of rotting into the
+  codebase. The one legitimate suppression
+  (`flowgen/app/src/config.rs`'s `TaskType` enum, whose lowercase
+  variants are YAML tags) has been migrated to `#[expect]` with a
+  reason.
+
+- **Generic HTTP server infrastructure.** Webhooks, MCP, and AI gateway
+  now share a single `HttpServer<D>` type parameterised by a `Dispatcher`
+  trait. Each role owns its URL layout and request handling; the server
+  owns the listener, dispatch table, and hot-reload lifecycle. This
+  eliminates duplicated server boilerplate across roles.
+
+- **AI gateway (LLM proxy).** New `llm_proxy` task type exposes flows as
+  OpenAI-compatible chat completion endpoints. Supports both OpenAI and
+  Anthropic upstream protocols with automatic request/response
+  translation. Multiple gateways can run on a single port, routed by the
+  `model` field prefix.
+
+- **OCI artifact sync.** New `oci_sync` task pulls flow definitions from
+  an OCI registry (GHCR, ECR, GAR, Artifactory, Harbor) and emits one
+  event per layer. Output shape mirrors `git_sync` so bootstrap
+  pipelines can swap one for the other. Credentials auto-detect both
+  the flowgen-native `{username, password}` shape and the standard
+  Docker `config.json` (`kubernetes.io/dockerconfigjson`) payload — the
+  same Secret used as the pod's `imagePullSecrets` can authenticate
+  artifact pulls. Pure-Rust HTTPS stack via `oci-client`, no shell-out
+  to `oras` or `docker`.
+
+- **Versioned API paths.** Default MCP path changed from `/mcp` to
+  `/mcp/v1` and default HTTP webhook path changed from
+  `/api/flowgen/workers` to `/api/flowgen/workers/v1`, following the
+  Google MCP convention. Paths remain configurable.
+
+- **Force shutdown on second signal.** A second SIGTERM or SIGINT now
+  forces an immediate exit instead of hanging. First signal initiates
+  graceful shutdown, second signal calls `process::exit(1)`.
+
+- **Git sync refactor.** Removed SSH auth support (`GitAuth`,
+  `GitAuthType` enums) in favour of a simpler `credentials_path` field
+  pointing to a JSON file with an HTTPS token. SSH URLs are rejected at
+  startup with a clear error. The token is presented through a gix
+  credential helper that responds to the server's `WWW-Authenticate`
+  challenge — it never appears in the repository URL, in `.git/config`,
+  or in logs. The credentials JSON now also accepts an optional
+  `username` field (defaults to `x-access-token`) for hosts that
+  require a specific literal username (GitLab OAuth tokens, Bitbucket
+  Cloud token-auth).
+
+### Improvements
+
+- **Template rendering supports full object substitution.** A simple
+  path template like `"{{event.data}}"` in a payload field now renders
+  into the complete JSON object, preserving structure and types. This
+  allows templates to replace `from_event: true` on HTTP and Salesforce
+  payload configs. `from_event` still works but is now considered
+  deprecated in favour of the template approach.
+
+- **Per-event templating in `ai_completion`.** Credentials, endpoint, and
+  model fields are now resolved at handle time against the incoming event
+  instead of once at init. A single `ai_completion` task can route to
+  multiple providers based on event data, with clients keyed and reused
+  via the worker-wide `ClientRegistry`. Enables a consolidated LLM proxy
+  flow (one task fans out to z.ai, Moonshot, OpenAI, etc.) instead of
+  one flow per provider.
+
+- **Leaf-task errors surface to source.** Added `signal_completion_with_error`
+  to `CompletionState` so failed leaves deliver the underlying error to the
+  source (HTTP webhook, MCP tool call, AI gateway request) instead of
+  letting the source hang until `ack_timeout`. Wired across all 19
+  leaf-capable processors. MCP tool callers and HTTP/AI-gateway clients
+  now see the actual upstream error (Salesforce `MALFORMED_SEARCH`, LLM
+  provider 4xx body, etc.) instead of an opaque timeout.
+
+- **Fail-fast on upstream 4xx in Salesforce processors.** Adopts
+  `salesforce_core 0.16.0`'s new `is_retryable()` helper on every
+  `restapi`, `bulkapi`, `toolingapi`, `soapapi`, and `pubsubapi` error
+  type. Permanent failures (bad input, auth, malformed query) now exit
+  the retry loop immediately instead of being wrapped as transient. Same
+  classification added to `ai_completion` for upstream LLM 4xx responses
+  (text-matched against rig's error string until rig exposes a typed
+  status). HTTP 429 is treated as permanent for LLMs since rate-limit
+  recovery exceeds retry-loop timescales.
+
+- **SOSL phrase content auto-escape.** `salesforce_restapi_search` now
+  escapes SOSL reserved characters (`- ? & | ! { } [ ] ( ) ^ ~ * : \ " ' +`)
+  inside `FIND {"..."}` phrase clauses before sending the query. Search
+  terms with hyphens, ampersands, or other reserved characters work
+  without manual escaping or `MALFORMED_SEARCH` errors. Already-escaped
+  characters are passed through verbatim.
+
+- **AI gateway error surfacing.** OpenAI-compatible streaming responses
+  now emit `data: {"error": ...}` SSE frames when a leaf task fails;
+  non-streaming responses return HTTP 502 with the underlying message
+  instead of dropping the error and returning empty content.
+
+- **`Source::Inline` now renders against event data.** Inline content
+  passed through `Source::Inline::render()` previously assumed
+  `config.render()` had already substituted templates at init time and
+  returned the raw string. Processors that defer rendering to handle time
+  (e.g. `ai_completion`) need the actual substitution. Inline templates
+  without `{{...}}` syntax are unaffected (idempotent pass).
+
+- **`ack_timeout` default documented.** The MCP `mcp_tool` task gained a
+  fields table covering all configuration options. All five source-task
+  docs (`generate`, `http/endpoint`, `nats/subscriber`, `salesforce/pubsub`,
+  `ai/mcp`) now state the `ack_timeout` default as "wait indefinitely"
+  with accurate per-source semantics.
+
+- **SOSL prefix matching documented.** Added a "Prefix matching" section
+  to `salesforce/rest` docs explaining how to append `*` inside the
+  phrase to match prefixes. Example MCP/HTTP SOSL flows updated to use
+  the wildcard form by default.
+
+### Breaking changes
+
+- **Lease cache keys preserve the flow name as written.** The task
+  manager used to lowercase the flow name and convert underscores to
+  hyphens when building the lease key (`flow.name`
+  `salesforce_pubsubapi_account_subscriber` →
+  `lease.salesforce-pubsubapi-account-subscriber`). The transform was
+  a left-over from when the executor wrote to Kubernetes Lease
+  objects, which require RFC 1123 DNS-safe names; the current NATS KV
+  backend has no such constraint, and `validate_name` already keeps
+  `flow.name` in a NATS-safe character set. The lease key is now
+  built verbatim, so it matches what shows up in tracing fields,
+  cache-prefix flow keys, and operator-facing logs. Existing
+  deployments will see new lease keys appear after upgrade; the old
+  `lease.<dashed>` entries linger as zombies until their TTL expires
+  (60 s by default) and can be removed manually with
+  `nats kv del flowgen_system lease.<old-name>` if desired.
+
+- **`http_webhook` task renamed to `http_endpoint`.** The old name was
+  misleading — the task handles any HTTP method (`GET`, `POST`, `PUT`,
+  `DELETE`, `PATCH`), not only callback webhooks. The new name matches
+  what the task actually does: it registers an endpoint on the worker's
+  HTTP server. No alias is provided; existing flows must rename the task
+  type. The docs route also moved from `/http/webhook` to `/http/endpoint`.
+
+### Fixes
+
+- **Dead dot-to-dash conversion in hot-reload key parsing removed.** The
+  reconciler's cache-key-to-flow-name derivation rewrote every dot in
+  the key suffix to a dash — a defensive transform left over from an
+  earlier shape of the code. `validate_name` already rejects `.` in
+  `flow.name` at config load, so the transform never had input to act
+  on, but it would have silently broken round-trip if validation were
+  ever loosened. The suffix is now returned verbatim.
+
+- **Source ack hung in fan-out / fan-in DAGs.** When two branches re-merged
+  at a buffer (or any other fan-in point), the source's completion channel
+  was sized by summing children's leaf counts, which double-counted
+  re-merged paths. The source then waited for more signals than there were
+  real leaves, never received a successful ack, and never incremented its
+  counter — a `generate` with `count: 1` fired every interval forever.
+  Leaf counting now deduplicates by leaf index.
+
+- **Buffer dropped acks when coalescing events from concurrent sources.**
+  When the buffer accumulated events from distinct sources (e.g. concurrent
+  webhook requests, parallel NATS deliveries), it kept only the last
+  event's completion handle and silently dropped the rest, so N-1 sources
+  per flush hung or saw their ack timeout fire. The buffer now collects
+  every distinct upstream and fans the downstream ack back out to all of
+  them. Events that share an upstream (single source fanned out and
+  re-merged) still pass through directly with no proxy overhead.
+
+- **`parse_json` in Rhai scripts now supports arrays.** The built-in
+  Rhai `parse_json` only handles JSON objects at the root. The engine
+  now registers a custom override that uses serde, supporting both
+  arrays and objects. Fixes flows that load JSON array resources and
+  pass them to `iterate`.
+
+- **MCP Streamable HTTP spec compliance.** `notifications/initialized`
+  now returns 202 Accepted instead of 200 OK. `ToolResult` serializes
+  `isError` in camelCase per the MCP `CallToolResult` spec. SSE result
+  events use the default format (`data:` only) instead of
+  `event: message`, matching what standard MCP clients expect.
+
+- **MCP and AI gateway servers start regardless of loaded tasks.** Servers
+  now start when `enabled: true` in config, even if no matching tasks are
+  loaded at startup. This supports hot-reload of flows from cache where
+  tasks arrive after initial boot.
+
+- **Improved config-not-found error message.** The error now includes the
+  working directory and uses sentence case for clarity.
+
+- **Unified NATS cache error messages.** All three NATS connection failure
+  paths (system cache, flow cache, resource cache) now use a consistent
+  message style and severity.
+
+- **Suppressed noisy OpenTelemetry logs.** Default log filter now includes
+  `opentelemetry=warn,opentelemetry_sdk=warn` to hide `MeterProvider`
+  INFO messages.
+
+- **Distinct server startup log messages.** Each server now logs its own
+  identity ("Starting HTTP server", "Starting MCP server", "Starting AI
+  gateway server") with port and path instead of all saying "Starting
+  HTTP server".
+
+- **Subscriber cancellation no longer hangs reconciler tear-down.** The
+  salesforce pubsub, NATS jetstream, and `generate` (cron) subscribers
+  spawned their reconnect loop into a detached `tokio::spawn` whose
+  `JoinHandle` was dropped on the floor. When the hot-reload reconciler
+  cancelled a flow's token, the running task was orphaned and kept
+  hammering the upstream — the 30s deregistration timeout would always
+  fire and stale subscribers would continue logging errors long after
+  the flow's cache entry was deleted. `run()` now drives the loop
+  directly and wraps every `await` (init, handle, backoff sleeps) in
+  `tokio::select!` with the cancellation token so cancellation
+  interrupts mid-backoff instead of waiting out the full delay.
+
+- **Log message style consistency.** Stripped trailing periods from
+  ~40 log messages across the codebase and converted internal
+  `". Skipping."`-style sentence breaks into single-sentence-with-comma
+  form, matching the convention "sentence (no period), structured
+  fields after". `...` ellipses on shutdown messages are preserved.
+
+### Docs
+
+- **Inline vs external scripts.** Added guidance on when to keep Rhai
+  inline in YAML versus moving it to a `resources/scripts/*.rhai` file,
+  with the recommended project layout, a link to the official Rhai
+  Visual Studio Code extension, and a new `script_fan_in_join.yaml`
+  example showing a fan-in DAG joined by an external script. The example
+  runs against the dummy CSV data shipped in the repository.
 ## 0.119.0
 
 ### Features

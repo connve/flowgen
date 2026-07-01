@@ -36,7 +36,7 @@ We started Flowgen while running data pipelines at a consumer business with hund
 flow:
   name: webhook_to_nats
   tasks:
-    - http_webhook:
+    - http_endpoint:
         name: ingest
         endpoint: /events
         method: POST

@@ -1,7 +1,7 @@
 # Look up a Salesforce record by ID, exposed as an MCP tool.
 #
 # Same flow as sobject_lookup.yaml but with mcp_tool as the entrypoint
-# instead of http_webhook. LLM agents can discover and call this tool
+# instead of http_endpoint. LLM agents can discover and call this tool
 # via the MCP server.
 #
 # Required:

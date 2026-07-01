@@ -1,15 +1,22 @@
-//! MCP server implementation with tool registry and Axum handlers.
+//! MCP role for the generic HTTP server.
 //!
 //! Implements the MCP Streamable HTTP transport: a single POST endpoint that
 //! accepts JSON-RPC 2.0 messages and responds with either JSON or SSE streams.
+//! The server lifecycle, dispatch table, and hot-reload semantics live in
+//! `flowgen_core::http_server`; this module only owns the MCP-specific URL
+//! layout and JSON-RPC handling logic.
+//!
+//! Roles, ports and listener instantiation are configured in `flowgen_app`.
 
 use axum::{
     body::Body,
     extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    routing::post,
+    Router,
 };
-use dashmap::DashMap;
+use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -17,21 +24,22 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
 
+/// Default MCP server port.
+pub const DEFAULT_MCP_PORT: u16 = 3001;
+
+/// Default MCP endpoint path.
+pub const DEFAULT_MCP_PATH: &str = "/mcp/v1";
+
+/// MCP protocol version supported by this server.
+const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Convenience type alias for the MCP server.
+pub type McpServer = HttpServer<McpDispatcher>;
+
 /// Errors that can occur during MCP server operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("MCP server bind error on port {port}: {source}")]
-    BindListener {
-        port: u16,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("MCP server HTTP error: {source}")]
-    ServeHttp {
-        #[source]
-        source: std::io::Error,
-    },
     #[error("Failed to serialize JSON-RPC response: {source}")]
     JsonSerialize {
         #[source]
@@ -65,11 +73,22 @@ pub enum Error {
     PipelineNoResult,
     #[error("Tool execution timed out after {duration}.")]
     ToolTimeout { duration: String },
+    #[error("Failed to build SSE response body: {source}")]
+    SseBody {
+        #[source]
+        source: axum::http::Error,
+    },
 }
 
-/// Registration entry for an MCP tool.
-#[derive(Debug)]
+/// Dispatch-table entry describing one registered MCP tool.
+///
+/// Stored in the MCP server's dispatch table keyed by tool name. `flow_name`
+/// lets the server bulk-deregister every tool owned by a flow when the flow
+/// is stopped or hot-reloaded.
+#[derive(Clone, Debug)]
 pub struct ToolRegistration {
+    /// Name of the flow that registered this tool.
+    pub flow_name: String,
     /// Tool description for LLMs.
     pub description: String,
     /// JSON Schema for tool input parameters.
@@ -88,179 +107,74 @@ pub struct ToolRegistration {
     pub leaf_count: usize,
 }
 
-/// MCP server with tool registry and response tracking.
+impl HasFlowName for ToolRegistration {
+    fn flow_name(&self) -> &str {
+        &self.flow_name
+    }
+}
+
+/// MCP-specific shared state passed to the dispatcher via `DispatchState::extras`.
 #[derive(Clone)]
-pub struct McpServer {
-    /// Registry of available MCP tools.
-    tool_registry: Arc<DashMap<String, ToolRegistration>>,
-    /// Registry for correlating requests with pipeline results.
-    response_registry: Arc<ResponseRegistry>,
-    /// Optional credentials from worker configuration.
-    credentials: Arc<Option<super::config::Credentials>>,
-    /// Optional auth provider for user identity resolution (JWT, OIDC, or session).
+pub struct McpExtras {
+    /// Registry for correlating requests with pipeline results / progress.
+    pub response_registry: Arc<ResponseRegistry>,
+    /// Optional global credentials shared across tools.
+    pub credentials: Arc<Option<super::config::Credentials>>,
+}
+
+/// Dispatcher for MCP traffic.
+///
+/// Wires a single `POST <path>` route that parses incoming JSON-RPC requests
+/// and dispatches them by method (`initialize`, `tools/list`, `tools/call`,
+/// `notifications/initialized`).
+pub struct McpDispatcher;
+
+impl Dispatcher for McpDispatcher {
+    type Registration = ToolRegistration;
+    type Extras = McpExtras;
+
+    fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
+        let route = state.path.clone();
+        Router::new()
+            .route(&route, post(handle_mcp))
+            .with_state(state)
+    }
+}
+
+/// Constructs an MCP server with default extras (empty response registry,
+/// optional global credentials, optional auth provider).
+pub fn new_mcp_server(
+    path: String,
+    credentials: Option<super::config::Credentials>,
     auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
+) -> McpServer {
+    let extras = McpExtras {
+        response_registry: Arc::new(ResponseRegistry::new()),
+        credentials: Arc::new(credentials),
+    };
+    McpServer::new_with_extras(path, extras).with_auth_provider(auth_provider)
 }
 
-impl std::fmt::Debug for McpServer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpServer")
-            .field("tool_count", &self.tool_registry.len())
-            .finish()
-    }
+/// Registers a tool. Returns an error if the tool name collides with an
+/// already-registered tool in the same server.
+pub fn register_tool(
+    server: &McpServer,
+    name: String,
+    registration: ToolRegistration,
+) -> Result<(), Error> {
+    server
+        .try_register(name.clone(), registration)
+        .map_err(|_| Error::ToolNameCollision { name })
 }
 
-impl flowgen_core::mcp_server::McpServer for McpServer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+/// Returns the response registry that pipeline tasks deliver results through.
+pub fn response_registry(server: &McpServer) -> &Arc<ResponseRegistry> {
+    &server.extras().response_registry
 }
 
-impl McpServer {
-    /// Creates a new MCP server with optional credentials and auth provider.
-    pub fn new(
-        credentials: Option<super::config::Credentials>,
-        auth_provider: Option<Arc<dyn flowgen_core::auth::AuthProvider>>,
-    ) -> Self {
-        Self {
-            tool_registry: Arc::new(DashMap::new()),
-            response_registry: Arc::new(ResponseRegistry::new()),
-            credentials: Arc::new(credentials),
-            auth_provider,
-        }
-    }
-
-    /// Registers a tool in the MCP server.
-    ///
-    /// Returns an error if a tool with the same name is already registered.
-    /// Use distinct tool names across flows to avoid collisions.
-    pub fn register_tool(&self, name: String, registration: ToolRegistration) -> Result<(), Error> {
-        if self.tool_registry.contains_key(&name) {
-            return Err(Error::ToolNameCollision { name });
-        }
-        info!("Registering MCP tool: {}", name);
-        self.tool_registry.insert(name, registration);
-        Ok(())
-    }
-
-    /// Returns the response registry for pipeline tasks to deliver results.
-    pub fn response_registry(&self) -> &Arc<ResponseRegistry> {
-        &self.response_registry
-    }
-
-    /// Default MCP server port.
-    const DEFAULT_PORT: u16 = 3001;
-
-    /// Default MCP endpoint path.
-    const DEFAULT_PATH: &str = "/mcp";
-
-    /// Starts the MCP server on its own port with the configured endpoint path.
-    pub async fn start_server(&self, port: Option<u16>, path: Option<String>) -> Result<(), Error> {
-        let server_port = port.unwrap_or(Self::DEFAULT_PORT);
-        let mcp_path = path.unwrap_or_else(|| Self::DEFAULT_PATH.to_string());
-
-        let router = axum::Router::new().route(
-            &mcp_path,
-            axum::routing::post(handle_mcp).with_state(self.clone()),
-        );
-
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{server_port}"))
-            .await
-            .map_err(|e| Error::BindListener {
-                port: server_port,
-                source: e,
-            })?;
-
-        info!("Starting MCP server on port {server_port} at {mcp_path}.");
-        axum::serve(listener, router)
-            .await
-            .map_err(|e| Error::ServeHttp { source: e })
-    }
-
-    /// Validates the API key from the Authorization header.
-    ///
-    /// Checks tool-specific credentials first, then falls back to global credentials.
-    /// If neither is configured, allows all requests.
-    /// Validate user-level authentication via the auth provider.
-    /// Returns the user context if valid, None if not required, or error if required but invalid.
-    async fn validate_user_auth(
-        &self,
-        headers: &HeaderMap,
-        auth_required: bool,
-    ) -> Result<Option<flowgen_core::auth::UserContext>, StatusCode> {
-        if !auth_required {
-            // Still try to extract if provider exists (opportunistic).
-            if let Some(provider) = &self.auth_provider {
-                if let Some(auth_header) = headers
-                    .get(header::AUTHORIZATION)
-                    .and_then(|h| h.to_str().ok())
-                {
-                    if let Some(token) = flowgen_core::auth::extract_bearer_token(auth_header) {
-                        return Ok(provider.validate(token).await.ok());
-                    }
-                }
-            }
-            return Ok(None);
-        }
-
-        let provider = self
-            .auth_provider
-            .as_ref()
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-        let auth_header = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-        let token = flowgen_core::auth::extract_bearer_token(auth_header)
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-        provider
-            .validate(token)
-            .await
-            .map(Some)
-            .map_err(|_| StatusCode::UNAUTHORIZED)
-    }
-
-    /// Validate endpoint-level API key authentication.
-    fn validate_auth(
-        &self,
-        headers: &HeaderMap,
-        tool_name: Option<&str>,
-    ) -> Result<(), StatusCode> {
-        // Resolve tool-specific credentials if a tool name is provided.
-        let tool_creds = tool_name.and_then(|name| {
-            self.tool_registry
-                .get(name)
-                .and_then(|reg| reg.credentials.clone())
-        });
-
-        // Use tool-specific credentials, falling back to global.
-        let credentials = tool_creds.as_ref().or(self.credentials.as_ref().as_ref());
-
-        let credentials = match credentials {
-            Some(creds) => creds,
-            None => return Ok(()),
-        };
-
-        if credentials.api_keys.is_empty() {
-            return Ok(());
-        }
-
-        let auth_header = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-
-        let token = flowgen_core::auth::extract_bearer_token(auth_header)
-            .ok_or(StatusCode::UNAUTHORIZED)?;
-
-        if credentials.api_keys.iter().any(|k| k == token) {
-            Ok(())
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
-        }
-    }
-}
-
-// --- MCP JSON-RPC Protocol Types ---
+// ---------------------------------------------------------------------------
+// JSON-RPC protocol
+// ---------------------------------------------------------------------------
 
 /// JSON-RPC 2.0 request message.
 #[derive(Debug, Deserialize)]
@@ -280,15 +194,11 @@ struct JsonRpcRequest {
 /// JSON-RPC 2.0 response message.
 #[derive(Debug, Serialize)]
 struct JsonRpcResponse {
-    /// JSON-RPC version, always "2.0".
     jsonrpc: &'static str,
-    /// Response identifier matching the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<serde_json::Value>,
-    /// Successful result payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<serde_json::Value>,
-    /// Error payload for failed requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonRpcError>,
 }
@@ -296,35 +206,29 @@ struct JsonRpcResponse {
 /// JSON-RPC 2.0 error object.
 #[derive(Debug, Serialize)]
 struct JsonRpcError {
-    /// Error code following JSON-RPC conventions.
     code: i32,
-    /// Human-readable error description.
     message: String,
 }
 
 /// Parameters for the tools/call method.
 #[derive(Debug, Deserialize)]
 struct ToolCallParams {
-    /// Name of the tool to invoke.
     name: String,
-    /// Tool input arguments as a JSON object.
     #[serde(default)]
     arguments: serde_json::Value,
 }
 
-/// MCP protocol version supported by this server.
-const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
-
-// --- Axum Handler ---
+// ---------------------------------------------------------------------------
+// Dispatcher entry point
+// ---------------------------------------------------------------------------
 
 /// Main MCP endpoint handler. Dispatches based on the JSON-RPC method field.
 #[tracing::instrument(skip_all, name = "mcp.request", fields(method = %request.method))]
 async fn handle_mcp(
-    State(server): State<McpServer>,
+    State(state): State<DispatchState<ToolRegistration, McpExtras>>,
     headers: HeaderMap,
     axum::Json(request): axum::Json<JsonRpcRequest>,
 ) -> Response {
-    // Validate JSON-RPC version if provided.
     if let Some(ref version) = request.jsonrpc {
         if version != "2.0" {
             let err = Error::UnsupportedJsonRpcVersion {
@@ -336,12 +240,9 @@ async fn handle_mcp(
 
     match request.method.as_str() {
         "initialize" => handle_initialize(request),
-        "tools/list" => handle_tools_list(&server, &headers, request),
-        "tools/call" => handle_tools_call(&server, &headers, request).await,
-        "notifications/initialized" => {
-            // Client acknowledgment after initialize, no response needed.
-            StatusCode::OK.into_response()
-        }
+        "tools/list" => handle_tools_list(&state, &headers, request),
+        "tools/call" => handle_tools_call(&state, &headers, request).await,
+        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         _ => {
             let err = Error::MethodNotFound {
                 method: request.method.clone(),
@@ -351,7 +252,6 @@ async fn handle_mcp(
     }
 }
 
-/// Handles the `initialize` method by returning server capabilities.
 fn handle_initialize(request: JsonRpcRequest) -> Response {
     json_rpc_response(
         request.id,
@@ -370,14 +270,17 @@ fn handle_initialize(request: JsonRpcRequest) -> Response {
     )
 }
 
-/// Handles the `tools/list` method by returning all registered tools.
-fn handle_tools_list(server: &McpServer, headers: &HeaderMap, request: JsonRpcRequest) -> Response {
-    if let Err(status) = server.validate_auth(headers, None) {
+fn handle_tools_list(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    headers: &HeaderMap,
+    request: JsonRpcRequest,
+) -> Response {
+    if let Err(status) = validate_auth(state, headers, None) {
         return json_rpc_error_response(request.id, -32000, status.to_string());
     }
 
-    let tools: Vec<serde_json::Value> = server
-        .tool_registry
+    let tools: Vec<serde_json::Value> = state
+        .table
         .iter()
         .map(|entry| {
             serde_json::json!({
@@ -391,16 +294,15 @@ fn handle_tools_list(server: &McpServer, headers: &HeaderMap, request: JsonRpcRe
     json_rpc_response(request.id, serde_json::json!({ "tools": tools }))
 }
 
-/// Handles the `tools/call` method by invoking a tool and streaming results via SSE.
 async fn handle_tools_call(
-    server: &McpServer,
+    state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
 ) -> Response {
-    match execute_tool_call(server, headers, &request).await {
+    match execute_tool_call(state, headers, &request).await {
         Ok(response) => response,
         Err(e) => {
-            error!(error = %e, "Tool call failed.");
+            error!(error = %e, "Tool call failed");
             let code = match &e {
                 Error::InvalidParams { .. } => -32602,
                 Error::UnknownTool { .. } => -32602,
@@ -412,22 +314,18 @@ async fn handle_tools_call(
     }
 }
 
-/// Executes a tool call, returning an SSE streaming response on success.
 async fn execute_tool_call(
-    server: &McpServer,
+    state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     request: &JsonRpcRequest,
 ) -> Result<Response, Error> {
     let params: ToolCallParams = serde_json::from_value(request.params.clone())
         .map_err(|source| Error::InvalidParams { source })?;
 
-    server
-        .validate_auth(headers, Some(&params.name))
-        .map_err(|_| Error::Unauthorized)?;
+    validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
-    // Look up tool in registry and extract sender, timeout, auth, and leaf count.
-    let (tool_tx, ack_timeout, auth_required, leaf_count) = server
-        .tool_registry
+    let (tool_tx, ack_timeout, auth_required, leaf_count) = state
+        .table
         .get(&params.name)
         .map(|entry| {
             (
@@ -441,20 +339,16 @@ async fn execute_tool_call(
             name: params.name.clone(),
         })?;
 
-    // Validate user-level auth based on tool configuration.
-    let user_context = server
-        .validate_user_auth(headers, auth_required)
+    let user_context = validate_user_auth(state, headers, auth_required)
         .await
         .map_err(|_| Error::Unauthorized)?;
 
-    // Generate a unique correlation identifier for this request.
     let correlation_id = uuid::Uuid::now_v7().to_string();
 
-    // Create progress channel for streaming intermediate updates to the client.
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
 
-    // Register in the response registry so pipeline tasks can send progress events.
-    server
+    state
+        .extras
         .response_registry
         .insert(
             correlation_id.clone(),
@@ -465,7 +359,6 @@ async fn execute_tool_call(
         )
         .await;
 
-    // Build event with correlation_id and optional user context in meta.
     let mut meta = serde_json::Map::new();
     meta.insert(
         flowgen_core::registry::CORRELATION_ID.to_string(),
@@ -477,9 +370,6 @@ async fn execute_tool_call(
         }
     }
 
-    // Size the completion channel to the number of leaves reachable from the
-    // tool's mcp_tool source. The MCP response is delivered only after every
-    // leaf has signalled completion.
     let (completion_state, completion_rx) = flowgen_core::event::new_completion_channel(leaf_count);
 
     let event = flowgen_core::event::EventBuilder::new()
@@ -492,19 +382,22 @@ async fn execute_tool_call(
         .build()
         .map_err(|source| Error::EventBuild { source })?;
 
-    tool_tx
-        .send(event)
+    // The dedicated `MCP tool invoked` log below carries richer fields
+    // than the generic event line, so the event itself goes through
+    // `send_silent` to avoid two near-duplicate entries per call.
+    use flowgen_core::event::EventExt;
+    event
+        .send_silent(Some(&tool_tx))
         .await
         .map_err(|e| Error::PipelineSend(e.to_string()))?;
 
     info!(
         tool = %params.name,
         correlation_id = %correlation_id,
-        "MCP tool invoked."
+        "MCP tool invoked"
     );
 
-    // Spawn a background task that streams progress and then delivers the final result.
-    let response_registry = server.response_registry.clone();
+    let response_registry = Arc::clone(&state.extras.response_registry);
     let cid_for_cleanup = correlation_id.clone();
     let request_id = request.id.clone();
     let tool_name_for_span = params.name.clone();
@@ -518,101 +411,95 @@ async fn execute_tool_call(
         outcome = tracing::field::Empty,
     );
 
-    tokio::spawn(async move {
-        // Formats a progress event as an SSE string.
-        let format_progress = |evt: &ProgressEvent| -> Option<String> {
-            serde_json::to_string(evt)
-                .ok()
-                .map(|data| format!("event: progress\ndata: {data}\n\n"))
-        };
+    tokio::spawn(
+        async move {
+            let format_progress = |evt: &ProgressEvent| -> Option<String> {
+                serde_json::to_string(evt)
+                    .ok()
+                    .map(|data| format!("event: progress\ndata: {data}\n\n"))
+            };
 
-        // Stream progress events concurrently with waiting for pipeline completion.
-        tokio::pin!(completion_rx);
+            tokio::pin!(completion_rx);
 
-        // Wait for pipeline completion, streaming progress concurrently.
-        // Result is None if timeout fired (already handled), Some if completion arrived.
-        type CompletionResult = Result<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-            tokio::sync::oneshot::error::RecvError,
-        >;
-        let result: Option<CompletionResult> = loop {
-            tokio::select! {
-                progress = progress_rx.recv() => {
-                    match progress {
-                        Some(evt) => {
-                            if let Some(msg) = format_progress(&evt) {
-                                if sse_tx.send(Ok(msg)).await.is_err() {
-                                    response_registry.remove(&cid_for_cleanup).await;
-                                    return;
-                                }
-                            }
-                        }
-                        None => break None,
-                    }
-                }
-                result = async {
-                    match ack_timeout {
-                        Some(timeout) => {
-                            match tokio::time::timeout(timeout, &mut completion_rx).await {
-                                Ok(result) => Some(result),
-                                Err(_) => {
-                                    // Timeout expired.
-                                    let duration = humantime::format_duration(timeout).to_string();
-                                    let err = Error::ToolTimeout { duration };
-                                    let tool_result = ToolResult {
-                                        content: vec![Content::Text { text: err.to_string() }],
-                                        is_error: true,
-                                    };
-                                    response_registry.remove(&cid_for_cleanup).await;
-                                    let final_event = build_result_event(request_id.clone(), Some(tool_result), None);
-                                    if let Some(event_str) = final_event {
-                                        let _ = sse_tx.send(Ok(event_str)).await;
+            type CompletionResult = Result<
+                Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
+                tokio::sync::oneshot::error::RecvError,
+            >;
+            let result: Option<CompletionResult> = loop {
+                tokio::select! {
+                    progress = progress_rx.recv() => {
+                        match progress {
+                            Some(evt) => {
+                                if let Some(msg) = format_progress(&evt) {
+                                    if sse_tx.send(Ok(msg)).await.is_err() {
+                                        response_registry.remove(&cid_for_cleanup).await;
+                                        return;
                                     }
-                                    None
                                 }
                             }
-                        }
-                        None => Some((&mut completion_rx).await),
-                    }
-                } => {
-                    // Clean up registry.
-                    response_registry.remove(&cid_for_cleanup).await;
-
-                    // Drain remaining progress events.
-                    while let Ok(evt) = progress_rx.try_recv() {
-                        if let Some(msg) = format_progress(&evt) {
-                            let _ = sse_tx.send(Ok(msg)).await;
+                            None => break None,
                         }
                     }
+                    result = async {
+                        match ack_timeout {
+                            Some(timeout) => {
+                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                                    Ok(result) => Some(result),
+                                    Err(_) => {
+                                        let duration = humantime::format_duration(timeout).to_string();
+                                        let err = Error::ToolTimeout { duration };
+                                        let tool_result = ToolResult {
+                                            content: vec![Content::Text { text: err.to_string() }],
+                                            is_error: true,
+                                        };
+                                        response_registry.remove(&cid_for_cleanup).await;
+                                        let final_event = build_result_event(request_id.clone(), Some(tool_result), None);
+                                        if let Some(event_str) = final_event {
+                                            let _ = sse_tx.send(Ok(event_str)).await;
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None => Some((&mut completion_rx).await),
+                        }
+                    } => {
+                        response_registry.remove(&cid_for_cleanup).await;
 
-                    match result {
-                        Some(completion) => break Some(completion),
-                        None => return, // Timeout already handled above.
+                        while let Ok(evt) = progress_rx.try_recv() {
+                            if let Some(msg) = format_progress(&evt) {
+                                let _ = sse_tx.send(Ok(msg)).await;
+                            }
+                        }
+
+                        match result {
+                            Some(completion) => break Some(completion),
+                            None => return,
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        // Record outcome on the current span; per-request latency is
-        // already captured by the span itself via OpenTelemetry.
-        let outcome = match &result {
-            Some(Ok(Ok(Some(_)))) => "success",
-            Some(Ok(Ok(None))) => "success_no_data",
-            Some(Ok(Err(_))) => "error",
-            Some(Err(_)) => "no_result",
-            None => "timeout",
-        };
+            let outcome = match &result {
+                Some(Ok(Ok(Some(_)))) => "success",
+                Some(Ok(Ok(None))) => "success_no_data",
+                Some(Ok(Err(_))) => "error",
+                Some(Err(_)) => "no_result",
+                None => "timeout",
+            };
 
-        tracing::Span::current().record("outcome", outcome);
-        info!(outcome = outcome, "MCP tool execution completed.");
+            tracing::Span::current().record("outcome", outcome);
+            info!(outcome = outcome, "MCP tool execution completed");
 
-        if let Some(completion) = result {
-            let final_event = completion_to_result_event(request_id, completion);
-            if let Some(event_str) = final_event {
-                let _ = sse_tx.send(Ok(event_str)).await;
+            if let Some(completion) = result {
+                let final_event = completion_to_result_event(request_id, completion);
+                if let Some(event_str) = final_event {
+                    let _ = sse_tx.send(Ok(event_str)).await;
+                }
             }
         }
-    }.instrument(span));
+        .instrument(span),
+    );
 
     let stream = ReceiverStream::new(sse_rx);
 
@@ -621,15 +508,95 @@ async fn execute_tool_call(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
-        .map_err(|e| {
-            error!("Failed to build SSE response: {e}");
-            Error::ServeHttp {
-                source: std::io::Error::other(e.to_string()),
-            }
-        })
+        .map_err(|source| Error::SseBody { source })
 }
 
-/// Builds a JSON-RPC success response.
+// ---------------------------------------------------------------------------
+// Auth helpers
+// ---------------------------------------------------------------------------
+
+/// Validates user-level authentication via the auth provider on the server.
+async fn validate_user_auth(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    headers: &HeaderMap,
+    auth_required: bool,
+) -> Result<Option<flowgen_core::auth::UserContext>, StatusCode> {
+    if !auth_required {
+        if let Some(provider) = &state.auth_provider {
+            if let Some(auth_header) = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+            {
+                if let Some(token) = flowgen_core::auth::extract_bearer_token(auth_header) {
+                    return Ok(provider.validate(token).await.ok());
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    let provider = state
+        .auth_provider
+        .as_ref()
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token =
+        flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
+    provider
+        .validate(token)
+        .await
+        .map(Some)
+        .map_err(|_| StatusCode::UNAUTHORIZED)
+}
+
+/// Validates endpoint-level API key authentication for an incoming request.
+fn validate_auth(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    headers: &HeaderMap,
+    tool_name: Option<&str>,
+) -> Result<(), StatusCode> {
+    let tool_creds = tool_name.and_then(|name| {
+        state
+            .table
+            .get(name)
+            .and_then(|reg| reg.credentials.clone())
+    });
+
+    let credentials = tool_creds
+        .as_ref()
+        .or(state.extras.credentials.as_ref().as_ref());
+
+    let credentials = match credentials {
+        Some(creds) => creds,
+        None => return Ok(()),
+    };
+
+    if credentials.api_keys.is_empty() {
+        return Ok(());
+    }
+
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let token =
+        flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if credentials.api_keys.iter().any(|k| k == token) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
 fn json_rpc_response(id: Option<serde_json::Value>, result: serde_json::Value) -> Response {
     let response = JsonRpcResponse {
         jsonrpc: "2.0",
@@ -640,7 +607,6 @@ fn json_rpc_response(id: Option<serde_json::Value>, result: serde_json::Value) -
     axum::Json(response).into_response()
 }
 
-/// Builds an SSE result event string from a tool result or error.
 fn build_result_event(
     id: Option<serde_json::Value>,
     tool_result: Option<ToolResult>,
@@ -653,7 +619,7 @@ fn build_result_event(
         error,
     };
     match serde_json::to_string(&response) {
-        Ok(data) => Some(format!("event: message\ndata: {data}\n\n")),
+        Ok(data) => Some(format!("data: {data}\n\n")),
         Err(e) => {
             error!("Failed to serialize MCP result event: {e}");
             None
@@ -661,7 +627,6 @@ fn build_result_event(
     }
 }
 
-/// Converts a pipeline completion result into an SSE result event string.
 fn completion_to_result_event(
     id: Option<serde_json::Value>,
     result: Result<
@@ -717,7 +682,6 @@ fn completion_to_result_event(
     }
 }
 
-/// Builds a JSON-RPC error response.
 fn json_rpc_error_response(id: Option<serde_json::Value>, code: i32, message: String) -> Response {
     let response = JsonRpcResponse {
         jsonrpc: "2.0",
@@ -731,655 +695,277 @@ fn json_rpc_error_response(id: Option<serde_json::Value>, code: i32, message: St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
-    use flowgen_core::registry::{Content, ToolResult};
+    use axum::http::Request;
+    use dashmap::DashMap;
     use http_body_util::BodyExt;
-    use serde_json::json;
+    use tower::ServiceExt;
 
-    /// Collects an axum Response body into a serde_json::Value.
-    async fn body_json(response: Response) -> serde_json::Value {
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("failed to collect body")
-            .to_bytes();
-        serde_json::from_slice(&bytes).expect("body is not valid JSON")
+    /// Creates an MCP server with no global credentials and no auth provider.
+    fn test_server() -> McpServer {
+        new_mcp_server(DEFAULT_MCP_PATH.to_string(), None, None)
     }
 
-    /// Extracts the embedded JSON-RPC payload from an SSE event string.
-    /// Expects format: "event: message\ndata: {json}\n\n"
-    fn parse_sse_data(sse: &str) -> serde_json::Value {
-        let data_line = sse
-            .lines()
-            .find(|l| l.starts_with("data: "))
-            .expect("no data: line in SSE event");
-        let json_str = data_line.strip_prefix("data: ").unwrap();
-        serde_json::from_str(json_str).expect("SSE data is not valid JSON")
+    /// Creates a ToolRegistration suitable for tests. The mpsc sender is
+    /// functional but nothing reads from the receiver.
+    fn test_tool_registration(flow: &str, description: &str) -> ToolRegistration {
+        let (tx, _rx) = mpsc::channel(1);
+        ToolRegistration {
+            flow_name: flow.to_string(),
+            description: description.to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            }),
+            tx,
+            credentials: None,
+            ack_timeout: None,
+            auth_required: false,
+            leaf_count: 1,
+        }
     }
 
-    // ---- json_rpc_response ----
-
-    #[tokio::test]
-    async fn json_rpc_response_with_numeric_id() {
-        let resp = json_rpc_response(Some(json!(1)), json!({"status": "ok"}));
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_json(resp).await;
-        assert_eq!(body["jsonrpc"], "2.0");
-        assert_eq!(body["id"], 1);
-        assert_eq!(body["result"]["status"], "ok");
-        assert!(body.get("error").is_none());
+    /// Build a DispatchState from the public API of the given McpServer, plus
+    /// a fresh DashMap that we also register tools into directly.
+    fn build_test_state(
+        server: &McpServer,
+        table: Arc<DashMap<String, ToolRegistration>>,
+    ) -> DispatchState<ToolRegistration, McpExtras> {
+        DispatchState {
+            table,
+            credentials_path: server.credentials_path().map(|p| p.to_path_buf()),
+            auth_provider: server.auth_provider(),
+            path: server.path().to_string(),
+            extras: server.extras().clone(),
+        }
     }
 
-    #[tokio::test]
-    async fn json_rpc_response_with_string_id() {
-        let resp = json_rpc_response(Some(json!("req-42")), json!("done"));
-        let body = body_json(resp).await;
-        assert_eq!(body["id"], "req-42");
-        assert_eq!(body["result"], "done");
+    /// Helper: build the router from a pre-built DispatchState and send a
+    /// JSON-RPC request, returning the parsed response body.
+    async fn send_jsonrpc_with_state(
+        state: DispatchState<ToolRegistration, McpExtras>,
+        body: serde_json::Value,
+        auth_header: Option<&str>,
+    ) -> serde_json::Value {
+        let path = state.path.clone();
+        let router = McpDispatcher::build_router(state);
+
+        let mut req_builder = Request::builder()
+            .method("POST")
+            .uri(&path)
+            .header("content-type", "application/json");
+
+        if let Some(token) = auth_header {
+            req_builder = req_builder.header("authorization", token);
+        }
+
+        let req = req_builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(req).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
-    #[tokio::test]
-    async fn json_rpc_response_with_null_id() {
-        let resp = json_rpc_response(None, json!([]));
-        let body = body_json(resp).await;
-        // id should be absent when None (skip_serializing_if)
-        assert!(body.get("id").is_none());
-        assert_eq!(body["result"], json!([]));
+    // -----------------------------------------------------------------------
+    // Server construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_mcp_server_has_empty_tool_registry() {
+        let server = test_server();
+        assert_eq!(server.path(), DEFAULT_MCP_PATH);
+        // Verify empty: try_register should succeed for any key.
+        let reg = test_tool_registration("f", "d");
+        assert!(server.try_register("probe".to_string(), reg).is_ok());
+        // Clean up the probe entry.
+        server.deregister_flow("f");
     }
 
-    #[tokio::test]
-    async fn json_rpc_response_with_complex_result() {
-        let result = json!({
-            "tools": [
-                {"name": "a", "description": "tool a"},
-                {"name": "b", "description": "tool b"}
-            ]
-        });
-        let resp = json_rpc_response(Some(json!(99)), result.clone());
-        let body = body_json(resp).await;
-        assert_eq!(body["result"], result);
+    // -----------------------------------------------------------------------
+    // Tool registration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn register_tool_succeeds_for_new_name() {
+        let server = test_server();
+        let reg = test_tool_registration("my_flow", "A test tool");
+        let result = register_tool(&server, "my_tool".to_string(), reg);
+        assert!(result.is_ok());
     }
 
-    // ---- json_rpc_error_response ----
-
-    #[tokio::test]
-    async fn json_rpc_error_response_method_not_found() {
-        let resp = json_rpc_error_response(Some(json!(5)), -32601, "Method not found".to_string());
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_json(resp).await;
-        assert_eq!(body["jsonrpc"], "2.0");
-        assert_eq!(body["id"], 5);
-        assert!(body.get("result").is_none());
-        assert_eq!(body["error"]["code"], -32601);
-        assert_eq!(body["error"]["message"], "Method not found");
-    }
-
-    #[tokio::test]
-    async fn json_rpc_error_response_with_no_id() {
-        let resp = json_rpc_error_response(None, -32600, "Invalid request".to_string());
-        let body = body_json(resp).await;
-        assert!(body.get("id").is_none());
-        assert_eq!(body["error"]["code"], -32600);
-    }
-
-    #[tokio::test]
-    async fn json_rpc_error_response_custom_code() {
-        let resp = json_rpc_error_response(Some(json!("x")), -32000, "Auth failed".to_string());
-        let body = body_json(resp).await;
-        assert_eq!(body["error"]["code"], -32000);
-        assert_eq!(body["error"]["message"], "Auth failed");
-    }
-
-    // ---- handle_initialize ----
-
-    #[tokio::test]
-    async fn handle_initialize_returns_capabilities() {
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(1)),
-            method: "initialize".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_initialize(request);
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_json(resp).await;
-        assert_eq!(body["jsonrpc"], "2.0");
-        assert_eq!(body["id"], 1);
-        assert_eq!(body["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
-        assert_eq!(
-            body["result"]["capabilities"]["tools"]["listChanged"],
-            false
+    #[test]
+    fn register_tool_returns_error_on_duplicate() {
+        let server = test_server();
+        let reg1 = test_tool_registration("flow_a", "First");
+        let reg2 = test_tool_registration("flow_b", "Second");
+        register_tool(&server, "dup_tool".to_string(), reg1).unwrap();
+        let result = register_tool(&server, "dup_tool".to_string(), reg2);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("dup_tool"),
+            "Error should mention the colliding tool name"
         );
-        assert_eq!(body["result"]["serverInfo"]["name"], "flowgen");
-        // Version should be present and non-empty
-        let version = body["result"]["serverInfo"]["version"]
-            .as_str()
-            .expect("version should be a string");
-        assert!(!version.is_empty());
     }
 
-    #[tokio::test]
-    async fn handle_initialize_with_no_id() {
-        let request = JsonRpcRequest {
-            jsonrpc: None,
-            id: None,
-            method: "initialize".to_string(),
-            params: json!(null),
-        };
-
-        let resp = handle_initialize(request);
-        let body = body_json(resp).await;
-        assert!(body.get("id").is_none());
-        assert!(body["result"]["protocolVersion"].is_string());
+    #[test]
+    fn response_registry_returns_shared_registry() {
+        let server = test_server();
+        let reg = response_registry(&server);
+        // Verify it is the same Arc by cloning and checking pointer equality.
+        let reg2 = response_registry(&server);
+        assert!(Arc::ptr_eq(reg, reg2));
     }
 
-    #[tokio::test]
-    async fn handle_initialize_with_string_id() {
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!("init-abc")),
-            method: "initialize".to_string(),
-            params: json!({}),
-        };
+    // -----------------------------------------------------------------------
+    // JSON-RPC: initialize
+    // -----------------------------------------------------------------------
 
-        let resp = handle_initialize(request);
-        let body = body_json(resp).await;
-        assert_eq!(body["id"], "init-abc");
+    #[tokio::test]
+    async fn handle_initialize_returns_protocol_version() {
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, None).await;
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(resp["result"]["serverInfo"]["name"], "flowgen");
     }
 
-    // ---- handle_tools_list ----
+    // -----------------------------------------------------------------------
+    // JSON-RPC: tools/list
+    // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn handle_tools_list_empty_registry() {
-        let server = McpServer::new(None, None);
-        let headers = HeaderMap::new();
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(2)),
-            method: "tools/list".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_tools_list(&server, &headers, request);
-        let body = body_json(resp).await;
-        assert_eq!(body["jsonrpc"], "2.0");
-        assert_eq!(body["id"], 2);
-        let tools = body["result"]["tools"].as_array().expect("tools array");
+    async fn tools_list_returns_empty_when_no_tools() {
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, None).await;
+        let tools = resp["result"]["tools"].as_array().unwrap();
         assert!(tools.is_empty());
     }
 
     #[tokio::test]
-    async fn handle_tools_list_with_registered_tools() {
-        let server = McpServer::new(None, None);
+    async fn tools_list_returns_registered_tools() {
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        let reg = test_tool_registration("my_flow", "Search the web");
+        table.insert("web_search".to_string(), reg);
 
-        let (tx, _rx) = mpsc::channel(1);
-        server
-            .register_tool(
-                "my_tool".to_string(),
-                ToolRegistration {
-                    description: "Does something".to_string(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"}
-                        }
-                    }),
-                    tx,
-                    credentials: None,
-                    ack_timeout: None,
-                    auth_required: false,
-                    leaf_count: 1,
-                },
-            )
-            .unwrap();
-
-        let headers = HeaderMap::new();
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(3)),
-            method: "tools/list".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_tools_list(&server, &headers, request);
-        let body = body_json(resp).await;
-        let tools = body["result"]["tools"].as_array().expect("tools array");
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, None).await;
+        let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "my_tool");
-        assert_eq!(tools[0]["description"], "Does something");
-        assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        assert_eq!(tools[0]["name"], "web_search");
+        assert_eq!(tools[0]["description"], "Search the web");
+        assert!(tools[0]["inputSchema"]["properties"]["query"].is_object());
     }
+
+    // -----------------------------------------------------------------------
+    // JSON-RPC: method_not_found
+    // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn handle_tools_list_rejects_bad_api_key() {
-        let creds = super::super::config::Credentials {
-            api_keys: vec!["secret-key".to_string()],
-        };
-        let server = McpServer::new(Some(creds), None);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer wrong-key".parse().unwrap());
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(10)),
-            method: "tools/list".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_tools_list(&server, &headers, request);
-        let body = body_json(resp).await;
-        // Should be an error response
-        assert!(body.get("error").is_some());
-        assert_eq!(body["error"]["code"], -32000);
-    }
-
-    #[tokio::test]
-    async fn handle_tools_list_accepts_valid_api_key() {
-        let creds = super::super::config::Credentials {
-            api_keys: vec!["good-key".to_string()],
-        };
-        let server = McpServer::new(Some(creds), None);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer good-key".parse().unwrap());
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(11)),
-            method: "tools/list".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_tools_list(&server, &headers, request);
-        let body = body_json(resp).await;
-        assert!(body.get("error").is_none());
-        assert!(body["result"]["tools"].is_array());
-    }
-
-    #[tokio::test]
-    async fn handle_tools_list_no_auth_header_with_creds_configured() {
-        let creds = super::super::config::Credentials {
-            api_keys: vec!["key".to_string()],
-        };
-        let server = McpServer::new(Some(creds), None);
-
-        let headers = HeaderMap::new(); // no auth header
-        let request = JsonRpcRequest {
-            jsonrpc: Some("2.0".to_string()),
-            id: Some(json!(12)),
-            method: "tools/list".to_string(),
-            params: json!({}),
-        };
-
-        let resp = handle_tools_list(&server, &headers, request);
-        let body = body_json(resp).await;
-        assert!(body.get("error").is_some());
-    }
-
-    // ---- build_result_event ----
-
-    #[test]
-    fn build_result_event_with_tool_result() {
-        let tool_result = ToolResult {
-            content: vec![Content::Text {
-                text: "hello world".to_string(),
-            }],
-            is_error: false,
-        };
-
-        let sse = build_result_event(Some(json!(7)), Some(tool_result), None);
-        let sse = sse.expect("should produce SSE string");
-        assert!(sse.starts_with("event: message\n"));
-        assert!(sse.ends_with("\n\n"));
-
-        let data = parse_sse_data(&sse);
-        assert_eq!(data["jsonrpc"], "2.0");
-        assert_eq!(data["id"], 7);
-        assert_eq!(data["result"]["content"][0]["type"], "text");
-        assert_eq!(data["result"]["content"][0]["text"], "hello world");
-        assert_eq!(data["result"]["is_error"], false);
-        assert!(data.get("error").is_none());
-    }
-
-    #[test]
-    fn build_result_event_with_error_result() {
-        let tool_result = ToolResult {
-            content: vec![Content::Text {
-                text: "something broke".to_string(),
-            }],
-            is_error: true,
-        };
-
-        let sse = build_result_event(Some(json!(8)), Some(tool_result), None).unwrap();
-        let data = parse_sse_data(&sse);
-        assert_eq!(data["result"]["is_error"], true);
-        assert_eq!(data["result"]["content"][0]["text"], "something broke");
-    }
-
-    #[test]
-    fn build_result_event_with_json_rpc_error() {
-        let error = JsonRpcError {
-            code: -32603,
-            message: "Internal error".to_string(),
-        };
-
-        let sse = build_result_event(Some(json!(9)), None, Some(error)).unwrap();
-        let data = parse_sse_data(&sse);
-        assert!(data.get("result").is_none());
-        assert_eq!(data["error"]["code"], -32603);
-        assert_eq!(data["error"]["message"], "Internal error");
-    }
-
-    #[test]
-    fn build_result_event_with_no_id() {
-        let tool_result = ToolResult {
-            content: vec![Content::Text {
-                text: "ok".to_string(),
-            }],
-            is_error: false,
-        };
-
-        let sse = build_result_event(None, Some(tool_result), None).unwrap();
-        let data = parse_sse_data(&sse);
-        assert!(data.get("id").is_none());
-    }
-
-    #[test]
-    fn build_result_event_with_no_result_and_no_error() {
-        let sse = build_result_event(Some(json!(0)), None, None).unwrap();
-        let data = parse_sse_data(&sse);
-        assert_eq!(data["jsonrpc"], "2.0");
-        // Both result and error should be absent
-        assert!(data.get("result").is_none());
-        assert!(data.get("error").is_none());
-    }
-
-    #[test]
-    fn build_result_event_with_multiple_content_items() {
-        let tool_result = ToolResult {
-            content: vec![
-                Content::Text {
-                    text: "first".to_string(),
-                },
-                Content::Text {
-                    text: "second".to_string(),
-                },
-            ],
-            is_error: false,
-        };
-
-        let sse = build_result_event(Some(json!(20)), Some(tool_result), None).unwrap();
-        let data = parse_sse_data(&sse);
-        let content = data["result"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["text"], "first");
-        assert_eq!(content[1]["text"], "second");
-    }
-
-    // ---- completion_to_result_event ----
-
-    #[test]
-    fn completion_to_result_event_with_some_data() {
-        let data = json!({"accounts": [{"id": 1}]});
-        let result: Result<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-            tokio::sync::oneshot::error::RecvError,
-        > = Ok(Ok(Some(data.clone())));
-
-        let sse = completion_to_result_event(Some(json!(100)), result).unwrap();
-        let parsed = parse_sse_data(&sse);
-        assert_eq!(parsed["result"]["is_error"], false);
-
-        // The text content should be the pretty-printed JSON
-        let text = parsed["result"]["content"][0]["text"]
-            .as_str()
-            .expect("text content");
-        let reparsed: serde_json::Value =
-            serde_json::from_str(text).expect("text should be valid JSON");
-        assert_eq!(reparsed, data);
-    }
-
-    #[test]
-    fn completion_to_result_event_with_none_data() {
-        let result: Result<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-            tokio::sync::oneshot::error::RecvError,
-        > = Ok(Ok(None));
-
-        let sse = completion_to_result_event(Some(json!(101)), result).unwrap();
-        let parsed = parse_sse_data(&sse);
-        assert_eq!(parsed["result"]["is_error"], false);
-        assert_eq!(
-            parsed["result"]["content"][0]["text"],
-            "Tool executed successfully."
-        );
-    }
-
-    #[test]
-    fn completion_to_result_event_with_pipeline_error() {
-        let err: Box<dyn std::error::Error + Send + Sync> = "db connection lost".into();
-        let result: Result<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-            tokio::sync::oneshot::error::RecvError,
-        > = Ok(Err(err));
-
-        let sse = completion_to_result_event(Some(json!(102)), result).unwrap();
-        let parsed = parse_sse_data(&sse);
-        assert_eq!(parsed["result"]["is_error"], true);
-        let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("db connection lost"));
-    }
-
-    #[tokio::test]
-    async fn completion_to_result_event_with_recv_error() {
-        // Create a oneshot and drop the sender to get a real RecvError.
-        let (tx, rx) = tokio::sync::oneshot::channel::<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-        >();
-        drop(tx);
-        let recv_err = rx.await.unwrap_err();
-
-        let sse = completion_to_result_event(Some(json!(103)), Err(recv_err)).unwrap();
-        let parsed = parse_sse_data(&sse);
-        assert!(parsed.get("result").is_none());
-        assert_eq!(parsed["error"]["code"], -32603);
-        assert!(parsed["error"]["message"]
+    async fn unknown_method_returns_error() {
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "nonexistent/method",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, None).await;
+        assert_eq!(resp["error"]["code"], -32601);
+        assert!(resp["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("Pipeline did not produce a result"));
+            .contains("nonexistent/method"));
     }
 
-    #[test]
-    fn completion_to_result_event_with_no_id() {
-        let result: Result<
-            Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>,
-            tokio::sync::oneshot::error::RecvError,
-        > = Ok(Ok(None));
+    // -----------------------------------------------------------------------
+    // Auth validation
+    // -----------------------------------------------------------------------
 
-        let sse = completion_to_result_event(None, result).unwrap();
-        let parsed = parse_sse_data(&sse);
-        assert!(parsed.get("id").is_none());
+    #[tokio::test]
+    async fn no_credentials_allows_all_requests() {
+        // Server with no global credentials — tools/list should succeed.
+        let server = test_server();
+        let table = Arc::new(DashMap::new());
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/list",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, None).await;
+        assert!(resp["result"].is_object());
+        assert!(resp["error"].is_null());
     }
 
-    // ---- McpServer registration ----
-
-    #[test]
-    fn register_tool_duplicate_name_returns_error() {
-        let server = McpServer::new(None, None);
-        let (tx1, _rx1) = mpsc::channel(1);
-        let (tx2, _rx2) = mpsc::channel(1);
-
-        server
-            .register_tool(
-                "dup_tool".to_string(),
-                ToolRegistration {
-                    description: "first".to_string(),
-                    input_schema: json!({}),
-                    tx: tx1,
-                    credentials: None,
-                    ack_timeout: None,
-                    auth_required: false,
-                    leaf_count: 1,
-                },
-            )
-            .unwrap();
-
-        let err = server
-            .register_tool(
-                "dup_tool".to_string(),
-                ToolRegistration {
-                    description: "second".to_string(),
-                    input_schema: json!({}),
-                    tx: tx2,
-                    credentials: None,
-                    ack_timeout: None,
-                    auth_required: false,
-                    leaf_count: 1,
-                },
-            )
-            .unwrap_err();
-
-        match err {
-            Error::ToolNameCollision { name } => assert_eq!(name, "dup_tool"),
-            other => panic!("expected ToolNameCollision, got: {other:?}"),
-        }
-    }
-
-    // ---- validate_auth ----
-
-    #[test]
-    fn validate_auth_no_credentials_allows_all() {
-        let server = McpServer::new(None, None);
-        let headers = HeaderMap::new();
-        assert!(server.validate_auth(&headers, None).is_ok());
-    }
-
-    #[test]
-    fn validate_auth_empty_api_keys_allows_all() {
-        let creds = super::super::config::Credentials { api_keys: vec![] };
-        let server = McpServer::new(Some(creds), None);
-        let headers = HeaderMap::new();
-        assert!(server.validate_auth(&headers, None).is_ok());
-    }
-
-    #[test]
-    fn validate_auth_valid_bearer_token() {
+    #[tokio::test]
+    async fn correct_bearer_token_passes() {
         let creds = super::super::config::Credentials {
-            api_keys: vec!["test-key-123".to_string()],
+            api_keys: vec!["secret-key-123".to_string()],
         };
-        let server = McpServer::new(Some(creds), None);
+        let server = new_mcp_server(DEFAULT_MCP_PATH.to_string(), Some(creds), None);
+        let table = Arc::new(DashMap::new());
+        let reg = test_tool_registration("flow_a", "A tool");
+        table.insert("tool_a".to_string(), reg);
+        let state = build_test_state(&server, table);
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            "Bearer test-key-123".parse().unwrap(),
-        );
-        assert!(server.validate_auth(&headers, None).is_ok());
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/list",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, Some("Bearer secret-key-123")).await;
+        assert!(resp["result"].is_object());
+        assert!(resp["error"].is_null());
     }
 
-    #[test]
-    fn validate_auth_invalid_bearer_token() {
+    #[tokio::test]
+    async fn wrong_bearer_token_returns_unauthorized() {
         let creds = super::super::config::Credentials {
-            api_keys: vec!["correct-key".to_string()],
+            api_keys: vec!["secret-key-123".to_string()],
         };
-        let server = McpServer::new(Some(creds), None);
+        let server = new_mcp_server(DEFAULT_MCP_PATH.to_string(), Some(creds), None);
+        let table = Arc::new(DashMap::new());
+        let state = build_test_state(&server, table);
 
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer wrong-key".parse().unwrap());
-        assert_eq!(
-            server.validate_auth(&headers, None).unwrap_err(),
-            StatusCode::UNAUTHORIZED
-        );
-    }
-
-    #[test]
-    fn validate_auth_missing_header_with_keys_configured() {
-        let creds = super::super::config::Credentials {
-            api_keys: vec!["key".to_string()],
-        };
-        let server = McpServer::new(Some(creds), None);
-        let headers = HeaderMap::new();
-        assert_eq!(
-            server.validate_auth(&headers, None).unwrap_err(),
-            StatusCode::UNAUTHORIZED
-        );
-    }
-
-    #[test]
-    fn validate_auth_tool_specific_credentials_override_global() {
-        // Global creds accept "global-key"
-        let global_creds = super::super::config::Credentials {
-            api_keys: vec!["global-key".to_string()],
-        };
-        let server = McpServer::new(Some(global_creds), None);
-
-        // Register a tool with its own credentials
-        let tool_creds = super::super::config::Credentials {
-            api_keys: vec!["tool-key".to_string()],
-        };
-        let (tx, _rx) = mpsc::channel(1);
-        server
-            .register_tool(
-                "protected".to_string(),
-                ToolRegistration {
-                    description: "test".to_string(),
-                    input_schema: json!({}),
-                    tx,
-                    credentials: Some(tool_creds),
-                    ack_timeout: None,
-                    auth_required: false,
-                    leaf_count: 1,
-                },
-            )
-            .unwrap();
-
-        // Global key should be rejected for the tool
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer global-key".parse().unwrap());
-        assert_eq!(
-            server
-                .validate_auth(&headers, Some("protected"))
-                .unwrap_err(),
-            StatusCode::UNAUTHORIZED
-        );
-
-        // Tool key should be accepted
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer tool-key".parse().unwrap());
-        assert!(server.validate_auth(&headers, Some("protected")).is_ok());
-    }
-
-    #[test]
-    fn validate_auth_multiple_api_keys() {
-        let creds = super::super::config::Credentials {
-            api_keys: vec![
-                "key-alpha".to_string(),
-                "key-beta".to_string(),
-                "key-gamma".to_string(),
-            ],
-        };
-        let server = McpServer::new(Some(creds), None);
-
-        // Each key should be accepted
-        for key in ["key-alpha", "key-beta", "key-gamma"] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::AUTHORIZATION,
-                format!("Bearer {key}").parse().unwrap(),
-            );
-            assert!(server.validate_auth(&headers, None).is_ok());
-        }
-
-        // An unknown key should be rejected
-        let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, "Bearer key-delta".parse().unwrap());
-        assert_eq!(
-            server.validate_auth(&headers, None).unwrap_err(),
-            StatusCode::UNAUTHORIZED
-        );
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list",
+            "params": {}
+        });
+        let resp = send_jsonrpc_with_state(state, body, Some("Bearer wrong-key")).await;
+        assert!(resp["error"].is_object());
     }
 }

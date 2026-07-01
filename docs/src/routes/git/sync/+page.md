@@ -2,6 +2,8 @@
 
 Clones or pulls a Git repository and emits one event per file. Downstream tasks decide what to do with the content — parse it, store it, transform it.
 
+Works with any HTTPS Git host: GitHub, GitLab, Bitbucket, Gitea, self-hosted. SSH URLs are not supported — use HTTPS + a token.
+
 Each event contains `{path, content, commit}` where `path` is relative to the scanned directory.
 
 ## Configuration
@@ -9,7 +11,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 ```yaml
 - git_sync:
     name: sync_flows
-    repository_url: "https://github.com/org/configs.git"
+    repository_url: "https://git.example.com/org/configs.git"
     branch: main
     path: "flows/"
     credentials_path: /etc/flowgen/credentials/git.json
@@ -25,6 +27,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | `path` | string | | Directory within the repo to scan. All files under this path are emitted. |
 | `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
 | `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). |
+| `force_pull` | bool | `false` | Bypass the HEAD-commit cache and re-walk the working tree every tick. Use only to re-seed a downstream cache mutated out of band; leave off in steady state. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -40,7 +43,7 @@ flow:
 
     - git_sync:
         name: pull_repo
-        repository_url: "https://github.com/org/configs.git"
+        repository_url: "https://git.example.com/org/configs.git"
         path: "flows/"
         credentials_path: /etc/flowgen/credentials/git.json
 
@@ -68,3 +71,24 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Ea
 | `path` | string | Relative file path in the repository. |
 | `content` | string | Full file content. |
 | `commit` | string | HEAD commit hash. |
+
+## Bootstrap flows
+
+Two end-to-end bootstrap flows reconcile a Git directory tree into the system cache. They tick on an interval, list existing cache entries, and emit one put per file and one delete per orphaned key:
+
+- [`examples/git/system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_flows.yaml) — keys each entry by `flow.name` parsed from the YAML body so the filename is incidental. The reconciler reads from `flowgen.flows.*` and starts, stops, and hot-reloads flows accordingly.
+- [`examples/git/system_sync_resources.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_resources.yaml) — keys each entry by the file's relative path under `flowgen.resources.*`. The runtime `ResourceLoader` reads from the same keys when tasks reference `resource: <path>`. See [Resources](/docs/flowgen/concepts/resources).
+
+Both skip the rest of their pipeline when the repo HEAD has not moved, so the only cost on a no-change tick is a `git fetch` plus a `list_keys` round-trip.
+
+## Change detection
+
+Each tick runs `git fetch` and reads the new HEAD commit hash. The hash is compared against the last successful sync, cached under `flow.{flow_name}.git_head.{repository_url}` in the shared cache. On a match, the file walk is skipped and the source emits only the upstream completion signal — one line per tick in the logs:
+
+```
+INFO flowgen_git::sync::processor: Git HEAD unchanged since last sync, skipping file walk repository=… commit=…
+```
+
+The cached commit is persisted only after every file event was sent, so a mid-walk failure causes the next tick to re-emit the full batch.
+
+Set `force_pull: true` to bypass the cache — use only to re-seed a downstream cache mutated out of band.

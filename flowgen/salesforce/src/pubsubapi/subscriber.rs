@@ -604,68 +604,71 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
+        let cancellation_token = self.task_context.cancellation_token.clone();
+        let mut reconnect_backoff = retry_config.reconnect_strategy();
 
-        tokio::spawn(
-            async move {
-                let mut reconnect_backoff = retry_config.reconnect_strategy();
+        // Infinite retry loop: subscribers must maintain connectivity indefinitely.
+        loop {
+            if cancellation_token.is_cancelled() {
+                return Ok(());
+            }
 
-                // Infinite retry loop: subscribers must maintain connectivity indefinitely.
-                loop {
-                    // Initialize with circuit breaker to detect permanent errors (bad credentials, etc.).
-                    let event_handler = match tokio_retry::Retry::spawn(retry_config.init_strategy(self.task_context.startup_delay), || async {
-                        match self.init().await {
-                            Ok(handler) => Ok(handler),
-                            Err(e) => {
-                                error!(error = %e, "Subscriber initialization failed");
-                                Err(tokio_retry::RetryError::transient(e))
-                            }
-                        }
-                    })
-                    .await
-                    {
-                        Ok(handler) => {
-                            reconnect_backoff = retry_config.reconnect_strategy();
-                            handler
-                        }
+            // Initialize with circuit breaker to detect permanent errors (bad credentials, etc.).
+            let init_future = tokio_retry::Retry::spawn(
+                retry_config.init_strategy(self.task_context.startup_delay),
+                || async {
+                    match self.init().await {
+                        Ok(handler) => Ok(handler),
                         Err(e) => {
-                            let delay = match reconnect_backoff.next() {
-                            Some(d) => d,
-                            None => retry_config.initial_backoff,
-                        };
-                            error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                    };
-
-                    // Run event loop until failure, then reinitialize.
-                    match event_handler.handle().await {
-                        Ok(()) => {
-                            if self.task_context.cancellation_token.is_cancelled() {
-                                return;
-                            }
-                            warn!("Subscriber lost connectivity, reinitializing");
-                        }
-                        Err(e) => {
-                            if self.task_context.cancellation_token.is_cancelled() {
-                                return;
-                            }
-                            error!(error = %e, "Subscriber lost connectivity, reinitializing");
+                            error!(error = %e, "Subscriber initialization failed");
+                            Err(tokio_retry::RetryError::transient(e))
                         }
                     }
+                },
+            );
 
-                    let delay = match reconnect_backoff.next() {
+            let event_handler = tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                result = init_future => match result {
+                    Ok(handler) => {
+                        reconnect_backoff = retry_config.reconnect_strategy();
+                        handler
+                    }
+                    Err(e) => {
+                        let delay = match reconnect_backoff.next() {
                             Some(d) => d,
                             None => retry_config.initial_backoff,
                         };
-                    tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
-                    tokio::time::sleep(delay).await;
-                }
-            }
-            .instrument(tracing::Span::current()),
-        );
+                        error!(error = %e, delay_ms = %delay.as_millis(), "Subscriber initialization exhausted retry attempts, will retry after backoff");
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = cancellation_token.cancelled() => return Ok(()),
+                        }
+                        continue;
+                    }
+                },
+            };
 
-        Ok(())
+            // Run event loop until failure, then reinitialize.
+            let handle_future = event_handler.handle();
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                result = handle_future => match result {
+                    Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
+                    Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
+                },
+            }
+
+            let delay = match reconnect_backoff.next() {
+                Some(d) => d,
+                None => retry_config.initial_backoff,
+            };
+            tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = cancellation_token.cancelled() => return Ok(()),
+            }
+        }
     }
 }
 

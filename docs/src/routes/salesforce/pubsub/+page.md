@@ -28,7 +28,7 @@ Subscribe to and publish Salesforce platform events and Change Data Capture even
 | `topic.num_requested` | int | | Messages per batch. |
 | `topic.durable_consumer_options` | object | | Durable consumer settings (see below). |
 | `endpoint` | string | | Custom Pub/Sub API endpoint. |
-| `ack_timeout` | duration | | Flow completion timeout. |
+| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before committing the replay offset. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

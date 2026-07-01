@@ -36,11 +36,11 @@ use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info, warn, Instrument};
 
-// Per-edge event buffer capacity. Sized to absorb burst jitter (e.g. iterate
-// fan-out) without pinning the producer. When full the sender awaits — this is
-// intentional backpressure that bounds memory. Override per-worker via
-// `worker.event_buffer_size` in the config file.
-const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000;
+// Event buffer size for MPSC channels. This needs to be large enough to handle
+// bursts from tasks like iterate that fan-out large arrays (e.g., 100k+ rows).
+// Set to 10M (~1.2 GB memory) to provide ample headroom for high-volume processing.
+// With MPSC, this buffer is distributed across N-1 channels for N tasks.
+const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000_000;
 
 /// Errors that can occur during flow execution.
 #[derive(thiserror::Error, Debug)]
@@ -70,15 +70,15 @@ pub enum Error {
     /// Error in HTTP request processor task.
     #[error(transparent)]
     HttpRequestProcessor(#[from] flowgen_http::request::Error),
-    /// Error in HTTP webhook processor task.
+    /// Error in HTTP endpoint processor task.
     #[error(transparent)]
-    HttpWebhookProcessor(#[from] flowgen_http::webhook::Error),
+    HttpEndpointProcessor(#[from] flowgen_http::endpoint::Error),
     /// Error in HTML scrape processor task.
     #[error(transparent)]
     HtmlScrapeProcessor(#[from] flowgen_html::scrape::processor::Error),
     /// Error in HTTP server task.
     #[error(transparent)]
-    HttpServer(#[from] flowgen_http::server::Error),
+    HttpServer(#[from] flowgen_core::http_server::Error),
     /// Error in NATS JetStream publisher task.
     #[error(transparent)]
     NatsJetStreamPublisher(#[from] flowgen_nats::jetstream::publisher::Error),
@@ -168,13 +168,19 @@ pub enum Error {
     NatsKvStore(#[from] flowgen_nats::jetstream::kv_store::Error),
     /// Error in AI gateway task.
     #[error(transparent)]
-    AiGateway(#[from] flowgen_ai_agent::ai_gateway::processor::Error),
+    LlmProxy(#[from] flowgen_ai_agent::ai_gateway::llm_proxy::Error),
     /// Error in Git sync task.
     #[error(transparent)]
     GitSync(#[from] flowgen_git::sync::processor::Error),
+    /// Error in OCI sync task.
+    #[error(transparent)]
+    OciSync(#[from] flowgen_oci::sync::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
+    /// Failed to store the task context after starting tasks.
+    #[error("Error storing task context after start_tasks")]
+    TaskContextStoreFailed,
     /// Failed to retrieve background task handles for monitoring.
     #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
@@ -184,6 +190,9 @@ pub enum Error {
     /// Flow cannot be initialized because MCP server is not enabled.
     #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool tasks.")]
     McpServerNotEnabled,
+    /// Flow cannot be initialized because AI gateway server is not enabled.
+    #[error("Flow cannot be initialized as ai_gateway is not configured. Add worker.ai_gateway to config or remove llm_proxy tasks.")]
+    AiGatewayServerNotEnabled,
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
@@ -297,7 +306,7 @@ impl TaskRegistryBuilder {
             // Determine blocking status (webhooks and mcp_tool tasks are blocking).
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
 
             let input_rx = if idx > 0 {
@@ -458,28 +467,35 @@ impl TaskRegistryBuilder {
         // channel stays open until every parent has finished.
         drop(inbound_tx);
 
-        // Compute the number of leaf tasks reachable from each task's output.
-        // Tasks are kept in topological order (parents always precede children)
-        // so a single reverse pass propagates leaf counts up the directed
-        // acyclic graph in linear time.
-        let mut downstream_leaves: Vec<usize> = vec![0; task_count];
+        // Compute the number of distinct leaf tasks reachable from each task's
+        // output. Tasks are kept in topological order (parents always precede
+        // children) so a single reverse pass propagates leaf sets up the
+        // directed acyclic graph. Summing child counts would double-count when
+        // two branches re-merge (e.g. fan-out -> buffer fan-in), inflating the
+        // source's completion expectation beyond the real number of leaves.
+        let mut reachable_leaves: Vec<std::collections::HashSet<usize>> =
+            vec![std::collections::HashSet::new(); task_count];
         for idx in (0..task_count).rev() {
             match children_per_parent.get(&idx) {
                 None => {
-                    // No children means this task is a leaf.
-                    downstream_leaves[idx] = 1;
+                    reachable_leaves[idx].insert(idx);
                 }
                 Some(children) => {
-                    downstream_leaves[idx] = children.iter().map(|&c| downstream_leaves[c]).sum();
+                    let mut set = std::collections::HashSet::new();
+                    for &c in children {
+                        set.extend(reachable_leaves[c].iter().copied());
+                    }
+                    reachable_leaves[idx] = set;
                 }
             }
         }
+        let downstream_leaves: Vec<usize> = reachable_leaves.iter().map(|s| s.len()).collect();
 
         let mut task_descriptors = Vec::with_capacity(task_count);
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
@@ -500,12 +516,24 @@ impl TaskRegistryBuilder {
 pub struct Flow {
     /// The flow's static configuration, loaded from a file.
     pub config: Arc<FlowConfig>,
-    /// An optional shared HTTP server instance, passed in from the main application.
-    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// An optional shared MCP server instance, passed in from the main application.
-    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
-    /// Shared cache, passed in from the main application.
+    /// An optional shared webhook HTTP server, passed in from the main application.
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    /// An optional shared MCP server, passed in from the main application.
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    /// An optional shared AI gateway server, passed in from the main application.
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Shared runtime cache, passed in from the main application. Holds
+    /// per-flow state (replay IDs, counters, last-run timestamps, business
+    /// data) and is exposed to user scripts via `ctx.cache`.
     cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// System cache, passed in from the main application. Holds cluster-wide
+    /// coordination state (lease keys for leader election). Kept separate
+    /// from the runtime `cache` so user scripts cannot reach lease keys, and
+    /// so retention policies can differ (short history plus per-message TTL
+    /// for leases, longer retention for per-flow state). In single-binary
+    /// or in-memory deployments this is the same `Arc` as `cache`; the
+    /// separation is enforced only by the operator in the main config.
+    system_cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Event channel buffer size for this flow (from app config or DEFAULT).
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
@@ -518,6 +546,9 @@ pub struct Flow {
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
     background_handles: Arc<std::sync::Mutex<Option<Vec<TaskHandle>>>>,
+    /// Task context from the most recent start_tasks call; used to read registration
+    /// info (registered_http_routes, registered_mcp_tools) before run() consumes self.
+    last_task_context: Arc<std::sync::Mutex<Option<Arc<flowgen_core::task::context::TaskContext>>>>,
 }
 
 impl Flow {
@@ -531,6 +562,18 @@ impl Flow {
         self.task_manager.as_ref().map(Arc::clone)
     }
 
+    /// Returns the cancellation token for the most recently started task tenure.
+    ///
+    /// Used by the reconciler to cancel a running flow before replacing it. Returns
+    /// `None` if `start_tasks()` has not yet been called (e.g. leader-elected flows
+    /// that have not yet acquired leadership).
+    pub fn cancellation_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.last_task_context
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|ctx| ctx.cancellation_token.clone()))
+    }
+
     /// Determines if the flow should run with leader election.
     ///
     /// If a flow contains any webhook tasks, it will always be treated as
@@ -539,14 +582,14 @@ impl Flow {
         let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
             matches!(
                 task,
-                TaskType::http_webhook(_) | TaskType::mcp_tool(_) | TaskType::ai_gateway(_)
+                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
             )
         });
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook, mcp_tool, or ai_gateway); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook, mcp_tool, or llm_proxy); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -564,13 +607,13 @@ impl Flow {
             return Ok(()); // Already initialized
         }
 
-        // Validate: Flow with http_webhook tasks requires HTTP server to be configured.
+        // Validate: Flow with http_endpoint tasks requires HTTP server to be configured.
         let has_webhook_tasks = self
             .config
             .flow
             .tasks
             .iter()
-            .any(|task| matches!(task, TaskType::http_webhook(_) | TaskType::ai_gateway(_)));
+            .any(|task| matches!(task, TaskType::http_endpoint(_) | TaskType::llm_proxy(_)));
 
         if has_webhook_tasks && self.http_server.is_none() {
             return Err(Error::HttpServerNotEnabled);
@@ -588,9 +631,12 @@ impl Flow {
             return Err(Error::McpServerNotEnabled);
         }
 
-        // Create an Executor with the cache for lease management.
+        // Create an Executor backed by the system cache. Lease keys must
+        // stay isolated from user-script-accessible runtime cache to keep
+        // coordination state outside any flow's reach.
         let lease_config = flowgen_core::executor::LeaseConfig::default();
-        let executor = flowgen_core::executor::Executor::new(self.cache.clone(), lease_config)?;
+        let executor =
+            flowgen_core::executor::Executor::new(self.system_cache.clone(), lease_config)?;
         let executor = Arc::new(executor);
 
         let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
@@ -623,8 +669,6 @@ impl Flow {
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
-            .http_server(self.http_server.clone())
-            .mcp_server(self.mcp_server.clone())
             .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token)
@@ -684,14 +728,28 @@ impl Flow {
         // Spawn all blocking tasks (webhooks).
         let mut blocking_handles = Vec::new();
         for task_desc in blocking_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             blocking_handles.push(handle);
         }
 
         // Spawn all background tasks.
         let mut background_handles = Vec::new();
         for task_desc in background_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             background_handles.push(handle);
         }
 
@@ -724,14 +782,28 @@ impl Flow {
         // Spawn all blocking tasks.
         let mut blocking_handles = Vec::new();
         for task_desc in all_blocking_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             blocking_handles.push(handle);
         }
 
         // Spawn all background tasks.
         let mut background_handles = Vec::new();
         for task_desc in all_background_tasks {
-            let handle = spawn_task(task_desc, task_context.clone()).await?;
+            let handle = spawn_task(
+                task_desc,
+                task_context.clone(),
+                self.http_server.clone(),
+                self.mcp_server.clone(),
+                self.ai_gateway_server.clone(),
+            )
+            .await?;
             background_handles.push(handle);
         }
 
@@ -765,6 +837,12 @@ impl Flow {
             .lock()
             .map_err(|_| Error::BackgroundHandlesStoreFailed)?;
         *lock = Some(handles.background_handles);
+
+        // Store task context so registration info is accessible before run() consumes self.
+        self.last_task_context
+            .lock()
+            .map_err(|_| Error::TaskContextStoreFailed)
+            .map(|mut guard| *guard = Some(Arc::clone(&handles.task_context)))?;
 
         Ok(handles.blocking_handles)
     }
@@ -1009,6 +1087,9 @@ impl Flow {
 async fn spawn_task(
     task_desc: TaskDescriptor,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
 ) -> Result<JoinHandle<Result<(), Error>>, Error> {
     let task_id = task_desc.id;
     let rx = task_desc.input_rx;
@@ -1183,15 +1264,17 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::http_webhook(config) => {
+        TaskType::http_endpoint(config) => {
             let config = Arc::new(config);
+            let http_server = http_server.clone().ok_or(Error::HttpServerNotEnabled)?;
             tokio::spawn(
                 async move {
-                    let mut builder = flowgen_http::webhook::ProcessorBuilder::new()
+                    let mut builder = flowgen_http::endpoint::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
-                        .task_context(task_context);
+                        .task_context(task_context)
+                        .http_server(http_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1659,13 +1742,15 @@ async fn spawn_task(
         }
         TaskType::mcp_tool(config) => {
             let config = Arc::new(config);
+            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_mcp::processor::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)
-                        .task_context(task_context);
+                        .task_context(task_context)
+                        .mcp_server(mcp_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1675,16 +1760,20 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::ai_gateway(config) => {
+        TaskType::llm_proxy(config) => {
             let config = Arc::new(config);
+            let ai_gateway_server = ai_gateway_server
+                .clone()
+                .ok_or(Error::AiGatewayServerNotEnabled)?;
             tokio::spawn(
                 async move {
                     let mut builder =
-                        flowgen_ai_agent::ai_gateway::processor::ProcessorBuilder::new()
+                        flowgen_ai_agent::ai_gateway::llm_proxy::ProcessorBuilder::new()
                             .config(config)
                             .task_id(task_id)
                             .task_type(task_type_str)
-                            .task_context(task_context);
+                            .task_context(task_context)
+                            .ai_gateway_server(ai_gateway_server);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -1715,6 +1804,27 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
+        TaskType::oci_sync(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_oci::sync::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
     };
 
     Ok(handle)
@@ -1725,12 +1835,17 @@ async fn spawn_task(
 pub struct FlowBuilder {
     /// Optional flow configuration.
     config: Option<Arc<FlowConfig>>,
-    /// Optional shared HTTP server instance.
-    http_server: Option<Arc<dyn flowgen_core::http_server::HttpServer>>,
-    /// Optional shared MCP server instance.
-    mcp_server: Option<Arc<dyn flowgen_core::mcp_server::McpServer>>,
-    /// Shared cache instance.
+    /// Optional shared webhook HTTP server.
+    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    /// Optional shared MCP server.
+    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    /// Optional shared AI gateway server.
+    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Shared runtime cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+    /// System cache instance. Backs the executor's lease store and is kept
+    /// out of user-script reach. Required at build time.
+    system_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// Optional event channel buffer size.
     event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration.
@@ -1753,21 +1868,40 @@ impl FlowBuilder {
         self
     }
 
-    /// Sets the shared HTTP server instance.
-    pub fn http_server(mut self, server: Arc<dyn flowgen_core::http_server::HttpServer>) -> Self {
+    /// Sets the shared webhook HTTP server.
+    pub fn http_server(mut self, server: Arc<flowgen_http::server::EndpointServer>) -> Self {
         self.http_server = Some(server);
         self
     }
 
-    /// Sets the shared MCP server instance.
-    pub fn mcp_server(mut self, server: Arc<dyn flowgen_core::mcp_server::McpServer>) -> Self {
+    /// Sets the shared MCP server.
+    pub fn mcp_server(mut self, server: Arc<flowgen_mcp::server::McpServer>) -> Self {
         self.mcp_server = Some(server);
         self
     }
 
-    /// Sets the shared cache instance.
+    /// Sets the shared AI gateway server.
+    pub fn ai_gateway_server(
+        mut self,
+        server: Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>,
+    ) -> Self {
+        self.ai_gateway_server = Some(server);
+        self
+    }
+
+    /// Sets the shared runtime cache instance.
     pub fn cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Sets the system cache instance used for leader-election leases.
+    ///
+    /// In multi-bucket deployments this points at a separate bucket from
+    /// the runtime cache; in single-binary or in-memory deployments it may
+    /// share the same underlying `Arc`.
+    pub fn system_cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
+        self.system_cache = Some(cache);
         self
     }
 
@@ -1812,9 +1946,13 @@ impl FlowBuilder {
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
             http_server: self.http_server,
             mcp_server: self.mcp_server,
+            ai_gateway_server: self.ai_gateway_server,
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
+            system_cache: self
+                .system_cache
+                .ok_or_else(|| Error::MissingBuilderAttribute("system_cache".to_string()))?,
             event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
@@ -1824,6 +1962,7 @@ impl FlowBuilder {
             },
             task_manager: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
+            last_task_context: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }
@@ -1831,6 +1970,63 @@ impl FlowBuilder {
 mod tests {
     use super::*;
     use crate::config::{Flow, FlowConfig};
+
+    #[test]
+    fn test_flow_builder_new() {
+        let builder = FlowBuilder::new();
+        assert!(builder.config.is_none());
+        assert!(builder.http_server.is_none());
+    }
+
+    #[test]
+    fn test_flow_builder_default() {
+        let builder = FlowBuilder::default();
+        assert!(builder.config.is_none());
+        assert!(builder.http_server.is_none());
+    }
+
+    #[test]
+    fn test_flow_builder_config() {
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "test_flow".to_string(),
+                labels: None,
+                tasks: vec![],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let builder = FlowBuilder::new().config(flow_config.clone());
+        assert_eq!(builder.config, Some(flow_config));
+    }
+
+    #[test]
+    fn test_flow_builder_http_server() {
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::EndpointDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
+        ));
+        let builder = FlowBuilder::new().http_server(server.clone());
+        assert!(builder.http_server.is_some());
+    }
+
+    #[test]
+    fn test_flow_builder_build_missing_config() {
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::EndpointDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
+        ));
+
+        let result = FlowBuilder::new().http_server(server).build();
+
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute(attr)) if attr == "config"
+        ));
+    }
 
     #[test]
     fn test_flow_builder_build_without_http_server() {
@@ -1846,7 +2042,11 @@ mod tests {
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
 
-        let result = FlowBuilder::new().config(flow_config).cache(cache).build();
+        let result = FlowBuilder::new()
+            .config(flow_config)
+            .cache(cache.clone())
+            .system_cache(cache)
+            .build();
 
         assert!(result.is_ok());
         let flow = result.unwrap();
@@ -1864,14 +2064,19 @@ mod tests {
                 parallel_instances: 1,
             },
         });
-        let server = Arc::new(flowgen_http::server::HttpServerBuilder::new().build());
+        let server = Arc::new(flowgen_core::http_server::HttpServer::<
+            flowgen_http::server::EndpointDispatcher,
+        >::new(
+            flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
+        ));
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
 
         let result = FlowBuilder::new()
             .config(flow_config.clone())
             .http_server(server)
-            .cache(cache)
+            .cache(cache.clone())
+            .system_cache(cache)
             .build();
 
         assert!(result.is_ok());
@@ -1958,7 +2163,7 @@ mod tests {
                 name: "test_flow".to_string(),
                 labels: None,
                 tasks: vec![
-                    TaskType::http_webhook(flowgen_http::config::Processor::default()),
+                    TaskType::http_endpoint(flowgen_http::config::Processor::default()),
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
                 ],
@@ -2033,5 +2238,250 @@ mod tests {
         assert_eq!(registry.tasks[0].id, 0);
         assert_eq!(registry.tasks[1].id, 1);
         assert_eq!(registry.tasks[2].id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_fan_out_fan_in() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "fan_out_fan_in".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("trigger", None),
+                    script_with_deps("read_a", Some(vec!["trigger"])),
+                    script_with_deps("convert_a", Some(vec!["read_a"])),
+                    script_with_deps("read_b", Some(vec!["trigger"])),
+                    script_with_deps("convert_b", Some(vec!["read_b"])),
+                    script_with_deps("buffer", Some(vec!["convert_a", "convert_b"])),
+                    script_with_deps("join", Some(vec!["buffer"])),
+                    script_with_deps("write", Some(vec!["join"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("write"), 1, "write is the only leaf");
+        assert_eq!(leaves("join"), 1);
+        assert_eq!(leaves("buffer"), 1);
+        assert_eq!(leaves("convert_a"), 1);
+        assert_eq!(leaves("convert_b"), 1);
+        assert_eq!(leaves("read_a"), 1);
+        assert_eq!(leaves("read_b"), 1);
+        assert_eq!(
+            leaves("trigger"),
+            1,
+            "trigger sees one terminal leaf, not two — both branches re-merge at buffer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_true_fan_out() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "fan_out".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("source", None),
+                    script_with_deps("leaf_a", Some(vec!["source"])),
+                    script_with_deps("leaf_b", Some(vec!["source"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("leaf_a"), 1);
+        assert_eq!(leaves("leaf_b"), 1);
+        assert_eq!(leaves("source"), 2, "two distinct downstream leaves");
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_nested_diamonds() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "nested_diamonds".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("src", None),
+                    script_with_deps("a1", Some(vec!["src"])),
+                    script_with_deps("a2", Some(vec!["src"])),
+                    script_with_deps("mid", Some(vec!["a1", "a2"])),
+                    script_with_deps("b1", Some(vec!["mid"])),
+                    script_with_deps("b2", Some(vec!["mid"])),
+                    script_with_deps("sink", Some(vec!["b1", "b2"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("sink"), 1);
+        assert_eq!(leaves("b1"), 1);
+        assert_eq!(leaves("b2"), 1);
+        assert_eq!(leaves("mid"), 1);
+        assert_eq!(leaves("a1"), 1);
+        assert_eq!(leaves("a2"), 1);
+        assert_eq!(
+            leaves("src"),
+            1,
+            "nested diamonds re-merge — naive sum would be 4"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_mixed_fan_out_and_re_merge() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "mixed".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("src", None),
+                    script_with_deps("a", Some(vec!["src"])),
+                    script_with_deps("b", Some(vec!["src"])),
+                    script_with_deps("c", Some(vec!["src"])),
+                    script_with_deps("merge", Some(vec!["a", "b"])),
+                    script_with_deps("leaf_x", Some(vec!["merge"])),
+                    script_with_deps("leaf_y", Some(vec!["c"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let leaves = |name: &str| {
+            registry
+                .tasks
+                .iter()
+                .find(|t| t.task_type.name() == name)
+                .expect("task missing")
+                .downstream_leaves
+        };
+
+        assert_eq!(leaves("leaf_x"), 1);
+        assert_eq!(leaves("leaf_y"), 1);
+        assert_eq!(leaves("merge"), 1);
+        assert_eq!(leaves("a"), 1);
+        assert_eq!(leaves("b"), 1);
+        assert_eq!(leaves("c"), 1);
+        assert_eq!(
+            leaves("src"),
+            2,
+            "merged branch counts once, independent branch adds the second leaf"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_downstream_leaves_linear_chain() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
+                ..Default::default()
+            })
+        };
+
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "linear".to_string(),
+                labels: None,
+                tasks: vec![
+                    script_with_deps("t0", None),
+                    script_with_deps("t1", Some(vec!["t0"])),
+                    script_with_deps("t2", Some(vec!["t1"])),
+                    script_with_deps("t3", Some(vec!["t2"])),
+                ],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        for task in &registry.tasks {
+            assert_eq!(
+                task.downstream_leaves,
+                1,
+                "{} should see 1 leaf",
+                task.task_type.name()
+            );
+        }
     }
 }

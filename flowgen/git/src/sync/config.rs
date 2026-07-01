@@ -48,6 +48,11 @@ pub struct Processor {
     /// Path to credentials JSON file for HTTPS token authentication.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
+    /// Bypass the HEAD-commit cache and re-walk the working tree every
+    /// tick. Use when downstream cache was mutated out of band and
+    /// needs re-seeding.
+    #[serde(default)]
+    pub force_pull: bool,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
@@ -59,10 +64,26 @@ pub struct Processor {
 impl ConfigExt for Processor {}
 
 /// Git credentials loaded from the credentials JSON file.
+///
+/// The token is sent over HTTPS via a gix credential helper that responds
+/// to the server's `WWW-Authenticate` challenge — the token never appears
+/// in the repository URL, in `.git/config`, or in logs.
+///
+/// `username` defaults to `x-access-token`, which works for GitHub Personal
+/// Access Tokens and GitHub App installation tokens, and is accepted as the
+/// basic-auth user by GitLab personal and deploy tokens and Bitbucket app
+/// passwords. Override it for hosts that require a specific literal
+/// username (GitLab OAuth tokens expect `oauth2`, Bitbucket Cloud
+/// token-auth expects `x-token-auth`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Credentials {
-    /// HTTPS token (e.g., GitHub PAT, GitLab deploy token).
+    /// HTTPS token, e.g. a GitHub Personal Access Token, a GitLab deploy
+    /// token, or a Bitbucket app password.
     pub token: String,
+    /// Optional username paired with the token for basic auth. Defaults to
+    /// `x-access-token` when omitted.
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 #[cfg(test)]
@@ -89,5 +110,17 @@ mod tests {
         }"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
         assert_eq!(creds.token, "ghp_xxxxxxxxxxxx");
+        assert!(creds.username.is_none());
+    }
+
+    #[test]
+    fn test_credentials_with_username() {
+        let json = r#"{
+            "token": "glpat-xxxx",
+            "username": "oauth2"
+        }"#;
+        let creds: Credentials = serde_json::from_str(json).unwrap();
+        assert_eq!(creds.token, "glpat-xxxx");
+        assert_eq!(creds.username.as_deref(), Some("oauth2"));
     }
 }

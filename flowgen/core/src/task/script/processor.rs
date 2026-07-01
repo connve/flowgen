@@ -868,6 +868,26 @@ impl crate::task::runner::Runner for Processor {
             },
         );
 
+        // Override Rhai's built-in parse_json which only supports objects at the root.
+        // This version uses serde to handle both objects and arrays.
+        engine.register_fn(
+            "parse_json",
+            |json: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+                let value: Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+                rhai::serde::to_dynamic(value).map_err(|e| e.to_string().into())
+            },
+        );
+
+        // YAML parser — needed by bootstrap flows that read user flows from
+        // disk/git and key them by `flow.name` rather than filename.
+        engine.register_fn(
+            "parse_yaml",
+            |yaml: &str| -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+                let value: Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
+                rhai::serde::to_dynamic(value).map_err(|e| e.to_string().into())
+            },
+        );
+
         let event_handler = EventHandler {
             code: script_code,
             tx: self.tx.clone(),
@@ -947,7 +967,7 @@ impl crate::task::runner::Runner for Processor {
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
                                 } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    arc.signal_completion(event.data_as_json().ok());
+                                    arc.signal_completion_with_error(err.to_string());
                                 }
                             }
                         }
@@ -1876,6 +1896,127 @@ mod tests {
                     first == "orders.123" || first == "orders.456",
                     "Expected one of the order keys, got {first}"
                 );
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_json_array() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let config = Arc::new(crate::task::script::config::Processor {
+            name: "test_parse_json_array".to_string(),
+            engine: crate::task::script::config::ScriptEngine::Rhai,
+            code: crate::resource::Source::Inline(
+                r#"
+                let arr = parse_json(`[{"id":"a1","name":"First"},{"id":"a2","name":"Second"}]`);
+                event.data = #{len: arr.len(), first_name: arr[0].name, second_id: arr[1].id};
+                event
+                "#
+                .to_string(),
+            ),
+            sandbox: None,
+            limits: crate::task::script::config::RhaiLimits::default(),
+            depends_on: None,
+            retry: None,
+        });
+
+        let (_event_tx, rx_in) = mpsc::channel(100);
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .receiver(rx_in)
+            .sender(tx)
+            .task_id(0)
+            .task_context(task_context)
+            .task_type("script")
+            .build()
+            .await
+            .unwrap();
+
+        let event_handler = processor.init().await.unwrap();
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 0,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        event_handler.handle(input_event).await.unwrap();
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(value["len"], 2);
+                assert_eq!(value["first_name"], "First");
+                assert_eq!(value["second_id"], "a2");
+            }
+            _ => panic!("Expected JSON output."),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_json_object() {
+        let (tx, mut rx) = mpsc::channel(100);
+        let task_context = create_mock_task_context();
+
+        let config = Arc::new(crate::task::script::config::Processor {
+            name: "test_parse_json_object".to_string(),
+            engine: crate::task::script::config::ScriptEngine::Rhai,
+            code: crate::resource::Source::Inline(
+                r#"
+                let obj = parse_json(`{"key":"value","count":42}`);
+                event.data = obj;
+                event
+                "#
+                .to_string(),
+            ),
+            sandbox: None,
+            limits: crate::task::script::config::RhaiLimits::default(),
+            depends_on: None,
+            retry: None,
+        });
+
+        let (_event_tx, rx_in) = mpsc::channel(100);
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .receiver(rx_in)
+            .sender(tx)
+            .task_id(0)
+            .task_context(task_context)
+            .task_type("script")
+            .build()
+            .await
+            .unwrap();
+
+        let event_handler = processor.init().await.unwrap();
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "test.subject".to_string(),
+            task_id: 0,
+            id: None,
+            timestamp: 0,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        event_handler.handle(input_event).await.unwrap();
+
+        let output = rx.recv().await.expect("Expected output event.");
+        match output.data {
+            EventData::Json(value) => {
+                assert_eq!(value["key"], "value");
+                assert_eq!(value["count"], 42);
             }
             _ => panic!("Expected JSON output."),
         }

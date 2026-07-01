@@ -5,7 +5,7 @@ flow:
 
     # HTTP webhook to receive incoming events (e.g., from external services).
     # Each webhook POST becomes an individual event for processing.
-    - http_webhook:
+    - http_endpoint:
         name: receive_webhook
         # Webhook path: http://localhost:3000/webhooks/events
         path: /webhooks/events

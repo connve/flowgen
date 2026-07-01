@@ -31,10 +31,6 @@ pub struct TaskContext {
     pub task_manager: std::sync::Arc<crate::task::manager::TaskManager>,
     /// Shared cache for task operations.
     pub cache: std::sync::Arc<dyn crate::cache::Cache>,
-    /// Optional shared HTTP server for webhook tasks.
-    pub http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    /// Optional shared MCP server for exposing flows as MCP tools.
-    pub mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Optional shared response registry for streaming progress back to source tasks.
     pub response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Optional resource loader for loading external assets (SQL files, templates, etc.).
@@ -66,14 +62,6 @@ impl std::fmt::Debug for TaskContext {
             .field("task_manager", &"<TaskManager>")
             .field("cache", &"<Cache>")
             .field(
-                "http_server",
-                &self.http_server.as_ref().map(|_| "<HttpServer>"),
-            )
-            .field(
-                "mcp_server",
-                &self.mcp_server.as_ref().map(|_| "<McpServer>"),
-            )
-            .field(
                 "response_registry",
                 &self
                     .response_registry
@@ -83,6 +71,7 @@ impl std::fmt::Debug for TaskContext {
             .field("resource_loader", &self.resource_loader)
             .field("retry", &self.retry)
             .field("cancellation_token", &"<CancellationToken>")
+            .field("leaf_count", &self.leaf_count)
             .field("client_registry", &"<ClientRegistry>")
             .finish()
     }
@@ -99,10 +88,6 @@ pub struct TaskContextBuilder {
     task_manager: Option<std::sync::Arc<crate::task::manager::TaskManager>>,
     /// Shared cache for task operations.
     cache: Option<std::sync::Arc<dyn crate::cache::Cache>>,
-    /// Optional shared HTTP server for webhook tasks.
-    http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    /// Optional shared MCP server for exposing flows as MCP tools.
-    mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
     /// Optional shared response registry for streaming progress.
     response_registry: Option<std::sync::Arc<crate::registry::ResponseRegistry>>,
     /// Resource loader for loading external assets.
@@ -159,30 +144,6 @@ impl TaskContextBuilder {
     /// * `cache` - Cache instance
     pub fn cache(mut self, cache: std::sync::Arc<dyn crate::cache::Cache>) -> Self {
         self.cache = Some(cache);
-        self
-    }
-
-    /// Sets the optional HTTP server for webhook tasks.
-    ///
-    /// # Arguments
-    /// * `http_server` - Optional HTTP server instance
-    pub fn http_server(
-        mut self,
-        http_server: Option<std::sync::Arc<dyn crate::http_server::HttpServer>>,
-    ) -> Self {
-        self.http_server = http_server;
-        self
-    }
-
-    /// Sets the optional MCP server for exposing flows as MCP tools.
-    ///
-    /// # Arguments
-    /// * `mcp_server` - Optional MCP server instance
-    pub fn mcp_server(
-        mut self,
-        mcp_server: Option<std::sync::Arc<dyn crate::mcp_server::McpServer>>,
-    ) -> Self {
-        self.mcp_server = mcp_server;
         self
     }
 
@@ -265,8 +226,6 @@ impl TaskContextBuilder {
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
-            http_server: self.http_server,
-            mcp_server: self.mcp_server,
             response_registry: self.response_registry,
             resource_loader: self.resource_loader,
             retry: self.retry,
@@ -274,11 +233,7 @@ impl TaskContextBuilder {
                 Some(token) => token,
                 None => tokio_util::sync::CancellationToken::new(),
             },
-            #[allow(clippy::manual_unwrap_or)]
-            leaf_count: match self.leaf_count {
-                Some(count) => count,
-                None => 1,
-            },
+            leaf_count: self.leaf_count.unwrap_or(1),
             startup_delay: None,
             client_registry: match self.client_registry {
                 Some(registry) => registry,
@@ -292,6 +247,13 @@ impl TaskContextBuilder {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn test_task_context_builder_new() {
+        let builder = TaskContextBuilder::new();
+        assert!(builder.flow_name.is_none());
+        assert!(builder.flow_labels.is_none());
+    }
 
     #[test]
     fn test_task_context_builder_build_success() {
@@ -319,6 +281,20 @@ mod tests {
     }
 
     #[test]
+    fn test_task_context_builder_missing_flow_name() {
+        let mut labels = Map::new();
+        labels.insert("name".to_string(), Value::String("Test".to_string()));
+
+        let result = TaskContextBuilder::new().flow_labels(Some(labels)).build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::MissingBuilderAttribute(_)
+        ));
+    }
+
+    #[test]
     fn test_task_context_builder_defaults() {
         let task_manager = Arc::new(
             crate::task::manager::TaskManagerBuilder::new()
@@ -336,6 +312,34 @@ mod tests {
 
         assert_eq!(context.flow.name, "default-test");
         assert!(context.flow.labels.is_none());
+    }
+
+    #[test]
+    fn test_task_context_builder_chain() {
+        let mut labels = Map::new();
+        labels.insert(
+            "description".to_string(),
+            Value::String("Chained Builder Test".to_string()),
+        );
+        labels.insert("type".to_string(), Value::String("test".to_string()));
+
+        let task_manager = Arc::new(
+            crate::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let cache =
+            Arc::new(crate::cache::memory::MemoryCache::new()) as Arc<dyn crate::cache::Cache>;
+        let context = TaskContextBuilder::new()
+            .flow_name("chain-test".to_string())
+            .flow_labels(Some(labels.clone()))
+            .task_manager(task_manager)
+            .cache(cache)
+            .build()
+            .unwrap();
+
+        assert_eq!(context.flow.name, "chain-test");
+        assert_eq!(context.flow.labels, Some(labels));
     }
 
     #[test]

@@ -12,10 +12,11 @@ pub mod completion {
     pub mod processor;
 }
 
-/// OpenAI-compatible AI gateway endpoint.
+/// AI gateway server hosting LLM proxy backends.
 pub mod ai_gateway {
     pub mod config;
-    pub mod processor;
+    pub mod llm_proxy;
+    pub mod server;
 }
 
 pub use agent::{AgentClient, ClientBuilder, CompletionChunk};

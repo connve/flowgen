@@ -32,7 +32,7 @@ jobs:
       - name: Checkout helm repo
         uses: actions/checkout@v4
         with:
-          repository: connve-labs/helm
+          repository: connve/helm
           token: ${{ steps.app-token.outputs.token }}
           path: helm-repo
           persist-credentials: true

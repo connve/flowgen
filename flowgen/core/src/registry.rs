@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Tool result containing content items and an error flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolResult {
     /// Content items returned by the tool.
     pub content: Vec<Content>,

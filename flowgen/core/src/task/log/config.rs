@@ -15,6 +15,15 @@ pub struct Processor {
     /// When false, logs pretty-printed JSON strings for console readability.
     #[serde(default)]
     pub structured: bool,
+    /// Whether to include `event.meta` in the log output.
+    ///
+    /// Defaults to `false` because meta is intended as in-flow context for
+    /// downstream tasks (stashed batches, correlation ids, per-event state)
+    /// and tends to dwarf the data payload in any log line that prints it.
+    /// Opt in with `include_meta: true` when the meta itself is what the
+    /// operator wants to see.
+    #[serde(default)]
+    pub include_meta: bool,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).

@@ -24,6 +24,17 @@
 - Do not add comments into unit tests.
 - **All tasks must be documented with working examples in the `examples/` directory.**
 - Example YAML files should demonstrate realistic use cases with clear comments.
+- **Always use existing URLs.** When linking from docs, examples,
+  comments, or the changelog, only use URLs that are already present in
+  the repository or have been provided directly. If a target URL cannot
+  be verified, omit the link rather than guess. Plausible-looking
+  patterns are not verification.
+  - **Flowgen docs site:** `https://connve.com/docs/flowgen/<route>`,
+    where `<route>` mirrors the SvelteKit routes under
+    `docs/src/routes/` (e.g. `core/script`, `concepts/resources`).
+  - **Flowgen GitHub repository:**
+    `https://github.com/connve/flowgen/blob/main/<repo-relative-path>`
+    for files on the default branch.
 
 #### Code Structure
 - If possible, please use following traits to structs: `#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]`.
@@ -31,6 +42,19 @@
 - Use proper abstractions and separation of concerns.
 - Follow existing patterns in the codebase for consistency.
 - Keep functions focused on a single responsibility.
+- **Prefer `match` over `if/else` chains and over Option/Result combinator
+  chains (`unwrap_or`, `unwrap_or_else`, `.map(...).unwrap_or(...)`).** Use
+  slice patterns, value matches, or destructuring (e.g.
+  `match v.as_slice() { [] => ..., [x] => ..., _ => ... }`) instead of
+  cascading `else if`. Only fall back to `if/else` for a single boolean
+  check or a non-pattern guard.
+- **Clippy wins when it conflicts with the `match` preference.** Some lints
+  (e.g. `manual_unwrap_or_default`) actively reject explicit
+  `match { Some(v) => v, None => default }` patterns and require the
+  combinator form. In those cases, follow clippy — do not add
+  `#[allow(...)]` solely to satisfy the `match` preference. The hard
+  constraint is `cargo clippy -- -D warnings`; the `match` preference is
+  the soft one.
 
 #### Dependency Management
 - **All package dependencies must be declared at the root workspace level in the workspace `Cargo.toml`.**
@@ -118,7 +142,7 @@ retry:
 - Subscriber (infinite retry): `flowgen/salesforce/src/pubsubapi/subscriber.rs`
 - Subscriber (infinite retry): `flowgen/nats/src/jetstream/subscriber.rs`
 - Publisher (circuit breaker): `flowgen/salesforce/src/pubsubapi/publisher.rs`
-- Webhook (circuit breaker): `flowgen/http/src/webhook.rs`
+- HTTP endpoint (circuit breaker): `flowgen/http/src/endpoint.rs`
 
 #### EventData Types
 

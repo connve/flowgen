@@ -48,23 +48,37 @@ impl EventHandler {
             return Ok(());
         }
 
+        // Build the view to log: by default strip `meta` so per-event log
+        // lines stay scoped to the payload. Operators that want to see the
+        // running meta (correlation ids, stashed batches, etc.) opt in
+        // explicitly via `include_meta: true`. The pass-through event sent
+        // downstream below is unchanged either way — this only controls
+        // what hits the log target.
+        let logged: std::borrow::Cow<'_, Event> = if self.config.include_meta {
+            std::borrow::Cow::Borrowed(&event)
+        } else {
+            let mut view = event.clone();
+            view.meta = None;
+            std::borrow::Cow::Owned(view)
+        };
+
         if self.config.structured {
             // Structured logging mode for Grafana/Loki.
             match self.config.level {
-                super::config::LogLevel::Trace => trace!(event = ?event),
-                super::config::LogLevel::Debug => debug!(event = ?event),
-                super::config::LogLevel::Info => info!(event = ?event),
-                super::config::LogLevel::Warn => warn!(event = ?event),
-                super::config::LogLevel::Error => error!(event = ?event),
+                super::config::LogLevel::Trace => trace!(event = ?logged),
+                super::config::LogLevel::Debug => debug!(event = ?logged),
+                super::config::LogLevel::Info => info!(event = ?logged),
+                super::config::LogLevel::Warn => warn!(event = ?logged),
+                super::config::LogLevel::Error => error!(event = ?logged),
             }
         } else {
             // Pretty-printed mode for console readability.
             match self.config.level {
-                super::config::LogLevel::Trace => trace!("{}", event),
-                super::config::LogLevel::Debug => debug!("{}", event),
-                super::config::LogLevel::Info => info!("{}", event),
-                super::config::LogLevel::Warn => warn!("{}", event),
-                super::config::LogLevel::Error => error!("{}", event),
+                super::config::LogLevel::Trace => trace!("{}", logged),
+                super::config::LogLevel::Debug => debug!("{}", logged),
+                super::config::LogLevel::Info => info!("{}", logged),
+                super::config::LogLevel::Warn => warn!("{}", logged),
+                super::config::LogLevel::Error => error!("{}", logged),
             }
         }
 
@@ -169,12 +183,13 @@ impl crate::task::runner::Runner for Processor {
                             .await;
 
                             if let Err(err) = result {
-                                error!(error = %err, "Log failed after all retry attempts.");
-                                // Emit error event downstream for error handling.
+                                error!(error = %err, "Log failed after all retry attempts");
                                 let mut error_event = event.clone();
                                 error_event.error = Some(err.to_string());
                                 if let Some(ref tx) = event_handler.tx {
                                     tx.send(error_event).await.ok();
+                                } else if let Some(arc) = event.completion_tx.as_ref() {
+                                    arc.signal_completion_with_error(err.to_string());
                                 }
                             }
                         }
@@ -302,6 +317,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            include_meta: false,
             depends_on: None,
             retry: None,
         });
@@ -339,6 +355,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            include_meta: false,
             depends_on: None,
             retry: None,
         });
@@ -370,6 +387,7 @@ mod tests {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
             structured: false,
+            include_meta: false,
             depends_on: None,
             retry: None,
         });
