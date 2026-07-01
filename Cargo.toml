@@ -13,7 +13,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.120.0"
+version = "0.120.1"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"

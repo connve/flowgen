@@ -77,7 +77,7 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 ```bash
 # Example: Linux x86_64, replace version as needed
-VERSION=0.119.0
+VERSION=0.120.1
 curl -LO "https://github.com/connve/flowgen/releases/download/v${VERSION}/flowgen-linux-amd64-${VERSION}.tar.gz"
 tar -xzf "flowgen-linux-amd64-${VERSION}.tar.gz"
 sudo mv flowgen /usr/local/bin/

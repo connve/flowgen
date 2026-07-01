@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.120.1
+
+### Build
+
+- **CI toolchain source unified with `rust-toolchain.toml`.** All
+  three workflows (`lint`, `test`, `security`) migrated from the
+  deprecated `actions-rs/toolchain@v1` to
+  `dtolnay/rust-toolchain@stable`, which reads the channel and
+  components from `rust-toolchain.toml`. Removes the duplicated
+  `toolchain: stable` overrides that could drift from the repo pin
+  and reintroduce the developer-vs-CI mismatch that produced the
+  0.120.0 `result_large_err` false-negative locally.
+- **MSRV enforced in CI.** New `test-msrv` job in
+  `test.yml` compiles the workspace on the exact
+  `rust-version = "1.88"` declared in `Cargo.toml`, so the field
+  stops being an aspirational promise. Uses `cargo check --locked`
+  to catch dependency bumps that raise the minimum silently.
+- **Docker builder image switched to `rust:slim-bookworm`.** Smaller
+  base (fewer system packages) means fewer CVE hits without changing
+  the toolchain contract — the channel still resolves from
+  `rust-toolchain.toml` at the first `cargo` invocation. Runtime
+  image (`gcr.io/distroless/cc-debian12:nonroot`) is untouched.
+
 ## 0.120.0
 
 ### Features

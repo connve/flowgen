@@ -131,7 +131,7 @@ export const navigation: NavSection[] = [
 	},
 	{
 		title: 'OCI',
-		icon: '/icons/git.svg',
+		icon: '/icons/oci.svg',
 		items: [
 			{ title: 'Overview', href: '/oci' },
 			{ title: 'OCI Sync', href: '/oci/sync' }
