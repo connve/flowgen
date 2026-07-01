@@ -40,6 +40,20 @@ docker run \
 3. Update the flow path in `config.yaml`
 4. Run with `cargo run`
 
+### Testing
+
+```bash
+cargo test                        # unit tests
+cargo test -- --ignored           # integration tests (requires Docker)
+cargo test -- --include-ignored   # both
+```
+
+Tests that spin up real containers (via
+[`testcontainers`](https://docs.rs/testcontainers)) or depend on a
+running Docker daemon are marked `#[ignore]` so a plain
+`cargo test` stays fast and works on machines without Docker. CI
+runs the ignored set in a dedicated `test-integration` job.
+
 ## Configuration
 
 - `config.yaml`: Application configuration
