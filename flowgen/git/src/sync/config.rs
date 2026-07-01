@@ -48,6 +48,11 @@ pub struct Processor {
     /// Path to credentials JSON file for HTTPS token authentication.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
+    /// Bypass the HEAD-commit cache and re-walk the working tree every
+    /// tick. Use when downstream cache was mutated out of band and
+    /// needs re-seeding.
+    #[serde(default)]
+    pub force_pull: bool,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,

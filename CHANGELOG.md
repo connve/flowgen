@@ -24,6 +24,32 @@
   `local/flowgen.yaml` and the four `examples/{git,oci}/system_sync_*`
   flows opt into the new flag.
 
+- **`oci_sync` and `git_sync` skip the pull when nothing changed.**
+  Each tick now compares a cheap signature against the last
+  successful run before re-fetching content. `oci_sync` keeps the
+  artifact's manifest digest in the shared cache under
+  `flow.{flow}.oci_digest.{artifact}`; the change signal is a plain
+  HTTP HEAD against the manifest URL (`fetch_manifest_digest`), so
+  a cache hit costs one zero-body request — no manifest JSON, no
+  config blob, no layer blobs. If the HEAD digest matches, the
+  source emits only the upstream completion signal.
+  `git_sync` keeps the HEAD commit hash under
+  `flow.{flow}.git_head.{repo}`; if the post-fetch hash matches, the
+  file walk is skipped. Works for both mutable tags
+  (`ghcr.io/org/flows:prod`) and immutable digests
+  (`…@sha256:abcd`) — the manifest digest is authoritative in
+  either case, so re-tagging `:prod` to a new release still
+  triggers a pull. The signature is persisted only after every
+  downstream event for the tick has been sent, so a mid-batch
+  failure causes the next tick to re-emit the full set
+  (idempotency mirrors `salesforce::pubsubapi::subscriber`'s
+  replay_id handling). A tenant reported 4.7K identical blob pulls
+  against a single GHCR artifact before this landed; the OCI fix
+  collapses that to one manifest HEAD per tick once the cache is
+  warm. Both tasks accept `force_pull: true` to bypass the cache
+  for the operator case where the downstream cache was mutated
+  out of band and needs re-seeding.
+
 - **`oci_sync` integration test against a real registry.** New
   `flowgen/oci/tests/sync_integration.rs` stands up a
   `registry:2.8.3` container via `testcontainers`, pushes a
@@ -39,7 +65,11 @@
   `init` also gained a small loopback-host check that switches to
   plain HTTP when the artifact reference points at `127.0.0.1`,
   `localhost`, or `[::1]`, so this test (and any future
-  registry-backed test) can run without TLS termination.
+  registry-backed test) can run without TLS termination. The test
+  is marked `#[ignore]` so the default `cargo test` skips it on
+  machines without a Docker daemon; a dedicated `test-integration`
+  job in `.github/workflows/test.yml` runs it on every PR via
+  `cargo test -- --ignored`.
 
 - **`nats_kv_store list` can include current values.** New
   `include_values: bool` field on the `nats_kv_store` config

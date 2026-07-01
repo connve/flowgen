@@ -10,8 +10,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task;
-use tracing::error;
+use tracing::{error, info};
 use walkdir::WalkDir;
+
+/// Rewrites `/`, `:`, `@`, `?`, `=` in a repository URL to hyphens so
+/// it fits the cache key alphabet.
+fn sanitize_repo_url(url: &str) -> String {
+    url.replace(['/', ':', '@', '?', '='], "-")
+}
 
 /// File event emitted for each file found in the repository.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -151,6 +157,33 @@ impl EventHandler {
             )
             .await?;
 
+            // Skip the file walk when HEAD matches the last successful
+            // sync — file contents at the same commit are byte-identical.
+            let cache = &self.task_context.cache;
+            let flow_name = &self.task_context.flow.name;
+            let sanitized_url = sanitize_repo_url(&self.config.repository_url);
+            let cache_key = format!("flow.{flow_name}.git_head.{sanitized_url}");
+            let cached_commit = cache
+                .get(&cache_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
+            if !self.config.force_pull && cached_commit.as_deref() == Some(commit.as_str()) {
+                info!(
+                    repository = %self.config.repository_url,
+                    commit = %commit,
+                    "Git HEAD unchanged since last sync, skipping file walk"
+                );
+                if let Some(arc) = completion_tx_arc.as_ref() {
+                    let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                    for _ in 0..upstream_leaf_share {
+                        arc.signal_completion(None);
+                    }
+                }
+                return Ok(());
+            }
+
             // Determine the scan base path.
             let scan_path = match &self.config.path {
                 Some(p) => self.clone_path.join(p),
@@ -229,6 +262,17 @@ impl EventHandler {
                         arc.signal_completion(None);
                     }
                 }
+            }
+
+            // Persist only after every file event was sent — a mid-walk
+            // failure must re-emit the full batch on the next tick.
+            if let Err(e) = cache.put(&cache_key, commit.clone().into(), None).await {
+                error!(
+                    repository = %self.config.repository_url,
+                    commit = %commit,
+                    error = %e,
+                    "Failed to persist git HEAD, next tick will re-walk"
+                );
             }
 
             Ok(())
@@ -674,6 +718,7 @@ mod tests {
             path: None,
             clone_path: None,
             credentials_path: None,
+            force_pull: false,
             depends_on: None,
             retry: None,
         }

@@ -8,12 +8,9 @@
 //! event per file layer, in order, with `completion_tx` attached to
 //! the final event so downstream buffers can detect end-of-batch.
 //!
-//! Gated behind the `integration-tests` feature so production
-//! builds (`cargo build --release`) do not pull in `testcontainers`
-//! or its docker-client transitive dependencies. Run with:
-//! `cargo test -p flowgen_oci --features integration-tests --test sync_integration`.
-
-#![cfg(feature = "integration-tests")]
+//! Requires a running Docker daemon. Marked `#[ignore]` so a
+//! default `cargo test` skips it on developer machines without
+//! Docker; CI runs the ignored set explicitly.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,6 +27,7 @@ use testcontainers::GenericImage;
 use tokio::sync::mpsc;
 
 #[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn oci_sync_emits_one_event_per_file_layer_with_completion_on_last() {
     let registry = GenericImage::new("registry", "2.8.3")
         .with_exposed_port(5000.tcp())
@@ -82,6 +80,7 @@ async fn oci_sync_emits_one_event_per_file_layer_with_completion_on_last() {
         name: "pull_repo".to_string(),
         artifact: format!("{registry_host}/flowgen/resources:latest"),
         credentials_path: None,
+        force_pull: false,
         depends_on: None,
         retry: None,
     });

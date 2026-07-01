@@ -22,6 +22,7 @@ Each event contains `{path, content, digest, artifact_digest}`. The shape mirror
 | `name` | string | required | Task name. |
 | `artifact` | string | required | Full OCI reference, e.g. `registry.example.com/org/flows:prod` or `registry.example.com/org/flows@sha256:abcd…`. |
 | `credentials_path` | string | | Path to a JSON credentials file. Two formats are auto-detected; see [credentials](/docs/flowgen/oci#credentials). Anonymous auth if omitted. |
+| `force_pull` | bool | `false` | Bypass the manifest-digest cache and re-pull every tick. Use only to re-seed a downstream cache mutated out of band; leave off in steady state. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -86,4 +87,18 @@ Two end-to-end bootstrap flows reconcile an OCI artifact into the system cache. 
 - [`examples/oci/system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_flows.yaml) — keys each entry by `flow.name` parsed from the layer body so the filename is incidental. The reconciler reads from `flowgen.flows.*` and starts, stops, and hot-reloads flows accordingly.
 - [`examples/oci/system_sync_resources.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_resources.yaml) — keys each entry by the layer's relative path under `flowgen.resources.*`. The runtime `ResourceLoader` reads from the same keys when tasks reference `resource: <path>`. See [Resources](/docs/flowgen/concepts/resources).
 
-Both skip the rest of their pipeline when the artifact digest has not moved, so the only cost on a no-change tick is a manifest fetch plus a `list_keys` round-trip.
+Both skip the rest of their pipeline when the artifact digest has not moved, so the only cost on a no-change tick is a manifest HEAD plus a `list_keys` round-trip.
+
+## Change detection
+
+Each tick issues an HTTP HEAD against the artifact's manifest URL to read `Docker-Content-Digest` from the response header. The digest is compared against the last successful pull, cached under `flow.{flow_name}.oci_digest.{artifact}` in the shared cache. On a match, the layer blobs are not fetched and the source emits only the upstream completion signal — one line per tick in the logs:
+
+```
+INFO flowgen_oci::sync::processor: OCI manifest digest unchanged since last pull, skipping layer fetch artifact=… digest=sha256:…
+```
+
+Works for both mutable tags (`:prod`) and immutable digests (`@sha256:…`) — the digest is authoritative in either case, so a re-tag of `:prod` to a new release still triggers a pull.
+
+The cached digest is persisted only after every layer event was sent, so a mid-pull failure causes the next tick to re-emit the full batch.
+
+Set `force_pull: true` to bypass the cache — use only to re-seed a downstream cache mutated out of band.

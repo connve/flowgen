@@ -35,6 +35,10 @@ pub struct Processor {
     /// the pod's `imagePullSecrets` also authenticate `oci_sync`.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
+    /// Bypass the manifest-digest cache and re-pull every tick. Use when
+    /// downstream cache was mutated out of band and needs re-seeding.
+    #[serde(default)]
+    pub force_pull: bool,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,

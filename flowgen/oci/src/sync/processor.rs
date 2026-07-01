@@ -13,7 +13,13 @@ use oci_client::{Client, Reference};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::error;
+use tracing::{error, info};
+
+/// Rewrites `/`, `:`, `@` in an OCI reference to hyphens so it fits
+/// the cache key alphabet.
+fn sanitize_artifact_ref(artifact: &str) -> String {
+    artifact.replace(['/', ':', '@'], "-")
+}
 
 /// File event emitted for each layer in the pulled artifact. Matches the
 /// shape `flowgen_git::sync` emits so bootstrap flows can target either.
@@ -112,6 +118,44 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
+            // Cheap change-signal via HEAD — avoids the manifest GET
+            // and the config-blob GET that `pull_manifest_and_config`
+            // would issue unconditionally.
+            let cache = &self.task_context.cache;
+            let flow_name = &self.task_context.flow.name;
+            let sanitized_artifact = sanitize_artifact_ref(&self.config.artifact);
+            let cache_key = format!("flow.{flow_name}.oci_digest.{sanitized_artifact}");
+            let cached_digest = cache
+                .get(&cache_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
+            if !self.config.force_pull {
+                let head_digest = self
+                    .client
+                    .fetch_manifest_digest(&self.reference, &self.auth)
+                    .await
+                    .map_err(|source| Error::Pull {
+                        reference: self.config.artifact.clone(),
+                        source,
+                    })?;
+                if cached_digest.as_deref() == Some(head_digest.as_str()) {
+                    info!(
+                        artifact = %self.config.artifact,
+                        digest = %head_digest,
+                        "OCI manifest digest unchanged since last pull, skipping layer fetch"
+                    );
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        let upstream_leaf_share = self.task_context.leaf_count.max(1);
+                        for _ in 0..upstream_leaf_share {
+                            arc.signal_completion(None);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             let (manifest, manifest_digest, _config_blob) = self
                 .client
                 .pull_manifest_and_config(&self.reference, &self.auth)
@@ -121,8 +165,6 @@ impl EventHandler {
                     source,
                 })?;
 
-            // The OCI image-manifest layers carry one blob per file. Pull
-            // each blob into memory; bootstrap flows are tiny by design.
             let layers = manifest.layers;
 
             let total = layers.len();
@@ -193,6 +235,20 @@ impl EventHandler {
                         arc.signal_completion(None);
                     }
                 }
+            }
+
+            // Persist only after every layer event was sent — a mid-pull
+            // failure must re-emit the full batch on the next tick.
+            if let Err(e) = cache
+                .put(&cache_key, manifest_digest.clone().into(), None)
+                .await
+            {
+                error!(
+                    artifact = %self.config.artifact,
+                    digest = %manifest_digest,
+                    error = %e,
+                    "Failed to persist OCI manifest digest, next tick will re-pull"
+                );
             }
 
             Ok(())
@@ -763,6 +819,7 @@ mod tests {
             name: "test_sync".to_string(),
             artifact: "ghcr.io/org/flows:prod".to_string(),
             credentials_path: None,
+            force_pull: false,
             depends_on: None,
             retry: None,
         }
