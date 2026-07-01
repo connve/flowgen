@@ -13,11 +13,9 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: clippy
-          override: true
+      # Reads channel + components from `rust-toolchain.toml`; no need to
+      # duplicate the pin here.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
         run: |
@@ -34,11 +32,8 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt
-          override: true
+      # Reads channel + components from `rust-toolchain.toml`.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Check formatting
         run: cargo fmt --all -- --check

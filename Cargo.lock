@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "arrow",
  "atty",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.120.0"
+version = "0.120.1"
 dependencies = [
  "apache-avro",
  "arrow",

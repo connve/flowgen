@@ -1,5 +1,7 @@
-# Rust base image with cargo-chef and sccache.
-FROM rust:bookworm AS rust_base
+# Rust base image with cargo-chef and sccache. The channel comes from
+# `rust-toolchain.toml`; `rustup` inside this image resolves it at the
+# first `cargo` invocation once the source is copied in.
+FROM rust:slim-bookworm AS rust_base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
