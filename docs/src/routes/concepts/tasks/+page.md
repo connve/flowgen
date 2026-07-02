@@ -49,6 +49,8 @@ Processors receive events, do something with them, and emit events to the next t
 | `ai_completion` | LLM completions from multiple providers. |
 | `llm_proxy` | Registers a flow as a backend on the AI gateway server. |
 | `mcp_tool` | Expose flows as MCP tools for LLM agents. |
+| `mcp_resource` | Expose read-only content (schemas, glossaries, docs) as MCP resources. |
+| `mcp_prompt` | Publish slash-command templates with typed arguments for MCP clients. |
 
 ## Task wiring
 

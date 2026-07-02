@@ -131,7 +131,7 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `http_server` | object | | HTTP server for `http_endpoint` tasks. |
-| `mcp_server` | object | | MCP server for `mcp_tool` tasks. |
+| `mcp_server` | object | | MCP server for `mcp_tool`, `mcp_resource`, and `mcp_prompt` tasks. |
 | `ai_gateway` | object | | AI gateway server for any AI task that requires exposing a server endpoint. |
 | `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/flowgen/concepts/retry). |
 | `event_buffer_size` | int | `10000` | Capacity of each inter-task event channel (in events). When full the upstream task blocks until the downstream task drains a slot. |
@@ -160,10 +160,12 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Required for `mcp_tool` tasks to register. |
+| `enabled` | bool | required | Required for any MCP task (`mcp_tool`, `mcp_resource`, `mcp_prompt`) to register. |
 | `port` | int | `3001` | Listening port. |
 | `path` | string | `/mcp/v1` | MCP endpoint path. |
 | `credentials_path` | string | | Worker-level shared API key credentials. Individual tools can override. |
+| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+| `resource_uri_scheme` | string | `flowgen` | Scheme used when auto-generating `mcp_resource` URIs of the form `<scheme>://<flow_name>/<name>`. White-label deployments override this. |
 
 ### `worker.retry`
 

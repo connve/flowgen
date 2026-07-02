@@ -130,6 +130,10 @@ pub enum TaskType {
     ai_completion(flowgen_ai_agent::completion::config::Processor),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
     mcp_tool(flowgen_mcp::config::Processor),
+    /// MCP resource task for exposing read-only content to MCP clients.
+    mcp_resource(flowgen_mcp::resource::config::Processor),
+    /// MCP prompt task for exposing slash-command templates to MCP clients.
+    mcp_prompt(flowgen_mcp::prompt::config::Processor),
     /// LLM proxy task — registers a flow as a backend on the AI gateway server.
     llm_proxy(flowgen_ai_agent::ai_gateway::config::Processor),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
@@ -170,6 +174,8 @@ impl TaskType {
             TaskType::nats_kv_store(_) => "nats_kv_store",
             TaskType::ai_completion(_) => "ai_completion",
             TaskType::mcp_tool(_) => "mcp_tool",
+            TaskType::mcp_resource(_) => "mcp_resource",
+            TaskType::mcp_prompt(_) => "mcp_prompt",
             TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
             TaskType::oci_sync(_) => "oci_sync",
@@ -207,6 +213,8 @@ impl TaskType {
             TaskType::nats_kv_store(c) => &c.name,
             TaskType::ai_completion(c) => &c.name,
             TaskType::mcp_tool(c) => &c.name,
+            TaskType::mcp_resource(c) => &c.name,
+            TaskType::mcp_prompt(c) => &c.name,
             TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
             TaskType::oci_sync(c) => &c.name,
@@ -244,6 +252,8 @@ impl TaskType {
             TaskType::nats_kv_store(c) => c.depends_on.as_ref(),
             TaskType::ai_completion(c) => c.depends_on.as_ref(),
             TaskType::mcp_tool(c) => c.depends_on.as_ref(),
+            TaskType::mcp_resource(c) => c.depends_on.as_ref(),
+            TaskType::mcp_prompt(c) => c.depends_on.as_ref(),
             TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
             TaskType::oci_sync(c) => c.depends_on.as_ref(),
@@ -438,6 +448,17 @@ pub struct McpServerOptions {
     /// Optional auth provider configuration for user identity resolution.
     /// Shared across all `mcp_tool` flows on this worker.
     pub auth: Option<flowgen_core::auth::AuthConfig>,
+    /// URI scheme used when auto-generating `mcp_resource` URIs of the form
+    /// `<scheme>://<flow_name>/<name>`. White-label deployments override
+    /// this (e.g. `acme`) so URIs emitted to LLM clients carry the
+    /// deployment's brand instead of `flowgen`.
+    #[serde(default = "default_resource_uri_scheme")]
+    pub resource_uri_scheme: String,
+}
+
+/// Default scheme for auto-generated MCP resource URIs.
+fn default_resource_uri_scheme() -> String {
+    "flowgen".to_string()
 }
 
 /// Default AI gateway port.

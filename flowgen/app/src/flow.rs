@@ -163,6 +163,12 @@ pub enum Error {
     /// Error in MCP tool processor task.
     #[error(transparent)]
     McpToolProcessor(#[from] flowgen_mcp::processor::Error),
+    /// Error in MCP resource processor task.
+    #[error(transparent)]
+    McpResourceProcessor(#[from] flowgen_mcp::resource::processor::Error),
+    /// Error in MCP prompt processor task.
+    #[error(transparent)]
+    McpPromptProcessor(#[from] flowgen_mcp::prompt::processor::Error),
     /// Error in NATS KV store task.
     #[error(transparent)]
     NatsKvStore(#[from] flowgen_nats::jetstream::kv_store::Error),
@@ -188,7 +194,7 @@ pub enum Error {
     #[error("Flow cannot be initialized as http_server is not enabled")]
     HttpServerNotEnabled,
     /// Flow cannot be initialized because MCP server is not enabled.
-    #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool tasks.")]
+    #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool/mcp_resource/mcp_prompt tasks.")]
     McpServerNotEnabled,
     /// Flow cannot be initialized because AI gateway server is not enabled.
     #[error("Flow cannot be initialized as ai_gateway is not configured. Add worker.ai_gateway to config or remove llm_proxy tasks.")]
@@ -303,10 +309,14 @@ impl TaskRegistryBuilder {
         let mut task_descriptors = Vec::with_capacity(task_count);
 
         for (idx, task_type) in tasks_config.iter().enumerate() {
-            // Determine blocking status (webhooks and mcp_tool tasks are blocking).
+            // Blocking setup tasks (webhooks, MCP registrations, LLM proxy).
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_)
+                    | TaskType::mcp_tool(_)
+                    | TaskType::mcp_resource(_)
+                    | TaskType::mcp_prompt(_)
+                    | TaskType::llm_proxy(_)
             );
 
             let input_rx = if idx > 0 {
@@ -495,7 +505,11 @@ impl TaskRegistryBuilder {
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let is_blocking = matches!(
                 task_type,
-                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_)
+                    | TaskType::mcp_tool(_)
+                    | TaskType::mcp_resource(_)
+                    | TaskType::mcp_prompt(_)
+                    | TaskType::llm_proxy(_)
             );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
@@ -582,14 +596,18 @@ impl Flow {
         let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
             matches!(
                 task,
-                TaskType::http_endpoint(_) | TaskType::mcp_tool(_) | TaskType::llm_proxy(_)
+                TaskType::http_endpoint(_)
+                    | TaskType::mcp_tool(_)
+                    | TaskType::mcp_resource(_)
+                    | TaskType::mcp_prompt(_)
+                    | TaskType::llm_proxy(_)
             )
         });
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook, mcp_tool, or llm_proxy); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (webhook, MCP registration, or llm_proxy); `required_leader_election` flag will be ignored.",
                     self.config.flow.name
                 );
             }
@@ -619,13 +637,13 @@ impl Flow {
             return Err(Error::HttpServerNotEnabled);
         }
 
-        // Validate: Flow with mcp_tool tasks requires MCP server to be configured.
-        let has_mcp_tasks = self
-            .config
-            .flow
-            .tasks
-            .iter()
-            .any(|task| matches!(task, TaskType::mcp_tool(_)));
+        // Validate: any MCP registration task requires the MCP server.
+        let has_mcp_tasks = self.config.flow.tasks.iter().any(|task| {
+            matches!(
+                task,
+                TaskType::mcp_tool(_) | TaskType::mcp_resource(_) | TaskType::mcp_prompt(_)
+            )
+        });
 
         if has_mcp_tasks && self.mcp_server.is_none() {
             return Err(Error::McpServerNotEnabled);
@@ -1754,6 +1772,44 @@ async fn spawn_task(
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::mcp_resource(config) => {
+            let config = Arc::new(config);
+            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
+            // mcp_resource emits no events; drop the pipeline sender.
+            drop(tx);
+            tokio::spawn(
+                async move {
+                    let builder = flowgen_mcp::resource::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context)
+                        .mcp_server(mcp_server);
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::mcp_prompt(config) => {
+            let config = Arc::new(config);
+            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
+            // mcp_prompt emits no events; drop the pipeline sender.
+            drop(tx);
+            tokio::spawn(
+                async move {
+                    let builder = flowgen_mcp::prompt::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context)
+                        .mcp_server(mcp_server);
                     builder.build().await?.run().await?;
                     Ok(())
                 }

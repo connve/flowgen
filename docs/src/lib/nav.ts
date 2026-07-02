@@ -118,7 +118,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Overview', href: '/ai' },
 			{ title: 'AI Completion', href: '/ai/completion' },
 			{ title: 'AI Gateway', href: '/ai/gateway' },
-			{ title: 'MCP Tools', href: '/ai/mcp' }
+			{ title: 'MCP', href: '/ai/mcp' }
 		]
 	},
 	{

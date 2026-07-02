@@ -32,7 +32,7 @@ Total elapsed: about 15 minutes.
 
 Every background task sleeps a random duration (up to `initial_backoff`) before its first initialization attempt. This staggers connections across flows and replicas to avoid thundering-herd login storms on external services (e.g. Salesforce OAuth, database connection pools). The jitter is automatic and requires no configuration.
 
-Blocking tasks (`http_endpoint`, `mcp_tool`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
+Blocking tasks (`http_endpoint`, `mcp_tool`, `mcp_resource`, `mcp_prompt`, `ai_gateway`) and `generate` tasks skip the jitter — they must bind or fire on schedule immediately.
 
 ## Two patterns
 

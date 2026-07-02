@@ -4,6 +4,61 @@
 
 ### Features
 
+- **MCP resources, prompts, and argument completion.** Three new
+  task types round out flowgen's MCP surface beyond the existing
+  `mcp_tool`: `mcp_resource` exposes curated read-only content
+  (schemas, glossaries, configmap-backed docs) at either fixed URIs
+  or RFC 6570 URI templates whose `{param}` bindings are rendered by
+  Handlebars per read; `mcp_prompt` publishes slash-command
+  templates with typed arguments (required/optional, defaults,
+  multi-message few-shot form) that MCP clients like Claude Desktop
+  surface in their prompt palette. `completion/complete` serves
+  argument autocomplete for both, backed either by an inline
+  `values: [...]` list or a loader-backed file (`resource:
+  "completions/x.txt"`, one value per line, `#` comments and blanks
+  skipped). The shared `Completion` enum and `parse_completion_lines`
+  helper live in the new `flowgen_mcp::completion` module so both
+  task types stay in sync without cross-module coupling.
+
+  The MCP server now hosts a long-lived SSE stream on `GET
+  <path>`; connecting clients receive an `Mcp-Session-Id` header
+  and get pushed `notifications/resources/list_changed` and
+  `notifications/prompts/list_changed` whenever a flow registers or
+  hot-reloads MCP entries. Broadcast is non-blocking (`try_send`
+  with lazy eviction of sessions whose receiver dropped) and runs
+  outside the dispatch-table shard lock so notification fan-out
+  never blocks registration. Auto-generated resource URIs use a
+  configurable `worker.mcp_server.resource_uri_scheme` (default
+  `flowgen`) — white-label deployments override it (`acme`,
+  `customer_x`, etc.) so LLM-visible identifiers carry the
+  deployment's brand instead of leaking `flowgen://` into every
+  cited resource. Users can still set an explicit `uri:` or
+  `uri_template:` per task to override the auto form entirely
+  (`https://docs.example.com/api.md` for genuinely public URLs,
+  custom schemes for template patterns). `deregister_flow_all`
+  replaces `HttpServer::deregister_flow` in the reconciler so hot
+  reload sweeps every extras-backed table (resources, templates,
+  prompts) together and emits notifications only when a table
+  actually lost an entry (`retain_and_count` helper counts inside
+  the atomic retain closure to close the len-before/len-after race
+  window).
+
+  Wire layer: replaced the last preexisting `serde_json::json!()`
+  call sites in `flowgen/mcp/src/server.rs` with `Serialize` structs
+  (`InitializeResult`, `ToolListEntry`, `ResourceListEntry`,
+  `ResourceTemplateListEntry`, `ResourceContent`, `PromptListEntry`,
+  `PromptMessageWire`, `CompleteResult`, and their result envelopes),
+  and made `json_rpc_response` generic over any `T: Serialize` so
+  handlers no longer produce untyped `Value`s. Error surface
+  extended with typed variants for every JSON-RPC error path
+  (`UnknownResourceUri`, `UnknownPrompt`, `MissingPromptArgument`,
+  `ConcreteBodyIsTemplate`, `TemplateBodyIsConcrete`,
+  `ResourceTemplateRender`, `PromptMessageRender`,
+  `SseResponseBuild`, `SessionIdEncoding`, plus per-registration
+  `ResourceUriCollision` / `PromptNameCollision`) instead of ad-hoc
+  `format!` strings, so callers get structured errors and the log
+  line matches the wire message exactly.
+
 - **AI gateway tool-use passthrough.** New `tool_passthrough:
   bool` field on the `ai_completion` task config (default
   `false`). When set, the processor bypasses rig's agent loop and

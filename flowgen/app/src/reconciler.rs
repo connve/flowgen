@@ -399,7 +399,8 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
         http_server.deregister_flow(flow_name);
     }
     if let Some(mcp_server) = &ctx.mcp_server {
-        mcp_server.deregister_flow(flow_name);
+        // Bulk-clears tools, resources, and resource templates in one pass.
+        flowgen_mcp::server::deregister_flow_all(mcp_server, flow_name);
     }
     if let Some(ai_gateway_server) = &ctx.ai_gateway_server {
         ai_gateway_server.deregister_flow(flow_name);
