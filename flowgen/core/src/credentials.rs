@@ -54,6 +54,30 @@ pub struct BasicAuth {
     pub password: String,
 }
 
+impl HttpCredentials {
+    /// Returns the value for an outgoing `Authorization` header, or `None`
+    /// when no credentials are set.
+    ///
+    /// Bearer wins over Basic when both are present, matching HTTP semantics
+    /// (a single request carries one `Authorization` header).
+    ///
+    /// Used by transports that expose raw header injection rather than a
+    /// reqwest `RequestBuilder`, so basic-auth encoding is not re-implemented
+    /// per call site.
+    pub fn authorization_header(&self) -> Option<String> {
+        use base64::Engine;
+        match (&self.bearer_auth, &self.basic_auth) {
+            (Some(token), _) => Some(format!("Bearer {token}")),
+            (None, Some(basic)) => {
+                let raw = format!("{}:{}", basic.username, basic.password);
+                let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+                Some(format!("Basic {encoded}"))
+            }
+            (None, None) => None,
+        }
+    }
+}
+
 /// Loads and parses HTTP credentials from a JSON file.
 pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error> {
     let content = tokio::fs::read_to_string(path)
@@ -66,4 +90,51 @@ pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error
         path: path.display().to_string(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorization_header_bearer() {
+        let creds = HttpCredentials {
+            bearer_auth: Some("tok".to_string()),
+            basic_auth: None,
+        };
+        assert_eq!(creds.authorization_header().as_deref(), Some("Bearer tok"));
+    }
+
+    #[test]
+    fn authorization_header_basic() {
+        let creds = HttpCredentials {
+            bearer_auth: None,
+            basic_auth: Some(BasicAuth {
+                username: "Aladdin".to_string(),
+                password: "open sesame".to_string(),
+            }),
+        };
+        assert_eq!(
+            creds.authorization_header().as_deref(),
+            Some("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+        );
+    }
+
+    #[test]
+    fn authorization_header_bearer_wins() {
+        let creds = HttpCredentials {
+            bearer_auth: Some("tok".to_string()),
+            basic_auth: Some(BasicAuth {
+                username: "u".to_string(),
+                password: "p".to_string(),
+            }),
+        };
+        assert_eq!(creds.authorization_header().as_deref(), Some("Bearer tok"));
+    }
+
+    #[test]
+    fn authorization_header_none() {
+        let creds = HttpCredentials::default();
+        assert_eq!(creds.authorization_header(), None);
+    }
 }

@@ -213,6 +213,37 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
+// --- Pipeline event payload ---
+
+/// Payload the AI gateway server writes into `event.data` before
+/// dispatching an incoming chat-completion into the flow pipeline.
+///
+/// The flat `prompt` / `system_prompt` shape stays canonical for
+/// legacy non-passthrough flows. `messages` / `tools` / `tool_choice`
+/// carry the full OpenAI-shape request when the client sends tools,
+/// so an `ai_completion` task in tool-passthrough mode can rebuild
+/// the upstream request without loss. They are skipped on the wire
+/// when absent so a tool-less request doesn't pump a redundant
+/// message list through Rhai / template rendering.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPayload<'a> {
+    pub prompt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<&'a str>,
+    pub model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<&'a [Message]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<&'a [ToolDefinition]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<&'a serde_json::Value>,
+}
+
 // --- OpenAI response types (non-streaming) ---
 
 /// OpenAI chat completion response.
@@ -294,11 +325,11 @@ pub struct Choice {
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     /// Tokens consumed by the prompt.
-    pub prompt_tokens: u32,
+    pub prompt_tokens: u64,
     /// Tokens generated in the completion.
-    pub completion_tokens: u32,
+    pub completion_tokens: u64,
     /// Total tokens used.
-    pub total_tokens: u32,
+    pub total_tokens: u64,
 }
 
 // --- OpenAI streaming types ---

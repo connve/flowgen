@@ -647,9 +647,15 @@ impl App {
                     ),
                     None => None,
                 };
+                let extras = match ai_config {
+                    Some(c) => flowgen_ai_agent::ai_gateway::server::AiGatewayExtras {
+                        max_body_bytes: c.max_body_bytes,
+                    },
+                    None => flowgen_ai_agent::ai_gateway::server::AiGatewayExtras::default(),
+                };
                 let server = flowgen_core::http_server::HttpServer::<
                     flowgen_ai_agent::ai_gateway::server::AiGatewayDispatcher,
-                >::new(path)
+                >::new_with_extras(path, extras)
                 .with_credentials_path(credentials_path)
                 .with_auth_provider(auth_provider);
                 Some(Arc::new(server))

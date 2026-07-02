@@ -234,7 +234,10 @@ mod tests {
     }
 
     fn test_ai_gateway_server() -> Arc<AiGatewayServer> {
-        Arc::new(AiGatewayServer::new("/v1".to_string()))
+        Arc::new(AiGatewayServer::new_with_extras(
+            "/v1".to_string(),
+            Default::default(),
+        ))
     }
 
     #[test]

@@ -23,5 +23,14 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        # Ignored advisories are DoS bugs in `quick-xml < 0.41` reached
+        # transitively via `object_store` (S3/GCS XML parsing). No released
+        # `object_store` uses `quick-xml >= 0.41` yet; upstream tracking is
+        # apache/arrow-rs-object-store#785 (bump PR) and #786 (RUSTSEC
+        # tracking issue). Remove the flags once `object_store` publishes
+        # a release depending on `quick-xml >= 0.41`.
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
 

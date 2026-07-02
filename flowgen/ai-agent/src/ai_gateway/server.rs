@@ -34,7 +34,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::error;
 
 /// Default port for the AI gateway server.
 pub const DEFAULT_AI_GATEWAY_PORT: u16 = 3002;
@@ -93,6 +93,26 @@ impl HasFlowName for LlmProxyRegistration {
     }
 }
 
+/// Default AI gateway request body limit. Sized for 1 M-token
+/// prompts with tool schemas and multi-turn histories.
+pub const DEFAULT_AI_GATEWAY_MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
+
+/// Worker-level dispatcher tuning knobs. Kept small so the framework
+/// contract stays generic.
+#[derive(Clone, Debug)]
+pub struct AiGatewayExtras {
+    /// Maximum inbound request body size, in bytes.
+    pub max_body_bytes: usize,
+}
+
+impl Default for AiGatewayExtras {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: DEFAULT_AI_GATEWAY_MAX_BODY_BYTES,
+        }
+    }
+}
+
 /// Dispatcher for AI gateway traffic.
 ///
 /// Wires `POST <path>/chat/completions` and `GET <path>/models` and routes
@@ -101,15 +121,17 @@ pub struct AiGatewayDispatcher;
 
 impl Dispatcher for AiGatewayDispatcher {
     type Registration = LlmProxyRegistration;
-    type Extras = ();
+    type Extras = AiGatewayExtras;
 
     fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
         let prefix = state.path.trim_end_matches('/').to_string();
         let chat_route = format!("{prefix}/chat/completions");
         let models_route = format!("{prefix}/models");
+        let body_limit = state.extras.max_body_bytes;
         Router::new()
             .route(&chat_route, post(dispatch_chat_completions))
             .route(&models_route, get(list_models))
+            .layer(axum::extract::DefaultBodyLimit::max(body_limit))
             .with_state(state)
     }
 }
@@ -135,7 +157,9 @@ struct ModelEntry {
 
 /// Returns the list of currently-registered gateway names in the OpenAI
 /// models schema.
-async fn list_models(State(state): State<DispatchState<LlmProxyRegistration>>) -> Response {
+async fn list_models(
+    State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
+) -> Response {
     let created = chrono::Utc::now().timestamp();
     let data = state
         .table
@@ -158,7 +182,7 @@ async fn list_models(State(state): State<DispatchState<LlmProxyRegistration>>) -
 /// registration, splits on the first `/`, and dispatches to the matching
 /// gateway with the downstream-model portion of `model`.
 async fn dispatch_chat_completions(
-    State(state): State<DispatchState<LlmProxyRegistration>>,
+    State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
     headers: HeaderMap,
     axum::Json(request): axum::Json<ChatCompletionRequest>,
 ) -> Response {
@@ -222,21 +246,38 @@ async fn dispatch_chat_completions(
     let created = chrono::Utc::now().timestamp();
     let is_stream = request.stream;
 
-    // Preserve the flat prompt/system_prompt shape for existing
-    // non-passthrough flows, and pass the full OpenAI-shape payload
-    // alongside so a tool-passthrough `ai_completion` can reach for
-    // `messages` / `tools` / `tool_choice` without losing information.
-    let data = serde_json::json!({
-        "prompt": prompt,
-        "system_prompt": system_prompt,
-        "model": downstream_model,
-        "temperature": request.temperature,
-        "max_tokens": request.max_tokens,
-        "stream": is_stream,
-        "messages": request.messages,
-        "tools": request.tools,
-        "tool_choice": request.tool_choice,
-    });
+    // Attach the full OpenAI-shape payload only when the client
+    // actually sent `tools`. Pumping the raw message list into
+    // event.data on every request pushes flows over the Rhai
+    // template renderer's expression-size limit.
+    let client_sent_tools = matches!(&request.tools, Some(t) if !t.is_empty());
+    let payload = crate::ai_gateway::config::EventPayload {
+        prompt: &prompt,
+        system_prompt: system_prompt.as_deref(),
+        model: &downstream_model,
+        temperature: request.temperature,
+        max_tokens: request.max_tokens,
+        stream: is_stream,
+        messages: match client_sent_tools {
+            true => Some(request.messages.as_slice()),
+            false => None,
+        },
+        tools: match (client_sent_tools, request.tools.as_deref()) {
+            (true, Some(t)) => Some(t),
+            _ => None,
+        },
+        tool_choice: match client_sent_tools {
+            true => request.tool_choice.as_ref(),
+            false => None,
+        },
+    };
+    let data = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, "Failed to serialize AI gateway event payload");
+            return DispatchError::PayloadSerialization { source: e }.into_response();
+        }
+    };
 
     let mut meta = serde_json::Map::new();
     if let Some(ref ctx) = user_context {
@@ -478,12 +519,6 @@ async fn dispatch_streaming(
         .await
         .map_err(|source| DispatchError::SendMessage { source })?;
 
-    info!(
-        gateway = %registration.config.name,
-        correlation_id = %correlation_id,
-        "Streaming AI gateway request accepted"
-    );
-
     let registry = Arc::clone(&registration.response_registry);
     let cid = correlation_id.clone();
     let ack_timeout = registration.config.ack_timeout;
@@ -689,6 +724,11 @@ enum DispatchError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to serialize gateway event payload: {source}")]
+    PayloadSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// OpenAI-compatible error response body.
@@ -723,7 +763,8 @@ impl DispatchError {
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed
             | DispatchError::FlowError { .. }
-            | DispatchError::MalformedToolCalls { .. } => "server_error",
+            | DispatchError::MalformedToolCalls { .. }
+            | DispatchError::PayloadSerialization { .. } => "server_error",
         }
     }
 }
@@ -744,7 +785,8 @@ impl IntoResponse for DispatchError {
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed
-            | DispatchError::MalformedToolCalls { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            | DispatchError::MalformedToolCalls { .. }
+            | DispatchError::PayloadSerialization { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             DispatchError::FlowError { .. } => StatusCode::BAD_GATEWAY,
         };
         let body = OpenAiErrorResponse {

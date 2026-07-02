@@ -1815,6 +1815,7 @@ dependencies = [
  "flowgen_core",
  "futures-util",
  "handlebars",
+ "http",
  "humantime-serde",
  "rig-core",
  "rig-vertexai",
@@ -1842,6 +1843,7 @@ dependencies = [
  "async-nats",
  "async-trait",
  "axum 0.8.8",
+ "base64",
  "bincode",
  "bytes",
  "chrono",
@@ -5680,9 +5682,9 @@ checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
 
 [[package]]
 name = "quick-xml"
-version = "0.39.2"
+version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
  "serde",

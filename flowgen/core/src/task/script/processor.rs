@@ -450,6 +450,7 @@ impl crate::task::runner::Runner for Processor {
         engine.set_max_string_size(limits.max_string_size);
         engine.set_max_array_size(limits.max_array_size);
         engine.set_max_map_size(limits.max_map_size);
+        engine.set_max_expr_depths(limits.max_expr_depth, limits.max_function_expr_depth);
 
         // Route Rhai print() and debug() through tracing so output inherits
         // the current span context (flow, task, task_id, task_type).

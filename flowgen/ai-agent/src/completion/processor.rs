@@ -81,6 +81,12 @@ pub enum Error {
     },
     #[error("Failed to connect to MCP server at {url}: {reason}")]
     McpConnection { url: String, reason: String },
+    #[error("Invalid Authorization header for MCP server at {url}: {source}")]
+    McpAuthHeader {
+        url: String,
+        #[source]
+        source: http::header::InvalidHeaderValue,
+    },
     #[error(
         "Client registry type mismatch — same provider/model/credentials key used with incompatible client types"
     )]
@@ -136,17 +142,45 @@ pub struct CompletionChunk {
     /// finish_reason to `tool_calls`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<crate::ai_gateway::config::ToolCall>,
+    /// Reasoning text; when set, `text` is empty on that chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Token usage statistics for completions.
+///
+/// Fields carry OpenAI wire names for a straight forward through
+/// `ai_gateway::config::Usage` to the gateway response. `total_tokens`
+/// may be greater than `prompt_tokens + completion_tokens` because
+/// some providers count cached-input separately.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionUsage {
     /// Number of tokens in the prompt.
-    pub prompt_tokens: usize,
+    pub prompt_tokens: u64,
     /// Number of tokens in the completion.
-    pub completion_tokens: usize,
+    pub completion_tokens: u64,
     /// Total tokens used.
-    pub total_tokens: usize,
+    pub total_tokens: u64,
+}
+
+impl From<rig::completion::Usage> for CompletionUsage {
+    fn from(u: rig::completion::Usage) -> Self {
+        Self {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.total_tokens,
+        }
+    }
+}
+
+impl From<CompletionUsage> for crate::ai_gateway::config::Usage {
+    fn from(u: CompletionUsage) -> Self {
+        Self {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        }
+    }
 }
 
 /// API credentials for AI providers.
@@ -232,6 +266,15 @@ async fn build_agent_client(
 
     if let Some(handle) = tool_server_handle {
         builder = builder.tool_server_handle(handle);
+    }
+
+    if let Some(thinking) = &config.thinking {
+        let params = thinking
+            .to_additional_params(&config.provider)
+            .map_err(|source| Error::SerdeJson { source })?;
+        if let Some(params) = params {
+            builder = builder.additional_params(params);
+        }
     }
 
     builder
@@ -368,16 +411,16 @@ impl EventHandler {
                 return self.send_response(response, completion_tx_arc).await;
             }
 
-            let completion_text = client
+            let completion = client
                 .complete(&rendered_prompt, rendered_system_prompt.as_deref())
                 .await
                 .map_err(|source| Error::AgentClient { source })?;
 
             let response = CompletionResponse {
-                text: completion_text,
+                text: completion.text,
                 model: self.config.model.clone(),
                 provider: format!("{:?}", self.config.provider),
-                usage: None,
+                usage: Some(completion.usage.into()),
                 tool_calls: Vec::new(),
             };
 
@@ -538,6 +581,7 @@ impl EventHandler {
                         is_final: false,
                         index,
                         tool_calls: Vec::new(),
+                        reasoning: None,
                     };
                     let payload = serde_json::to_value(&chunk)
                         .map_err(|source| Error::SerdeJson { source })?;
@@ -567,6 +611,7 @@ impl EventHandler {
             is_final: true,
             index,
             tool_calls: collected_tool_calls,
+            reasoning: None,
         };
         let payload =
             serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
@@ -665,6 +710,7 @@ impl EventHandler {
                             is_final: false,
                             index,
                             tool_calls: Vec::new(),
+                            reasoning: None,
                         };
                         let data = serde_json::to_value(&chunk_event)
                             .map_err(|source| Error::SerdeJson { source })?;
@@ -687,7 +733,33 @@ impl EventHandler {
                             .map_err(|source| Error::SendMessage { source })?;
                         index += 1;
                     }
-                    AgentChunk::Final(text) => {
+                    AgentChunk::Reasoning(text) => {
+                        let chunk_event = CompletionChunk {
+                            text: String::new(),
+                            is_final: false,
+                            index,
+                            tool_calls: Vec::new(),
+                            reasoning: Some(text),
+                        };
+                        let data = serde_json::to_value(&chunk_event)
+                            .map_err(|source| Error::SerdeJson { source })?;
+
+                        let e = EventBuilder::new()
+                            .data(EventData::Json(data))
+                            .subject(self.config.name.clone())
+                            .task_id(self.task_id)
+                            .task_type(self.task_type)
+                            .build()
+                            .map_err(|source| Error::EventBuilder { source })?;
+
+                        e.send_silent(self.tx.as_ref())
+                            .await
+                            .map_err(|source| Error::SendMessage { source })?;
+                        index += 1;
+                    }
+                    AgentChunk::Final { text, usage: _ } => {
+                        // Streaming wire chunk carries no usage field yet;
+                        // aggregated usage is dropped until it is added.
                         accumulated_text = text;
                     }
                     AgentChunk::Error(err) => {
@@ -703,6 +775,7 @@ impl EventHandler {
                 is_final: true,
                 index,
                 tool_calls: Vec::new(),
+                reasoning: None,
             };
             let data =
                 serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
@@ -853,8 +926,20 @@ impl flowgen_core::task::runner::Runner for Processor {
                             url: mcp_config.url.clone(),
                             source,
                         })?;
-                    if let Some(bearer_token) = creds.bearer_auth {
-                        transport_config = transport_config.auth_header(bearer_token);
+                    // Route through custom_headers rather than auth_header:
+                    // rmcp's auth_header wraps its value in `Bearer <...>`,
+                    // which would double-prefix Basic credentials.
+                    if let Some(header_value) = creds.authorization_header() {
+                        let value =
+                            http::HeaderValue::from_str(&header_value).map_err(|source| {
+                                Error::McpAuthHeader {
+                                    url: mcp_config.url.clone(),
+                                    source,
+                                }
+                            })?;
+                        let mut headers = std::collections::HashMap::new();
+                        headers.insert(http::header::AUTHORIZATION, value);
+                        transport_config = transport_config.custom_headers(headers);
                     }
                 }
 
@@ -1071,6 +1156,7 @@ mod tests {
             is_final: false,
             index: 0,
             tool_calls: Vec::new(),
+            reasoning: None,
         };
 
         let json = serde_json::to_string(&chunk).unwrap();
@@ -1143,6 +1229,7 @@ mod tests {
             is_final: false,
             index: 3,
             tool_calls: Vec::new(),
+            reasoning: None,
         };
         let v = serde_json::to_value(&chunk).unwrap();
         assert_eq!(v["text"], "partial");
@@ -1157,6 +1244,7 @@ mod tests {
             is_final: true,
             index: 10,
             tool_calls: Vec::new(),
+            reasoning: None,
         };
         let v = serde_json::to_value(&chunk).unwrap();
         assert_eq!(v["is_final"], true);
@@ -1170,6 +1258,7 @@ mod tests {
             is_final: false,
             index: 0,
             tool_calls: Vec::new(),
+            reasoning: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let back: CompletionChunk = serde_json::from_str(&json).unwrap();

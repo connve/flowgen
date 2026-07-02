@@ -33,7 +33,13 @@ fi
 # Check if cargo-audit is installed
 if command -v cargo-audit >/dev/null 2>&1; then
     echo "Running cargo audit..."
-    cargo audit
+    # Ignored: DoS in `quick-xml < 0.41` reached transitively via
+    # `object_store` (S3/GCS XML parsing). No released `object_store`
+    # uses `quick-xml >= 0.41` yet; upstream tracking is
+    # apache/arrow-rs-object-store#785 and #786.
+    cargo audit \
+        --ignore RUSTSEC-2026-0194 \
+        --ignore RUSTSEC-2026-0195
     if [ $? -ne 0 ]; then
         echo ""
         echo "Error: Security vulnerabilities found. Please fix them before committing."

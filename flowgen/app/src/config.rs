@@ -454,6 +454,16 @@ fn default_ai_gateway_path() -> String {
     "/v1".to_string()
 }
 
+/// Default max request body size for the AI gateway (128 MiB). Sized for
+/// modern 1 M-token context windows plus tool schemas and history —
+/// roughly 4 bytes per token after JSON overhead means a full 1 M-token
+/// prompt lands around 4 MB; the 128 MiB ceiling absorbs multi-turn
+/// histories and worst-case tool-payload growth without needing per-flow
+/// overrides.
+fn default_ai_gateway_max_body_bytes() -> usize {
+    128 * 1024 * 1024
+}
+
 /// AI gateway server configuration options.
 ///
 /// Exposes registered AI gateway flows as a single OpenAI-compatible endpoint.
@@ -479,6 +489,12 @@ pub struct AiGatewayOptions {
     /// Optional auth provider configuration for user identity resolution.
     /// Shared across all AI gateway flows on this worker.
     pub auth: Option<flowgen_core::auth::AuthConfig>,
+    /// Maximum request body size in bytes. Defaults to 128 MiB, which
+    /// covers 1 M-token prompts with tool schemas and multi-turn
+    /// histories. Requests over this limit are rejected with
+    /// `413 Payload Too Large`.
+    #[serde(default = "default_ai_gateway_max_body_bytes")]
+    pub max_body_bytes: usize,
 }
 
 /// Default webhook HTTP server port.

@@ -98,6 +98,7 @@ regex = { version = "1.12" }
 uuid = { version = "1", features = ["v7"] }
 axum = { version = "0.8" }
 base64 = { version = "0.22" }
+http = { version = "1.4" }
 bb8 = { version = "0.9" }
 bb8-tiberius = { version = "0.16" }
 async-trait = { version = "0.1" }

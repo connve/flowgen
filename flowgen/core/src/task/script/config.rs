@@ -93,6 +93,12 @@ fn default_max_array_size() -> usize {
 fn default_max_map_size() -> usize {
     1_000_000
 }
+fn default_max_expr_depth() -> usize {
+    256
+}
+fn default_max_function_expr_depth() -> usize {
+    128
+}
 
 /// Rhai engine resource limits.
 ///
@@ -118,6 +124,18 @@ pub struct RhaiLimits {
     /// Maximum number of entries in a map.
     #[serde(default = "default_max_map_size")]
     pub max_map_size: usize,
+    /// Maximum AST nesting depth for top-level script expressions.
+    /// Rhai's default (64 in release) rejects deeply-nested JSON
+    /// literals during `parse_json`; anything sourced from a real
+    /// LLM chat payload (opencode / Claude Desktop tool schemas)
+    /// exceeds that on the first request. The higher default here
+    /// still bounds runaway recursion.
+    #[serde(default = "default_max_expr_depth")]
+    pub max_expr_depth: usize,
+    /// Maximum AST nesting depth for expressions inside Rhai
+    /// functions defined by the script.
+    #[serde(default = "default_max_function_expr_depth")]
+    pub max_function_expr_depth: usize,
 }
 
 impl Default for RhaiLimits {
@@ -128,6 +146,8 @@ impl Default for RhaiLimits {
             max_string_size: default_max_string_size(),
             max_array_size: default_max_array_size(),
             max_map_size: default_max_map_size(),
+            max_expr_depth: default_max_expr_depth(),
+            max_function_expr_depth: default_max_function_expr_depth(),
         }
     }
 }

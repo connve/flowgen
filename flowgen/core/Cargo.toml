@@ -51,6 +51,7 @@ tracing-subscriber = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde_yaml = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 

@@ -14,6 +14,7 @@ use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use rig::agent::{Agent, MultiTurnStreamItem};
 use rig::client::CompletionClient as RigCompletionClientTrait;
+use rig::completion::message::{Reasoning, ReasoningContent};
 use rig::completion::{
     CompletionError, CompletionModel, CompletionRequest, Document, Prompt, Usage,
 };
@@ -31,13 +32,34 @@ use tokio::sync::RwLock;
 /// Type alias for dynamic context storage (vector store indexes with sample sizes).
 type DynamicContext = Arc<RwLock<Vec<(usize, Arc<dyn VectorStoreIndexDyn + Send + Sync>)>>>;
 
+/// Flattens `Reasoning` text/summary blocks; returns `None` when only
+/// opaque payloads (encrypted/redacted) are present.
+fn flatten_reasoning(reasoning: &Reasoning) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for block in &reasoning.content {
+        match block {
+            ReasoningContent::Text { text, .. } => parts.push(text),
+            ReasoningContent::Summary(text) => parts.push(text),
+            _ => {}
+        }
+    }
+    match parts.as_slice() {
+        [] => None,
+        _ => Some(parts.join("\n")),
+    }
+}
+
 /// Streaming chunk from completion.
 #[derive(Debug, Clone)]
 pub enum CompletionChunk {
     /// Text chunk from the stream.
     Text(String),
-    /// Final response with complete text.
-    Final(String),
+    /// Reasoning/thinking text; full blocks and deltas collapsed to a
+    /// single string, signatures dropped.
+    Reasoning(String),
+    /// Final response with the complete text and provider-reported
+    /// token usage. `Usage` is zero-filled when the provider omits it.
+    Final { text: String, usage: Usage },
     /// Error during streaming.
     Error(String),
 }
@@ -502,6 +524,15 @@ struct AgentParams<'a> {
     additional_params: &'a Option<Value>,
 }
 
+/// Non-passthrough completion output carrying rig-reported token usage
+/// alongside the text. Reserving a struct here lets the processor and
+/// the gateway forward `Usage` end-to-end without any per-call type
+/// gymnastics or reaching into rig-native types.
+pub struct CompletionOutput {
+    pub text: String,
+    pub usage: Usage,
+}
+
 /// Provider-agnostic response returned by tool-use passthrough.
 ///
 /// Drops the provider-specific `raw_response` so a single type flows
@@ -741,22 +772,29 @@ enum AgentEnum {
 }
 
 impl AgentEnum {
-    /// Prompts the agent and returns the completion.
-    async fn prompt(self, prompt: &str) -> Result<String, rig::completion::PromptError> {
+    /// Prompts the agent and returns the completion together with
+    /// rig-reported token usage. Uses rig's `extended_details()` API
+    /// so the response carries both the text and a `Usage` breakdown
+    /// instead of just the text; providers that don't report usage
+    /// return zeroed fields.
+    async fn prompt(
+        self,
+        prompt: &str,
+    ) -> Result<rig::agent::PromptResponse, rig::completion::PromptError> {
         match self {
-            Self::OpenAi(agent) => agent.prompt(prompt).await,
-            Self::OpenAiCompat(agent) => agent.prompt(prompt).await,
-            Self::Anthropic(agent) => agent.prompt(prompt).await,
-            Self::Cohere(agent) => agent.prompt(prompt).await,
-            Self::Gemini(agent) => agent.prompt(prompt).await,
-            Self::Mistral(agent) => agent.prompt(prompt).await,
-            Self::Groq(agent) => agent.prompt(prompt).await,
-            Self::Together(agent) => agent.prompt(prompt).await,
-            Self::Xai(agent) => agent.prompt(prompt).await,
-            Self::OpenRouter(agent) => agent.prompt(prompt).await,
-            Self::Perplexity(agent) => agent.prompt(prompt).await,
-            Self::HuggingFace(agent) => agent.prompt(prompt).await,
-            Self::VertexAi(agent) => agent.prompt(prompt).await,
+            Self::OpenAi(agent) => agent.prompt(prompt).extended_details().await,
+            Self::OpenAiCompat(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Anthropic(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Cohere(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Gemini(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Mistral(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Groq(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Together(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Xai(agent) => agent.prompt(prompt).extended_details().await,
+            Self::OpenRouter(agent) => agent.prompt(prompt).extended_details().await,
+            Self::Perplexity(agent) => agent.prompt(prompt).extended_details().await,
+            Self::HuggingFace(agent) => agent.prompt(prompt).extended_details().await,
+            Self::VertexAi(agent) => agent.prompt(prompt).extended_details().await,
         }
     }
 
@@ -769,16 +807,30 @@ impl AgentEnum {
         macro_rules! map_stream {
             ($agent:expr, $prompt:expr) => {{
                 let stream = $agent.stream_prompt($prompt).await;
-                Box::pin(stream.map(|item| match item {
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(text),
-                    )) => CompletionChunk::Text(text.text),
-                    Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
-                        CompletionChunk::Final(resp.response().to_string())
-                    }
-                    Err(e) => CompletionChunk::Error(e.to_string()),
-                    _ => CompletionChunk::Text(String::new()),
-                }))
+                Box::pin(
+                    stream
+                        .map(|item| match item {
+                            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                StreamedAssistantContent::Text(text),
+                            )) => Some(CompletionChunk::Text(text.text)),
+                            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                StreamedAssistantContent::Reasoning(reasoning),
+                            )) => flatten_reasoning(&reasoning).map(CompletionChunk::Reasoning),
+                            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                            )) => Some(CompletionChunk::Reasoning(reasoning)),
+                            Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
+                                Some(CompletionChunk::Final {
+                                    text: resp.response().to_string(),
+                                    usage: resp.usage(),
+                                })
+                            }
+                            Err(e) => Some(CompletionChunk::Error(e.to_string())),
+                            // Tool calls are rig-internal on this path.
+                            _ => None,
+                        })
+                        .filter_map(|item| async move { item }),
+                )
             }};
         }
 
@@ -843,7 +895,7 @@ impl AgentClient {
         &self,
         prompt: &str,
         system_prompt: Option<&str>,
-    ) -> Result<String, Error> {
+    ) -> Result<CompletionOutput, Error> {
         // Build agent on-demand to allow dynamic system prompts per request.
         let params = AgentParams {
             model: &self.model,
@@ -863,10 +915,14 @@ impl AgentClient {
 
         let agent = self.client.build_agent(&params);
 
-        agent
+        let resp = agent
             .prompt(prompt)
             .await
-            .map_err(|source| Error::CompletionRequest { source })
+            .map_err(|source| Error::CompletionRequest { source })?;
+        Ok(CompletionOutput {
+            text: resp.output,
+            usage: resp.usage,
+        })
     }
 
     /// Generates a streaming completion from a prompt with optional system prompt.
