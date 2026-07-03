@@ -1,46 +1,46 @@
+# Load Parquet files from GCS into BigQuery staging, then archive the
+# exact same files. Building an explicit URI list from `list` output
+# guarantees the same set is loaded and archived — GCS eventual
+# consistency would otherwise let a naive wildcard drop files.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
 flow:
   require_leader_election: true
   name: move_files_after_processing
   tasks:
-    # Generate triggers the flow every 5 minutes.
+
     - generate:
         name: trigger
         interval: 5m
 
-    # Object store list finds all parquet files in the source directory.
     - object_store_list:
         name: list_unprocessed_files
         path: gs://my-bucket/incoming/*.parquet
         credentials_path: /etc/gcp/credentials.json
 
-    # Build explicit file URIs from object store list results.
-    # This ensures BigQuery and archive use the exact same file list,
-    # preventing data loss from GCS eventual consistency timing issues.
+    # Reconstruct absolute GCS URIs from the list results and stash them
+    # so both BigQuery and the archive step act on the identical set.
     - script:
         name: build_file_list
         code: |
-          // Early return if no files to process.
           if event.data.files.len() == 0 {
             return ();
           }
 
-          // Extract bucket prefix from object_store_list path.
           let path_parts = event.data.path.split("/");
           let bucket = path_parts[0] + "//" + path_parts[2];
 
-          // Build full GCS URIs by combining bucket with relative file locations.
           let source_uris = [];
           for file in event.data.files {
             source_uris.push(bucket + "/" + file.location);
           }
 
-          // Store file list in context metadata for BigQuery and archive tasks.
           ctx.meta.file_count = source_uris.len();
           ctx.meta.source_uris = source_uris;
 
           event
 
-    # Load files to BigQuery staging table using explicit file list.
     - gcp_bigquery_job:
         name: load_to_bigquery
         operation: create
@@ -57,14 +57,12 @@ flow:
         create_disposition: create_if_needed
         autodetect: true
 
-    # Object store move archives the exact files that were loaded to BigQuery.
-    # Using source_files ensures atomicity - the same files loaded are archived.
+    # Archive exactly the URIs that BigQuery loaded, atomic w.r.t. the load.
     - object_store_move:
         name: archive_processed_files
         source_files: "{{event.meta.source_uris}}"
         destination: gs://my-bucket/processed/
         credentials_path: /etc/gcp/credentials.json
 
-    # Log prints the move result with file count.
     - log:
         name: print_move_result

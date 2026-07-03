@@ -1,48 +1,42 @@
+# Read a BigQuery table via the Storage Read API for high-throughput
+# parallel reads. Faster than the Query API for large tables. Results
+# arrive as Arrow RecordBatch.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
 flow:
   name: bigquery_storage_read_basic
   require_leader_election: true
   tasks:
 
-    # Generate triggers the flow once after 10 seconds.
     - generate:
         name: trigger
         interval: 10s
         count: 1
 
-    # BigQuery Storage Read API for high-throughput parallel table reads.
-    # More efficient than Query API for reading large tables (millions+ rows).
-    # Results are returned as Arrow RecordBatch for efficient columnar processing.
+    # `selected_fields` prunes columns server-side; `row_restriction`
+    # filters server-side; `max_stream_count` upper-bounds parallelism.
     - gcp_bigquery_storage_read:
         name: read_orders_table
-        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
-        # GCP project ID where the table is located
         project_id: my-project-id
-        # BigQuery dataset ID
         dataset_id: analytics
-        # BigQuery table ID
         table_id: orders
-        # Optional: Select specific columns (improves performance and reduces data transfer)
         selected_fields:
           - id
           - customer_id
           - amount
           - order_date
-        # Optional: Server-side row filtering (SQL WHERE clause without "WHERE" keyword)
         row_restriction: "order_date >= '2024-01-01'"
-        # Optional: Maximum number of parallel read streams (higher = faster for large tables)
         max_stream_count: 4
 
-    # Convert Arrow RecordBatch to JSON format for downstream processing.
     - convert:
         name: arrow_to_json
         target_format: json
 
-    # Split JSON array into individual row events for per-record processing.
     - iterate:
         name: split_rows
 
-    # Output individual row events to console for debugging and monitoring.
     - log:
         name: log
         level: info

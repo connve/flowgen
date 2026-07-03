@@ -70,12 +70,18 @@ impl Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
-            .config
+        // `content` is deferred to per-read rendering.
+        let mut for_render = (*self.config).clone();
+        let raw_content = std::mem::replace(
+            &mut for_render.content,
+            flowgen_core::resource::Source::Inline(String::new()),
+        );
+        let mut rendered = for_render
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
+        rendered.content = raw_content;
         Ok(EventHandler {
-            config: Arc::new(init_config),
+            config: Arc::new(rendered),
         })
     }
 
@@ -110,7 +116,10 @@ impl Runner for Processor {
             false => {
                 let resolved = cfg
                     .content
-                    .resolve(self.task_context.resource_loader.as_ref())
+                    .render(
+                        self.task_context.resource_loader.as_ref(),
+                        &serde_json::json!({}),
+                    )
                     .await
                     .map_err(|source| Error::ResolveContent { source })?;
                 super::super::server::ResourceBody::Concrete(resolved)

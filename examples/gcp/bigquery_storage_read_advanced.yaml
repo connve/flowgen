@@ -1,75 +1,58 @@
+# Read a historical BigQuery snapshot via Storage Read with column
+# projection, server-side row filter, sampling, and time travel.
+# Uses cross-project billing.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
 flow:
   name: bigquery_storage_read_advanced
   require_leader_election: true
   tasks:
 
-    # Generate triggers the flow once after 10 seconds.
     - generate:
         name: trigger
         interval: 10s
         count: 1
 
-    # Advanced BigQuery Storage Read demonstrating enterprise features:
-    # - Cross-project billing (data in one project, billing in another)
-    # - Time-travel queries (read historical data snapshots)
-    # - Data sampling for testing and analysis
-    # - Compression for reduced network transfer
-    # - Custom retry configuration
+    # `snapshot_time` reads the table as it existed at that timestamp.
+    # `sample_percentage` returns roughly N% of rows for testing/analysis.
     - gcp_bigquery_storage_read:
         name: read_historical_snapshot
-        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
-        # Project where the data/tables are located
         project_id: data-warehouse-project
-        # Optional: Project for creating the read session (billing project)
-        # Common in enterprises where data and billing are separated
         job_project_id: billing-project
-        # BigQuery dataset ID
         dataset_id: analytics
-        # BigQuery table ID
         table_id: transactions
-        # Optional: Select specific columns (reduces data transfer and improves performance)
         selected_fields:
           - transaction_id
           - user_id
           - amount
           - currency
           - transaction_date
-        # Optional: Server-side row filtering (SQL WHERE clause without "WHERE" keyword)
         row_restriction: "amount > 100 AND currency = 'USD'"
-        # Optional: Random sampling percentage (0.0 to 100.0) for testing/analysis
         sample_percentage: 10.0
-        # Optional: Time-travel to read table as it existed at a specific timestamp (RFC3339 format)
         snapshot_time: "2024-01-15T12:00:00Z"
-        # Optional: Maximum number of parallel read streams (higher = faster for large tables)
         max_stream_count: 8
-        # Optional: Preferred minimum number of streams (optimization hint)
         preferred_min_stream_count: 2
-        # Optional: Compression codec for network transfer ("unspecified" or "lz4")
         compression_codec: lz4
-        # Optional: Data format ("arrow" is default and preferred for columnar processing)
         data_format: arrow
-        # Optional: Custom retry configuration (overrides app-level retry config)
         retry:
           max_attempts: 5
           max_delay: "30s"
 
-    # Buffer the record batches to group them
+    # Group RecordBatches before conversion.
     - buffer:
         name: batch_records
         size: 1000
         timeout: "30s"
 
-    # Convert Arrow RecordBatch to JSON for downstream processing
     - convert:
         name: arrow_to_json
         target_format: json
 
-    # Split into individual records
     - iterate:
         name: split_rows
 
-    # Log the output
     - log:
         name: log
         level: info

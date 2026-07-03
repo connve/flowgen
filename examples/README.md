@@ -9,6 +9,7 @@ This directory contains example flows demonstrating various flowgen features and
 - **`gcp/`** - Examples for Google Cloud Platform integrations
 - **`object-store/`** - Examples for reading and writing files
 - **`cloudflare/`** - Examples for Cloudflare integrations
+- **`mcp/`** - MCP server task examples (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
 - **`salesforce/`** - Examples for Salesforce integrations
 
 ## Test Data

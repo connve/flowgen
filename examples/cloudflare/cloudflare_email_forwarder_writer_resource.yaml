@@ -1,8 +1,13 @@
+# Same as cloudflare_email_forwarder_writer.yaml but the Avro schema
+# is loaded from a resource file instead of inlined.
+#
+# Required:
+#   - NATS credentials at /etc/nats/credentials.json
+#   - resources/schemas/email_message.avsc
 flow:
   name: cloudflare_email_forwarder_writer_resource
   tasks:
 
-    # Subscribe to email forwarded events in NATS.
     - nats_jetstream_subscriber:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
@@ -20,14 +25,12 @@ flow:
         max_messages: 100
         delay: 1s
 
-    # Convert event data (JSON) to avro using external schema file.
     - convert:
         name: json_avro_converter
         target_format: avro
         schema:
           resource: "schemas/email_message.avsc"
 
-    # Write data into local or remote object store.
     - object_store_write:
         name: write_events
         path: file:///cloudflare/email

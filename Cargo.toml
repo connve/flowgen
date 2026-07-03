@@ -63,6 +63,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
     "brotli",
     "deflate",
     "charset",
+    "stream",
 ] }
 url = { version = "2.5" }
 # gitoxide — pure-Rust git implementation. HTTPS transport via reqwest with

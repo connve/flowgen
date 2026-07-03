@@ -68,12 +68,17 @@ impl Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
-            .config
+        // `template` and `messages` are deferred to per-get rendering.
+        let mut for_render = (*self.config).clone();
+        let raw_template = for_render.template.take();
+        let raw_messages = for_render.messages.take();
+        let mut rendered = for_render
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
+        rendered.template = raw_template;
+        rendered.messages = raw_messages;
         Ok(EventHandler {
-            config: Arc::new(init_config),
+            config: Arc::new(rendered),
         })
     }
 

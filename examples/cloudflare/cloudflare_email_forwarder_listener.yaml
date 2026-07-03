@@ -1,21 +1,26 @@
+# Receive forwarded emails from a Cloudflare Email Worker and republish
+# each payload to NATS. Pair with the writer flow to persist them.
+#
+# Required:
+#   - Webhook credentials at /etc/cloudflare-emails/credentials.json
+#   - NATS credentials at /etc/nats/credentials.json
 flow:
   name: cloudflare_email_forwarder_listener
   tasks:
 
-    # Receive email forwarder by Cloudflare Worker.
+    # POST /api/flowgen/workers/webhook/cloudflare/emails
     - http_endpoint:
         name: receive_requests
         credentials_path: /etc/cloudflare-emails/credentials.json
         method: POST
         endpoint: /cloudflare/emails
 
-    # Return only payload from the event.data.
+    # Cloudflare wraps the message in `payload`; unwrap before publishing.
     - script:
         name: return_payload
         code: |
           event.data.payload
 
-    # Publish event to NATS.
     - nats_jetstream_publisher:
         name: publish_events
         credentials_path: /etc/nats/credentials.json

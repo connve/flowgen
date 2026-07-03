@@ -1,0 +1,68 @@
+# Publishes read-only resources to any MCP client. Resources are
+# registration-only: each task publishes its entry at init and exits;
+# the MCP server serves resources/list, resources/templates/list and
+# resources/read directly.
+#
+# Concrete resources resolve their content once at init. Templated URIs
+# defer rendering to per-read so `{placeholder}` bindings drive the
+# output.
+#
+# Required:
+#   - MCP server enabled in worker config
+#   - Resource files referenced by content / completion sources:
+#       resources/salesforce_account_schema.json
+#       resources/mcp/api_docs.md
+#       resources/mcp/completions/account_ids.txt
+flow:
+  name: mcp_resources_examples
+  tasks:
+
+    # Inline concrete resource. URI auto-generated as
+    # <resource_uri_scheme>://mcp_resources_examples/company_glossary.
+    - mcp_resource:
+        name: company_glossary
+        description: "Internal glossary of company-specific terms."
+        mime_type: text/markdown
+        content: |
+          # Glossary
+          - ABM: Account-Based Marketing
+          - NBA: Next Best Action
+          - MRR: Monthly Recurring Revenue
+
+    # Loader-backed concrete resource. Content is read from the
+    # configured resource path so an LLM can cite field names correctly.
+    - mcp_resource:
+        name: salesforce_account_schema
+        description: "Salesforce Account SObject field schema."
+        mime_type: application/json
+        content:
+          resource: "salesforce_account_schema.json"
+
+    # Explicit-URI concrete resource. Use when the content has a real
+    # public URL the client may also open directly.
+    - mcp_resource:
+        name: internal_api_docs
+        uri: "https://docs.example.com/api.md"
+        description: "Internal API documentation (also hosted publicly)."
+        mime_type: text/markdown
+        content:
+          resource: "mcp/api_docs.md"
+
+    # Templated resource. Client calls
+    # `resources/read({uri: "flowgen://account/001Qy0abc"})`; the server
+    # binds `id=001Qy0abc` and renders `content` with `{{id}}` in scope.
+    # `parameters` attaches completion suggestions to `{id}`.
+    - mcp_resource:
+        name: account_summary
+        uri_template: "flowgen://account/{id}"
+        description: "Per-account summary keyed by Salesforce ID."
+        mime_type: text/markdown
+        content: |
+          # Account {{id}}
+
+          Summary: this is a stub rendered for account `{{id}}`.
+          Replace with a real lookup in your production flow.
+        parameters:
+          - name: id
+            completion:
+              resource: "mcp/completions/account_ids.txt"

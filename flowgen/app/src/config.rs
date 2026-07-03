@@ -221,6 +221,18 @@ impl TaskType {
         }
     }
 
+    /// Whether this task participates in the event pipeline.
+    ///
+    /// Registration-only tasks (`mcp_prompt`, `mcp_resource`) publish their
+    /// entry to the shared MCP server at init and exit — the client-facing
+    /// `prompts/get` and `resources/read` calls are served by the MCP HTTP
+    /// server, never through the flow pipeline. They therefore have no
+    /// inbound channel, no outbound channel, and no implicit dependency on
+    /// the preceding task in the flow list.
+    pub const fn has_pipeline_io(&self) -> bool {
+        !matches!(self, TaskType::mcp_prompt(_) | TaskType::mcp_resource(_))
+    }
+
     /// Returns the `depends_on` list if configured on the task.
     pub fn depends_on(&self) -> Option<&Vec<String>> {
         match self {

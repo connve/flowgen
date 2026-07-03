@@ -1,20 +1,23 @@
+# List Parquet files in a GCS bucket once at startup. Useful as a
+# discovery step before downstream tasks read or move them.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
 flow:
   require_leader_election: true
   name: list_files
   tasks:
-    # Generate triggers the flow once after 10 seconds.
+
     - generate:
         name: trigger
         interval: 10s
         count: 1
 
-    # Object store list returns metadata for all files matching the path pattern.
-    # Useful for discovering files before processing them.
+    # Returns metadata (path, size, mtime) for each match.
     - object_store_list:
         name: list_gcs_files
         path: gs://my-bucket/data/*.parquet
         credentials_path: /etc/gcp/credentials.json
 
-    # Log prints the list result with file count and metadata.
     - log:
         name: print_files

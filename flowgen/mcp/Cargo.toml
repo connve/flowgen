@@ -33,6 +33,9 @@ humantime = { workspace = true }
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { workspace = true }
+reqwest = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true

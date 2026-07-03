@@ -1,0 +1,37 @@
+# Minimal mcp_tool flow: exposes a callable tool to any MCP client.
+# A tools/call request is injected as an event, the script builds the
+# response, and the result is returned to the client.
+#
+# Required:
+#   - MCP server enabled in worker config (worker.mcp_server.enabled: true)
+flow:
+  name: mcp_tool_example
+  tasks:
+
+    # LLM-facing tool. Arguments arrive as event.data on tools/call.
+    - mcp_tool:
+        name: greet_user
+        description: "Return a personalised greeting for the given user."
+        input_schema:
+          type: object
+          properties:
+            name:
+              type: string
+              description: "Name of the user to greet."
+            greeting:
+              type: string
+              description: "Optional greeting word."
+              default: "Hello"
+          required: [name]
+
+    # Build the response payload. Return value becomes the tool result.
+    - script:
+        name: build_greeting
+        code: |
+          let greeting = event.data.greeting;
+          if greeting == () || greeting == "" {
+              greeting = "Hello";
+          }
+          #{
+              message: greeting + ", " + event.data.name + "!",
+          }

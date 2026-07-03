@@ -1,8 +1,14 @@
+# Consume forwarded emails from NATS, convert JSON → Avro with an
+# inline schema, and archive to the object store partitioned by
+# EventDate. See the `_resource` variant for the same flow with the
+# Avro schema loaded from a file.
+#
+# Required:
+#   - NATS credentials at /etc/nats/credentials.json
 flow:
   name: cloudflare_email_forwarder_writer
   tasks:
 
-    # Subscribe to email forwarded events in NATS.
     - nats_jetstream_subscriber:
         name: start_subscription
         credentials_path: /etc/nats/credentials.json
@@ -20,14 +26,14 @@ flow:
         max_messages: 100
         delay: 1s
 
-    # Convert event data (JSON) to avro.
+    # Inline Avro schema — for anything longer than a one-off, prefer
+    # the `resource:` form (see the `_resource` variant).
     - convert:
         name: json_avro_converter
         target_format: avro
         schema: |
           {"type":"record","name":"EmailMessage","fields":[{"name":"subject","type":"string","default":""},{"name":"from","type":{"type":"record","name":"EmailAddress","fields":[{"name":"email","type":"string","default":""},{"name":"name","type":"string","default":""}]}},{"name":"to","type":{"type":"array","items":"EmailAddress"},"default":[]},{"name":"cc","type":["null",{"type":"array","items":"EmailAddress"}],"default":null},{"name":"bcc","type":["null",{"type":"array","items":"EmailAddress"}],"default":null},{"name":"date","type":"string","default":""},{"name":"message_id","type":"string","default":""},{"name":"headers","type":{"type":"map","values":"string"},"default":{}},{"name":"body","type":{"type":"record","name":"EmailBody","fields":[{"name":"text","type":["null","string"],"default":null},{"name":"html","type":["null","string"],"default":null}]}},{"name":"raw_content","type":"string","default":""}]}
 
-    # Write data into local or remote object store.
     - object_store_write:
         name: write_events
         path: file:///cloudflare/email

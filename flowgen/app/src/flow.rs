@@ -291,7 +291,12 @@ impl TaskRegistryBuilder {
             return Ok(TaskRegistry { tasks: Vec::new() });
         }
 
-        if tasks_config.iter().any(|t| t.depends_on().is_some()) {
+        // The DAG path also owns the implicit-parent walk that skips
+        // registration-only tasks, so route through it whenever any task
+        // opts out of pipeline I/O even if none declares `depends_on`.
+        let needs_dag = tasks_config.iter().any(|t| t.depends_on().is_some())
+            || tasks_config.iter().any(|t| !t.has_pipeline_io());
+        if needs_dag {
             self.build_dag(tasks_config)
         } else {
             self.build_linear(tasks_config)
@@ -354,8 +359,13 @@ impl TaskRegistryBuilder {
     ///
     /// Tasks without `depends_on` fall back to depending on the previous task
     /// in the list, so mixed flows (some tasks with `depends_on`, some without)
-    /// work intuitively. Fan-out points (multiple tasks depending on the same
-    /// parent) use a dispatcher that clones events to each child channel.
+    /// work intuitively. Registration-only tasks (`has_pipeline_io() == false`)
+    /// are skipped when resolving the implicit parent and never get an
+    /// implicit parent themselves — they neither emit nor consume events, so
+    /// wiring them into the DAG would either stall a downstream task on a
+    /// channel that never sends or attach them to a channel they will never
+    /// read. Fan-out points (multiple tasks depending on the same parent)
+    /// use a dispatcher that clones events to each child channel.
     fn build_dag(&self, tasks_config: &[TaskType]) -> Result<TaskRegistry, Error> {
         let task_count = tasks_config.len();
 
@@ -372,6 +382,10 @@ impl TaskRegistryBuilder {
         }
 
         // Resolve each task's parent indices from `depends_on` names.
+        // Registration-only tasks never get an implicit parent, and the
+        // implicit-parent walk skips over any earlier registration-only task
+        // so a normal task following one still chains to the last real
+        // pipeline task.
         let mut parent_indices: Vec<Vec<usize>> = Vec::with_capacity(task_count);
         for (idx, task_type) in tasks_config.iter().enumerate() {
             let parents = match task_type.depends_on() {
@@ -394,8 +408,12 @@ impl TaskRegistryBuilder {
                     }
                     indices
                 }
-                None if idx > 0 => vec![idx - 1],
-                None => vec![],
+                None if !task_type.has_pipeline_io() => vec![],
+                None => (0..idx)
+                    .rev()
+                    .find(|&i| tasks_config[i].has_pipeline_io())
+                    .map(|i| vec![i])
+                    .unwrap_or_default(),
             };
             parent_indices.push(parents);
         }
@@ -2539,5 +2557,116 @@ mod tests {
                 task.task_type.name()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_registration_only_tasks_get_no_implicit_parent() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let mcp_prompt = |name: &str| {
+            TaskType::mcp_prompt(flowgen_mcp::prompt::config::Processor {
+                name: name.to_string(),
+                description: format!("desc for {name}"),
+                arguments: Vec::new(),
+                template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
+                messages: None,
+                depends_on: None,
+                retry: None,
+            })
+        };
+
+        // Two mcp_prompts back-to-back without any `depends_on:` — both
+        // should register as independent sources, neither should inherit
+        // the other as a parent.
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "registration_only".to_string(),
+                labels: None,
+                tasks: vec![mcp_prompt("a"), mcp_prompt("b")],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        for task in &registry.tasks {
+            assert!(
+                task.input_rx.is_none(),
+                "{} must have no inbound channel",
+                task.task_type.name()
+            );
+            assert!(
+                task.output_tx.is_none(),
+                "{} must have no outbound channel",
+                task.task_type.name()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_implicit_parent_skips_registration_only() {
+        use crate::config::{Flow, FlowConfig, TaskType};
+
+        let script = |name: &str| {
+            TaskType::script(flowgen_core::task::script::config::Processor {
+                name: name.to_string(),
+                depends_on: None,
+                ..Default::default()
+            })
+        };
+        let mcp_prompt = |name: &str| {
+            TaskType::mcp_prompt(flowgen_mcp::prompt::config::Processor {
+                name: name.to_string(),
+                description: format!("desc for {name}"),
+                arguments: Vec::new(),
+                template: Some(flowgen_core::resource::Source::Inline("body".to_string())),
+                messages: None,
+                depends_on: None,
+                retry: None,
+            })
+        };
+
+        // script → mcp_prompt → script: the trailing script should chain
+        // back to the first script through the mcp_prompt, not treat the
+        // prompt as its parent.
+        let flow_config = Arc::new(FlowConfig {
+            flow: Flow {
+                name: "skip_registration".to_string(),
+                labels: None,
+                tasks: vec![script("first"), mcp_prompt("register"), script("last")],
+                require_leader_election: None,
+                parallel_instances: 1,
+            },
+        });
+
+        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+
+        let prompt = registry
+            .tasks
+            .iter()
+            .find(|t| t.task_type.name() == "register")
+            .expect("prompt missing");
+        assert!(prompt.input_rx.is_none(), "prompt has no inbound channel");
+        assert!(prompt.output_tx.is_none(), "prompt has no outbound channel");
+
+        let first = registry
+            .tasks
+            .iter()
+            .find(|t| t.task_type.name() == "first")
+            .expect("first missing");
+        let last = registry
+            .tasks
+            .iter()
+            .find(|t| t.task_type.name() == "last")
+            .expect("last missing");
+        assert!(
+            first.output_tx.is_some(),
+            "first still emits — its child is `last`, not `register`"
+        );
+        assert!(
+            last.input_rx.is_some(),
+            "last consumes — its parent is `first`, walked past `register`"
+        );
     }
 }

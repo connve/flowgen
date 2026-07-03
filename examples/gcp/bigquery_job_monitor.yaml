@@ -1,41 +1,33 @@
+# Poll a BigQuery job until it reaches a terminal state, then log
+# the final status. In production this flow is triggered by an
+# upstream flow that created the job and passed the id via event data;
+# the hardcoded `job_id` here is a placeholder.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
 flow:
   name: bigquery_job_monitor
   require_leader_election: true
   tasks:
 
-    # This flow demonstrates polling a BigQuery job until completion.
-    # In production, you would typically trigger this flow from another flow
-    # that creates a job, passing the job_id via event data.
-    # For this example, we use a hardcoded job_id.
+    # Placeholder trigger; real deployments emit from upstream job-create flows.
     - generate:
         name: trigger
         interval: 3600s
 
-    # Poll job status every 5 seconds until completion (max 10 minutes).
-    # The get operation repeatedly calls the BigQuery API until the job
-    # reaches a terminal state (DONE) or polling times out.
+    # `get` polls until the job is DONE or `max_poll_duration` elapses.
     - gcp_bigquery_job:
         name: poll_job_status
-        # Operation type: get polls job status until completion
         operation: get
         project_id: my-gcp-project
         credentials_path: /etc/gcp/credentials.json
         job_type: load
-        # Job ID from the create operation (typically from event.data.id)
-        # In production: job_id: "{{event.data.job_id}}"
         job_id: "job_abc123xyz"
-        # Poll every 5 seconds
         poll_interval: 5s
-        # Give up after 10 minutes
         max_poll_duration: 600s
 
-    # Log the final job status.
-    # Check event.data.status.state for "DONE" or event.data.status.error_result for errors.
+    # Terminal status lives at event.data.status.state; errors at status.error_result.
     - log:
         name: log_job_status
         level: info
         structured: true
-
-    # Example downstream processing based on job completion:
-    # You can add conditional logic here to handle successful vs failed jobs.
-    # For example, send notifications, trigger downstream ETL, or retry failed jobs.

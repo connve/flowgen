@@ -1,48 +1,37 @@
+# Poll completed orders every 5 minutes with a parameterised query.
+# SQL is loaded from a resource file; parameters bind as @param_name.
+#
+# Required:
+#   - GCP service account at /etc/gcp/credentials.json
+#   - resources/gcp/queries/fetch_completed_orders.sql (uses @status, @start_date)
 flow:
   name: bigquery_query_parameterized
   require_leader_election: true
   tasks:
 
-    # Run this task on specified intervals to fetch completed orders.
     - generate:
         name: generate_jobs
         interval: 300s
 
-    # BigQuery query with parameterized SQL for SQL injection protection.
-    # Parameters are type-safe and properly escaped by BigQuery client.
-    #
-    # This example demonstrates loading SQL from an external resource file.
-    # The query is loaded from "resources/gcp/queries/fetch_completed_orders.sql"
-    # where "resources/" is the base path configured in config.yaml.
     - gcp_bigquery_query:
         name: fetch_completed_orders
-        # Path to GCP service account JSON credentials
         credentials_path: /etc/gcp/credentials.json
-        # GCP project ID where BigQuery resources are located
         project_id: my-project-id
-        # SQL query loaded from external file
         query:
           resource: "gcp/queries/fetch_completed_orders.sql"
-        # Query parameters (referenced as @param_name in SQL)
-        # Example SQL: SELECT * FROM orders WHERE status = @status AND date >= @start_date
         parameters:
           status: "completed"
           start_date: "2024-01-01"
-        # Optional: Maximum number of rows to return
         max_results: 10000
-        # Optional: Query execution timeout (e.g., "30s", "5m", "1h")
         timeout: "1m"
 
-    # Convert Arrow RecordBatch to JSON format for downstream processing.
     - convert:
         name: arrow_to_json
         target_format: json
 
-    # Split JSON array into individual row events for per-record processing.
     - iterate:
         name: split_rows
 
-    # Output individual row events to console for debugging and monitoring.
     - log:
         name: log
         level: info

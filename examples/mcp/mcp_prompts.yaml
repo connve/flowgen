@@ -1,0 +1,74 @@
+# Publishes slash-command prompts to any MCP client. Prompts are
+# registration-only: each task publishes its template at init and exits;
+# the MCP server serves prompts/list and prompts/get directly.
+#
+# Required:
+#   - MCP server enabled in worker config
+#   - Resource files referenced by completion sources:
+#       resources/mcp/completions/tone.txt
+#       resources/mcp/completions/languages.txt
+flow:
+  name: mcp_prompts_examples
+  tasks:
+
+    # Single-message prompt. `template` renders as one user turn.
+    - mcp_prompt:
+        name: explain_query
+        description: "Explain what a BigQuery SQL query does."
+        arguments:
+          - name: query
+            description: "The SQL query text."
+            required: true
+        template: |
+          Explain what this BigQuery query does, what tables it reads,
+          and what the result shape will look like. Be concise.
+
+          ```sql
+          {{arguments.query}}
+          ```
+
+    # Multi-message prompt with defaults, inline completion, and a
+    # loader-backed completion source. The assistant turn primes the
+    # model with the expected structure.
+    - mcp_prompt:
+        name: draft_outreach_email
+        description: "Draft a B2B outreach email tailored to industry and persona."
+        arguments:
+          - name: industry
+            description: "Target industry (e.g. Manufacturing, Logistics)."
+            required: true
+            completion:
+              values: [Manufacturing, Logistics, Retail, Fintech, Healthcare]
+          - name: persona
+            description: "Target role (e.g. VP Sales, CFO)."
+            required: true
+          - name: tone
+            description: "Tone of the email."
+            required: false
+            default: "formal"
+            completion:
+              resource: "mcp/completions/tone.txt"
+          - name: language
+            description: "Output language."
+            required: false
+            default: "English"
+            completion:
+              resource: "mcp/completions/languages.txt"
+        messages:
+          - role: user
+            content: "Industry: Fintech; Persona: CTO; Tone: casual; Language: English."
+          - role: assistant
+            content: |
+              Subject: Cutting compliance-report toil in half
+
+              Hi there — I noticed your team publishes SOC2 attestation quarterly.
+              Would a 15-minute walk-through of our audit-evidence automation be useful?
+
+              — Alex
+          - role: user
+            content: |
+              Draft an outreach email.
+              Industry: {{arguments.industry}}
+              Persona: {{arguments.persona}}
+              Tone: {{arguments.tone}}
+              Language: {{arguments.language}}
