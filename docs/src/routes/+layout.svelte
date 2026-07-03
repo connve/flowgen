@@ -59,8 +59,17 @@
 </script>
 
 <svelte:head>
-	<title>CONNVE — Data. Intelligence. Edge.™</title>
-	<meta name="description" content="Flowgen — Data activation with a blast 💥" />
+	<title>CONNVE — Act on live signals. At radically lower cost.</title>
+	<meta name="description" content="Data Activation Platform for Sales, Customer Engagement and Operations. Powered by open-source, real-time infrastructure. Self-hosted or managed." />
+	<link rel="canonical" href="https://connve.com/docs/flowgen/" />
+	<meta property="og:type" content="website" />
+	<meta property="og:url" content="https://connve.com/docs/flowgen/" />
+	<meta property="og:title" content="CONNVE — Act on live signals. At radically lower cost." />
+	<meta property="og:description" content="Data Activation Platform for Sales, Customer Engagement and Operations. Powered by open-source, real-time infrastructure. Self-hosted or managed." />
+	<meta property="og:site_name" content="CONNVE" />
+	<meta property="og:image" content="https://connve.com/og.png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
 </svelte:head>
 
 <div class="drawer lg:drawer-open">
