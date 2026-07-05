@@ -303,6 +303,37 @@ pub enum Provider {
     Custom,
 }
 
+impl Provider {
+    /// Canonical lowercase name matching the serde `rename_all` shape.
+    /// Used for `event.meta.provider` + structured logs so downstream
+    /// filters (Loki queries, Rhai budget guards) see the same string
+    /// the YAML config uses.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Provider::OpenAi => "openai",
+            Provider::Anthropic => "anthropic",
+            Provider::Cohere => "cohere",
+            Provider::Google => "google",
+            Provider::VertexAi => "vertexai",
+            Provider::Groq => "groq",
+            Provider::HuggingFace => "huggingface",
+            Provider::Mistral => "mistral",
+            Provider::Ollama => "ollama",
+            Provider::OpenRouter => "openrouter",
+            Provider::Perplexity => "perplexity",
+            Provider::Together => "together",
+            Provider::Xai => "xai",
+            Provider::Custom => "custom",
+        }
+    }
+}
+
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

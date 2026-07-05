@@ -4,13 +4,20 @@ This directory contains example flows demonstrating various flowgen features and
 
 ## Directory Structure
 
-- **`data/`** - Synthetic test data for examples
-- **`resources/`** - External resource files (SQL queries, templates, etc.)
-- **`gcp/`** - Examples for Google Cloud Platform integrations
-- **`object-store/`** - Examples for reading and writing files
-- **`cloudflare/`** - Examples for Cloudflare integrations
-- **`mcp/`** - MCP server task examples (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
-- **`salesforce/`** - Examples for Salesforce integrations
+- **`ai-completion/`** - `ai_completion` task (RAG, resource-loaded prompts)
+- **`ai-gateway/`** - `llm_proxy` fronting OpenAI + Anthropic clients
+- **`cloudflare/`** - Cloudflare integrations
+- **`data/`** - Synthetic test data used by examples
+- **`gcp/`** - Google Cloud Platform integrations (BigQuery, Pub/Sub, ...)
+- **`git/`** - `git` task (repo sync)
+- **`mcp/`** - MCP server tasks (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
+- **`mssql/`** - Microsoft SQL Server integrations
+- **`object-store/`** - Reading/writing files (local, S3, GCS)
+- **`oci/`** - OCI registry sync
+- **`resources/`** - Shared resource files (SQL, templates, scripts, schemas)
+- **`salesforce/`** - Salesforce (CDC replication, data activation/export, sobject CRUD)
+- **`script/`** - `script` task patterns (inline, resource, cache, fan-in join)
+- **`parallel_instances.yaml`** - Starter showcasing the `parallel_instances` flow-level knob
 
 ## Test Data
 
@@ -22,7 +29,14 @@ All data in this directory is randomly generated and does not represent real cus
 
 ## Resource Files
 
-The `resources/` directory contains external resource files (SQL queries, templates, etc.) that can be loaded by tasks.
+The `resources/` directory holds external files that tasks load via `resource:` references. Organised by the example domain they belong to:
+
+- **`ai-completion/context/`** - RAG context snippets for `ai-completion/` flows
+- **`ai-completion/prompts/`** - System / user prompt templates for `ai-completion/` flows
+- **`gcp/`** - SQL queries and DDL for `gcp/` BigQuery examples
+- **`salesforce/`** - SOQL queries for `salesforce/` examples
+- **`schemas/`** - JSON schemas shared across examples
+- **`scripts/`** - Rhai scripts shared across flows (e.g. `ai-gateway/route_provider.rhai`)
 
 Configure the resource path in `config.yaml`:
 
@@ -31,13 +45,13 @@ resources:
   path: "examples/resources"
 ```
 
-Reference resources in flow configuration:
+Reference resources in a flow:
 
 ```yaml
 - gcp_bigquery_query:
     name: fetch_data
     query:
-      resource: "queries/fetch_completed_orders.sql"
+      resource: "gcp/fetch_completed_orders.sql"
 ```
 
 ## Running Examples

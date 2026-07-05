@@ -40,12 +40,6 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("Git fetch failed for {url}: {source}")]
-    Fetch {
-        url: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
     #[error("Failed to open existing repository at {path}: {source}")]
     OpenRepo {
         path: PathBuf,
@@ -190,10 +184,14 @@ impl EventHandler {
                 None => self.clone_path.clone(),
             };
 
-            // Walk files and emit one event per file.
+            // Walk files and emit one event per file. `.git/` is
+            // excluded so a bare `path: None` (or `path: "."`) config
+            // does not leak internal git metadata like `.git/config` or
+            // shallow markers into the downstream pipeline.
             let entries: Vec<_> = WalkDir::new(&scan_path)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| e.file_name() != ".git")
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().is_file())
                 .collect();
@@ -308,12 +306,31 @@ async fn clone_or_pull(
 }
 
 /// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
+///
+/// Wipes any existing clone before running a fresh shallow clone. A
+/// previous implementation kept the clone across ticks and called
+/// `fetch_existing`, but gix's low-level fetch only advances the
+/// remote-tracking ref: it never updates `refs/heads/<branch>` or the
+/// working tree. `head_commit` therefore kept returning the original
+/// shallow-clone commit even after upstream advanced, so the sync task
+/// silently missed every new commit until the pod restarted and the
+/// clone_path was wiped. Re-cloning shallow at depth 1 transfers the
+/// same pack file `fetch` would have — the cost of one syscall to
+/// remove ~KB of shallow state — and guarantees the working tree
+/// matches HEAD every tick.
 fn sync_blocking(
     url: &str,
     branch: &str,
     credentials: Option<&Credentials>,
     path: &Path,
 ) -> Result<String, Error> {
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| Error::Clone {
+            url: url.to_string(),
+            source: Box::new(e),
+        })?;
+    }
+
     // gix expects the clone target's parent to exist. The derived default
     // path includes per-flow and per-task segments that are not pre-created
     // by the volume mount, so ensure the full path exists up front.
@@ -322,11 +339,7 @@ fn sync_blocking(
         source: Box::new(e),
     })?;
 
-    if path.join(".git").exists() {
-        fetch_existing(path, url, credentials)?;
-    } else {
-        shallow_clone(url, branch, path, credentials)?;
-    }
+    shallow_clone(url, branch, path, credentials)?;
     head_commit(path)
 }
 
@@ -437,59 +450,6 @@ fn shallow_clone(
     checkout
         .main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
         .map_err(|e| Error::Checkout {
-            source: Box::new(e),
-        })?;
-
-    Ok(())
-}
-
-/// Fetches the latest refs into an existing clone and resets HEAD to the
-/// remote tracking branch. Mirrors `git pull --ff-only` semantics.
-fn fetch_existing(
-    path: &Path,
-    log_url: &str,
-    credentials: Option<&Credentials>,
-) -> Result<(), Error> {
-    let repo = gix::open(path).map_err(|e| Error::OpenRepo {
-        path: path.to_path_buf(),
-        source: Box::new(e),
-    })?;
-
-    let remote = repo
-        .find_default_remote(gix::remote::Direction::Fetch)
-        .ok_or_else(|| Error::Fetch {
-            url: log_url.to_string(),
-            source: "no default remote configured".into(),
-        })?
-        .map_err(|e| Error::Fetch {
-            url: log_url.to_string(),
-            source: Box::new(e),
-        })?;
-
-    let mut connection =
-        remote
-            .connect(gix::remote::Direction::Fetch)
-            .map_err(|e| Error::Fetch {
-                url: log_url.to_string(),
-                source: Box::new(e),
-            })?;
-
-    if let Some(creds) = credentials {
-        let helper = CredentialHelper::new(creds);
-        connection.set_credentials(helper.into_gix_callback());
-    }
-
-    let prepared = connection
-        .prepare_fetch(gix::progress::Discard, Default::default())
-        .map_err(|e| Error::Fetch {
-            url: log_url.to_string(),
-            source: Box::new(e),
-        })?;
-
-    prepared
-        .receive(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
-        .map_err(|e| Error::Fetch {
-            url: log_url.to_string(),
             source: Box::new(e),
         })?;
 
@@ -751,18 +711,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Git clone failed for https://github.com/org/repo.git: network timeout"
-        );
-    }
-
-    #[test]
-    fn error_display_fetch() {
-        let err = Error::Fetch {
-            url: "https://github.com/org/repo.git".to_string(),
-            source: "auth failed".into(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "Git fetch failed for https://github.com/org/repo.git: auth failed"
         );
     }
 

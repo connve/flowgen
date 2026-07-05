@@ -5,7 +5,7 @@
 //! columnar processing. This API is optimized for reading large amounts of data
 //! and does not support SQL queries.
 
-use arrow::array::{ArrayRef, RecordBatch};
+use arrow::array::RecordBatch;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
@@ -16,38 +16,9 @@ use gcloud_googleapis::cloud::bigquery::storage::v1::read_session::{
 };
 use google_cloud_bigquery::client::{Client, ClientConfig, ReadTableOption};
 use google_cloud_bigquery::http::table::TableReference;
-use google_cloud_bigquery::storage::value::StructDecodable;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
-
-/// Wrapper type that implements StructDecodable to capture full RecordBatch.
-/// Since the gcloud-bigquery library iterates over individual rows, we use this
-/// wrapper to capture just one row per RecordBatch as a marker, then reconstruct
-/// the full RecordBatch with proper schema later.
-struct RecordBatchMarker {
-    /// Captured on first row only to mark the start of a new batch.
-    arrays: Vec<ArrayRef>,
-}
-
-impl StructDecodable for RecordBatchMarker {
-    fn decode_arrow(
-        fields: &[ArrayRef],
-        row_no: usize,
-    ) -> Result<Self, google_cloud_bigquery::storage::value::Error> {
-        // Capture the arrays on the first row of each RecordBatch.
-        // We only need to do this once per RecordBatch.
-        if row_no == 0 {
-            Ok(Self {
-                arrays: fields.to_vec(),
-            })
-        } else {
-            // For subsequent rows in the same batch, return a placeholder.
-            // We'll filter these out later.
-            Ok(Self { arrays: Vec::new() })
-        }
-    }
-}
 
 /// Errors that can occur during BigQuery Storage Read operations.
 #[derive(thiserror::Error, Debug)]
@@ -88,11 +59,6 @@ pub enum Error {
         #[source]
         source: google_cloud_bigquery::storage::Error,
     },
-    #[error("Table metadata retrieval error: {source}")]
-    TableMetadata {
-        #[source]
-        source: google_cloud_bigquery::http::error::Error,
-    },
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -102,15 +68,6 @@ pub enum Error {
     MissingBuilderAttribute(String),
     #[error("Invalid timestamp format in snapshot_time")]
     InvalidTimestamp,
-    #[error("No data returned from BigQuery Storage Read API")]
-    NoDataReturned,
-    #[error("Table schema is missing")]
-    MissingSchema,
-    #[error("Arrow RecordBatch construction error: {source}")]
-    RecordBatchConstruction {
-        #[source]
-        source: arrow::error::ArrowError,
-    },
     #[error(
         "Client registry type mismatch — same credentials used with incompatible client types"
     )]
@@ -146,43 +103,50 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Read table using Storage Read API.
-            let record_batches = read_table(&self.client, &config).await?;
+            // Stream RecordBatches from the Storage Read API. Peek one batch ahead
+            // so the final batch can carry completion_tx without buffering the
+            // whole result set. If no batches are returned, emit an empty one so
+            // downstream tasks still observe end-of-batch.
+            let mut iterator = open_read_iterator(&self.client, &config).await?;
+            let mut pending: Option<RecordBatch> = iterator
+                .next()
+                .await
+                .map_err(|source| Error::StorageRead { source })?;
 
-            // If no data returned, send an empty record batch to maintain event chain.
-            // Downstream tasks must receive an event to know the operation completed.
-            let record_batches = if record_batches.is_empty() {
-                vec![arrow::array::RecordBatch::new_empty(Arc::new(
+            if pending.is_none() {
+                pending = Some(arrow::array::RecordBatch::new_empty(Arc::new(
                     arrow::datatypes::Schema::empty(),
-                ))]
-            } else {
-                record_batches
-            };
+                )));
+            }
 
-            // Send each record batch as a separate event.
-            let batch_len = record_batches.len();
-            for (idx, record_batch) in record_batches.into_iter().enumerate() {
-                let num_rows = record_batch.num_rows();
+            loop {
+                let batch = match pending.take() {
+                    Some(b) => b,
+                    None => break,
+                };
+                let next = iterator
+                    .next()
+                    .await
+                    .map_err(|source| Error::StorageRead { source })?;
+                let is_last = next.is_none();
+                let num_rows = batch.num_rows();
 
                 let mut result_event = EventBuilder::new()
-                    .data(EventData::ArrowRecordBatch(record_batch))
+                    .data(EventData::ArrowRecordBatch(batch))
                     .subject(format!("{}.{}", event.subject, config.name))
                     .task_id(self.task_id)
                     .task_type(self.task_type)
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
-                // Only attach completion_tx to the last batch.
-                if idx == batch_len - 1 {
+                if is_last {
                     match self.tx {
                         None => {
-                            // Leaf task: signal completion after last batch.
                             if let Some(arc) = completion_tx_arc.as_ref() {
                                 arc.signal_completion(result_event.data_as_json().ok());
                             }
                         }
                         Some(_) => {
-                            // Pass through completion_tx to last batch.
                             result_event.completion_tx = completion_tx_arc.clone();
                         }
                     }
@@ -193,6 +157,8 @@ impl EventHandler {
                     .context("num_records", num_rows)
                     .await
                     .map_err(|source| Error::SendMessage { source })?;
+
+                pending = next;
             }
 
             Ok(())
@@ -422,18 +388,19 @@ impl Default for ProcessorBuilder {
     }
 }
 
-/// Reads table data using BigQuery Storage Read API and returns Arrow RecordBatches.
-async fn read_table(
+/// Opens a streaming `RecordBatchIterator` against the BigQuery Storage Read API.
+/// Each `next()` returns one Arrow `RecordBatch` as it arrives from the wire,
+/// so callers can emit downstream events without buffering the whole result set.
+async fn open_read_iterator(
     client: &Client,
     config: &super::config::StorageRead,
-) -> Result<Vec<RecordBatch>, Error> {
+) -> Result<google_cloud_bigquery::storage::RecordBatchIterator, Error> {
     let table_ref = TableReference {
         project_id: config.project_id.clone(),
         dataset_id: config.dataset_id.clone(),
         table_id: config.table_id.clone(),
     };
 
-    // Build read options.
     let mut read_options = TableReadOptions::default();
 
     if let Some(ref fields) = config.selected_fields {
@@ -453,7 +420,6 @@ async fn read_table(
         super::config::CompressionCodec::Lz4 => 2,
     });
 
-    // Build table modifiers for time-travel.
     let table_modifiers = if let Some(ref snapshot_time) = config.snapshot_time {
         let timestamp = chrono::DateTime::parse_from_rfc3339(snapshot_time)
             .map_err(|_| Error::InvalidTimestamp)?;
@@ -468,7 +434,6 @@ async fn read_table(
         None
     };
 
-    // Build read table options.
     let mut option = ReadTableOption::default();
     option = option.with_session_read_options(read_options);
 
@@ -480,120 +445,16 @@ async fn read_table(
         option = option.with_max_stream_count(max_streams);
     }
 
-    // Set job project for cross-project billing support.
-    // If job_project_id is specified, use it for billing.
-    // Otherwise, defaults to the data project_id.
     option = option.with_job_project_id(config.get_job_project_id().to_string());
 
-    // Fetch table schema to get field names and their order.
-    // The Storage Read API returns columns in schema order (or selected_fields order if specified).
-    let table_info = client
-        .table()
-        .get(&config.project_id, &config.dataset_id, &config.table_id)
+    client
+        .read_table_record_batches(&table_ref, Some(option))
         .await
-        .map_err(|source| Error::TableMetadata { source })?;
-
-    let table_schema = table_info.schema.ok_or_else(|| Error::MissingSchema)?;
-
-    // Build ordered list of field names based on the actual table schema order.
-    // The Storage Read API always returns columns in table schema order, regardless of
-    // the order specified in selected_fields. If selected_fields is specified, we need to filter appropriately.
-    // to filter the table schema to only include those fields, but preserve schema order.
-    let field_names: Vec<String> = if let Some(ref selected) = config.selected_fields {
-        // Filter table schema fields to only include selected fields, preserving schema order.
-        table_schema
-            .fields
-            .iter()
-            .filter_map(|f| {
-                if selected.contains(&f.name) {
-                    Some(f.name.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        // Use all fields in table schema order.
-        table_schema.fields.iter().map(|f| f.name.clone()).collect()
-    };
-
-    // Read table using Row iterator.
-    // The gcloud-bigquery library internally deserializes Arrow RecordBatches into individual rows.
-    // Since we want to work with RecordBatches (not individual rows), we need to collect rows.
-    // and reconstruct the RecordBatches. This is a limitation of the current library API.
-    //
-    // Note: Each Row contains references to the Arrow arrays (columns) and a row index.
-    // Multiple Row objects from the same batch share the same underlying Arrow arrays.
-    // We group rows by their array references to reconstruct the original batches.
-
-    // The upstream library panics with index out of bounds when the table has no read
-    // streams (empty table or no matching rows). Use catch_unwind to handle this gracefully
-    // and return an empty result instead of crashing the worker.
-    let read_client = client.clone();
-    let read_result = tokio::task::spawn(async move {
-        read_client
-            .read_table::<RecordBatchMarker>(&table_ref, Some(option))
-            .await
-    })
-    .await;
-
-    let mut iterator = match read_result {
-        Ok(Ok(iter)) => iter,
-        Ok(Err(source)) => return Err(Error::StorageRead { source }),
-        Err(_) => {
-            // Task panicked (upstream library bug on empty tables). Return empty result.
-            return Ok(vec![]);
-        }
-    };
-
-    let mut batches = Vec::new();
-
-    // Collect all captures and filter out placeholders (subsequent rows in same batch).
-    while let Some(capture) = iterator
-        .next()
-        .await
-        .map_err(|source| Error::StorageRead { source })?
-    {
-        // Skip placeholder captures (empty arrays means it was a subsequent row).
-        if capture.arrays.is_empty() {
-            continue;
-        }
-
-        // Construct schema using the field names from table metadata.
-        // The Storage Read API returns columns in the same order as the schema or selected_fields.
-        let schema = arrow::datatypes::Schema::new(
-            capture
-                .arrays
-                .iter()
-                .enumerate()
-                .map(|(i, arr)| {
-                    let field_name = field_names
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| format!("column_{i}"));
-                    arrow::datatypes::Field::new(
-                        field_name,
-                        arr.data_type().clone(),
-                        true, // nullable
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        let batch = RecordBatch::try_new(Arc::new(schema), capture.arrays)
-            .map_err(|source| Error::RecordBatchConstruction { source })?;
-
-        batches.push(batch);
-    }
-
-    Ok(batches)
+        .map_err(|source| Error::StorageRead { source })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use arrow::array::{Int64Array, StringArray};
-
     #[test]
     fn test_invalid_timestamp() {
         let result = chrono::DateTime::parse_from_rfc3339("invalid");
@@ -606,69 +467,6 @@ mod tests {
         assert!(result.is_ok());
         let timestamp = result.unwrap();
         assert_eq!(timestamp.timestamp(), 1705320000);
-    }
-
-    #[test]
-    fn test_record_batch_capture_first_row() {
-        let col1 = Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef;
-        let col2 = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
-        let fields = vec![col1.clone(), col2.clone()];
-
-        let result = RecordBatchMarker::decode_arrow(&fields, 0);
-        assert!(result.is_ok());
-        let capture = result.unwrap();
-        assert_eq!(capture.arrays.len(), 2);
-        assert!(!capture.arrays.is_empty());
-    }
-
-    #[test]
-    fn test_record_batch_capture_subsequent_row() {
-        let col1 = Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef;
-        let col2 = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
-        let fields = vec![col1.clone(), col2.clone()];
-
-        let result = RecordBatchMarker::decode_arrow(&fields, 1);
-        assert!(result.is_ok());
-        let capture = result.unwrap();
-        assert!(capture.arrays.is_empty());
-    }
-
-    #[test]
-    fn test_record_batch_reconstruction() {
-        let col1 = Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef;
-        let col2 = Arc::new(StringArray::from(vec!["a", "b", "c"])) as ArrayRef;
-
-        let capture = RecordBatchMarker {
-            arrays: vec![col1.clone(), col2.clone()],
-        };
-
-        let schema = arrow::datatypes::Schema::new(
-            capture
-                .arrays
-                .iter()
-                .enumerate()
-                .map(|(i, arr)| {
-                    arrow::datatypes::Field::new(
-                        format!("column_{i}"),
-                        arr.data_type().clone(),
-                        true,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        let batch = RecordBatch::try_new(Arc::new(schema), capture.arrays);
-        assert!(batch.is_ok());
-        let batch = batch.unwrap();
-        assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 2);
-    }
-
-    #[test]
-    fn test_record_batch_empty_arrays() {
-        let capture = RecordBatchMarker { arrays: Vec::new() };
-
-        assert!(capture.arrays.is_empty());
     }
 
     #[test]

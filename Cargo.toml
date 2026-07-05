@@ -13,7 +13,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.121.0"
+version = "0.122.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -35,10 +35,10 @@ object_store = { version = "0.13.1", default-features = false, features = [
 ] }
 bytes = { version = "1.11.1" }
 handlebars = { version = "6.3" }
-arrow = { version = "56.1", features = ["chrono-tz"] }
-arrow-schema = { version = "56.1", features = ["serde"] }
-arrow-json = { version = "56.1" }
-parquet = { version = "56.1" }
+arrow = { version = "58.3", features = ["chrono-tz"] }
+arrow-schema = { version = "58.3", features = ["serde"] }
+arrow-json = { version = "58.3" }
+parquet = { version = "58.3" }
 chrono = { version = "0.4" }
 clap = { version = "4", features = ["derive", "env"] }
 chrono-tz = { version = "0.10" }
@@ -83,6 +83,10 @@ gix = { version = "0.83", default-features = false, features = [
 oci-client = { version = "0.17", default-features = false, features = [
     "rustls-tls",
 ] }
+flate2 = { version = "1.0", default-features = false, features = [
+    "rust_backend",
+] }
+tar = { version = "0.4", default-features = false }
 # Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
 # https://github.com/nats-io/nats.rs/pull/1550
 async-nats = { git = "https://github.com/nats-io/nats.rs", rev = "7e6672c240a4a1bd7726d37ac7b52a290af6b690" }

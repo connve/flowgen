@@ -145,6 +145,11 @@ pub struct CompletionChunk {
     /// Reasoning text; when set, `text` is empty on that chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Provider-reported token usage. Populated only on the final
+    /// chunk (`is_final: true`) so the gateway can emit an OpenAI
+    /// `stream_options.include_usage`-style usage frame before `[DONE]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CompletionUsage>,
 }
 
 /// Token usage statistics for completions.
@@ -223,7 +228,7 @@ async fn build_agent_client(
             _ => {
                 let path = config.credentials_path.as_ref().ok_or_else(|| {
                     Error::MissingCredentialsPath {
-                        provider: format!("{:?}", config.provider),
+                        provider: config.provider.as_str().to_string(),
                     }
                 })?;
                 Some(load_credentials(path).await?)
@@ -353,7 +358,7 @@ impl EventHandler {
             .map_err(|source| Error::ConfigRender { source })?;
 
         let key = flowgen_core::client_registry::ClientKey::new(&(
-            format!("{:?}", rendered.provider),
+            rendered.provider.as_str().to_string(),
             rendered.model.clone(),
             rendered.endpoint.clone(),
             rendered.credentials_path.clone(),
@@ -394,6 +399,7 @@ impl EventHandler {
     /// Non-streaming completion: waits for the full response and emits a single event.
     #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
+        let started_at = std::time::Instant::now();
         let client = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
@@ -408,7 +414,9 @@ impl EventHandler {
                 let response = self
                     .passthrough_response(&client, &event, rendered_system_prompt)
                     .await?;
-                return self.send_response(response, completion_tx_arc).await;
+                return self
+                    .send_response(response, completion_tx_arc, started_at)
+                    .await;
             }
 
             let completion = client
@@ -418,13 +426,14 @@ impl EventHandler {
 
             let response = CompletionResponse {
                 text: completion.text,
-                model: self.config.model.clone(),
-                provider: format!("{:?}", self.config.provider),
+                model: client.model().to_string(),
+                provider: self.config.provider.as_str().to_string(),
                 usage: Some(completion.usage.into()),
                 tool_calls: Vec::new(),
             };
 
-            self.send_response(response, completion_tx_arc).await
+            self.send_response(response, completion_tx_arc, started_at)
+                .await
         })
         .await
     }
@@ -499,9 +508,9 @@ impl EventHandler {
 
         Ok(CompletionResponse {
             text: super::passthrough::text_from_choice(&resp.choice),
-            model: self.config.model.clone(),
-            provider: format!("{:?}", self.config.provider),
-            usage: None,
+            model: client.model().to_string(),
+            provider: self.config.provider.as_str().to_string(),
+            usage: Some(resp.usage.into()),
             tool_calls: super::passthrough::tool_calls_from_choice(&resp.choice),
         })
     }
@@ -516,6 +525,7 @@ impl EventHandler {
         client: &crate::agent::AgentClient,
         event: &Arc<Event>,
         rendered_system_prompt: Option<String>,
+        started_at: std::time::Instant,
     ) -> Result<(), Error> {
         use crate::agent::PassthroughStreamEvent;
         use futures_util::StreamExt;
@@ -567,6 +577,7 @@ impl EventHandler {
         let mut index: usize = 0;
         let mut accumulated_text = String::new();
         let mut collected_tool_calls: Vec<crate::ai_gateway::config::ToolCall> = Vec::new();
+        let mut final_usage: Option<CompletionUsage> = None;
 
         while let Some(item) = stream.next().await {
             if self.task_context.cancellation_token.is_cancelled() {
@@ -582,6 +593,7 @@ impl EventHandler {
                         index,
                         tool_calls: Vec::new(),
                         reasoning: None,
+                        usage: None,
                     };
                     let payload = serde_json::to_value(&chunk)
                         .map_err(|source| Error::SerdeJson { source })?;
@@ -601,7 +613,10 @@ impl EventHandler {
                     collected_tool_calls
                         .push(super::passthrough::rig_tool_call_to_oai_public(&call));
                 }
-                Ok(PassthroughStreamEvent::Done) => break,
+                Ok(PassthroughStreamEvent::Done(usage)) => {
+                    final_usage = usage.map(Into::into);
+                    break;
+                }
                 Err(source) => return Err(Error::CompletionFailed(source.to_string())),
             }
         }
@@ -612,15 +627,28 @@ impl EventHandler {
             index,
             tool_calls: collected_tool_calls,
             reasoning: None,
+            usage: final_usage.clone(),
         };
         let payload =
             serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
+
+        let completion_ctx = crate::meta::CompletionContext {
+            provider: self.config.provider.as_str().to_string(),
+            model: client.model().to_string(),
+            prompt_tokens: final_usage.as_ref().map(|u| u.prompt_tokens),
+            completion_tokens: final_usage.as_ref().map(|u| u.completion_tokens),
+            total_tokens: final_usage.as_ref().map(|u| u.total_tokens),
+            latency_ms: started_at.elapsed().as_millis() as u64,
+        };
+        let mut meta = serde_json::Map::new();
+        completion_ctx.insert_into(&mut meta);
 
         let mut e = EventBuilder::new()
             .data(EventData::Json(payload))
             .subject(self.config.name.clone())
             .task_id(self.task_id)
             .task_type(self.task_type)
+            .meta(meta)
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
@@ -636,6 +664,21 @@ impl EventHandler {
         }
 
         e.send_with_logging(self.tx.as_ref())
+            .context(crate::meta::PROVIDER, &completion_ctx.provider)
+            .context(crate::meta::MODEL, &completion_ctx.model)
+            .context(crate::meta::LATENCY_MS, completion_ctx.latency_ms)
+            .context(
+                crate::meta::PROMPT_TOKENS,
+                completion_ctx.prompt_tokens.unwrap_or(0),
+            )
+            .context(
+                crate::meta::COMPLETION_TOKENS,
+                completion_ctx.completion_tokens.unwrap_or(0),
+            )
+            .context(
+                crate::meta::TOTAL_TOKENS,
+                completion_ctx.total_tokens.unwrap_or(0),
+            )
             .await
             .map_err(|source| Error::SendMessage { source })?;
 
@@ -648,6 +691,7 @@ impl EventHandler {
     /// source considers the request complete.
     #[tracing::instrument(skip(self, event), name = "task.handle")]
     async fn handle_streaming(&self, event: Event) -> Result<(), Error> {
+        let started_at = std::time::Instant::now();
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -669,7 +713,12 @@ impl EventHandler {
             // event stream back through the same downstream channel.
             if self.should_passthrough(&event)? {
                 return self
-                    .passthrough_stream_response(&client, &event, rendered_system_prompt)
+                    .passthrough_stream_response(
+                        &client,
+                        &event,
+                        rendered_system_prompt,
+                        started_at,
+                    )
                     .await;
             }
 
@@ -679,6 +728,7 @@ impl EventHandler {
 
             let mut index: usize = 0;
             let mut accumulated_text = String::new();
+            let mut final_usage: Option<CompletionUsage> = None;
 
             while let Some(chunk) = stream.next().await {
                 if self.task_context.cancellation_token.is_cancelled() {
@@ -711,6 +761,7 @@ impl EventHandler {
                             index,
                             tool_calls: Vec::new(),
                             reasoning: None,
+                            usage: None,
                         };
                         let data = serde_json::to_value(&chunk_event)
                             .map_err(|source| Error::SerdeJson { source })?;
@@ -740,6 +791,7 @@ impl EventHandler {
                             index,
                             tool_calls: Vec::new(),
                             reasoning: Some(text),
+                            usage: None,
                         };
                         let data = serde_json::to_value(&chunk_event)
                             .map_err(|source| Error::SerdeJson { source })?;
@@ -757,10 +809,9 @@ impl EventHandler {
                             .map_err(|source| Error::SendMessage { source })?;
                         index += 1;
                     }
-                    AgentChunk::Final { text, usage: _ } => {
-                        // Streaming wire chunk carries no usage field yet;
-                        // aggregated usage is dropped until it is added.
+                    AgentChunk::Final { text, usage } => {
                         accumulated_text = text;
+                        final_usage = Some(usage.into());
                     }
                     AgentChunk::Error(err) => {
                         // Logging only would hang the source until ack_timeout.
@@ -776,15 +827,28 @@ impl EventHandler {
                 index,
                 tool_calls: Vec::new(),
                 reasoning: None,
+                usage: final_usage.clone(),
             };
             let data =
                 serde_json::to_value(&final_chunk).map_err(|source| Error::SerdeJson { source })?;
+
+            let completion_ctx = crate::meta::CompletionContext {
+                provider: self.config.provider.as_str().to_string(),
+                model: client.model().to_string(),
+                prompt_tokens: final_usage.as_ref().map(|u| u.prompt_tokens),
+                completion_tokens: final_usage.as_ref().map(|u| u.completion_tokens),
+                total_tokens: final_usage.as_ref().map(|u| u.total_tokens),
+                latency_ms: started_at.elapsed().as_millis() as u64,
+            };
+            let mut meta = serde_json::Map::new();
+            completion_ctx.insert_into(&mut meta);
 
             let mut e = EventBuilder::new()
                 .data(EventData::Json(data))
                 .subject(self.config.name.clone())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
+                .meta(meta)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
@@ -802,6 +866,21 @@ impl EventHandler {
             }
 
             e.send_with_logging(self.tx.as_ref())
+                .context(crate::meta::PROVIDER, &completion_ctx.provider)
+                .context(crate::meta::MODEL, &completion_ctx.model)
+                .context(crate::meta::LATENCY_MS, completion_ctx.latency_ms)
+                .context(
+                    crate::meta::PROMPT_TOKENS,
+                    completion_ctx.prompt_tokens.unwrap_or(0),
+                )
+                .context(
+                    crate::meta::COMPLETION_TOKENS,
+                    completion_ctx.completion_tokens.unwrap_or(0),
+                )
+                .context(
+                    crate::meta::TOTAL_TOKENS,
+                    completion_ctx.total_tokens.unwrap_or(0),
+                )
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
 
@@ -836,20 +915,36 @@ impl EventHandler {
         Ok((rendered_prompt, rendered_system_prompt))
     }
 
-    /// Sends a completion response as an event.
+    /// Sends a completion response as an event. `started_at` is the
+    /// wall-clock start of the handle call so latency lands on
+    /// `event.meta` and the structured log line.
     async fn send_response(
         &self,
         response: CompletionResponse,
         completion_tx_arc: Option<SharedCompletionTx>,
+        started_at: std::time::Instant,
     ) -> Result<(), Error> {
         let response_value =
             serde_json::to_value(&response).map_err(|source| Error::SerdeJson { source })?;
+
+        let completion_ctx = crate::meta::CompletionContext {
+            provider: response.provider.clone(),
+            model: response.model.clone(),
+            prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
+            completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
+            total_tokens: response.usage.as_ref().map(|u| u.total_tokens),
+            latency_ms: started_at.elapsed().as_millis() as u64,
+        };
+
+        let mut meta = serde_json::Map::new();
+        completion_ctx.insert_into(&mut meta);
 
         let mut event = EventBuilder::new()
             .data(EventData::Json(response_value))
             .subject(self.config.name.clone())
             .task_id(self.task_id)
             .task_type(self.task_type)
+            .meta(meta)
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
 
@@ -869,6 +964,21 @@ impl EventHandler {
 
         event
             .send_with_logging(self.tx.as_ref())
+            .context(crate::meta::PROVIDER, &completion_ctx.provider)
+            .context(crate::meta::MODEL, &completion_ctx.model)
+            .context(crate::meta::LATENCY_MS, completion_ctx.latency_ms)
+            .context(
+                crate::meta::PROMPT_TOKENS,
+                completion_ctx.prompt_tokens.unwrap_or(0),
+            )
+            .context(
+                crate::meta::COMPLETION_TOKENS,
+                completion_ctx.completion_tokens.unwrap_or(0),
+            )
+            .context(
+                crate::meta::TOTAL_TOKENS,
+                completion_ctx.total_tokens.unwrap_or(0),
+            )
             .await
             .map_err(|source| Error::SendMessage { source })?;
 
@@ -1157,6 +1267,7 @@ mod tests {
             index: 0,
             tool_calls: Vec::new(),
             reasoning: None,
+            usage: None,
         };
 
         let json = serde_json::to_string(&chunk).unwrap();
@@ -1230,6 +1341,7 @@ mod tests {
             index: 3,
             tool_calls: Vec::new(),
             reasoning: None,
+            usage: None,
         };
         let v = serde_json::to_value(&chunk).unwrap();
         assert_eq!(v["text"], "partial");
@@ -1245,6 +1357,7 @@ mod tests {
             index: 10,
             tool_calls: Vec::new(),
             reasoning: None,
+            usage: None,
         };
         let v = serde_json::to_value(&chunk).unwrap();
         assert_eq!(v["is_final"], true);
@@ -1259,6 +1372,7 @@ mod tests {
             index: 0,
             tool_calls: Vec::new(),
             reasoning: None,
+            usage: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let back: CompletionChunk = serde_json::from_str(&json).unwrap();
@@ -1281,6 +1395,68 @@ mod tests {
         assert_eq!(usage.prompt_tokens, back.prompt_tokens);
         assert_eq!(usage.completion_tokens, back.completion_tokens);
         assert_eq!(usage.total_tokens, back.total_tokens);
+    }
+
+    // --- CompletionChunk.usage on final chunk ---
+
+    #[test]
+    fn completion_chunk_final_carries_usage() {
+        let chunk = CompletionChunk {
+            text: "done".to_string(),
+            is_final: true,
+            index: 5,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            usage: Some(CompletionUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            }),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["is_final"], true);
+        assert_eq!(v["usage"]["prompt_tokens"], 100);
+        assert_eq!(v["usage"]["completion_tokens"], 50);
+        assert_eq!(v["usage"]["total_tokens"], 150);
+    }
+
+    #[test]
+    fn completion_chunk_intermediate_omits_usage_on_wire() {
+        let chunk = CompletionChunk {
+            text: "partial".to_string(),
+            is_final: false,
+            index: 3,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            usage: None,
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("usage"),
+            "intermediate chunks must not serialise a usage key"
+        );
+    }
+
+    #[test]
+    fn completion_chunk_with_usage_roundtrip() {
+        let chunk = CompletionChunk {
+            text: "final".to_string(),
+            is_final: true,
+            index: 1,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            usage: Some(CompletionUsage {
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                total_tokens: 30,
+            }),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let back: CompletionChunk = serde_json::from_str(&json).unwrap();
+        let usage = back.usage.expect("usage roundtripped");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total_tokens, 30);
     }
 
     // --- Credentials optional fields ---

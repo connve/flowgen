@@ -4,10 +4,10 @@
 #
 # Required:
 #   - OpenAI API key at /etc/openai/credentials.json
-#   - resources/prompts/rag_system.md
-#   - resources/context/product_documentation.md
-#   - resources/context/pricing_info.md
-#   - resources/context/support_info.txt
+#   - resources/ai-completion/prompts/rag_system.md
+#   - resources/ai-completion/context/product_documentation.md
+#   - resources/ai-completion/context/pricing_info.md
+#   - resources/ai-completion/context/support_info.txt
 flow:
   name: rag_resource_completion
   tasks:
@@ -24,12 +24,12 @@ flow:
         model: gpt-4-turbo
         credentials_path: /etc/openai/credentials.json
         system_prompt:
-          resource: "prompts/rag_system.md"
+          resource: "ai-completion/prompts/rag_system.md"
         prompt: "Question: {{event.data.question}}"
         static_context:
-          - resource: "context/product_documentation.md"
-          - resource: "context/pricing_info.md"
-          - resource: "context/support_info.txt"
+          - resource: "ai-completion/context/product_documentation.md"
+          - resource: "ai-completion/context/pricing_info.md"
+          - resource: "ai-completion/context/support_info.txt"
           - "Inline context also works: Company founded in 2024."
         temperature: 0.3
         max_tokens: 800

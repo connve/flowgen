@@ -70,6 +70,21 @@ pub enum Error {
         #[source]
         source: std::string::FromUtf8Error,
     },
+    #[error("Failed to read tar archive in layer '{digest}': {source}")]
+    TarRead {
+        digest: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("File '{path}' in layer '{digest}' exceeds max_file_size ({size} > {limit} bytes)")]
+    FileTooLarge {
+        digest: String,
+        path: String,
+        size: u64,
+        limit: u64,
+    },
+    #[error("Artifact '{reference}' exceeds max_total_size (uncompressed > {limit} bytes)")]
+    ArtifactTooLarge { reference: String, limit: u64 },
     #[error("Error sending event: {source}")]
     SendMessage {
         #[source]
@@ -92,6 +107,186 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+}
+
+/// One extracted file plus the tar entry path (when the source layer was
+/// an archive) or None (when the layer bytes were the file itself).
+struct ExtractedFile {
+    path: Option<String>,
+    content: String,
+}
+
+/// Layer wire format, chosen by media type. Raw layers come from oras-style
+/// pushes; tar and tar+gzip come from docker/OCI images.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum LayerFormat {
+    Raw,
+    Tar,
+    TarGzip,
+}
+
+fn detect_layer_format(media_type: &str) -> LayerFormat {
+    let mt = media_type.to_ascii_lowercase();
+    if mt.ends_with("+gzip") || mt.ends_with(".tar.gzip") || mt.ends_with(".tar+gzip") {
+        LayerFormat::TarGzip
+    } else if mt.ends_with(".tar") || mt.ends_with("+tar") {
+        LayerFormat::Tar
+    } else {
+        LayerFormat::Raw
+    }
+}
+
+/// Extracts one or more `ExtractedFile`s from a single layer's raw bytes,
+/// dispatching on the layer's media type. Enforces per-file and cumulative
+/// size caps to defuse tar bombs; skips directories, symlinks, hardlinks,
+/// and docker whiteout markers.
+fn extract_layer_files(
+    buf: Vec<u8>,
+    format: LayerFormat,
+    digest: &str,
+    max_file_size: u64,
+    max_total_size: u64,
+    total_so_far: &mut u64,
+    reference: &str,
+) -> Result<Vec<ExtractedFile>, Error> {
+    match format {
+        LayerFormat::Raw => {
+            let size = buf.len() as u64;
+            if size > max_file_size {
+                return Err(Error::FileTooLarge {
+                    digest: digest.to_string(),
+                    path: String::new(),
+                    size,
+                    limit: max_file_size,
+                });
+            }
+            let new_total = total_so_far.saturating_add(size);
+            if new_total > max_total_size {
+                return Err(Error::ArtifactTooLarge {
+                    reference: reference.to_string(),
+                    limit: max_total_size,
+                });
+            }
+            *total_so_far = new_total;
+            let content = String::from_utf8(buf).map_err(|source| Error::InvalidLayerEncoding {
+                digest: digest.to_string(),
+                source,
+            })?;
+            Ok(vec![ExtractedFile {
+                path: None,
+                content,
+            }])
+        }
+        LayerFormat::Tar => extract_tar(
+            &buf[..],
+            digest,
+            max_file_size,
+            max_total_size,
+            total_so_far,
+            reference,
+        ),
+        LayerFormat::TarGzip => {
+            let decoder = flate2::read::GzDecoder::new(&buf[..]);
+            extract_tar(
+                decoder,
+                digest,
+                max_file_size,
+                max_total_size,
+                total_so_far,
+                reference,
+            )
+        }
+    }
+}
+
+fn extract_tar<R: std::io::Read>(
+    reader: R,
+    digest: &str,
+    max_file_size: u64,
+    max_total_size: u64,
+    total_so_far: &mut u64,
+    reference: &str,
+) -> Result<Vec<ExtractedFile>, Error> {
+    let mut archive = tar::Archive::new(reader);
+    let mut out = Vec::new();
+
+    let entries = archive.entries().map_err(|source| Error::TarRead {
+        digest: digest.to_string(),
+        source,
+    })?;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|source| Error::TarRead {
+            digest: digest.to_string(),
+            source,
+        })?;
+
+        let entry_type = entry.header().entry_type();
+        if !entry_type.is_file() {
+            continue;
+        }
+
+        let raw_path = entry
+            .path()
+            .map_err(|source| Error::TarRead {
+                digest: digest.to_string(),
+                source,
+            })?
+            .to_string_lossy()
+            .into_owned();
+
+        let path = raw_path.trim_start_matches('/').to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let file_name = std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy());
+        if let Some(name) = file_name {
+            if name.starts_with(".wh.") {
+                continue;
+            }
+        }
+
+        let size = entry.header().size().map_err(|source| Error::TarRead {
+            digest: digest.to_string(),
+            source,
+        })?;
+        if size > max_file_size {
+            return Err(Error::FileTooLarge {
+                digest: digest.to_string(),
+                path,
+                size,
+                limit: max_file_size,
+            });
+        }
+        let new_total = total_so_far.saturating_add(size);
+        if new_total > max_total_size {
+            return Err(Error::ArtifactTooLarge {
+                reference: reference.to_string(),
+                limit: max_total_size,
+            });
+        }
+        *total_so_far = new_total;
+
+        let mut buf = Vec::with_capacity(size as usize);
+        std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|source| Error::TarRead {
+            digest: digest.to_string(),
+            source,
+        })?;
+
+        let content = String::from_utf8(buf).map_err(|source| Error::InvalidLayerEncoding {
+            digest: digest.to_string(),
+            source,
+        })?;
+
+        out.push(ExtractedFile {
+            path: Some(path),
+            content,
+        });
+    }
+
+    Ok(out)
 }
 
 /// Event handler for OCI sync operations.
@@ -167,14 +362,14 @@ impl EventHandler {
 
             let layers = manifest.layers;
 
-            let total = layers.len();
+            let mut file_events: Vec<FileEvent> = Vec::new();
+            let mut total_uncompressed: u64 = 0;
             for (index, layer) in layers.iter().enumerate() {
-                let path = layer
+                let layer_title = layer
                     .annotations
                     .as_ref()
                     .and_then(|ann| ann.get("org.opencontainers.image.title"))
-                    .cloned()
-                    .unwrap_or_else(|| format!("layer-{index}"));
+                    .cloned();
 
                 let mut buf = Vec::new();
                 self.client
@@ -185,18 +380,34 @@ impl EventHandler {
                         source,
                     })?;
 
-                let content =
-                    String::from_utf8(buf).map_err(|source| Error::InvalidLayerEncoding {
-                        digest: layer.digest.clone(),
-                        source,
-                    })?;
+                let format = detect_layer_format(&layer.media_type);
+                let extracted = extract_layer_files(
+                    buf,
+                    format,
+                    &layer.digest,
+                    self.config.max_file_size,
+                    self.config.max_total_size,
+                    &mut total_uncompressed,
+                    &self.config.artifact,
+                )?;
 
-                let file_event = FileEvent {
-                    path,
-                    content,
-                    digest: layer.digest.clone(),
-                    artifact_digest: manifest_digest.clone(),
-                };
+                for file in extracted {
+                    let path = file.path.unwrap_or_else(|| {
+                        layer_title
+                            .clone()
+                            .unwrap_or_else(|| format!("layer-{index}"))
+                    });
+                    file_events.push(FileEvent {
+                        path,
+                        content: file.content,
+                        digest: layer.digest.clone(),
+                        artifact_digest: manifest_digest.clone(),
+                    });
+                }
+            }
+
+            let total = file_events.len();
+            for (index, file_event) in file_events.into_iter().enumerate() {
                 let data = serde_json::to_value(&file_event)
                     .map_err(|source| Error::SerdeJson { source })?;
 
@@ -208,7 +419,6 @@ impl EventHandler {
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
-                // Only the last layer carries the completion signal.
                 if index == total - 1 {
                     match self.tx {
                         None => {
@@ -227,7 +437,6 @@ impl EventHandler {
                     .map_err(|source| Error::SendMessage { source })?;
             }
 
-            // Empty artifact: still satisfy the source completion contract.
             if total == 0 {
                 if let Some(arc) = completion_tx_arc.as_ref() {
                     let upstream_leaf_share = self.task_context.leaf_count.max(1);
@@ -446,6 +655,8 @@ impl flowgen_core::task::runner::Runner for Processor {
                                         Error::InvalidReference { .. }
                                             | Error::ParseCredentials { .. }
                                             | Error::InvalidLayerEncoding { .. }
+                                            | Error::FileTooLarge { .. }
+                                            | Error::ArtifactTooLarge { .. }
                                     );
                                     error!(error = %e, "OCI sync failed");
                                     if is_permanent {
@@ -818,10 +1029,7 @@ mod tests {
         ProcessorConfig {
             name: "test_sync".to_string(),
             artifact: "ghcr.io/org/flows:prod".to_string(),
-            credentials_path: None,
-            force_pull: false,
-            depends_on: None,
-            retry: None,
+            ..Default::default()
         }
     }
 
@@ -918,5 +1126,206 @@ mod tests {
             .await;
         let processor = result.unwrap();
         assert!(processor.tx.is_some());
+    }
+
+    fn build_tar(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, content) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *content).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn build_tar_gzip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let tar_bytes = build_tar(files);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &tar_bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn detect_layer_format_raw() {
+        assert!(matches!(
+            detect_layer_format("application/yaml"),
+            LayerFormat::Raw
+        ));
+        assert!(matches!(
+            detect_layer_format("application/vnd.oci.image.config.v1+json"),
+            LayerFormat::Raw
+        ));
+    }
+
+    #[test]
+    fn detect_layer_format_tar_gzip() {
+        assert!(matches!(
+            detect_layer_format("application/vnd.oci.image.layer.v1.tar+gzip"),
+            LayerFormat::TarGzip
+        ));
+        assert!(matches!(
+            detect_layer_format("application/vnd.docker.image.rootfs.diff.tar.gzip"),
+            LayerFormat::TarGzip
+        ));
+    }
+
+    #[test]
+    fn detect_layer_format_tar() {
+        assert!(matches!(
+            detect_layer_format("application/vnd.oci.image.layer.v1.tar"),
+            LayerFormat::Tar
+        ));
+    }
+
+    #[test]
+    fn extract_raw_layer_returns_untouched_bytes() {
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            b"hello: world".to_vec(),
+            LayerFormat::Raw,
+            "sha256:abc",
+            1024,
+            1024,
+            &mut total,
+            "test:v1",
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].path.is_none());
+        assert_eq!(result[0].content, "hello: world");
+        assert_eq!(total, 12);
+    }
+
+    #[test]
+    fn extract_tar_gzip_yields_one_file_per_entry() {
+        let bytes = build_tar_gzip(&[
+            ("flow.yaml", b"name: a"),
+            ("processors/sms.yaml", b"kind: sms"),
+        ]);
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            bytes,
+            LayerFormat::TarGzip,
+            "sha256:abc",
+            1024,
+            1024,
+            &mut total,
+            "test:v1",
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].path.as_deref(), Some("flow.yaml"));
+        assert_eq!(result[0].content, "name: a");
+        assert_eq!(result[1].path.as_deref(), Some("processors/sms.yaml"));
+        assert_eq!(result[1].content, "kind: sms");
+    }
+
+    #[test]
+    fn extract_tar_strips_leading_slash() {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_path("etc/flow.yaml").unwrap();
+        // Overwrite the name bytes in-place with a leading slash — the safe
+        // setter refuses absolute paths, but real docker layers occasionally
+        // contain them.
+        let name_bytes = &mut header.as_old_mut().name;
+        name_bytes[0] = b'/';
+        for (i, b) in b"etc/flow.yaml".iter().enumerate() {
+            name_bytes[i + 1] = *b;
+        }
+        header.set_cksum();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, &b"x"[..]).unwrap();
+        let bytes = builder.into_inner().unwrap();
+
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            bytes,
+            LayerFormat::Tar,
+            "sha256:abc",
+            1024,
+            1024,
+            &mut total,
+            "test:v1",
+        )
+        .unwrap();
+        assert_eq!(result[0].path.as_deref(), Some("etc/flow.yaml"));
+    }
+
+    #[test]
+    fn extract_tar_skips_whiteout_markers() {
+        let bytes = build_tar(&[
+            ("kept.yaml", b"kept"),
+            ("dir/.wh.removed.yaml", b"anything"),
+        ]);
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            bytes,
+            LayerFormat::Tar,
+            "sha256:abc",
+            1024,
+            1024,
+            &mut total,
+            "test:v1",
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path.as_deref(), Some("kept.yaml"));
+    }
+
+    #[test]
+    fn extract_rejects_file_over_max_file_size() {
+        let big = [b'a'; 200];
+        let bytes = build_tar(&[("big.yaml", &big)]);
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            bytes,
+            LayerFormat::Tar,
+            "sha256:abc",
+            100,
+            10_000,
+            &mut total,
+            "test:v1",
+        );
+        assert!(matches!(result, Err(Error::FileTooLarge { .. })));
+    }
+
+    #[test]
+    fn extract_rejects_when_total_over_cap() {
+        let a = [b'a'; 60];
+        let b = [b'b'; 60];
+        let bytes = build_tar(&[("a.yaml", &a), ("b.yaml", &b)]);
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            bytes,
+            LayerFormat::Tar,
+            "sha256:abc",
+            1024,
+            100,
+            &mut total,
+            "test:v1",
+        );
+        assert!(matches!(result, Err(Error::ArtifactTooLarge { .. })));
+    }
+
+    #[test]
+    fn extract_raw_rejects_non_utf8() {
+        let mut total: u64 = 0;
+        let result = extract_layer_files(
+            vec![0xff, 0xfe, 0xfd],
+            LayerFormat::Raw,
+            "sha256:abc",
+            1024,
+            1024,
+            &mut total,
+            "test:v1",
+        );
+        assert!(matches!(result, Err(Error::InvalidLayerEncoding { .. })));
     }
 }

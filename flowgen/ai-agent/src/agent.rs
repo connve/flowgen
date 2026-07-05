@@ -545,11 +545,13 @@ pub struct PassthroughResponse {
 /// Provider-agnostic streaming event carried out of tool-use
 /// passthrough. Mirrors the subset of `rig::StreamedAssistantContent`
 /// the AI gateway cares about — text deltas and complete tool calls;
-/// reasoning and provider-native items are dropped.
+/// reasoning and provider-native items are dropped. `Done` carries
+/// the provider-reported token usage extracted from the final
+/// response, or `None` if the provider omitted it.
 pub enum PassthroughStreamEvent {
     Text(String),
     ToolCall(rig::completion::message::ToolCall),
-    Done,
+    Done(Option<Usage>),
 }
 
 /// One-shot completion that skips rig's agent loop.
@@ -605,6 +607,7 @@ where
         >,
         CompletionError,
     > {
+        use rig::completion::GetTokenUsage;
         let cm = self.completion_model(model);
         let stream = cm.stream(request).await?;
         let mapped = stream.map(|item| match item {
@@ -612,7 +615,9 @@ where
             Ok(RigStreamedContent::ToolCall { tool_call, .. }) => {
                 Ok(PassthroughStreamEvent::ToolCall(tool_call))
             }
-            Ok(RigStreamedContent::Final(_)) => Ok(PassthroughStreamEvent::Done),
+            Ok(RigStreamedContent::Final(res)) => {
+                Ok(PassthroughStreamEvent::Done(res.token_usage()))
+            }
             // Drop reasoning and delta fragments — the gateway only
             // needs text and complete tool calls.
             Ok(_) => Ok(PassthroughStreamEvent::Text(String::new())),
@@ -995,5 +1000,76 @@ impl AgentClient {
             .completion_stream_passthrough(&self.model, request)
             .await
             .map_err(|source| Error::CompletionPassthrough { source })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::processor::CompletionUsage;
+
+    fn make_usage(input: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn completion_chunk_final_carries_text_and_usage() {
+        let chunk = CompletionChunk::Final {
+            text: "hello".to_string(),
+            usage: make_usage(10, 5),
+        };
+        match chunk {
+            CompletionChunk::Final { text, usage } => {
+                assert_eq!(text, "hello");
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 5);
+                assert_eq!(usage.total_tokens, 15);
+            }
+            other => panic!("expected Final variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn passthrough_stream_event_done_carries_some_usage() {
+        let event = PassthroughStreamEvent::Done(Some(make_usage(100, 200)));
+        match event {
+            PassthroughStreamEvent::Done(Some(u)) => {
+                assert_eq!(u.input_tokens, 100);
+                assert_eq!(u.output_tokens, 200);
+                assert_eq!(u.total_tokens, 300);
+            }
+            _ => panic!("expected Done(Some(_))"),
+        }
+    }
+
+    #[test]
+    fn passthrough_stream_event_done_carries_none_when_provider_omits_usage() {
+        // Providers that never yield a `Final` frame with usage produce
+        // `Done(None)`, which the completion processor forwards as
+        // `final_chunk.usage = None`. That branch must stay a valid
+        // pattern so the compiler catches accidental removal.
+        let event = PassthroughStreamEvent::Done(None);
+        match event {
+            PassthroughStreamEvent::Done(None) => {}
+            _ => panic!("expected Done(None)"),
+        }
+    }
+
+    #[test]
+    fn rig_usage_converts_to_completion_usage_with_matching_totals() {
+        // The completion processor's Fix 2 (final chunk carries usage)
+        // relies on this conversion: `usage.map(Into::into)`. Assert the
+        // three OpenAI wire fields survive the mapping unchanged.
+        let rig_usage = make_usage(42, 7);
+        let converted: CompletionUsage = rig_usage.into();
+        assert_eq!(converted.prompt_tokens, 42);
+        assert_eq!(converted.completion_tokens, 7);
+        assert_eq!(converted.total_tokens, 49);
     }
 }

@@ -1,10 +1,12 @@
 # OCI Sync
 
-Pulls an OCI artifact (manifest + layers) from a registry and emits one event per layer. Downstream tasks decide what to do with each layer's content — parse it, store it, transform it.
+Pulls an OCI artifact (manifest + layers) from a registry and emits one event per file. Downstream tasks decide what to do with each file's content — parse it, store it, transform it.
 
 Works with any OCI-compliant registry: GHCR, ECR, GAR, ACR, Artifactory, Harbor, Docker Hub, Quay, self-hosted.
 
 Each event contains `{path, content, digest, artifact_digest}`. The shape mirrors [Git Sync](/docs/flowgen/git/sync) so the same downstream pipeline (buffer → diff → cache write) works with either source.
+
+Both `oras push` artifacts and Docker container images are supported: raw layers produce one event per layer using the `org.opencontainers.image.title` annotation as the path, while tar and tar+gzip layers are unpacked and produce one event per file entry using the tar entry path.
 
 ## Configuration
 
@@ -23,6 +25,8 @@ Each event contains `{path, content, digest, artifact_digest}`. The shape mirror
 | `artifact` | string | required | Full OCI reference, e.g. `registry.example.com/org/flows:prod` or `registry.example.com/org/flows@sha256:abcd…`. |
 | `credentials_path` | string | | Path to a JSON credentials file. Two formats are auto-detected; see [credentials](/docs/flowgen/oci#credentials). Anonymous auth if omitted. |
 | `force_pull` | bool | `false` | Bypass the manifest-digest cache and re-pull every tick. Use only to re-seed a downstream cache mutated out of band; leave off in steady state. |
+| `max_file_size` | int | `10485760` (10 MB) | Maximum uncompressed size, in bytes, for any single file extracted from a tar or tar+gzip layer. Applies to raw layers as their whole-blob size. |
+| `max_total_size` | int | `104857600` (100 MB) | Maximum cumulative uncompressed size, in bytes, across every file pulled from one artifact. Guards against tar-bomb layers. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -71,14 +75,31 @@ flow:
 
 ## Output
 
-Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each layer emitted produces an event with `event.data` containing:
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each file emitted produces an event with `event.data` containing:
 
 | Field | Type | Description |
 |---|---|---|
-| `path` | string | File path in the artifact, derived from the layer's `org.opencontainers.image.title` annotation set during `oras push`. Falls back to `layer-<index>` if the annotation is missing. |
-| `content` | string | Layer blob as UTF-8. Non-UTF-8 layers (e.g. binary blobs) produce an error. |
-| `digest` | string | Layer blob digest (`sha256:…`). |
+| `path` | string | File path in the artifact. For raw layers, taken from the layer's `org.opencontainers.image.title` annotation (falls back to `layer-<index>` if missing). For tar and tar+gzip layers, taken from the tar entry path with any leading `/` stripped. |
+| `content` | string | File content as UTF-8. Non-UTF-8 files produce an error. |
+| `digest` | string | Layer blob digest (`sha256:…`). Multiple files extracted from one tar layer share the same digest. |
 | `artifact_digest` | string | Whole-artifact manifest digest. The same value across all events from one pull. |
+
+## Layer formats
+
+The layer's `mediaType` in the manifest dispatches the extractor:
+
+| Media type suffix | Handling |
+|---|---|
+| anything else (e.g. `application/octet-stream`, `application/yaml`) | Raw layer — the blob bytes are the file. One event per layer. Path from `org.opencontainers.image.title`. |
+| `+gzip` (e.g. `application/vnd.oci.image.layer.v1.tar+gzip`, `application/vnd.docker.image.rootfs.diff.tar.gzip`) | tar+gzip archive — decompressed and unpacked. One event per file entry. Path from the tar entry. |
+| `.tar` or `+tar` (e.g. `application/vnd.oci.image.layer.v1.tar`) | tar archive — unpacked. One event per file entry. |
+
+Inside tar and tar+gzip layers, directories, symlinks, hardlinks, and docker whiteout markers (`.wh.*`) are skipped. Only regular files produce events.
+
+This means both push paths work:
+
+- `oras push registry.example.com/org/flows:prod flow.yaml:application/yaml` — one raw layer per file, path from the `:mediaType` annotation.
+- `docker push registry.example.com/org/flows:prod` (from a `FROM scratch` Dockerfile that `COPY`s YAML files in) — one tar+gzip layer per Dockerfile stage, each unpacked into per-file events.
 
 ## Bootstrap flows
 

@@ -1,0 +1,52 @@
+# OpenAI-compatible AI gateway that fronts several downstream
+# providers behind a single URL. The script inspects the client's
+# `model` alias and rewrites the endpoint, model, and credentials
+# before `ai_completion` runs. Client-supplied tool schemas pass
+# through verbatim so OpenAI-tool-use SDKs work end-to-end.
+#
+# Client URL:
+#   POST http://<host>:3002/v1/chat/completions
+#
+# Client request:
+#   {
+#     "model": "flowgen_openai/<alias>",
+#     "messages": [{"role":"user","content":"..."}],
+#     "stream": true,
+#     "stream_options": {"include_usage": true}
+#   }
+#
+# The `flowgen_openai/` prefix picks this flow; `<alias>` (kimi, zai,
+# ...) selects the downstream provider. Aliases are defined in the
+# shared `route_provider.rhai` script.
+#
+# Required:
+#   - AI gateway enabled in worker config (worker.ai_gateway.enabled: true)
+#   - Downstream provider credentials under /etc/<alias>/credentials.json
+flow:
+  name: openai_proxy
+  tasks:
+
+    - llm_proxy:
+        name: flowgen_openai
+        # protocol: openai  # default
+
+    # Route the client alias to a concrete provider. Shared with
+    # anthropic_proxy.yaml so both endpoints stay in sync.
+    - script:
+        name: route_provider
+        code:
+          resource: "scripts/ai-gateway/route_provider.rhai"
+
+    # Forward to the downstream provider. `tool_passthrough: true`
+    # keeps client tool schemas intact; `stream: true` streams tokens
+    # back through the gateway as SSE chunks.
+    - ai_completion:
+        name: forward
+        provider: custom
+        endpoint: "{{event.data.endpoint}}"
+        model: "{{event.data.routed_model}}"
+        credentials_path: "{{event.data.credentials_path}}"
+        prompt: "{{event.data.prompt}}"
+        system_prompt: "{{event.data.system_prompt}}"
+        tool_passthrough: true
+        stream: true

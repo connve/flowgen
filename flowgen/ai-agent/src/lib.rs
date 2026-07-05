@@ -5,6 +5,7 @@
 //! multi-modal capabilities (text, images, speech, etc.).
 
 pub mod agent;
+pub mod meta;
 
 /// AI completion processor for generating responses using LLMs.
 pub mod completion {
@@ -17,6 +18,7 @@ pub mod completion {
 pub mod ai_gateway {
     pub mod config;
     pub mod llm_proxy;
+    pub mod protocol;
     pub mod server;
 }
 

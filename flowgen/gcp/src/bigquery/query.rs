@@ -134,8 +134,9 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Execute query.
-            let (record_batch, job_id) = execute_query(
+            // Stream query result pages instead of buffering the whole table.
+            // Peek one page ahead so the final page can carry completion_tx.
+            let mut pages = QueryPageStream::start(
                 &self.client,
                 &config,
                 self.task_context.resource_loader.as_ref(),
@@ -143,40 +144,56 @@ impl EventHandler {
             )
             .await?;
 
-            let num_rows = record_batch.num_rows();
+            let mut pending = pages.next_batch().await?;
+            let mut is_first = true;
+            loop {
+                let batch = match pending.take() {
+                    Some(b) => b,
+                    None => break,
+                };
+                let next = pages.next_batch().await?;
+                let is_last = next.is_none();
+                let num_rows = batch.num_rows();
 
-            // Build result event.
-            let mut event_builder = EventBuilder::new()
-                .data(EventData::ArrowRecordBatch(record_batch))
-                .subject(format!("{}.{}", event.subject, config.name))
-                .task_id(self.task_id)
-                .task_type(self.task_type);
+                let mut event_builder = EventBuilder::new()
+                    .data(EventData::ArrowRecordBatch(batch))
+                    .subject(format!("{}.{}", event.subject, config.name))
+                    .task_id(self.task_id)
+                    .task_type(self.task_type);
 
-            if let Some(id) = job_id {
-                event_builder = event_builder.id(id);
-            }
+                // Only stamp the job_id onto the first emitted event.
+                if is_first {
+                    if let Some(id) = pages.job_id() {
+                        event_builder = event_builder.id(id.to_string());
+                    }
+                    is_first = false;
+                }
 
-            let mut result_event = event_builder
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
+                let mut result_event = event_builder
+                    .build()
+                    .map_err(|source| Error::EventBuilder { source })?;
 
-            // Signal completion or pass through to next task.
-            match self.tx {
-                None => {
-                    if let Some(arc) = completion_tx_arc.as_ref() {
-                        arc.signal_completion(result_event.data_as_json().ok());
+                if is_last {
+                    match self.tx {
+                        None => {
+                            if let Some(arc) = completion_tx_arc.as_ref() {
+                                arc.signal_completion(result_event.data_as_json().ok());
+                            }
+                        }
+                        Some(_) => {
+                            result_event.completion_tx = completion_tx_arc.clone();
+                        }
                     }
                 }
-                Some(_) => {
-                    result_event.completion_tx = completion_tx_arc.clone();
-                }
-            }
 
-            result_event
-                .send_with_logging(self.tx.as_ref())
-                .context("num_rows", num_rows)
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+                result_event
+                    .send_with_logging(self.tx.as_ref())
+                    .context("num_rows", num_rows)
+                    .await
+                    .map_err(|source| Error::SendMessage { source })?;
+
+                pending = next;
+            }
 
             Ok(())
         })
@@ -405,100 +422,129 @@ impl Default for ProcessorBuilder {
     }
 }
 
-/// Executes a query and returns Arrow RecordBatch.
-async fn execute_query(
-    client: &Client,
-    config: &super::config::Query,
-    resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
-    event_value: &serde_json::Value,
-) -> Result<(arrow::array::RecordBatch, Option<String>), Error> {
-    // Render query (inline queries already rendered, resource files need rendering).
-    let query_string = config
-        .query
-        .render(resource_loader, event_value)
-        .await
-        .map_err(|source| Error::ResourceLoad { source })?;
+/// Stream of `RecordBatch`es produced page-by-page from a BigQuery REST query.
+/// Each `next_batch()` returns the current page as one Arrow batch and issues
+/// the follow-up `getQueryResults` request under the hood, so callers can emit
+/// downstream events without ever holding the full result set in memory.
+struct QueryPageStream<'a> {
+    client: &'a Client,
+    job_ref: google_cloud_bigquery::http::job::JobReference,
+    schema: Option<google_cloud_bigquery::http::table::TableSchema>,
+    next_rows: Option<Vec<Tuple>>,
+    page_token: Option<String>,
+    job_id: Option<String>,
+}
 
-    // Build query request.
-    let mut query_request = QueryRequest {
-        query: query_string,
-        use_legacy_sql: config.use_legacy_sql,
-        use_query_cache: Some(config.use_query_cache),
-        ..Default::default()
-    };
+impl<'a> QueryPageStream<'a> {
+    async fn start(
+        client: &'a Client,
+        config: &super::config::Query,
+        resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
+        event_value: &serde_json::Value,
+    ) -> Result<QueryPageStream<'a>, Error> {
+        let query_string = config
+            .query
+            .render(resource_loader, event_value)
+            .await
+            .map_err(|source| Error::ResourceLoad { source })?;
 
-    // Add parameters.
-    if let Some(ref params) = config.parameters {
-        query_request.query_parameters = params
-            .iter()
-            .map(|(name, value)| build_query_parameter(name, value))
-            .collect::<Result<Vec<_>, _>>()?;
-    }
+        let mut query_request = QueryRequest {
+            query: query_string,
+            use_legacy_sql: config.use_legacy_sql,
+            use_query_cache: Some(config.use_query_cache),
+            ..Default::default()
+        };
 
-    // Set options.
-    if let Some(timeout) = config.timeout {
-        query_request.timeout_ms = Some(timeout.as_millis() as i64);
-    }
-    if let Some(max) = config.max_results {
-        query_request.max_results = Some(max as i64);
-    }
-    if let Some(ref location) = config.location {
-        query_request.location = location.clone();
-    }
-    if let Some(create_session) = config.create_session {
-        query_request.create_session = Some(create_session);
-    }
-    if let Some(ref labels) = config.labels {
-        query_request.labels = Some(labels.clone());
-    }
-
-    // Execute query.
-    let response: QueryResponse = client
-        .job()
-        .query(config.get_job_project_id(), &query_request)
-        .await
-        .map_err(|source| Error::QueryExecution { source })?;
-
-    // If query is not complete, poll for results using getQueryResults.
-    let (schema, mut job_ref, mut all_rows, mut page_token) = if !response.job_complete {
-        let result = poll_query_results(client, &response).await?;
-        (
-            result.schema,
-            result.job_reference,
-            result.rows.unwrap_or_default(),
-            result.page_token,
-        )
-    } else {
-        (
-            response.schema,
-            response.job_reference,
-            response.rows.unwrap_or_default(),
-            response.page_token,
-        )
-    };
-
-    // Fetch all pages if there are more results.
-    while let Some(token) = page_token {
-        let page_response = get_query_results_page(client, &job_ref, &token).await?;
-
-        if let Some(mut rows) = page_response.rows {
-            all_rows.append(&mut rows);
+        if let Some(ref params) = config.parameters {
+            query_request.query_parameters = params
+                .iter()
+                .map(|(name, value)| build_query_parameter(name, value))
+                .collect::<Result<Vec<_>, _>>()?;
         }
 
-        page_token = page_response.page_token;
+        if let Some(timeout) = config.timeout {
+            query_request.timeout_ms = Some(timeout.as_millis() as i64);
+        }
+        if let Some(max) = config.max_results {
+            query_request.max_results = Some(max as i64);
+        }
+        if let Some(ref location) = config.location {
+            query_request.location = location.clone();
+        }
+        if let Some(create_session) = config.create_session {
+            query_request.create_session = Some(create_session);
+        }
+        if let Some(ref labels) = config.labels {
+            query_request.labels = Some(labels.clone());
+        }
+
+        let response: QueryResponse = client
+            .job()
+            .query(config.get_job_project_id(), &query_request)
+            .await
+            .map_err(|source| Error::QueryExecution { source })?;
+
+        let (schema, mut job_ref, first_rows, page_token) = if !response.job_complete {
+            let result = poll_query_results(client, &response).await?;
+            (
+                result.schema,
+                result.job_reference,
+                result.rows.unwrap_or_default(),
+                result.page_token,
+            )
+        } else {
+            (
+                response.schema,
+                response.job_reference,
+                response.rows.unwrap_or_default(),
+                response.page_token,
+            )
+        };
+
+        let job_id = if !job_ref.job_id.is_empty() {
+            Some(std::mem::take(&mut job_ref.job_id))
+        } else {
+            None
+        };
+        // Restore job_id inside job_ref for follow-up getQueryResults calls.
+        if let Some(ref id) = job_id {
+            job_ref.job_id = id.clone();
+        }
+
+        Ok(QueryPageStream {
+            client,
+            job_ref,
+            schema,
+            next_rows: Some(first_rows),
+            page_token,
+            job_id,
+        })
     }
 
-    // Convert to RecordBatch with schema and all rows.
-    let record_batch = response_to_record_batch(schema, all_rows)?;
+    fn job_id(&self) -> Option<&str> {
+        self.job_id.as_deref()
+    }
 
-    // Extract job_id from job_reference (move instead of clone).
-    let job_id = if !job_ref.job_id.is_empty() {
-        Some(std::mem::take(&mut job_ref.job_id))
-    } else {
-        None
-    };
+    /// Returns the next page as one Arrow `RecordBatch`, or `None` when the
+    /// job has no more pages. The very first call emits the initial rows even
+    /// if they're empty (so downstream still sees a schema-shaped batch and
+    /// end-of-batch semantics fire on empty result sets).
+    async fn next_batch(&mut self) -> Result<Option<arrow::array::RecordBatch>, Error> {
+        let rows = match self.next_rows.take() {
+            Some(r) => r,
+            None => return Ok(None),
+        };
 
-    Ok((record_batch, job_id))
+        // Prefetch the next page's rows so the caller can peek one ahead.
+        if let Some(token) = self.page_token.take() {
+            let page = get_query_results_page(self.client, &self.job_ref, &token).await?;
+            self.next_rows = Some(page.rows.unwrap_or_default());
+            self.page_token = page.page_token;
+        }
+
+        let batch = response_to_record_batch(self.schema.clone(), rows)?;
+        Ok(Some(batch))
+    }
 }
 
 /// Poll for query completion using getQueryResults API.

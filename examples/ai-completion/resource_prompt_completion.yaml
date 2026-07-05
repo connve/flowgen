@@ -4,8 +4,8 @@
 #
 # Required:
 #   - Anthropic API key at /etc/anthropic/credentials.json
-#   - resources/prompts/analyst_system.md
-#   - resources/prompts/analyze_data.md
+#   - resources/ai-completion/prompts/analyst_system.md
+#   - resources/ai-completion/prompts/analyze_data.md
 flow:
   name: resource_prompt_completion
   tasks:
@@ -21,8 +21,8 @@ flow:
         model: claude-3-5-sonnet-20241022
         credentials_path: /etc/anthropic/credentials.json
         system_prompt:
-          resource: "prompts/analyst_system.md"
+          resource: "ai-completion/prompts/analyst_system.md"
         prompt:
-          resource: "prompts/analyze_data.md"
+          resource: "ai-completion/prompts/analyze_data.md"
         temperature: 0.5
         max_tokens: 2000

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 ///     artifact: "ghcr.io/connve/flows-tenant-connve:prod"
 ///     credentials_path: /etc/flowgen/credentials/registry.json
 /// ```
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Processor {
     /// Task name.
     pub name: String,
@@ -39,12 +39,43 @@ pub struct Processor {
     /// downstream cache was mutated out of band and needs re-seeding.
     #[serde(default)]
     pub force_pull: bool,
+    /// Maximum uncompressed size for any single file extracted from a
+    /// tar/tar+gzip layer. Guards against tar-bomb layers. Default: 10 MB.
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: u64,
+    /// Maximum total uncompressed size across all files pulled from a
+    /// single artifact. Default: 100 MB.
+    #[serde(default = "default_max_total_size")]
+    pub max_total_size: u64,
     /// Optional list of upstream task names this task depends on.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+fn default_max_file_size() -> u64 {
+    10 * 1024 * 1024
+}
+
+fn default_max_total_size() -> u64 {
+    100 * 1024 * 1024
+}
+
+impl Default for Processor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            artifact: String::new(),
+            credentials_path: None,
+            force_pull: false,
+            max_file_size: default_max_file_size(),
+            max_total_size: default_max_total_size(),
+            depends_on: None,
+            retry: None,
+        }
+    }
 }
 
 impl ConfigExt for Processor {}
@@ -75,6 +106,28 @@ mod tests {
         assert!(config.credentials_path.is_none());
         assert!(config.depends_on.is_none());
         assert!(config.retry.is_none());
+        assert_eq!(config.max_file_size, 10 * 1024 * 1024);
+        assert_eq!(config.max_total_size, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn config_deser_size_caps_override() {
+        let json = r#"{
+            "name": "pull",
+            "artifact": "ghcr.io/org/flows:prod",
+            "max_file_size": 1024,
+            "max_total_size": 4096
+        }"#;
+        let config: Processor = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_file_size, 1024);
+        assert_eq!(config.max_total_size, 4096);
+    }
+
+    #[test]
+    fn processor_default_matches_serde_defaults() {
+        let p = Processor::default();
+        assert_eq!(p.max_file_size, 10 * 1024 * 1024);
+        assert_eq!(p.max_total_size, 100 * 1024 * 1024);
     }
 
     #[test]

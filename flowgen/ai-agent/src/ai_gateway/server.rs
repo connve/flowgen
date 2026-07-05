@@ -12,9 +12,16 @@
 //! URL layout and OpenAI translation logic.
 
 use crate::ai_gateway::config::{
-    self, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message, Protocol,
-    SSE_DONE,
+    self, ChatCompletionRequest, EventPayload, Message, Protocol, SSE_DONE,
 };
+use crate::ai_gateway::protocol::completions::OpenAiAdapter;
+use crate::ai_gateway::protocol::messages::{
+    self as anthropic_msg, MessagesAdapter, MessagesRequest,
+};
+use crate::ai_gateway::protocol::{
+    ProtocolAdapter, StopReason, StreamWriter as ProtocolStreamWriter,
+};
+use crate::meta;
 use axum::{
     body::Body,
     extract::State,
@@ -34,7 +41,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Default port for the AI gateway server.
 pub const DEFAULT_AI_GATEWAY_PORT: u16 = 3002;
@@ -126,10 +133,12 @@ impl Dispatcher for AiGatewayDispatcher {
     fn build_router(state: DispatchState<Self::Registration, Self::Extras>) -> Router {
         let prefix = state.path.trim_end_matches('/').to_string();
         let chat_route = format!("{prefix}/chat/completions");
+        let messages_route = format!("{prefix}/messages");
         let models_route = format!("{prefix}/models");
         let body_limit = state.extras.max_body_bytes;
         Router::new()
             .route(&chat_route, post(dispatch_chat_completions))
+            .route(&messages_route, post(dispatch_messages))
             .route(&models_route, get(list_models))
             .layer(axum::extract::DefaultBodyLimit::max(body_limit))
             .with_state(state)
@@ -178,9 +187,9 @@ async fn list_models(
     .into_response()
 }
 
-/// Handler for `POST <path>/chat/completions`. Peeks `body.model` to find the
-/// registration, splits on the first `/`, and dispatches to the matching
-/// gateway with the downstream-model portion of `model`.
+/// Handler for `POST <path>/chat/completions`. Peeks `body.model` to
+/// find the registration, translates the OpenAI request into the
+/// shared `EventPayload`, and hands off to the generic dispatcher.
 async fn dispatch_chat_completions(
     State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
     headers: HeaderMap,
@@ -198,31 +207,9 @@ async fn dispatch_chat_completions(
         _ => return DispatchError::MissingProxyPrefix.into_response(),
     };
 
-    let registration = match state.table.get(&proxy_name) {
-        Some(entry) => entry.clone(),
-        None => {
-            return DispatchError::UnknownProxy { name: proxy_name }.into_response();
-        }
-    };
-
-    // Reject if the registration speaks a different protocol than this URL.
-    // Today only OpenAI exists so this is always true; the check exists so
-    // adding a second protocol later does not require rewriting the dispatcher.
-    if registration.protocol != Protocol::Openai {
-        return DispatchError::WrongProtocolForUrl { name: proxy_name }.into_response();
-    }
-
-    if registration.cancellation_token.is_cancelled() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-
-    if let Err(e) = validate_endpoint_auth(registration.credentials.as_ref(), &headers) {
-        return e.into_response();
-    }
-
-    let user_context = match validate_user_auth(&registration, &headers).await {
-        Ok(ctx) => ctx,
-        Err(e) => return e.into_response(),
+    let ctx = match resolve_registration(&state, Protocol::Openai, proxy_name, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
 
     let system_prompt = request
@@ -242,22 +229,18 @@ async fn dispatch_chat_completions(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let request_id = format!("chatcmpl-{}", uuid::Uuid::now_v7());
-    let created = chrono::Utc::now().timestamp();
-    let is_stream = request.stream;
-
     // Attach the full OpenAI-shape payload only when the client
     // actually sent `tools`. Pumping the raw message list into
     // event.data on every request pushes flows over the Rhai
     // template renderer's expression-size limit.
     let client_sent_tools = matches!(&request.tools, Some(t) if !t.is_empty());
-    let payload = crate::ai_gateway::config::EventPayload {
+    let payload = EventPayload {
         prompt: &prompt,
         system_prompt: system_prompt.as_deref(),
         model: &downstream_model,
         temperature: request.temperature,
         max_tokens: request.max_tokens,
-        stream: is_stream,
+        stream: request.stream,
         messages: match client_sent_tools {
             true => Some(request.messages.as_slice()),
             false => None,
@@ -271,7 +254,148 @@ async fn dispatch_chat_completions(
             false => None,
         },
     };
-    let data = match serde_json::to_value(&payload) {
+
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .map(|o| o.include_usage)
+        .unwrap_or(false);
+
+    let model = downstream_model.clone();
+    dispatch::<OpenAiAdapter>(ctx, &payload, model, request.stream, include_usage).await
+}
+
+/// Handler for `POST <path>/messages`. Parses the Anthropic Messages
+/// API request, translates it into the shared `EventPayload`, and
+/// hands off to the generic dispatcher. Endpoint-level auth also
+/// accepts `x-api-key` (Claude Code's default header) in addition to
+/// the standard `Authorization: Bearer` handled by the shared path.
+async fn dispatch_messages(
+    State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
+    mut headers: HeaderMap,
+    axum::Json(request): axum::Json<MessagesRequest>,
+) -> Response {
+    // Claude Code sends the endpoint credential as `x-api-key: <token>`.
+    // Fold it into the standard `Authorization: Bearer <token>` header
+    // before running the shared auth path so existing credentials JSON
+    // files keep working unchanged.
+    if !headers.contains_key(header::AUTHORIZATION) {
+        if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+            if let Ok(value) = format!("Bearer {key}").parse() {
+                headers.insert(header::AUTHORIZATION, value);
+            }
+        }
+    }
+
+    let model = request.model.clone();
+    let (proxy_name, downstream_model) = match model.split_once('/') {
+        Some((name, rest)) if !name.is_empty() && !rest.is_empty() => {
+            (name.to_string(), rest.to_string())
+        }
+        _ => return DispatchError::MissingProxyPrefix.into_response(),
+    };
+
+    let ctx = match resolve_registration(&state, Protocol::Anthropic, proxy_name, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    let translated = anthropic_msg::translate_request(&request);
+
+    let payload = EventPayload {
+        prompt: &translated.prompt,
+        system_prompt: translated.system_prompt.as_deref(),
+        model: &downstream_model,
+        temperature: request.temperature,
+        max_tokens: Some(request.max_tokens),
+        stream: request.stream,
+        messages: translated.messages.as_deref(),
+        tools: translated.tools.as_deref(),
+        tool_choice: translated.tool_choice.as_ref(),
+    };
+
+    let model = downstream_model.clone();
+    // Anthropic has no `stream_options.include_usage` opt-in — usage
+    // always rides `message_delta`. Pass `true` so the adapter's
+    // writer sees it (the writer ignores the flag).
+    dispatch::<MessagesAdapter>(ctx, &payload, model, request.stream, true).await
+}
+
+// ---------------------------------------------------------------------------
+// Shared dispatch skeleton
+// ---------------------------------------------------------------------------
+
+/// Everything the generic dispatcher needs to know about a resolved
+/// request: the target registration and the caller's user identity
+/// (when auth is enabled). Built once by `resolve_registration` and
+/// consumed by `dispatch::<Adapter>`.
+struct DispatchContext {
+    registration: LlmProxyRegistration,
+    user_context: Option<flowgen_core::auth::UserContext>,
+}
+
+/// Per-request state passed from `dispatch<A>` into the blocking /
+/// streaming branches. Grouping it into one struct keeps each branch's
+/// signature narrow.
+struct DispatchRequest<'a> {
+    data: serde_json::Value,
+    meta: serde_json::Map<String, serde_json::Value>,
+    model: String,
+    request_id: String,
+    created: i64,
+    include_usage: bool,
+    gateway_ctx: &'a crate::meta::GatewayContext,
+}
+
+/// Look up the registration by name, enforce the URL/protocol guard,
+/// run endpoint- and user-level auth, and hand back a `DispatchContext`
+/// on success. Returns a pre-formatted `Response` on failure so the
+/// caller can short-circuit.
+async fn resolve_registration(
+    state: &DispatchState<LlmProxyRegistration, AiGatewayExtras>,
+    expected_protocol: Protocol,
+    proxy_name: String,
+    headers: &HeaderMap,
+) -> Result<DispatchContext, Response> {
+    let registration = match state.table.get(&proxy_name) {
+        Some(entry) => entry.clone(),
+        None => return Err(DispatchError::UnknownProxy { name: proxy_name }.into_response()),
+    };
+
+    if registration.protocol != expected_protocol {
+        return Err(DispatchError::WrongProtocolForUrl { name: proxy_name }.into_response());
+    }
+
+    if registration.cancellation_token.is_cancelled() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    }
+
+    if let Err(e) = validate_endpoint_auth(registration.credentials.as_ref(), headers) {
+        return Err(e.into_response());
+    }
+
+    let user_context = match validate_user_auth(&registration, headers).await {
+        Ok(ctx) => ctx,
+        Err(e) => return Err(e.into_response()),
+    };
+
+    Ok(DispatchContext {
+        registration,
+        user_context,
+    })
+}
+
+/// Generic dispatch entry point. Serialises the `EventPayload` into
+/// the pipeline event and forwards to blocking / streaming based on
+/// the client's `stream` flag.
+async fn dispatch<A: ProtocolAdapter>(
+    ctx: DispatchContext,
+    payload: &EventPayload<'_>,
+    downstream_model: String,
+    is_stream: bool,
+    include_usage: bool,
+) -> Response {
+    let data = match serde_json::to_value(payload) {
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "Failed to serialize AI gateway event payload");
@@ -280,32 +404,38 @@ async fn dispatch_chat_completions(
     };
 
     let mut meta = serde_json::Map::new();
-    if let Some(ref ctx) = user_context {
-        if let Ok(value) = serde_json::to_value(ctx) {
+    if let Some(ref uctx) = ctx.user_context {
+        if let Ok(value) = serde_json::to_value(uctx) {
             meta.insert(flowgen_core::auth::AUTH.to_string(), value);
         }
     }
 
+    // Flatten request-side observability fields onto event.meta so
+    // downstream tasks (Rhai budget guards, bigquery_write archiving,
+    // NATS billing events) can read them without re-parsing the body.
+    let gateway_ctx = crate::meta::GatewayContext {
+        protocol: A::PROTOCOL_NAME,
+        proxy_name: ctx.registration.config.name.clone(),
+        model: downstream_model.clone(),
+        stream: is_stream,
+        user_id: ctx.user_context.as_ref().map(|u| u.user_id.clone()),
+    };
+    gateway_ctx.insert_into(&mut meta);
+
+    let request = DispatchRequest {
+        data,
+        meta,
+        model: downstream_model,
+        request_id: format!("{}-{}", A::REQUEST_ID_PREFIX, uuid::Uuid::now_v7()),
+        created: chrono::Utc::now().timestamp(),
+        include_usage,
+        gateway_ctx: &gateway_ctx,
+    };
+
     let result = if is_stream {
-        dispatch_streaming(
-            &registration,
-            data,
-            meta,
-            downstream_model,
-            request_id,
-            created,
-        )
-        .await
+        dispatch_streaming::<A>(&ctx.registration, request).await
     } else {
-        dispatch_blocking(
-            &registration,
-            data,
-            meta,
-            downstream_model,
-            request_id,
-            created,
-        )
-        .await
+        dispatch_blocking::<A>(&ctx.registration, request).await
     };
 
     match result {
@@ -400,34 +530,40 @@ async fn validate_user_auth(
 // Dispatch implementations
 // ---------------------------------------------------------------------------
 
-/// Non-streaming chat completion: send event, await leaf completion, return
-/// an OpenAI `ChatCompletionResponse`.
-async fn dispatch_blocking(
+/// Non-streaming dispatch: send event, await leaf completion, hand
+/// off to the adapter to shape the wire response.
+async fn dispatch_blocking<A: ProtocolAdapter>(
     registration: &LlmProxyRegistration,
-    data: serde_json::Value,
-    meta: serde_json::Map<String, serde_json::Value>,
-    model: String,
-    request_id: String,
-    created: i64,
+    request: DispatchRequest<'_>,
 ) -> Result<Response, DispatchError> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
     let mut builder = EventBuilder::new()
-        .data(EventData::Json(data))
+        .data(EventData::Json(request.data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
         .completion_tx(completion_state);
 
-    if !meta.is_empty() {
-        builder = builder.meta(meta);
+    if !request.meta.is_empty() {
+        builder = builder.meta(request.meta);
     }
 
     let e = builder
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;
 
-    e.send_with_logging(Some(&registration.tx))
+    let logger = e
+        .send_with_logging(Some(&registration.tx))
+        .context(meta::PROTOCOL, request.gateway_ctx.protocol)
+        .context(meta::PROXY_NAME, &request.gateway_ctx.proxy_name)
+        .context(meta::MODEL, &request.gateway_ctx.model)
+        .context(meta::STREAM, request.gateway_ctx.stream);
+    let logger = match &request.gateway_ctx.user_id {
+        Some(id) => logger.context(meta::USER_ID, id),
+        None => logger,
+    };
+    logger
         .await
         .map_err(|source| DispatchError::SendMessage { source })?;
 
@@ -445,10 +581,35 @@ async fn dispatch_blocking(
         message: e.to_string(),
     })?;
 
+    let (text, tool_calls, usage) = unpack_completion(completion_data.as_ref())?;
+
+    Ok(A::build_blocking_response(
+        request.request_id,
+        request.model,
+        request.created,
+        text,
+        tool_calls,
+        usage,
+    ))
+}
+
+/// Pull `text`, `tool_calls`, and `usage` out of the leaf's completion
+/// event. Wire shape is fixed by `CompletionResponse` and predates the
+/// protocol split, so both adapters read the same fields.
+fn unpack_completion(
+    data: Option<&serde_json::Value>,
+) -> Result<
+    (
+        String,
+        Vec<crate::ai_gateway::config::ToolCall>,
+        Option<crate::ai_gateway::config::Usage>,
+    ),
+    DispatchError,
+> {
     // Downstream serialises `CompletionResponse` — read `text` for the
     // completion string and `tool_calls` for passthrough. Fall back to
     // `content` for legacy leaf tasks that emit their own shape.
-    let text = match completion_data.as_ref() {
+    let text = match data {
         Some(v) => match v.get("text").or_else(|| v.get("content")) {
             Some(c) => match c.as_str() {
                 Some(s) => s.to_string(),
@@ -459,30 +620,47 @@ async fn dispatch_blocking(
         None => String::new(),
     };
     let tool_calls: Vec<crate::ai_gateway::config::ToolCall> =
-        match completion_data.as_ref().and_then(|v| v.get("tool_calls")) {
+        match data.and_then(|v| v.get("tool_calls")) {
             Some(v) if !v.is_null() => serde_json::from_value(v.clone())
                 .map_err(|source| DispatchError::MalformedToolCalls { source })?,
             _ => Vec::new(),
         };
 
-    let response = match tool_calls.is_empty() {
-        true => ChatCompletionResponse::new(request_id, created, model, text),
-        false => ChatCompletionResponse::with_tool_calls(request_id, created, model, tool_calls),
+    // Malformed `usage` is logged and dropped rather than propagated
+    // because token accounting is best-effort — a bad shape must not
+    // fail an otherwise successful completion.
+    let usage = match data.and_then(|v| v.get("usage")).filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => match serde_json::from_value::<crate::ai_gateway::config::Usage>(v.clone()) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                warn!(error = %e, "Malformed usage in downstream completion event; dropping.");
+                None
+            }
+        },
     };
-    Ok(axum::Json(response).into_response())
+
+    Ok((text, tool_calls, usage))
 }
 
-/// Streaming chat completion: open SSE response stream backed by the response
-/// registry, forwarding progress events as `ChatCompletionChunk` content
-/// chunks and the final completion as a stop chunk plus `[DONE]`.
-async fn dispatch_streaming(
+/// Streaming dispatch: open SSE response stream backed by the response
+/// registry, driving the adapter's `StreamWriter` from the leaf's
+/// progress events and terminal completion. Wire format is entirely
+/// owned by the adapter — this function only sequences state.
+async fn dispatch_streaming<A: ProtocolAdapter>(
     registration: &LlmProxyRegistration,
-    data: serde_json::Value,
-    mut meta: serde_json::Map<String, serde_json::Value>,
-    model: String,
-    request_id: String,
-    created: i64,
+    request: DispatchRequest<'_>,
 ) -> Result<Response, DispatchError> {
+    let DispatchRequest {
+        data,
+        mut meta,
+        model,
+        request_id,
+        created,
+        include_usage,
+        gateway_ctx,
+    } = request;
+
     let correlation_id = uuid::Uuid::now_v7().to_string();
 
     let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressEvent>(32);
@@ -515,7 +693,17 @@ async fn dispatch_streaming(
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;
 
-    e.send_with_logging(Some(&registration.tx))
+    let logger = e
+        .send_with_logging(Some(&registration.tx))
+        .context(meta::PROTOCOL, gateway_ctx.protocol)
+        .context(meta::PROXY_NAME, &gateway_ctx.proxy_name)
+        .context(meta::MODEL, &gateway_ctx.model)
+        .context(meta::STREAM, gateway_ctx.stream);
+    let logger = match &gateway_ctx.user_id {
+        Some(id) => logger.context(meta::USER_ID, id),
+        None => logger,
+    };
+    logger
         .await
         .map_err(|source| DispatchError::SendMessage { source })?;
 
@@ -525,26 +713,12 @@ async fn dispatch_streaming(
     let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
 
     tokio::spawn(async move {
-        async fn send_sse(
-            tx: &mpsc::Sender<Result<String, std::convert::Infallible>>,
-            chunk: &ChatCompletionChunk,
-        ) -> bool {
-            match chunk.to_sse() {
-                Ok(data) => tx.send(Ok(data)).await.is_ok(),
-                Err(e) => {
-                    error!(error = %e, "Failed to serialize SSE chunk");
-                    true
-                }
-            }
-        }
+        let mut writer = A::new_stream_writer(request_id, model, created);
 
-        if !send_sse(
-            &sse_tx,
-            &ChatCompletionChunk::role(&request_id, created, &model),
-        )
-        .await
-        {
-            return;
+        for frame in writer.open() {
+            if sse_tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
         }
 
         tokio::pin!(completion_rx);
@@ -559,12 +733,11 @@ async fn dispatch_streaming(
                 progress = progress_rx.recv() => {
                     match progress {
                         Some(evt) => {
-                            let chunk = ChatCompletionChunk::content(
-                                &request_id, created, &model, evt.status.clone(),
-                            );
-                            if !send_sse(&sse_tx, &chunk).await {
-                                registry.remove(&cid).await;
-                                return;
+                            for frame in writer.text_delta(evt.status.clone()) {
+                                if sse_tx.send(Ok(frame)).await.is_err() {
+                                    registry.remove(&cid).await;
+                                    return;
+                                }
                             }
                         }
                         None => break None,
@@ -584,10 +757,9 @@ async fn dispatch_streaming(
                     registry.remove(&cid).await;
 
                     while let Ok(evt) = progress_rx.try_recv() {
-                        let chunk = ChatCompletionChunk::content(
-                            &request_id, created, &model, evt.status.clone(),
-                        );
-                        send_sse(&sse_tx, &chunk).await;
+                        for frame in writer.text_delta(evt.status.clone()) {
+                            let _ = sse_tx.send(Ok(frame)).await;
+                        }
                     }
 
                     match completion {
@@ -598,7 +770,8 @@ async fn dispatch_streaming(
             }
         };
 
-        let mut emitted_tool_calls = false;
+        let mut final_usage: Option<crate::ai_gateway::config::Usage> = None;
+        let mut stop = StopReason::End;
         match &result {
             Some(Ok(Ok(Some(data)))) => {
                 // Legacy shape uses `content`; `CompletionChunk` uses
@@ -611,8 +784,9 @@ async fn dispatch_streaming(
                     None => String::new(),
                 };
                 if !text.is_empty() {
-                    let chunk = ChatCompletionChunk::content(&request_id, created, &model, text);
-                    send_sse(&sse_tx, &chunk).await;
+                    for frame in writer.text_delta(text) {
+                        let _ = sse_tx.send(Ok(frame)).await;
+                    }
                 }
                 let tool_calls: Vec<crate::ai_gateway::config::ToolCall> =
                     match data.get("tool_calls") {
@@ -625,49 +799,49 @@ async fn dispatch_streaming(
                         },
                         _ => Vec::new(),
                     };
-                for (idx, call) in tool_calls.into_iter().enumerate() {
-                    emitted_tool_calls = true;
-                    let idx = idx as u32;
-                    let open = ChatCompletionChunk::tool_call_open(
-                        &request_id,
-                        created,
-                        &model,
-                        idx,
-                        call.id.clone(),
-                        call.function.name.clone(),
-                    );
-                    send_sse(&sse_tx, &open).await;
-                    let args = ChatCompletionChunk::tool_call_arguments(
-                        &request_id,
-                        created,
-                        &model,
-                        idx,
-                        call.function.arguments.clone(),
-                    );
-                    send_sse(&sse_tx, &args).await;
+                if !tool_calls.is_empty() {
+                    stop = StopReason::ToolUse;
+                    for frame in writer.tool_calls(tool_calls) {
+                        let _ = sse_tx.send(Ok(frame)).await;
+                    }
                 }
+                // Usage lives on the completion processor's final chunk.
+                // Only newer emitters populate it; older ones fall through.
+                // Malformed shapes are logged and dropped rather than
+                // aborting the stream — token accounting is best-effort.
+                final_usage = match data.get("usage").filter(|v| !v.is_null()) {
+                    None => None,
+                    Some(v) => {
+                        match serde_json::from_value::<crate::ai_gateway::config::Usage>(v.clone())
+                        {
+                            Ok(u) => Some(u),
+                            Err(e) => {
+                                warn!(error = %e, "Malformed usage in downstream stream event; dropping.");
+                                None
+                            }
+                        }
+                    }
+                };
             }
             Some(Ok(Err(e))) => {
-                // Surface leaf-task failure as an SSE error frame so the client sees the cause, not an empty stream.
-                let payload = OpenAiErrorResponse {
-                    error: OpenAiErrorDetail {
-                        message: e.to_string(),
-                        error_type: "server_error",
-                    },
-                };
-                if let Ok(json) = serde_json::to_string(&payload) {
-                    let _ = sse_tx.send(Ok(format!("data: {json}\n\n"))).await;
+                // Surface leaf-task failure as an SSE error frame in the
+                // adapter's wire shape so the client sees the cause, not an
+                // empty stream.
+                let frame = A::error_sse_frame(&e.to_string());
+                if !frame.is_empty() {
+                    let _ = sse_tx.send(Ok(frame)).await;
                 }
             }
             _ => {}
         }
 
-        let final_chunk = match emitted_tool_calls {
-            true => ChatCompletionChunk::stop_tool_calls(&request_id, created, &model),
-            false => ChatCompletionChunk::stop(&request_id, created, &model),
-        };
-        send_sse(&sse_tx, &final_chunk).await;
-        let _ = sse_tx.send(Ok(SSE_DONE.to_string())).await;
+        for frame in writer.close(stop, final_usage, include_usage) {
+            let _ = sse_tx.send(Ok(frame)).await;
+        }
+
+        if A::EMIT_DONE_SENTINEL {
+            let _ = sse_tx.send(Ok(SSE_DONE.to_string())).await;
+        }
     });
 
     let stream = ReceiverStream::new(sse_rx);
