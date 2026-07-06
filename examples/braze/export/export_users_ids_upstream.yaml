@@ -1,0 +1,34 @@
+# Export Braze user profiles driven by upstream events.
+#
+# A generate task emits events with user_id in the payload. The
+# braze_export_users_ids task renders "{{event.data.user_id}}" for each
+# incoming event and calls POST /users/export/ids. The response is logged.
+#
+# Required:
+#   - Braze credentials at /etc/braze/credentials.json with:
+#       { "api_key": "...", "rest_endpoint": "https://rest.iad-01.braze.com" }
+flow:
+  name: braze_export_users_ids_upstream
+  tasks:
+    - generate:
+        name: trigger
+        interval: 60s
+        count: 1
+        payload:
+          user_id: "user-123"
+
+    - braze_export_users_ids:
+        name: export_user
+        credentials_path: /etc/braze/credentials.json
+        external_ids:
+          - "{{event.data.user_id}}"
+        fields_to_export:
+          - external_id
+          - email
+          - first_name
+          - last_name
+
+    - log:
+        name: log_result
+        level: info
+        structured: true

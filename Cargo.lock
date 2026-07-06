@@ -868,6 +868,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "braze"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1077535170a9af56e04237d1e9418911a1e95e4f35217069ff18b542bdcd0a99"
+dependencies = [
+ "braze_generated",
+ "chrono",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "braze_generated"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d000cb384f97486eaa5d14215b1235147326b04d13f94384dc27973d7d83aa88"
+dependencies = [
+ "bytes",
+ "chrono",
+ "futures",
+ "openapiv3",
+ "progenitor",
+ "progenitor-client",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1784,6 +1819,7 @@ dependencies = [
  "clap",
  "config",
  "flowgen_ai_agent",
+ "flowgen_braze",
  "flowgen_core",
  "flowgen_gcp",
  "flowgen_git",
@@ -1841,6 +1877,23 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "flowgen_braze"
+version = "0.122.0"
+dependencies = [
+ "async-trait",
+ "braze",
+ "flowgen_core",
+ "futures-util",
+ "humantime-serde",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-retry2",
+ "tracing",
 ]
 
 [[package]]
@@ -2294,7 +2347,7 @@ dependencies = [
 [[package]]
 name = "gcloud-auth"
 version = "1.3.0"
-source = "git+https://github.com/connve/google-cloud-rust#2f317566ff19a5a8f774c20daca168dbea61511d"
+source = "git+https://github.com/connve/google-cloud-rust#e5826496e0077d4df9ee1fac5400bcc365df9177"
 dependencies = [
  "async-trait",
  "base64",
@@ -2315,7 +2368,7 @@ dependencies = [
 [[package]]
 name = "gcloud-bigquery"
 version = "1.7.0"
-source = "git+https://github.com/connve/google-cloud-rust#2f317566ff19a5a8f774c20daca168dbea61511d"
+source = "git+https://github.com/connve/google-cloud-rust#e5826496e0077d4df9ee1fac5400bcc365df9177"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2343,7 +2396,7 @@ dependencies = [
 [[package]]
 name = "gcloud-gax"
 version = "1.4.0"
-source = "git+https://github.com/connve/google-cloud-rust#2f317566ff19a5a8f774c20daca168dbea61511d"
+source = "git+https://github.com/connve/google-cloud-rust#e5826496e0077d4df9ee1fac5400bcc365df9177"
 dependencies = [
  "http",
  "thiserror 2.0.18",
@@ -2358,7 +2411,7 @@ dependencies = [
 [[package]]
 name = "gcloud-googleapis"
 version = "1.3.0"
-source = "git+https://github.com/connve/google-cloud-rust#2f317566ff19a5a8f774c20daca168dbea61511d"
+source = "git+https://github.com/connve/google-cloud-rust#e5826496e0077d4df9ee1fac5400bcc365df9177"
 dependencies = [
  "prost 0.14.3",
  "prost-types",
@@ -2369,7 +2422,7 @@ dependencies = [
 [[package]]
 name = "gcloud-metadata"
 version = "1.0.2"
-source = "git+https://github.com/connve/google-cloud-rust#2f317566ff19a5a8f774c20daca168dbea61511d"
+source = "git+https://github.com/connve/google-cloud-rust#e5826496e0077d4df9ee1fac5400bcc365df9177"
 dependencies = [
  "reqwest 0.13.2",
  "thiserror 2.0.18",

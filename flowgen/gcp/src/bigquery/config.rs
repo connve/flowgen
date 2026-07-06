@@ -190,6 +190,17 @@ pub struct Query {
     /// Format: "project_id.dataset_id" or "dataset_id" (uses query's project_id).
     #[serde(default)]
     pub default_dataset: Option<String>,
+    /// Route the result through the BigQuery Storage Read API instead
+    /// of paginated REST results. Emits Arrow `RecordBatch` directly
+    /// per wire batch, without the per-row `Tuple` conversion the REST
+    /// path pays. Recommended for large result sets (over one million
+    /// rows or one hundred megabytes); adds temporary-table overhead
+    /// for smaller queries. Not compatible with data-definition or
+    /// data-manipulation statements such as `INSERT` or `CREATE TABLE`,
+    /// because those produce no destination table and will error.
+    /// Default: false.
+    #[serde(default)]
+    pub use_storage_read: bool,
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).
@@ -656,6 +667,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };
@@ -685,6 +697,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };
@@ -716,6 +729,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };
@@ -746,6 +760,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };
@@ -771,6 +786,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };
@@ -795,6 +811,7 @@ mod tests {
             create_session: None,
             labels: None,
             default_dataset: None,
+            use_storage_read: false,
             depends_on: None,
             retry: None,
         };

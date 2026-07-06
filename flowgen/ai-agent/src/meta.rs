@@ -33,7 +33,15 @@ use serde_json::{Map, Value};
 pub const PROTOCOL: &str = "protocol";
 /// Registered `llm_proxy` task name (the `<name>/<model>` prefix).
 pub const PROXY_NAME: &str = "proxy_name";
-/// Downstream model requested (the `<model>` portion).
+/// Model the client asked for (the `<model>` portion of the
+/// `<name>/<model>` routing key). This is what the client typed —
+/// distinct from `MODEL` on the completion side, which holds the
+/// actual downstream model the leaf ended up calling (e.g. a Rhai
+/// `route_provider` script may rewrite `kimi` → `kimi-k2.7-code`).
+pub const REQUESTED_MODEL: &str = "requested_model";
+/// Model the completion leaf actually called upstream. Set on the
+/// response side; distinct from `REQUESTED_MODEL` which is the
+/// client's original alias.
 pub const MODEL: &str = "model";
 /// Whether the client asked for a streaming response.
 pub const STREAM: &str = "stream";
@@ -62,8 +70,11 @@ pub struct GatewayContext {
     pub protocol: &'static str,
     /// Registered `llm_proxy` task name.
     pub proxy_name: String,
-    /// Downstream model requested by the client.
-    pub model: String,
+    /// Model the client asked for — the `<model>` portion of the
+    /// `<name>/<model>` routing key. Note this is the *alias* the
+    /// client typed and may be rewritten by an intermediate Rhai
+    /// script before hitting the completion leaf.
+    pub requested_model: String,
     /// Whether the client asked for streaming.
     pub stream: bool,
     /// Authenticated user id, `None` when auth is off.
@@ -75,7 +86,10 @@ impl GatewayContext {
     pub fn insert_into(&self, meta: &mut Map<String, Value>) {
         meta.insert(PROTOCOL.into(), Value::String(self.protocol.into()));
         meta.insert(PROXY_NAME.into(), Value::String(self.proxy_name.clone()));
-        meta.insert(MODEL.into(), Value::String(self.model.clone()));
+        meta.insert(
+            REQUESTED_MODEL.into(),
+            Value::String(self.requested_model.clone()),
+        );
         meta.insert(STREAM.into(), Value::Bool(self.stream));
         if let Some(id) = &self.user_id {
             meta.insert(USER_ID.into(), Value::String(id.clone()));
@@ -134,7 +148,7 @@ mod tests {
         let ctx = GatewayContext {
             protocol: "anthropic",
             proxy_name: "flowgen_anthropic".into(),
-            model: "kimi-k2".into(),
+            requested_model: "kimi".into(),
             stream: true,
             user_id: Some("user_42".into()),
         };
@@ -145,7 +159,10 @@ mod tests {
             meta.get(PROXY_NAME),
             Some(&Value::String("flowgen_anthropic".into()))
         );
-        assert_eq!(meta.get(MODEL), Some(&Value::String("kimi-k2".into())));
+        assert_eq!(
+            meta.get(REQUESTED_MODEL),
+            Some(&Value::String("kimi".into()))
+        );
         assert_eq!(meta.get(STREAM), Some(&Value::Bool(true)));
         assert_eq!(meta.get(USER_ID), Some(&Value::String("user_42".into())));
     }
@@ -155,7 +172,7 @@ mod tests {
         let ctx = GatewayContext {
             protocol: "openai",
             proxy_name: "flowgen_openai".into(),
-            model: "gpt-4".into(),
+            requested_model: "gpt-4".into(),
             stream: false,
             user_id: None,
         };

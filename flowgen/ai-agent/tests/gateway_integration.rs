@@ -908,7 +908,10 @@ async fn gateway_writes_context_fields_to_event_meta_openai_path() {
         meta.get("proxy_name"),
         Some(&Value::String("flowgen_openai".into()))
     );
-    assert_eq!(meta.get("model"), Some(&Value::String("gpt-4".into())));
+    assert_eq!(
+        meta.get("requested_model"),
+        Some(&Value::String("gpt-4".into()))
+    );
     assert_eq!(meta.get("stream"), Some(&Value::Bool(false)));
     // user_id absent when auth is off — downstream reads as missing.
     assert!(!meta.contains_key("user_id"));
@@ -944,7 +947,10 @@ async fn gateway_writes_context_fields_to_event_meta_anthropic_path() {
         meta.get("proxy_name"),
         Some(&Value::String("flowgen_anthropic".into()))
     );
-    assert_eq!(meta.get("model"), Some(&Value::String("kimi".into())));
+    assert_eq!(
+        meta.get("requested_model"),
+        Some(&Value::String("kimi".into()))
+    );
     assert_eq!(meta.get("stream"), Some(&Value::Bool(false)));
 }
 

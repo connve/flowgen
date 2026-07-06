@@ -181,6 +181,9 @@ pub enum Error {
     /// Error in OCI sync task.
     #[error(transparent)]
     OciSync(#[from] flowgen_oci::sync::processor::Error),
+    /// Error in Braze export user IDs task.
+    #[error(transparent)]
+    BrazeExportUsersIds(#[from] flowgen_braze::export::users::processor::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1887,6 +1890,28 @@ async fn spawn_task(
                         .task_id(task_id)
                         .task_type(task_type_str)
                         .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::braze_export_users_ids(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_braze::export::users::processor::ProcessorBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }

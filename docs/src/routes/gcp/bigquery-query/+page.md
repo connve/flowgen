@@ -31,14 +31,17 @@ Runs SQL queries against Google BigQuery. Returns results as Arrow RecordBatch.
 | `use_legacy_sql` | bool | false | Use legacy SQL syntax. |
 | `default_dataset` | string | | Default dataset for unqualified table names. |
 | `labels` | map | | Job labels. |
+| `use_storage_read` | bool | false | Route the result through the BigQuery Storage Read API instead of paginated REST results. Recommended for large result sets (over one million rows or one hundred megabytes). Adds temporary-table overhead for smaller queries and is not compatible with data-definition or data-manipulation statements such as `INSERT` or `CREATE TABLE`. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
 ## Output
 
+The task streams the result and emits one downstream event per wire batch (`getQueryResults` page for the REST backend, Arrow batch for the Storage Read backend). The final event carries `completion_tx` so downstream buffers observe end-of-batch even on empty result sets. An empty result set still produces one event containing an empty `RecordBatch`.
+
 | Format | Crate | Description |
 |---|---|---|
-| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [google-cloud-bigquery](https://github.com/googleapis/google-cloud-rust) | Query results with columns and types matching the BigQuery result set. Job ID is set as `event.id`. |
+| [Arrow RecordBatch](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [google-cloud-bigquery](https://github.com/googleapis/google-cloud-rust) | Query results with columns and types matching the BigQuery result set. On the REST backend, the job ID is set as `event.id` on the first emitted event. The Storage Read backend does not surface the parent job ID. |
 
 ## Example: Query with resource file
 

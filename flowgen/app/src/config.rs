@@ -140,6 +140,8 @@ pub enum TaskType {
     git_sync(flowgen_git::sync::config::Processor),
     /// OCI sync task for pulling flow artifacts from an OCI registry into the cache.
     oci_sync(flowgen_oci::sync::config::Processor),
+    /// Braze export user IDs task.
+    braze_export_users_ids(flowgen_braze::export::users::config::Processor),
 }
 
 impl TaskType {
@@ -179,6 +181,7 @@ impl TaskType {
             TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
             TaskType::oci_sync(_) => "oci_sync",
+            TaskType::braze_export_users_ids(_) => "braze_export_users_ids",
         }
     }
 
@@ -218,6 +221,7 @@ impl TaskType {
             TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
             TaskType::oci_sync(c) => &c.name,
+            TaskType::braze_export_users_ids(c) => &c.name,
         }
     }
 
@@ -269,6 +273,7 @@ impl TaskType {
             TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
             TaskType::oci_sync(c) => c.depends_on.as_ref(),
+            TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
         }
     }
 }

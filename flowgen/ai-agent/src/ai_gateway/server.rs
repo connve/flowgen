@@ -416,7 +416,7 @@ async fn dispatch<A: ProtocolAdapter>(
     let gateway_ctx = crate::meta::GatewayContext {
         protocol: A::PROTOCOL_NAME,
         proxy_name: ctx.registration.config.name.clone(),
-        model: downstream_model.clone(),
+        requested_model: downstream_model.clone(),
         stream: is_stream,
         user_id: ctx.user_context.as_ref().map(|u| u.user_id.clone()),
     };
@@ -557,7 +557,7 @@ async fn dispatch_blocking<A: ProtocolAdapter>(
         .send_with_logging(Some(&registration.tx))
         .context(meta::PROTOCOL, request.gateway_ctx.protocol)
         .context(meta::PROXY_NAME, &request.gateway_ctx.proxy_name)
-        .context(meta::MODEL, &request.gateway_ctx.model)
+        .context(meta::REQUESTED_MODEL, &request.gateway_ctx.requested_model)
         .context(meta::STREAM, request.gateway_ctx.stream);
     let logger = match &request.gateway_ctx.user_id {
         Some(id) => logger.context(meta::USER_ID, id),
@@ -697,7 +697,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         .send_with_logging(Some(&registration.tx))
         .context(meta::PROTOCOL, gateway_ctx.protocol)
         .context(meta::PROXY_NAME, &gateway_ctx.proxy_name)
-        .context(meta::MODEL, &gateway_ctx.model)
+        .context(meta::REQUESTED_MODEL, &gateway_ctx.requested_model)
         .context(meta::STREAM, gateway_ctx.stream);
     let logger = match &gateway_ctx.user_id {
         Some(id) => logger.context(meta::USER_ID, id),

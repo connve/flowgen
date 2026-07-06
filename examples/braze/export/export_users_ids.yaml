@@ -1,0 +1,39 @@
+# Export Braze user profiles by identifier using POST /users/export/ids.
+#
+# This flow triggers once, exports two users by external_id, and logs
+# the Braze response. All Braze identifier types are supported:
+# external_ids, user_aliases, device_id, braze_id, email_address and
+# phone. Values can be static strings or Handlebars templates rendered
+# against the incoming event (e.g. "{{event.data.user_id}}").
+#
+# Required:
+#   - Braze credentials at /etc/braze/credentials.json with:
+#       { "api_key": "...", "rest_endpoint": "https://rest.iad-01.braze.com" }
+#
+# Optional:
+#   - fields_to_export limits which fields Braze returns. Required for
+#     accounts onboarded after 2024-08-22.
+flow:
+  name: braze_export_users_ids_example
+  tasks:
+    - generate:
+        name: trigger
+        interval: 60s
+        count: 1
+
+    - braze_export_users_ids:
+        name: export_users
+        credentials_path: /etc/braze/credentials.json
+        external_ids:
+          - "user-1"
+          - "user-2"
+        fields_to_export:
+          - external_id
+          - email
+          - first_name
+          - last_name
+
+    - log:
+        name: log_result
+        level: info
+        structured: true

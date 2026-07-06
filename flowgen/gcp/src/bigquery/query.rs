@@ -68,6 +68,16 @@ pub enum Error {
         #[source]
         source: google_cloud_bigquery::http::error::Error,
     },
+    #[error("BigQuery Storage Read query error: {source}")]
+    StorageQueryExecution {
+        #[source]
+        source: google_cloud_bigquery::client::QueryError,
+    },
+    #[error("BigQuery Storage Read stream error: {source}")]
+    StorageRead {
+        #[source]
+        source: google_cloud_bigquery::storage::Error,
+    },
     #[error("BigQuery response missing schema")]
     MissingSchema,
     #[error("Arrow error: {source}")]
@@ -136,7 +146,7 @@ impl EventHandler {
 
             // Stream query result pages instead of buffering the whole table.
             // Peek one page ahead so the final page can carry completion_tx.
-            let mut pages = QueryPageStream::start(
+            let mut pages = QueryStream::start(
                 &self.client,
                 &config,
                 self.task_context.resource_loader.as_ref(),
@@ -145,6 +155,15 @@ impl EventHandler {
             .await?;
 
             let mut pending = pages.next_batch().await?;
+            // Empty result set still owes downstream one event so the
+            // buffer/diff/leaf pipeline observes end-of-batch. Storage Read
+            // returns `None` on the very first call for an empty table;
+            // REST always returns a first (possibly empty) page.
+            if pending.is_none() {
+                pending = Some(arrow::array::RecordBatch::new_empty(Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                )));
+            }
             let mut is_first = true;
             loop {
                 let batch = match pending.take() {
@@ -422,26 +441,42 @@ impl Default for ProcessorBuilder {
     }
 }
 
-/// Stream of `RecordBatch`es produced page-by-page from a BigQuery REST query.
-/// Each `next_batch()` returns the current page as one Arrow batch and issues
-/// the follow-up `getQueryResults` request under the hood, so callers can emit
-/// downstream events without ever holding the full result set in memory.
-struct QueryPageStream<'a> {
-    client: &'a Client,
-    job_ref: google_cloud_bigquery::http::job::JobReference,
-    schema: Option<google_cloud_bigquery::http::table::TableSchema>,
-    next_rows: Option<Vec<Tuple>>,
-    page_token: Option<String>,
+/// Stream of `RecordBatch`es from a BigQuery query, backed by either the
+/// REST `getQueryResults` pagination path or the Storage Read API. Both
+/// variants emit one Arrow batch per iteration so the handler can stream
+/// events without buffering the whole result set.
+enum QueryResultStream<'a> {
+    /// Paginated REST results. One event per `getQueryResults` page.
+    Rest {
+        client: &'a Client,
+        job_ref: google_cloud_bigquery::http::job::JobReference,
+        schema: Option<google_cloud_bigquery::http::table::TableSchema>,
+        next_rows: Option<Vec<Tuple>>,
+        page_token: Option<String>,
+    },
+    /// BigQuery Storage Read backend. One event per Arrow batch
+    /// returned by the wire. Boxed because `RecordBatchIterator`
+    /// carries a full gRPC stream handle (~840 B); keeping it inline
+    /// would bloat the REST variant too (`clippy::large_enum_variant`).
+    Storage {
+        iter: Box<google_cloud_bigquery::storage::RecordBatchIterator>,
+    },
+}
+
+/// Wraps a `QueryResultStream` with the job_id extracted at start time so
+/// the handler can stamp it on the first emitted event.
+struct QueryStream<'a> {
+    inner: QueryResultStream<'a>,
     job_id: Option<String>,
 }
 
-impl<'a> QueryPageStream<'a> {
+impl<'a> QueryStream<'a> {
     async fn start(
         client: &'a Client,
         config: &super::config::Query,
         resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
         event_value: &serde_json::Value,
-    ) -> Result<QueryPageStream<'a>, Error> {
+    ) -> Result<QueryStream<'a>, Error> {
         let query_string = config
             .query
             .render(resource_loader, event_value)
@@ -478,6 +513,18 @@ impl<'a> QueryPageStream<'a> {
             query_request.labels = Some(labels.clone());
         }
 
+        if config.use_storage_read {
+            return Self::start_storage(client, config, query_request).await;
+        }
+
+        Self::start_rest(client, config, query_request).await
+    }
+
+    async fn start_rest(
+        client: &'a Client,
+        config: &super::config::Query,
+        query_request: QueryRequest,
+    ) -> Result<QueryStream<'a>, Error> {
         let response: QueryResponse = client
             .job()
             .query(config.get_job_project_id(), &query_request)
@@ -506,18 +553,45 @@ impl<'a> QueryPageStream<'a> {
         } else {
             None
         };
-        // Restore job_id inside job_ref for follow-up getQueryResults calls.
         if let Some(ref id) = job_id {
             job_ref.job_id = id.clone();
         }
 
-        Ok(QueryPageStream {
-            client,
-            job_ref,
-            schema,
-            next_rows: Some(first_rows),
-            page_token,
+        Ok(QueryStream {
+            inner: QueryResultStream::Rest {
+                client,
+                job_ref,
+                schema,
+                next_rows: Some(first_rows),
+                page_token,
+            },
             job_id,
+        })
+    }
+
+    async fn start_storage(
+        client: &'a Client,
+        config: &super::config::Query,
+        query_request: QueryRequest,
+    ) -> Result<QueryStream<'a>, Error> {
+        use google_cloud_bigquery::query::QueryOption;
+
+        let iter = client
+            .query_record_batches(
+                config.get_job_project_id(),
+                query_request,
+                QueryOption::default(),
+            )
+            .await
+            .map_err(|source| Error::StorageQueryExecution { source })?;
+
+        Ok(QueryStream {
+            inner: QueryResultStream::Storage {
+                iter: Box::new(iter),
+            },
+            // Storage Read path does not surface the parent job_id to the
+            // handler; downstream callers that key on it must use REST.
+            job_id: None,
         })
     }
 
@@ -525,25 +599,38 @@ impl<'a> QueryPageStream<'a> {
         self.job_id.as_deref()
     }
 
-    /// Returns the next page as one Arrow `RecordBatch`, or `None` when the
-    /// job has no more pages. The very first call emits the initial rows even
-    /// if they're empty (so downstream still sees a schema-shaped batch and
-    /// end-of-batch semantics fire on empty result sets).
+    /// Returns the next `RecordBatch`, or `None` when the stream is drained.
+    /// For the REST backend, the first call emits the initial rows even if
+    /// they're empty so downstream still sees an end-of-batch event on empty
+    /// result sets.
     async fn next_batch(&mut self) -> Result<Option<arrow::array::RecordBatch>, Error> {
-        let rows = match self.next_rows.take() {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        match &mut self.inner {
+            QueryResultStream::Rest {
+                client,
+                job_ref,
+                schema,
+                next_rows,
+                page_token,
+            } => {
+                let rows = match next_rows.take() {
+                    Some(r) => r,
+                    None => return Ok(None),
+                };
 
-        // Prefetch the next page's rows so the caller can peek one ahead.
-        if let Some(token) = self.page_token.take() {
-            let page = get_query_results_page(self.client, &self.job_ref, &token).await?;
-            self.next_rows = Some(page.rows.unwrap_or_default());
-            self.page_token = page.page_token;
+                if let Some(token) = page_token.take() {
+                    let page = get_query_results_page(client, job_ref, &token).await?;
+                    *next_rows = Some(page.rows.unwrap_or_default());
+                    *page_token = page.page_token;
+                }
+
+                let batch = response_to_record_batch(schema.clone(), rows)?;
+                Ok(Some(batch))
+            }
+            QueryResultStream::Storage { iter } => iter
+                .next()
+                .await
+                .map_err(|source| Error::StorageRead { source }),
         }
-
-        let batch = response_to_record_batch(self.schema.clone(), rows)?;
-        Ok(Some(batch))
     }
 }
 
@@ -616,8 +703,9 @@ fn response_to_record_batch(
     schema: Option<google_cloud_bigquery::http::table::TableSchema>,
     rows: Vec<Tuple>,
 ) -> Result<arrow::array::RecordBatch, Error> {
-    // DDL/DML statements (CREATE TABLE, INSERT, etc.) don't return a schema.
-    // Return an empty RecordBatch in this case.
+    // Data-definition and data-manipulation statements such as
+    // `CREATE TABLE` or `INSERT` do not return a schema. Emit an empty
+    // `RecordBatch` in that case so downstream still observes an event.
     let bq_schema = match schema {
         Some(s) => s,
         None => {
@@ -1521,7 +1609,6 @@ mod tests {
 
     #[test]
     fn test_response_to_record_batch_no_schema_returns_empty_batch() {
-        // DDL/DML statements return no schema — should succeed with empty batch.
         let result = response_to_record_batch(None, vec![]).unwrap();
         assert_eq!(result.num_rows(), 0);
         assert_eq!(result.num_columns(), 0);

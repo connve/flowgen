@@ -43,6 +43,72 @@ export const navigation: NavSection[] = [
 		]
 	},
 	{
+		title: 'Core Tasks',
+		icon: '/icons/core.svg',
+		items: [
+			{ title: 'Overview', href: '/core' },
+			{ title: 'Script (Rhai)', href: '/core/script' },
+			{ title: 'Convert', href: '/core/convert' },
+			{ title: 'Iterate', href: '/core/iterate' },
+			{ title: 'Buffer', href: '/core/buffer' },
+			{ title: 'Generate', href: '/core/generate' },
+			{ title: 'Log', href: '/core/log' }
+		]
+	},
+	{
+		title: 'AI',
+		icon: '/icons/ai.svg',
+		items: [
+			{ title: 'Overview', href: '/ai' },
+			{ title: 'AI Completion', href: '/ai/completion' },
+			{ title: 'AI Gateway', href: '/ai/gateway' },
+			{ title: 'MCP', href: '/ai/mcp' }
+		]
+	},
+	{
+		title: 'Braze',
+		icon: '/icons/braze.png',
+		items: [
+			{ title: 'Overview', href: '/braze' },
+			{ title: 'Export Users by IDs', href: '/braze/export/users' }
+		]
+	},
+	{
+		title: 'Git',
+		icon: '/icons/git.svg',
+		items: [
+			{ title: 'Overview', href: '/git' },
+			{ title: 'Git Sync', href: '/git/sync' }
+		]
+	},
+	{
+		title: 'Google Cloud',
+		icon: '/icons/gcp.svg',
+		items: [
+			{ title: 'Overview', href: '/gcp' },
+			{ title: 'BigQuery Query', href: '/gcp/bigquery-query' },
+			{ title: 'BigQuery Storage', href: '/gcp/bigquery-storage' },
+			{ title: 'BigQuery Jobs', href: '/gcp/bigquery-jobs' }
+		]
+	},
+	{
+		title: 'HTTP',
+		icon: '/icons/http.svg',
+		items: [
+			{ title: 'Overview', href: '/http' },
+			{ title: 'Endpoint', href: '/http/endpoint' },
+			{ title: 'Request', href: '/http/request' }
+		]
+	},
+	{
+		title: 'MSSQL',
+		icon: '/icons/mssql.svg',
+		items: [
+			{ title: 'Overview', href: '/mssql' },
+			{ title: 'Query', href: '/mssql/query' }
+		]
+	},
+	{
 		title: 'NATS JetStream',
 		icon: '/icons/nats.svg',
 		items: [
@@ -50,6 +116,22 @@ export const navigation: NavSection[] = [
 			{ title: 'Subscriber', href: '/nats/subscriber' },
 			{ title: 'Publisher', href: '/nats/publisher' },
 			{ title: 'KV Store', href: '/nats/kv-store' }
+		]
+	},
+	{
+		title: 'Object Store',
+		icon: '/icons/object-store.svg',
+		items: [
+			{ title: 'Overview', href: '/object-store' },
+			{ title: 'Object Store', href: '/object-store/object-store' }
+		]
+	},
+	{
+		title: 'OCI',
+		icon: '/icons/oci.svg',
+		items: [
+			{ title: 'Overview', href: '/oci' },
+			{ title: 'OCI Sync', href: '/oci/sync' }
 		]
 	},
 	{
@@ -74,80 +156,6 @@ export const navigation: NavSection[] = [
 					{ title: 'Deduplication', href: '/salesforce/guides/deduplication' }
 				]
 			}
-		]
-	},
-	{
-		title: 'Google Cloud',
-		icon: '/icons/gcp.svg',
-		items: [
-			{ title: 'Overview', href: '/gcp' },
-			{ title: 'BigQuery Query', href: '/gcp/bigquery-query' },
-			{ title: 'BigQuery Storage', href: '/gcp/bigquery-storage' },
-			{ title: 'BigQuery Jobs', href: '/gcp/bigquery-jobs' }
-		]
-	},
-	{
-		title: 'HTTP',
-		icon: '/icons/http.svg',
-		items: [
-			{ title: 'Overview', href: '/http' },
-			{ title: 'Endpoint', href: '/http/endpoint' },
-			{ title: 'Request', href: '/http/request' }
-		]
-	},
-	{
-		title: 'Object Store',
-		icon: '/icons/object-store.svg',
-		items: [
-			{ title: 'Overview', href: '/object-store' },
-			{ title: 'Object Store', href: '/object-store/object-store' }
-		]
-	},
-	{
-		title: 'MSSQL',
-		icon: '/icons/mssql.svg',
-		items: [
-			{ title: 'Overview', href: '/mssql' },
-			{ title: 'Query', href: '/mssql/query' }
-		]
-	},
-	{
-		title: 'AI',
-		icon: '/icons/ai.svg',
-		items: [
-			{ title: 'Overview', href: '/ai' },
-			{ title: 'AI Completion', href: '/ai/completion' },
-			{ title: 'AI Gateway', href: '/ai/gateway' },
-			{ title: 'MCP', href: '/ai/mcp' }
-		]
-	},
-	{
-		title: 'Git',
-		icon: '/icons/git.svg',
-		items: [
-			{ title: 'Overview', href: '/git' },
-			{ title: 'Git Sync', href: '/git/sync' }
-		]
-	},
-	{
-		title: 'OCI',
-		icon: '/icons/oci.svg',
-		items: [
-			{ title: 'Overview', href: '/oci' },
-			{ title: 'OCI Sync', href: '/oci/sync' }
-		]
-	},
-	{
-		title: 'Core Tasks',
-		icon: '/icons/core.svg',
-		items: [
-			{ title: 'Overview', href: '/core' },
-			{ title: 'Script (Rhai)', href: '/core/script' },
-			{ title: 'Convert', href: '/core/convert' },
-			{ title: 'Iterate', href: '/core/iterate' },
-			{ title: 'Buffer', href: '/core/buffer' },
-			{ title: 'Generate', href: '/core/generate' },
-			{ title: 'Log', href: '/core/log' }
 		]
 	},
 ];

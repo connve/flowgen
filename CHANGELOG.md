@@ -4,6 +4,17 @@
 
 ### Features
 
+- **`braze_export_users_ids` task for Braze user profile exports.** New
+  `flowgen_braze` crate wraps the Braze REST SDK and exposes
+  `POST /users/export/ids` as a flowgen processor. Supports all Braze
+  identifier types (`external_ids`, `user_aliases`, `device_id`,
+  `braze_id`, `email_address`, `phone`) and `fields_to_export`.
+  Identifier values can be static strings or Handlebars templates
+  rendered against the incoming event. The Braze response is emitted as
+  a JSON event downstream. Configuration uses `credentials_path`
+  pointing to a JSON file with `api_key` and `rest_endpoint`. See
+  `examples/braze/export_users_ids.yaml`.
+
 - **AI gateway speaks Anthropic and forwards token usage.** The
   `llm_proxy` task grows a `protocol` field: leaving it at the
   default `openai` keeps `POST /v1/chat/completions` behaviour
@@ -37,6 +48,18 @@
   `RecordBatch` before emitting; peak RAM was ~2× the query result.
   Now each page is emitted as it arrives, with `completion_tx`
   peeked one page ahead. `job_id` stamped on the first event only.
+
+- **`bigquery_query` optional Storage Read backend.** New
+  `use_storage_read: bool` (default `false`) on the task config.
+  When enabled, the query result flows through the BigQuery Storage
+  Read API and is emitted one Arrow batch at a time via the same
+  `RecordBatchIterator` the `bigquery_storage_read` task uses, so
+  large result sets (over one million rows) skip the per-row `Tuple`
+  conversion the REST backend pays. Trade-off: adds temporary-table
+  overhead for small queries and is not compatible with
+  data-definition or data-manipulation statements. Backed by the new
+  upstream `query_record_batches` helper in
+  `connve/google-cloud-rust`.
 
 - **`bigquery_storage_read` streams RecordBatches from the wire.**
   The processor no longer collects the full result set before emitting
@@ -76,6 +99,13 @@
   one artifact). Both are enforced during tar iteration, so a
   malicious layer fails fast before consuming memory. Raw layers
   are subject to the same caps.
+
+### Breaking changes
+
+- **AI gateway event meta: `model` → `requested_model`.** The gateway
+  now writes the client-requested alias under `event.meta.requested_model`;
+  the completion leaf still writes the actual upstream model under
+  `event.meta.model`. Update flows and scripts accordingly.
 
 ### Fixes
 
