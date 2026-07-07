@@ -55,22 +55,21 @@ Subscribers — `nats_jetstream_subscriber`, `salesforce_pubsubapi_subscriber`, 
 
 If you set `max_attempts: 1` on a subscriber, only the initialisation circuit breaker is affected — the runtime reconnect loop still runs forever. This is intentional: the alternative is silently dropping a critical infrastructure component when the upstream broker has a hiccup.
 
-## Worker-level configuration
+## App-level configuration
 
-Set defaults for every flow on the worker by configuring `worker.retry`:
+Set defaults for every task by configuring top-level `retry`:
 
 ```yaml
-worker:
-  retry:
-    max_attempts: 10
-    initial_backoff: "1s"
+retry:
+  max_attempts: 10
+  initial_backoff: "1s"
 ```
 
-If `worker.retry` is omitted, flowgen uses `max_attempts: 10`, `initial_backoff: "1s"` as documented above.
+If `retry` is omitted, flowgen uses `max_attempts: 10`, `initial_backoff: "1s"` as documented above.
 
 ## Per-task overrides
 
-Any task can override the worker default by setting `retry` on the task itself:
+Any task can override the app default by setting `retry` on the task itself:
 
 ```yaml
 - http_request:

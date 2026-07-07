@@ -2094,6 +2094,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let builder = FlowBuilder::new().config(flow_config.clone());
@@ -2137,6 +2138,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
@@ -2162,6 +2164,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
             flowgen_http::server::EndpointDispatcher,
@@ -2200,6 +2203,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2239,6 +2243,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2269,6 +2274,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2307,6 +2313,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2330,6 +2337,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2368,6 +2376,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2419,6 +2428,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2465,6 +2475,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2519,6 +2530,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2570,6 +2582,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2611,6 +2624,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2663,6 +2677,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();

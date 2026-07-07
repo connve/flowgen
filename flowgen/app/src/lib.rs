@@ -15,3 +15,5 @@ pub mod flow;
 pub mod reconciler;
 /// Hot-reload watcher for cache-sourced flows.
 pub mod watcher;
+/// Embedded admin web interface.
+pub mod web;

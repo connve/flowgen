@@ -44,6 +44,10 @@ atty = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
 walkdir = { workspace = true }
+axum = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

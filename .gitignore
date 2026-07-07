@@ -6,3 +6,12 @@
 /local
 .mcp.json
 /vendor
+
+# web (SvelteKit)
+/web/node_modules
+/web/build
+/web/.svelte-kit
+/web/dist
+/web/.vite
+/web/.env
+/web/.env.*

@@ -15,6 +15,23 @@ use tracing::{debug, error, info, warn, Instrument};
 /// entries the flow owns from the shared servers (via each server's own
 /// `deregister_flow(flow_name)`).
 pub struct FlowHandle {
+    /// Unique name of the flow.
+    pub flow_name: String,
+    /// Optional description extracted from flow labels.
+    pub flow_description: Option<String>,
+    /// Tags extracted from `labels.tags` (empty when none).
+    pub flow_tags: Vec<String>,
+    /// Whether the flow requires leader election.
+    pub require_leader_election: bool,
+    /// Number of tasks in the flow.
+    pub task_count: usize,
+    /// Wall-clock time when the flow's supervisor was spawned. Surfaced on
+    /// the admin API as `last_run` until per-event tracking replaces it.
+    pub started_at: std::time::SystemTime,
+    /// YAML source of the flow config, serialized at registration time.
+    /// Surfaced on the admin API so operators can inspect the loaded flow
+    /// without shelling into the pod to `cat` the source file.
+    pub flow_yaml: String,
     /// Token used to signal the flow's tasks to stop gracefully.
     pub cancellation_token: tokio_util::sync::CancellationToken,
     /// Join handle for the flow's background monitor task spawned by `run()`.
@@ -30,6 +47,50 @@ pub struct FlowHandle {
     /// key, racing the replacement flow's renewer under the same pod-level
     /// holder identity.
     pub task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
+}
+
+impl FlowHandle {
+    /// Returns the flow name.
+    pub fn flow_name(&self) -> &str {
+        &self.flow_name
+    }
+
+    /// Returns the flow description, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.flow_description.as_deref()
+    }
+
+    /// Returns the flow tags (empty when none).
+    pub fn tags(&self) -> &[String] {
+        &self.flow_tags
+    }
+
+    /// Returns true if the flow requires leader election.
+    pub fn require_leader_election(&self) -> bool {
+        self.require_leader_election
+    }
+
+    /// Returns the number of tasks in the flow.
+    pub fn task_count(&self) -> usize {
+        self.task_count
+    }
+
+    /// YAML source of the flow config.
+    pub fn flow_yaml(&self) -> &str {
+        &self.flow_yaml
+    }
+
+    /// Wall-clock start time of the flow's supervisor task.
+    pub fn started_at(&self) -> std::time::SystemTime {
+        self.started_at
+    }
+
+    /// True when the flow's supervisor is still executing. A `false` here
+    /// means the flow has exited (usually via an unhandled task panic or
+    /// error), so callers can surface it as an `error` status.
+    pub fn is_running(&self) -> bool {
+        !self.join_handle.is_finished()
+    }
 }
 
 /// Errors that can occur during application execution.
@@ -270,7 +331,7 @@ impl App {
                 })?;
 
             match config.try_deserialize::<FlowConfig>() {
-                Ok(flow_config) => {
+                Ok(mut flow_config) => {
                     if let Err(reason) = flow_config.validate() {
                         error!(
                             key = %key,
@@ -279,6 +340,7 @@ impl App {
                         );
                         continue;
                     }
+                    flow_config.raw_source = Some(content.clone());
                     info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache");
                     flow_configs.push((key, flow_config));
                 }
@@ -378,7 +440,7 @@ impl App {
                         };
 
                         match config.try_deserialize::<FlowConfig>() {
-                            Ok(flow_config) => {
+                            Ok(mut flow_config) => {
                                 if let Err(reason) = flow_config.validate() {
                                     error!(
                                         path = %path.display(),
@@ -387,6 +449,7 @@ impl App {
                                     );
                                     return None;
                                 }
+                                flow_config.raw_source = Some(contents);
                                 info!(flow = %flow_config.flow.name, "Loaded flow");
                                 Some(flow_config)
                             }
@@ -514,36 +577,32 @@ impl App {
         }
 
         // Create shared webhook HTTP server if enabled.
-        let http_server: Option<Arc<flowgen_http::server::EndpointServer>> = match app_config
-            .worker
-            .as_ref()
-            .and_then(|w| w.http_server.as_ref())
-        {
-            Some(http_config) if http_config.enabled => {
-                let path = http_config.path.clone();
-                let auth_provider = match http_config.auth.clone() {
-                    Some(auth_config) => Some(
-                        auth_config
-                            .build()
-                            .await
-                            .map_err(|source| Error::AuthProviderInit { source })?,
-                    ),
-                    None => None,
-                };
-                let server = flowgen_core::http_server::HttpServer::<
-                    flowgen_http::server::EndpointDispatcher,
-                >::new(path)
-                .with_credentials_path(http_config.credentials_path.clone())
-                .with_auth_provider(auth_provider);
-                Some(Arc::new(server))
-            }
-            _ => None,
-        };
+        let http_server: Option<Arc<flowgen_http::server::EndpointServer>> =
+            match app_config.http_server.as_ref() {
+                Some(http_config) if http_config.enabled => {
+                    let path = http_config.path.clone();
+                    let auth_provider = match http_config.auth.clone() {
+                        Some(auth_config) => Some(
+                            auth_config
+                                .build()
+                                .await
+                                .map_err(|source| Error::AuthProviderInit { source })?,
+                        ),
+                        None => None,
+                    };
+                    let server = flowgen_core::http_server::HttpServer::<
+                        flowgen_http::server::EndpointDispatcher,
+                    >::new(path)
+                    .with_credentials_path(http_config.credentials_path.clone())
+                    .with_auth_provider(auth_provider);
+                    Some(Arc::new(server))
+                }
+                _ => None,
+            };
 
         let mcp_enabled = app_config
-            .worker
+            .mcp_server
             .as_ref()
-            .and_then(|w| w.mcp_server.as_ref())
             .map(|mcp| mcp.enabled)
             .unwrap_or(false);
 
@@ -563,10 +622,7 @@ impl App {
         }
 
         let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled {
-            let mcp_config = app_config
-                .worker
-                .as_ref()
-                .and_then(|w| w.mcp_server.as_ref());
+            let mcp_config = app_config.mcp_server.as_ref();
             // Load MCP credentials if configured.
             let credentials = mcp_config
                 .and_then(|mcp_config| mcp_config.credentials_path.as_ref())
@@ -626,22 +682,18 @@ impl App {
                 .any(|t| matches!(t, crate::config::TaskType::llm_proxy(_)))
         });
         let ai_gateway_enabled = app_config
-            .worker
+            .ai_gateway
             .as_ref()
-            .and_then(|w| w.ai_gateway.as_ref())
             .map(|g| g.enabled)
             .unwrap_or(false);
 
         if has_ai_gateway_tasks && !ai_gateway_enabled {
-            warn!("Flows contain llm_proxy tasks but worker.ai_gateway is not enabled, LLM proxy endpoints will not be registered");
+            warn!("Flows contain llm_proxy tasks but ai_gateway is not enabled, LLM proxy endpoints will not be registered");
         }
 
         let ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>> =
             if ai_gateway_enabled {
-                let ai_config = app_config
-                    .worker
-                    .as_ref()
-                    .and_then(|w| w.ai_gateway.as_ref());
+                let ai_config = app_config.ai_gateway.as_ref();
                 let path = ai_config.map(|c| c.path.clone()).unwrap_or_else(|| {
                     flowgen_ai_agent::ai_gateway::server::DEFAULT_AI_GATEWAY_PATH.to_string()
                 });
@@ -810,12 +862,11 @@ impl App {
                 flow_builder = flow_builder.ai_gateway_server(Arc::clone(server));
             }
 
-            if let Some(retry_config) = app_config.worker.as_ref().and_then(|w| w.retry.as_ref()) {
+            if let Some(retry_config) = app_config.retry.as_ref() {
                 flow_builder = flow_builder.retry(retry_config.clone());
             }
 
-            if let Some(buffer_size) = app_config.worker.as_ref().and_then(|w| w.event_buffer_size)
-            {
+            if let Some(buffer_size) = app_config.event_buffer_size {
                 flow_builder = flow_builder.event_buffer_size(buffer_size);
             }
 
@@ -877,9 +928,8 @@ impl App {
         let mut background_handles = Vec::new();
         if let Some(ref http_server) = http_server {
             let configured_port = app_config
-                .worker
+                .http_server
                 .as_ref()
-                .and_then(|w| w.http_server.as_ref())
                 .map(|http| http.port)
                 .unwrap_or(flowgen_http::server::DEFAULT_ENDPOINT_PORT);
             info!(port = configured_port, path = %http_server.path(), "Starting HTTP server");
@@ -899,9 +949,8 @@ impl App {
 
         if let Some(ref mcp_server) = mcp_server {
             let configured_port = app_config
-                .worker
+                .mcp_server
                 .as_ref()
-                .and_then(|w| w.mcp_server.as_ref())
                 .map(|c| c.port)
                 .unwrap_or(flowgen_mcp::server::DEFAULT_MCP_PORT);
             info!(port = configured_port, path = %mcp_server.path(), "Starting MCP server");
@@ -920,9 +969,8 @@ impl App {
 
         if let Some(ref ai_gateway_server) = ai_gateway_server {
             let configured_port = app_config
-                .worker
+                .ai_gateway
                 .as_ref()
-                .and_then(|w| w.ai_gateway.as_ref())
                 .map(|c| c.port)
                 .unwrap_or(flowgen_ai_agent::ai_gateway::server::DEFAULT_AI_GATEWAY_PORT);
             info!(port = configured_port, path = %ai_gateway_server.path(), "Starting AI gateway server");
@@ -952,6 +1000,42 @@ impl App {
         for flow in flows {
             let flow_name = flow.name().to_string();
             let from_filesystem = filesystem_flow_names.contains(&flow_name);
+            let flow_description = flow
+                .config
+                .flow
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("description"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
+            let flow_tags = flow
+                .config
+                .flow
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("tags"))
+                .and_then(|value| value.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(ToString::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let require_leader_election = flow.config.flow.require_leader_election.unwrap_or(false);
+            let task_count = flow.config.flow.tasks.len();
+            let flow_yaml = match flow.config.raw_source.clone() {
+                Some(source) => source,
+                None => match serde_yaml::to_string(&*flow.config) {
+                    Ok(yaml) => yaml,
+                    Err(source) => {
+                        warn!(
+                            error = %source,
+                            "Failed to serialize flow config to YAML for admin API"
+                        );
+                        String::new()
+                    }
+                },
+            };
 
             let cancellation_token = flow
                 .cancellation_token()
@@ -963,8 +1047,15 @@ impl App {
 
             if let Ok(mut registry) = flow_registry.write() {
                 registry.insert(
-                    flow_name,
+                    flow_name.clone(),
                     FlowHandle {
+                        flow_name,
+                        flow_description,
+                        flow_tags,
+                        require_leader_election,
+                        task_count,
+                        started_at: std::time::SystemTime::now(),
+                        flow_yaml,
                         cancellation_token,
                         join_handle,
                         from_filesystem,
@@ -972,6 +1063,24 @@ impl App {
                     },
                 );
             }
+        }
+
+        // Start the admin web UI if enabled.
+        let web_config = app_config.web.as_ref();
+        if let Some(web_config) = web_config.filter(|w| w.enabled) {
+            let port = web_config.port;
+            let path = web_config.path.clone();
+            let web_state = crate::web::WebState {
+                flow_registry: Arc::clone(&flow_registry),
+                prefix: String::new(),
+                resource_loader: resource_loader.clone(),
+            };
+            let web_handle = tokio::spawn(async move {
+                if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {
+                    error!("{}", source);
+                }
+            });
+            background_handles.push(web_handle);
         }
 
         // Spawn the hot-reload watcher and reconciler if the system cache supports watching.

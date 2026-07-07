@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.124.0
+
+### Breaking
+
+- **`worker:` config namespace collapsed to the top level.** Flowgen ships
+  as a single binary — there is no separate worker/server split — so the
+  `worker: { http_server, mcp_server, ai_gateway, web, retry,
+  event_buffer_size }` grouping was misleading. These fields now live at
+  the root of the config alongside `cache`, `flows`, `resources`, and
+  `telemetry`. Migrate existing configs by unindenting one level and
+  removing the `worker:` header line.
+
+## 0.123.0
+
+### Features
+
+- **Admin web UI.** New embedded SvelteKit dashboard served by the
+  worker (opt-in via `worker.web.enabled: true`). Lists loaded flows
+  with description, tags, status, and last-run timestamp; click a row
+  to preview the raw source YAML with Prism syntax highlighting.
+  Adds a Resources tab that browses everything under the configured
+  `resources.path` and renders `.md` files with `marked` plus code
+  files with Prism (SQL, YAML, JSON, Rhai, JS/TS, Bash, Python).
+  Sidebar layout with collapsible navigation, dark-mode toggle, and
+  the running flowgen version. Backend exposes read-only
+  `GET /api/flows`, `GET /api/flows/{name}`, `GET /api/resources`,
+  `GET /api/resources/{key}`, and `GET /api/version`.
+
+- **Flow labels: `description` and `tags`.** Flows can declare
+  `labels.description` (free-form string) and `labels.tags` (array of
+  strings) — surfaced on the admin UI so operators can categorize and
+  search loaded flows without reading the raw YAML.
+
+- **AI completion preserves upstream event meta.** `ai_completion`
+  used to overwrite `event.meta` with only the completion context
+  (provider, model, latency, usage), silently dropping any custom
+  fields upstream tasks had stashed via `ctx.meta.<field> = ...`.
+  The response now merges the completion context into the incoming
+  meta, so multi-step flows (script → ai_completion → downstream
+  script) can round-trip per-event state through the LLM turn.
+
+- **OpenAI content-parts array on the AI gateway.** The gateway's
+  `POST /v1/chat/completions` handler previously required
+  `messages[].content` to be a bare string; Rig, the OpenAI SDKs,
+  and several third-party clients emit the array form
+  (`[{"type":"text","text":"..."}]`) even for pure-text turns and
+  were rejected with a 422. `Message::content` now accepts either
+  shape and flattens the array back to a single string internally.
+
 ## 0.122.0
 
 ### Features

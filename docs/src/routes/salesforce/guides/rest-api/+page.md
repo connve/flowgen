@@ -212,15 +212,14 @@ flow:
 
 ## MCP server configuration
 
-To expose flows as MCP tools, enable the MCP server in the worker config:
+To expose flows as MCP tools, enable the MCP server in the config:
 
 ```yaml
-worker:
-  mcp_server:
-    enabled: true
-    port: 3001
-    path: /mcp/v1
-    credentials_path: /etc/mcp/api-keys.json
+mcp_server:
+  enabled: true
+  port: 3001
+  path: /mcp/v1
+  credentials_path: /etc/mcp/api-keys.json
 ```
 
 LLM agents connect to the MCP endpoint and discover all registered tools via the `tools/list` method. See [MCP Tools](/docs/flowgen/ai/mcp) for details.

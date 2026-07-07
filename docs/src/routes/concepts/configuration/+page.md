@@ -1,13 +1,18 @@
 # Configuration
 
-Flowgen's worker reads a single YAML file (passed via `--config`). It has five top-level sections:
+Flowgen reads a single YAML file (passed via `--config`). Top-level sections:
 
 ```yaml
-flows:       # Flow discovery (required).
-cache:       # Distributed cache backend (optional).
-resources:   # External resource loading (optional).
-worker:      # HTTP/MCP servers, retry defaults, channel sizing (optional).
-telemetry:   # OpenTelemetry export (optional).
+flows:             # Flow discovery (required).
+cache:             # Distributed cache backend (optional).
+resources:         # External resource loading (optional).
+http_server:       # Webhook / metrics HTTP server (optional).
+mcp_server:        # MCP server for tools/resources/prompts (optional).
+ai_gateway:        # OpenAI-compatible LLM gateway (optional).
+web:               # Admin web UI (optional).
+retry:             # Default retry policy for every task (optional).
+event_buffer_size: # Per-edge channel capacity (optional).
+telemetry:         # OpenTelemetry export (optional).
 ```
 
 Only `flows` is required. Every other section has working defaults.
@@ -43,33 +48,37 @@ cache:
 resources:
   path: /etc/flowgen/resources/
 
-worker:
-  http_server:
-    enabled: true
-    port: 3000
-    path: /api/flowgen/workers/v1
-    credentials_path: /etc/flowgen/credentials/http.json
-    auth:
-      type: jwt
-      secret: "shared-secret"
+http_server:
+  enabled: true
+  port: 3000
+  path: /api/flowgen/workers/v1
+  credentials_path: /etc/flowgen/credentials/http.json
+  auth:
+    type: jwt
+    secret: "shared-secret"
 
-  mcp_server:
-    enabled: true
-    port: 3001
-    path: /mcp/v1
-    credentials_path: /etc/flowgen/credentials/mcp.json
+mcp_server:
+  enabled: true
+  port: 3001
+  path: /mcp/v1
+  credentials_path: /etc/flowgen/credentials/mcp.json
 
-  ai_gateway:
-    enabled: true
-    port: 3002
-    path: /v1
-    credentials_path: /etc/flowgen/credentials/ai.json
+ai_gateway:
+  enabled: true
+  port: 3002
+  path: /v1
+  credentials_path: /etc/flowgen/credentials/ai.json
 
-  retry:
-    max_attempts: 10
-    initial_backoff: "1s"
+web:
+  enabled: true
+  port: 8080
+  path: /flowgen
 
-  event_buffer_size: 10000
+retry:
+  max_attempts: 10
+  initial_backoff: "1s"
+
+event_buffer_size: 10000
 
 telemetry:
   enabled: true
@@ -80,7 +89,7 @@ telemetry:
 
 ## `flows`
 
-Flow discovery. Filesystem and distributed cache can be used independently or together; the worker merges flows from both sources at startup.
+Flow discovery. Filesystem and distributed cache can be used independently or together; flowgen merges flows from both sources at startup.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -124,29 +133,34 @@ External resource loading for SQL queries, prompts, scripts, schemas. See [Resou
 
 When `resources` is omitted, only inline content is supported — any task that uses `{ resource: ... }` will fail at startup with a clear error.
 
-## `worker`
+## `http_server`
 
-Worker-process configuration: HTTP server, MCP server, retry defaults, channel sizing.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `http_server` | object | | HTTP server for `http_endpoint` tasks. |
-| `mcp_server` | object | | MCP server for `mcp_tool`, `mcp_resource`, and `mcp_prompt` tasks. |
-| `ai_gateway` | object | | AI gateway server for any AI task that requires exposing a server endpoint. |
-| `retry` | object | `{max_attempts: 10, initial_backoff: "1s"}` | Default retry config for every task. See [Retry](/docs/flowgen/concepts/retry). |
-| `event_buffer_size` | int | `10000` | Capacity of each inter-task event channel (in events). When full the upstream task blocks until the downstream task drains a slot. |
-
-### `worker.http_server`
+HTTP server that hosts every `http_endpoint` route plus health/metrics endpoints.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | required | Required for `http_endpoint` tasks to start. |
 | `port` | int | `3000` | Listening port. |
 | `path` | string | | Optional path prefix applied to every registered route. |
-| `credentials_path` | string | | Worker-level shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |
+| `credentials_path` | string | | Shared bearer/basic credentials. Tasks override per-route. See [Credentials](/docs/flowgen/concepts/credentials). |
 | `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
-### `worker.ai_gateway`
+## `mcp_server`
+
+MCP server for exposing `mcp_tool`, `mcp_resource`, and `mcp_prompt` tasks to LLM clients.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | required | Required for any MCP task to register. |
+| `port` | int | `3001` | Listening port. |
+| `path` | string | `/mcp/v1` | MCP endpoint path. |
+| `credentials_path` | string | | Shared API key credentials. Individual tools can override. |
+| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
+| `resource_uri_scheme` | string | `flowgen` | Scheme used when auto-generating `mcp_resource` URIs of the form `<scheme>://<flow_name>/<name>`. White-label deployments override this. |
+
+## `ai_gateway`
+
+OpenAI-compatible LLM gateway that serves every registered `llm_proxy` flow.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -156,20 +170,21 @@ Worker-process configuration: HTTP server, MCP server, retry defaults, channel s
 | `credentials_path` | string | | Path to global credentials file. Individual `llm_proxy` tasks can override. |
 | `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
 
-### `worker.mcp_server`
+## `web`
+
+Embedded admin dashboard for inspecting loaded flows and resources at runtime.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Required for any MCP task (`mcp_tool`, `mcp_resource`, `mcp_prompt`) to register. |
-| `port` | int | `3001` | Listening port. |
-| `path` | string | `/mcp/v1` | MCP endpoint path. |
-| `credentials_path` | string | | Worker-level shared API key credentials. Individual tools can override. |
-| `auth` | object | | User-level authentication provider (JWT, OIDC, session). See [Authentication](/docs/flowgen/concepts/auth). |
-| `resource_uri_scheme` | string | `flowgen` | Scheme used when auto-generating `mcp_resource` URIs of the form `<scheme>://<flow_name>/<name>`. White-label deployments override this. |
+| `enabled` | bool | required | Set `true` to start the admin server. |
+| `port` | int | `8080` | Listening port. |
+| `path` | string | `/` | Path prefix. Use a subpath (e.g. `/flowgen`) when co-hosting under a tenant subdomain like `tenant.example.com/flowgen`. |
 
-### `worker.retry`
+The UI lists loaded flows with description, tags, status, and last-run timestamp; click a row to preview the raw source YAML with syntax highlighting. A Resources tab browses everything under the configured `resources.path` and renders `.md` files as HTML plus code files (SQL, YAML, JSON, Rhai, JS/TS, Bash, Python) with Prism.
 
-Sets the default retry policy for every task on this worker. Individual tasks can override via their own `retry` field.
+## `retry`
+
+Sets the default retry policy for every task. Individual tasks can override via their own `retry` field.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -178,7 +193,7 @@ Sets the default retry policy for every task on this worker. Individual tasks ca
 
 See [Retry](/docs/flowgen/concepts/retry) for the two retry patterns (circuit breaker for processors, infinite reconnect for subscribers).
 
-### `worker.event_buffer_size`
+## `event_buffer_size`
 
 Each pair of connected tasks shares a bounded mpsc channel. `event_buffer_size` sets the channel capacity (in events). When the channel fills, the upstream task blocks until the downstream task drains a slot — this is how backpressure propagates through the flow. No events are dropped.
 
@@ -203,4 +218,4 @@ When `telemetry` is omitted entirely, no OTLP exporter starts but tracing logs s
 flowgen --config /etc/flowgen/config.yaml
 ```
 
-The worker validates the config at startup. Any field with a typo, missing required value, or invalid type produces an error before any flow runs.
+Flowgen validates the config at startup. Any field with a typo, missing required value, or invalid type produces an error before any flow runs.

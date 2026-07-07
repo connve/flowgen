@@ -13,7 +13,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.122.0"
+version = "0.124.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -138,3 +138,5 @@ scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 walkdir = { version = "2.5" }
 testcontainers = { version = "0.27" }
+rust-embed = { version = "8.7" }
+mime_guess = { version = "2.0" }

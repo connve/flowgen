@@ -4,6 +4,9 @@
 # span (instance=1..5) in logs to see which pipeline handled an event.
 flow:
   name: parallel_instances_example
+  labels:
+    description: "Runs 5 independent flow pipelines inside the same process for horizontal throughput within a single pod."
+    tags: ["parallel", "example"]
   require_leader_election: true
   parallel_instances: 5
   tasks:

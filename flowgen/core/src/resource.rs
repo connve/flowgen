@@ -8,7 +8,7 @@
 //! - **Cache**: Distributed cache, resource keys resolve to cache keys with a configured prefix.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 
@@ -216,6 +216,11 @@ impl ResourceLoader {
             base_path: None,
             cache: Some(CacheSource { cache, prefix }),
         }
+    }
+
+    /// Returns the configured filesystem base path, if any.
+    pub fn base_path(&self) -> Option<&Path> {
+        self.base_path.as_deref()
     }
 
     /// Adds a cache fallback to a filesystem-backed loader.

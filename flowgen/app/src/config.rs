@@ -24,6 +24,13 @@ pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
 pub struct FlowConfig {
     /// Flow definition containing name and tasks.
     pub flow: Flow,
+    /// Verbatim YAML source the loader read this flow from. Kept for the
+    /// admin API so the UI can render the file as authored — round-tripping
+    /// through `serde_yaml` introduces enum tags and `null` sentinels for
+    /// `Option::None` fields, which is not what an operator wants to see.
+    /// Skipped in (de)serialization so it does not affect config parsing.
+    #[serde(skip)]
+    pub raw_source: Option<String>,
 }
 
 impl FlowConfig {
@@ -285,6 +292,9 @@ impl std::fmt::Display for TaskType {
 }
 
 /// Main application configuration.
+///
+/// Flowgen ships as a single binary — there is no separate worker/server
+/// split — so component sections live at the top level.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     /// Optional cache configuration (shared across components).
@@ -293,15 +303,6 @@ pub struct AppConfig {
     pub flows: FlowOptions,
     /// Optional resource loading configuration (shared across components).
     pub resources: Option<ResourceOptions>,
-    /// Optional worker component configuration.
-    pub worker: Option<WorkerConfig>,
-    /// Optional OpenTelemetry configuration for metrics and tracing.
-    pub telemetry: Option<TelemetryOptions>,
-}
-
-/// Worker component configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-pub struct WorkerConfig {
     /// Optional HTTP server configuration for webhooks, health checks, and metrics.
     pub http_server: Option<HttpServerOptions>,
     /// Optional MCP server configuration for exposing flows as MCP tools.
@@ -310,11 +311,15 @@ pub struct WorkerConfig {
     /// Runs on its own port so the surface can later migrate to gRPC or WebSocket
     /// independently of the webhook HTTP server.
     pub ai_gateway: Option<AiGatewayOptions>,
+    /// Optional admin web UI configuration for inspecting loaded flows.
+    pub web: Option<WebOptions>,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Per-edge event channel capacity in events (defaults to 10,000).
     /// When full the upstream task blocks until downstream drains a slot.
     pub event_buffer_size: Option<usize>,
+    /// Optional OpenTelemetry configuration for metrics and tracing.
+    pub telemetry: Option<TelemetryOptions>,
 }
 
 /// Cache type for storage backend.
@@ -535,6 +540,32 @@ pub struct AiGatewayOptions {
     pub max_body_bytes: usize,
 }
 
+/// Default admin web UI port.
+fn default_web_port() -> u16 {
+    8080
+}
+
+/// Default admin web UI path prefix.
+fn default_web_path() -> String {
+    "/".to_string()
+}
+
+/// Admin web UI configuration options.
+///
+/// Serves a lightweight, read-only dashboard for inspecting loaded flows.
+/// The UI is built into the binary as static assets.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct WebOptions {
+    /// Whether the admin web UI is enabled.
+    pub enabled: bool,
+    /// Port for the admin web server. Defaults to 8080.
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+    /// Path prefix for the admin web UI. Defaults to "/".
+    #[serde(default = "default_web_path")]
+    pub path: String,
+}
+
 /// Default webhook HTTP server port.
 fn default_http_port() -> u16 {
     3000
@@ -609,6 +640,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         };
 
         assert_eq!(flow_config.flow.name, "test_flow");
@@ -629,6 +661,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         };
 
         let serialized = serde_json::to_string(&flow_config).unwrap();
@@ -736,28 +769,22 @@ mod tests {
                 cache: None,
             },
             resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
-            worker: Some(WorkerConfig {
-                http_server: None,
-                mcp_server: None,
-                ai_gateway: None,
-                retry: None,
-                event_buffer_size: None,
-            }),
         };
 
         assert!(app_config.cache.is_some());
         assert!(app_config.cache.as_ref().unwrap().enabled);
         assert!(app_config.flows.path.is_some());
         assert!(app_config.telemetry.is_none());
-        assert!(app_config.worker.as_ref().unwrap().http_server.is_none());
-        assert!(app_config.worker.as_ref().unwrap().retry.is_none());
-        assert!(app_config
-            .worker
-            .as_ref()
-            .unwrap()
-            .event_buffer_size
-            .is_none());
+        assert!(app_config.http_server.is_none());
+        assert!(app_config.retry.is_none());
+        assert!(app_config.event_buffer_size.is_none());
         assert!(app_config.resources.is_none());
     }
 
@@ -770,14 +797,13 @@ mod tests {
                 cache: None,
             },
             resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
-            worker: Some(WorkerConfig {
-                http_server: None,
-                mcp_server: None,
-                ai_gateway: None,
-                retry: None,
-                event_buffer_size: None,
-            }),
         };
 
         assert!(app_config.cache.is_none());
@@ -801,14 +827,13 @@ mod tests {
                 cache: None,
             },
             resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
-            worker: Some(WorkerConfig {
-                http_server: None,
-                mcp_server: None,
-                ai_gateway: None,
-                retry: None,
-                event_buffer_size: None,
-            }),
         };
 
         let serialized = serde_json::to_string(&app_config).unwrap();
@@ -833,14 +858,13 @@ mod tests {
                 cache: None,
             },
             resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
-            worker: Some(WorkerConfig {
-                http_server: None,
-                mcp_server: None,
-                ai_gateway: None,
-                retry: None,
-                event_buffer_size: None,
-            }),
         };
 
         let cloned = app_config.clone();
@@ -961,6 +985,7 @@ mod tests {
                 require_leader_election: None,
                 parallel_instances: 1,
             },
+            raw_source: None,
         };
 
         assert_eq!(flow_config.flow.name, "complex_flow");
@@ -1007,30 +1032,23 @@ mod tests {
                 cache: None,
             },
             resources: None,
-            telemetry: None,
-            worker: Some(WorkerConfig {
-                http_server: Some(HttpServerOptions {
-                    enabled: true,
-                    port: 8080,
-                    path: "/workers".to_string(),
-                    credentials_path: None,
-                    auth: None,
-                }),
-                mcp_server: None,
-                ai_gateway: None,
-                retry: None,
-                event_buffer_size: None,
+            http_server: Some(HttpServerOptions {
+                enabled: true,
+                port: 8080,
+                path: "/workers".to_string(),
+                credentials_path: None,
+                auth: None,
             }),
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
+            telemetry: None,
         };
 
-        assert!(app_config.worker.as_ref().unwrap().http_server.is_some());
-        let http_server = app_config
-            .worker
-            .as_ref()
-            .unwrap()
-            .http_server
-            .as_ref()
-            .unwrap();
+        assert!(app_config.http_server.is_some());
+        let http_server = app_config.http_server.as_ref().unwrap();
         assert!(http_server.enabled);
         assert_eq!(http_server.port, 8080);
         assert_eq!(http_server.path, "/workers");
@@ -1097,13 +1115,18 @@ mod tests {
                 cache: None,
             },
             resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
                 otlp_endpoint: "http://otel-collector:4317".to_string(),
                 service_name: "flowgen".to_string(),
                 metrics_export_interval: Duration::from_secs(60),
             }),
-            worker: None,
         };
 
         assert!(app_config.telemetry.is_some());

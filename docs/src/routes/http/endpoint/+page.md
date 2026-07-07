@@ -1,14 +1,13 @@
 # HTTP Endpoint
 
-Registers an HTTP route on the worker's HTTP server. Each incoming request is injected into the flow as an event and the flow's response is returned to the caller. Supports `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. Requires `worker.http_server.enabled: true`.
+Registers an HTTP route on the shared HTTP server. Each incoming request is injected into the flow as an event and the flow's response is returned to the caller. Supports `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`. Requires `http_server.enabled: true`.
 
 ## Configuration
 
 ```yaml
-worker:
-  http_server:
-    enabled: true
-    port: 3000
+http_server:
+  enabled: true
+  port: 3000
 ```
 
 ```yaml

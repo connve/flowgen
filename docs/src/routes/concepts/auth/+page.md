@@ -1,12 +1,12 @@
 # Authentication
 
-Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server). Auth is configured once at the worker level and shared across every HTTP-facing task on that worker. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
+Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server). Auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
 
 User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/flowgen/concepts/credentials) for the distinction.
 
 ## Providers
 
-Three provider types, configured under `worker.http_server.auth`:
+Three provider types, configured under `http_server.auth` (same shape works on `mcp_server.auth` and `ai_gateway.auth`):
 
 | Provider | What it validates | When to use |
 |---|---|---|
@@ -17,16 +17,15 @@ Three provider types, configured under `worker.http_server.auth`:
 ## JWT provider
 
 ```yaml
-worker:
-  http_server:
-    enabled: true
-    auth:
-      type: jwt
-      secret: "your-hmac-secret"        # for HS256 (mutually exclusive with jwks_url)
-      # jwks_url: "https://idp.example.com/.well-known/jwks.json"   # for RS256/ES256
-      audience: "flowgen-prod"          # optional: reject tokens with a different aud
-      issuer: "https://auth.example.com" # optional: reject tokens with a different iss
-      user_id_claim: "sub"              # optional: defaults to "sub"
+http_server:
+  enabled: true
+  auth:
+    type: jwt
+    secret: "your-hmac-secret"        # for HS256 (mutually exclusive with jwks_url)
+    # jwks_url: "https://idp.example.com/.well-known/jwks.json"   # for RS256/ES256
+    audience: "flowgen-prod"          # optional: reject tokens with a different aud
+    issuer: "https://auth.example.com" # optional: reject tokens with a different iss
+    user_id_claim: "sub"              # optional: defaults to "sub"
 ```
 
 Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `jwks_url`, flowgen fetches the JWKS at startup and matches incoming tokens by their `kid` header.
@@ -34,14 +33,13 @@ Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `j
 ## OIDC provider
 
 ```yaml
-worker:
-  http_server:
-    enabled: true
-    auth:
-      type: oidc
-      issuer_url: "https://auth.example.com/realms/myapp"
-      audience: "flowgen-prod"
-      user_id_claim: "sub"
+http_server:
+  enabled: true
+  auth:
+    type: oidc
+    issuer_url: "https://auth.example.com/realms/myapp"
+    audience: "flowgen-prod"
+    user_id_claim: "sub"
 ```
 
 Flowgen reads `{issuer_url}/.well-known/openid-configuration` at startup, extracts the JWKS endpoint, and validates incoming tokens against those keys. The provider rejects tokens whose `iss` claim does not match the discovered issuer.
@@ -49,20 +47,19 @@ Flowgen reads `{issuer_url}/.well-known/openid-configuration` at startup, extrac
 ## Session provider
 
 ```yaml
-worker:
-  http_server:
-    enabled: true
-    auth:
-      type: session
-      validation_url: "https://auth.example.com/api/session/validate"
-      user_id_field: "user_id"
+http_server:
+  enabled: true
+  auth:
+    type: session
+    validation_url: "https://auth.example.com/api/session/validate"
+    user_id_field: "user_id"
 ```
 
 For each incoming request, flowgen sends `Authorization: Bearer <token>` to `validation_url`. A 2xx response with a JSON body is treated as valid; the `user_id_field` is extracted from the response and becomes `UserContext.user_id`. Any other status returns 401 to the caller.
 
 ## Per-task opt-in
 
-Setting `auth` on the worker enables the provider but does not force every task to require a token. Each HTTP-facing task opts in individually:
+Setting `auth` at the server level enables the provider but does not force every task to require a token. Each HTTP-facing task opts in individually:
 
 ```yaml
 - http_endpoint:
@@ -120,7 +117,7 @@ The shape of `event.meta.auth`:
 
 ## Composing with credentials_path
 
-A webhook can require both a worker-shared bearer secret (`credentials_path`) **and** a user-level JWT (`auth.required: true`). Both checks must pass. The shared secret is for service-to-service authentication (the caller proves they are an authorised service); the JWT identifies the end user.
+A webhook can require both a shared bearer secret (`credentials_path`) **and** a user-level JWT (`auth.required: true`). Both checks must pass. The shared secret is for service-to-service authentication (the caller proves they are an authorised service); the JWT identifies the end user.
 
 ```yaml
 - http_endpoint:

@@ -13,12 +13,11 @@ Exposes two wire protocols on the same server, both routed by the request body's
 The AI gateway runs as its own HTTP server, independent of the webhook HTTP server and MCP server:
 
 ```yaml
-worker:
-  ai_gateway:
-    enabled: true
-    port: 3002
-    path: /v1
-    # credentials_path: /etc/flowgen/credentials/ai.json
+ai_gateway:
+  enabled: true
+  port: 3002
+  path: /v1
+  # credentials_path: /etc/flowgen/credentials/ai.json
 ```
 
 ### Fields
@@ -49,8 +48,8 @@ Registers a flow as a backend on the shared AI gateway server. Inbound chat comp
 |---|---|---|---|
 | `name` | string | required | Proxy name. Combined with the downstream model as `<name>/<downstream-model>` in the client's `model` field. |
 | `protocol` | string | `openai` | Wire protocol exposed for this proxy. One of `openai` or `anthropic`. |
-| `credentials_path` | string | | Overrides `worker.ai_gateway.credentials_path` for this proxy. |
-| `auth` | object | | Per-proxy authentication. When `auth.required` is true, requests must include a valid bearer token validated by the worker auth provider. |
+| `credentials_path` | string | | Overrides `ai_gateway.credentials_path` for this proxy. |
+| `auth` | object | | Per-proxy authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider. |
 | `ack_timeout` | duration | wait indefinitely | Max time to wait for the pipeline to complete before returning a timeout error to the client. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
@@ -100,7 +99,7 @@ Example client call:
 
 ```bash
 ANTHROPIC_BASE_URL=http://<host>:3002 \
-ANTHROPIC_API_KEY=<matches worker credentials> \
+ANTHROPIC_API_KEY=<matches ai_gateway credentials> \
 ANTHROPIC_MODEL=claude/kimi-k2 \
 claude ...
 ```

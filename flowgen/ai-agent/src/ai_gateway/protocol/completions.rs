@@ -85,7 +85,16 @@ pub struct Message {
     pub role: String,
     /// Message text content. `None` when `tool_calls` is present, or on a
     /// tool-role message before the caller inlines the tool result.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Accepts both OpenAI wire forms: a bare string, or an array of typed
+    /// content parts (`[{"type":"text","text":"..."}]`). Array form is
+    /// flattened by concatenating all `text` parts — non-text parts (image,
+    /// input_audio) are ignored since the gateway does not forward them.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_message_content",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub content: Option<String>,
     /// Tool invocations the assistant wants to perform. Present only on
     /// assistant messages returned by a model in tool-use mode.
@@ -95,6 +104,55 @@ pub struct Message {
     /// tool-role follow-up messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+/// Accepts `content` as either a bare string or an OpenAI content-parts
+/// array. Rig, the OpenAI SDK, and several third-party clients emit the
+/// array form even for pure-text turns; the gateway then flattens back to a
+/// single string since it only forwards text.
+fn deserialize_message_content<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ContentInput {
+        Text(String),
+        Parts(Vec<ContentPart>),
+        Null,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum ContentPart {
+        Text {
+            text: String,
+        },
+        #[serde(other)]
+        Other,
+    }
+
+    match Option::<ContentInput>::deserialize(deserializer).map_err(D::Error::custom)? {
+        None | Some(ContentInput::Null) => Ok(None),
+        Some(ContentInput::Text(s)) => Ok(Some(s)),
+        Some(ContentInput::Parts(parts)) => {
+            let joined: String = parts
+                .into_iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text),
+                    ContentPart::Other => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if joined.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(joined))
+            }
+        }
+    }
 }
 
 impl Message {
@@ -689,6 +747,41 @@ mod tests {
         assert!(!req.stream);
         assert!(req.tools.is_none());
         assert!(req.tool_choice.is_none());
+    }
+
+    #[test]
+    fn message_content_accepts_openai_parts_array() {
+        let json = r#"{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello "},
+                {"type": "text", "text": "world"}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn message_content_skips_non_text_parts() {
+        let json = r#"{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "prompt"},
+                {"type": "image_url", "image_url": {"url": "http://x"}}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_deref(), Some("prompt"));
+    }
+
+    #[test]
+    fn message_content_null_and_missing() {
+        let msg: Message =
+            serde_json::from_str(r#"{"role": "assistant", "content": null}"#).unwrap();
+        assert!(msg.content.is_none());
+        let msg: Message = serde_json::from_str(r#"{"role": "assistant"}"#).unwrap();
+        assert!(msg.content.is_none());
     }
 
     #[test]

@@ -8,6 +8,9 @@
 #   - resources/ai-completion/prompts/analyze_data.md
 flow:
   name: resource_prompt_completion
+  labels:
+    description: "Webhook → LLM completion with system and user prompts loaded from resource files."
+    tags: ["ai", "webhook", "example"]
   tasks:
 
     # POST /api/flowgen/workers/webhook/analyze with the payload to analyse.

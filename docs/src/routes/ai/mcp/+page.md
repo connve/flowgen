@@ -11,16 +11,15 @@ Expose flows and curated content to [Model Context Protocol](https://modelcontex
 
 ## Server configuration
 
-The MCP server must be enabled in the worker config to register any of the tasks below:
+The MCP server must be enabled in the config to register any of the tasks below:
 
 ```yaml
-worker:
-  mcp_server:
-    enabled: true
-    port: 3001
-    path: /mcp/v1
-    credentials_path: /path/to/credentials.json
-    resource_uri_scheme: flowgen
+mcp_server:
+  enabled: true
+  port: 3001
+  path: /mcp/v1
+  credentials_path: /path/to/credentials.json
+  resource_uri_scheme: flowgen
 ```
 
 ### Fields
@@ -60,9 +59,9 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 | `name` | string | required | Tool name. Combined with the flow name as `{flow_name}.{name}` to form the full tool identifier. |
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
 | `input_schema` | object | | JSON Schema for the tool's input parameters. |
-| `credentials_path` | string | | Overrides `worker.mcp_server.credentials_path` for this tool. |
+| `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
 | `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before returning a timeout error to the client. |
-| `auth` | object | | Per-tool authentication. When `auth.required` is true, requests must include a valid bearer token validated by the worker auth provider; the resolved user context is injected into `event.meta.auth`. |
+| `auth` | object | | Per-tool authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider; the resolved user context is injected into `event.meta.auth`. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

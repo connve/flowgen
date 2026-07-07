@@ -298,6 +298,47 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         }
     }
 
+    let flow_description = new_flow
+        .config
+        .flow
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("description"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let flow_tags = new_flow
+        .config
+        .flow
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("tags"))
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let require_leader_election = new_flow
+        .config
+        .flow
+        .require_leader_election
+        .unwrap_or(false);
+    let task_count = new_flow.config.flow.tasks.len();
+    let flow_yaml = match new_flow.config.raw_source.clone() {
+        Some(source) => source,
+        None => match serde_yaml::to_string(&*new_flow.config) {
+            Ok(yaml) => yaml,
+            Err(source) => {
+                tracing::warn!(
+                    error = %source,
+                    "Failed to serialize flow config to YAML for admin API"
+                );
+                String::new()
+            }
+        },
+    };
+
     let cancellation_token = new_flow
         .cancellation_token()
         .unwrap_or_else(tokio_util::sync::CancellationToken::new);
@@ -315,6 +356,13 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
             registry.insert(
                 flow_name.clone(),
                 FlowHandle {
+                    flow_name: flow_name.clone(),
+                    flow_description,
+                    flow_tags,
+                    require_leader_election,
+                    task_count,
+                    started_at: std::time::SystemTime::now(),
+                    flow_yaml,
                     cancellation_token,
                     join_handle,
                     from_filesystem: false,
@@ -438,14 +486,16 @@ fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<FlowConfig, Erro
         config::FileFormat::Yaml
     };
 
-    config::Config::builder()
+    let mut flow_config: FlowConfig = config::Config::builder()
         .add_source(config::File::from_str(&content, format))
         .build()
         .and_then(|c| c.try_deserialize::<FlowConfig>())
         .map_err(|source| Error::FlowConfigParse {
             key: key.to_string(),
             source,
-        })
+        })?;
+    flow_config.raw_source = Some(content.into_owned());
+    Ok(flow_config)
 }
 
 /// Builds a minimal `ReconcilerContext` for tests that only exercise
@@ -465,7 +515,12 @@ fn test_context(prefix: &str) -> ReconcilerContext {
             }),
         },
         resources: None,
-        worker: None,
+        http_server: None,
+        mcp_server: None,
+        ai_gateway: None,
+        web: None,
+        retry: None,
+        event_buffer_size: None,
         telemetry: None,
     };
 
@@ -505,20 +560,10 @@ fn build_flow(
     if let Some(server) = &ctx.ai_gateway_server {
         builder = builder.ai_gateway_server(Arc::clone(server));
     }
-    if let Some(retry) = ctx
-        .app_config
-        .worker
-        .as_ref()
-        .and_then(|w| w.retry.as_ref())
-    {
+    if let Some(retry) = ctx.app_config.retry.as_ref() {
         builder = builder.retry(retry.clone());
     }
-    if let Some(buf) = ctx
-        .app_config
-        .worker
-        .as_ref()
-        .and_then(|w| w.event_buffer_size)
-    {
+    if let Some(buf) = ctx.app_config.event_buffer_size {
         builder = builder.event_buffer_size(buf);
     }
     if let Some(loader) = &ctx.resource_loader {
@@ -567,7 +612,12 @@ mod tests {
                 cache: None,
             },
             resources: None,
-            worker: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -688,7 +738,12 @@ flow:
                 }),
             },
             resources: None,
-            worker: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            retry: None,
+            event_buffer_size: None,
             telemetry: None,
         };
 
