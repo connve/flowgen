@@ -227,25 +227,61 @@ impl EventHandler {
             })?;
 
             let status = response.status();
-            let body = response.text().await.map_err(|source| Error::Reqwest {
-                endpoint: endpoint.clone(),
-                method: method.clone(),
-                source,
-            })?;
 
-            if status.is_client_error() || status.is_server_error() {
-                return Err(Error::HttpError {
-                    endpoint: endpoint.clone(),
-                    method: method.clone(),
-                    status: status.as_u16(),
-                    body,
-                });
-            }
-
-            let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
+            let event_data = match self.config.response_type {
+                crate::config::ResponseType::Bytes => {
+                    let raw = response.bytes().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body: String::from_utf8_lossy(&raw).to_string(),
+                        });
+                    }
+                    EventData::Bytes(raw)
+                }
+                crate::config::ResponseType::Text => {
+                    let body = response.text().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body,
+                        });
+                    }
+                    EventData::Json(json!(body))
+                }
+                crate::config::ResponseType::Json => {
+                    let body = response.text().await.map_err(|source| Error::Reqwest {
+                        endpoint: endpoint.clone(),
+                        method: method.clone(),
+                        source,
+                    })?;
+                    if status.is_client_error() || status.is_server_error() {
+                        return Err(Error::HttpError {
+                            endpoint: endpoint.clone(),
+                            method: method.clone(),
+                            status: status.as_u16(),
+                            body,
+                        });
+                    }
+                    let data = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!(body));
+                    EventData::Json(data)
+                }
+            };
 
             let mut e = event_builder
-                .data(EventData::Json(data))
+                .data(event_data)
                 .subject(self.config.name.to_owned())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
@@ -638,6 +674,7 @@ mod tests {
             connect_timeout: crate::config::default_connect_timeout(),
             max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
+            response_type: crate::config::ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,

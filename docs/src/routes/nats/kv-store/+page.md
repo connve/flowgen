@@ -18,7 +18,7 @@ Read, write, list, and delete keys in a NATS JetStream Key-Value bucket.
     name: write_flow
     operation: put
     credentials_path: /etc/nats/credentials.json
-    url: nats://localhost:4222
+    url: "{{env.NATS_URL}}"
     bucket: flowgen_system
     key: "flows.{{event.data.path}}"
 ```
@@ -81,6 +81,7 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
     bucket: flowgen_system
     key: "config.{{event.data.name}}"
     credentials_path: /etc/nats/credentials.json
+    url: "{{env.NATS_URL}}"
 ```
 
 ### Read from KV
@@ -92,6 +93,7 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
     bucket: flowgen_system
     key: "config.my_setting"
     credentials_path: /etc/nats/credentials.json
+    url: "{{env.NATS_URL}}"
 ```
 
 Returns `{key, content, found}`. `content` is null if the key does not exist.
@@ -105,6 +107,7 @@ Returns `{key, content, found}`. `content` is null if the key does not exist.
     bucket: flowgen_system
     key_prefix: "flows."
     credentials_path: /etc/nats/credentials.json
+    url: "{{env.NATS_URL}}"
 ```
 
 Returns `{prefix, keys, count}`.
@@ -118,4 +121,5 @@ Returns `{prefix, keys, count}`.
     bucket: flowgen_system
     key: "config.old_setting"
     credentials_path: /etc/nats/credentials.json
+    url: "{{env.NATS_URL}}"
 ```

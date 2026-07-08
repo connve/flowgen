@@ -12,9 +12,12 @@
 # changes can be redeployed independently.
 #
 # Required:
+#   - GIT_RESOURCES_URL env var, e.g.
+#       https://github.com/org/resources.git
 #   - /etc/flowgen/credentials/git.json with
-#       { "token": "<github_pat_or_gitlab_deploy_token>" }
+#       { "token": "..." }
 #   - /etc/nats/credentials.json for NATS KV writes.
+#   - NATS_URL env var (e.g. nats://localhost:4222)
 flow:
   name: system_sync_resources
   require_leader_election: true
@@ -26,7 +29,7 @@ flow:
 
     - git_sync:
         name: pull_repo
-        repository_url: "https://git.example.com/your-org/your-flows.git"
+        repository_url: "{{env.GIT_RESOURCES_URL}}"
         branch: main
         path: "resources/"
         credentials_path: /etc/flowgen/credentials/git.json
@@ -46,6 +49,7 @@ flow:
     - nats_kv_store:
         name: list_existing
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: list
         key_prefix: "flowgen.resources."
@@ -133,6 +137,7 @@ flow:
     - nats_kv_store:
         name: write_to_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: put
         key: "{{event.data.key}}"
@@ -141,6 +146,7 @@ flow:
     - nats_kv_store:
         name: delete_from_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: delete
         key: "{{event.data.key}}"

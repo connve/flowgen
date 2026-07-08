@@ -22,7 +22,7 @@ worker:
     enabled: true
     auth:
       type: jwt
-      secret: "your-hmac-secret"        # for HS256 (mutually exclusive with jwks_url)
+      secret: "your-password"        # for HS256 (mutually exclusive with jwks_url)
       # jwks_url: "https://idp.example.com/.well-known/jwks.json"   # for RS256/ES256
       audience: "flowgen-prod"          # optional: reject tokens with a different aud
       issuer: "https://auth.example.com" # optional: reject tokens with a different iss

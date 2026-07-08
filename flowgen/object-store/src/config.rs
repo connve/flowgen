@@ -15,6 +15,8 @@ pub const DEFAULT_CSV_EXTENSION: &str = "csv";
 pub const DEFAULT_JSON_EXTENSION: &str = "json";
 /// File extension for Parquet format files.
 pub const DEFAULT_PARQUET_EXTENSION: &str = "parquet";
+/// File extension for raw-byte writes.
+pub const DEFAULT_BYTES_EXTENSION: &str = "bin";
 
 /// Object store operation type.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -156,6 +158,8 @@ pub enum WriteFormat {
     Avro,
     /// Newline-delimited JSON.
     Json,
+    /// Raw bytes written verbatim; used for `EventData::Bytes` payloads.
+    Bytes,
 }
 
 /// Configuration for Hive-style directory partitioning.

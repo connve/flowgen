@@ -24,6 +24,7 @@ Makes outbound HTTP requests. URL, headers, and payload support templating.
 | `headers` | map | | HTTP headers. Values support templating. |
 | `timeout` | duration | `30s` | Total request timeout from start to response body received. Set explicitly to override or omit-with-`null` to disable. |
 | `connect_timeout` | duration | `10s` | TCP/TLS connect timeout. |
+| `response_type` | string | `json` | How to decode the response body. `json` parses the body as JSON (falls back to a JSON string on parse errors). `text` wraps the body verbatim as a JSON string. `bytes` emits `EventData::Bytes` for binary payloads such as ZIP archives or image blobs. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

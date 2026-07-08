@@ -6,6 +6,7 @@
 use crate::buffer::{ContentType, FromReader, ToWriter};
 use apache_avro::{from_avro_datum, Reader as AvroReader};
 use arrow::{array::RecordBatchWriter, csv::reader::Format};
+use base64::Engine;
 use chrono::Utc;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -480,6 +481,8 @@ pub enum EventData {
     Avro(AvroData),
     /// JSON format for flexible structured data.
     Json(serde_json::Value),
+    /// Raw bytes for binary payloads (archive contents, non-UTF-8 blobs).
+    Bytes(bytes::Bytes),
 }
 
 /// Avro data container with schema and serialized payload.
@@ -517,6 +520,10 @@ impl TryFrom<&EventData> for Value {
                 serde_json::Value::try_from(avro_value).map_err(|e| Error::Avro { source: e })?
             }
             EventData::Json(data) => data.clone(),
+            EventData::Bytes(bytes) => {
+                // Base64 so Handlebars templates against `event.data` don't crash on binary payloads.
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
         };
         Ok(data)
     }
@@ -758,6 +765,13 @@ impl<W: Write> ToWriter<W> for EventData {
                     .append(value)
                     .map_err(|e| Error::Avro { source: e })?;
                 avro_writer.flush().map_err(|e| Error::Avro { source: e })?;
+                Ok(())
+            }
+            EventData::Bytes(bytes) => {
+                let mut writer = writer;
+                writer
+                    .write_all(&bytes)
+                    .map_err(|source| Error::IO { source })?;
                 Ok(())
             }
         }

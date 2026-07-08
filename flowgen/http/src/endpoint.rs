@@ -767,6 +767,7 @@ mod tests {
             connect_timeout: crate::config::default_connect_timeout(),
             max_body_bytes: crate::config::default_max_body_bytes(),
             stream: false,
+            response_type: crate::config::ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,

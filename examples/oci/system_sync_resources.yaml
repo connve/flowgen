@@ -12,10 +12,13 @@
 # changes can be redeployed independently.
 #
 # Required:
+#   - OCI_RESOURCES_ARTIFACT env var, e.g.
+#       registry.example.com/org/resources:prod
 #   - /etc/flowgen/credentials/registry.json with either
 #       { "username": "...", "password": "..." }
 #     or a Docker config.json payload (kubernetes.io/dockerconfigjson).
 #   - /etc/nats/credentials.json for NATS KV writes.
+#   - NATS_URL env var (e.g. nats://localhost:4222)
 flow:
   name: system_sync_resources
   require_leader_election: true
@@ -27,7 +30,7 @@ flow:
 
     - oci_sync:
         name: pull_repo
-        artifact: "registry.example.com/your-org/your-resources:prod"
+        artifact: "{{env.OCI_RESOURCES_ARTIFACT}}"
         credentials_path: /etc/flowgen/credentials/registry.json
 
     - buffer:
@@ -45,6 +48,7 @@ flow:
     - nats_kv_store:
         name: list_existing
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: list
         key_prefix: "flowgen.resources."
@@ -132,6 +136,7 @@ flow:
     - nats_kv_store:
         name: write_to_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: put
         key: "{{event.data.key}}"
@@ -140,6 +145,7 @@ flow:
     - nats_kv_store:
         name: delete_from_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: delete
         key: "{{event.data.key}}"

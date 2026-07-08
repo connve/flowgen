@@ -54,7 +54,7 @@ Read requires a concrete file path (e.g. `gs://bucket/dir/file.csv`). It does no
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `format` | string | `auto` | Output format: `auto`, `parquet`, `csv`, `avro`, `json`. |
+| `format` | string | `auto` | Output format: `auto`, `parquet`, `csv`, `avro`, `json`, `bytes`. `auto` picks `parquet` for Arrow batches, `avro` for Avro, `json` for JSON, and `bytes` for `EventData::Bytes` payloads (raw binary, `.bin` extension). |
 | `hive_partition_options` | object | | Hive-style partitioning (by date, hour). |
 
 ### Move fields

@@ -9,7 +9,7 @@ The `credentials_path` field points to a JSON file with NKey authentication:
 ```json
 {
   "nkey": {
-    "seed": "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY"
+    "seed": "your-private-key"
   }
 }
 ```

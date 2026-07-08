@@ -8,6 +8,7 @@ Publishes events to a NATS JetStream subject.
 - nats_jetstream_publisher:
     name: publish_results
     credentials_path: /etc/nats/credentials.json
+    url: "{{env.NATS_URL}}"
     subject: "results.processed"
 ```
 

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.123.0
+
+### Features
+
+- **`EventData::Bytes(bytes::Bytes)`** carries binary payloads through the
+  pipeline for content that cannot be safely coerced to UTF-8. Rendered as
+  a base64 string by `TryFrom<&EventData> for Value` so Handlebars
+  templates against `event.data` do not crash; downstream tasks that need
+  the raw bytes match `EventData::Bytes` directly.
+
+- **`http_request response_type: json | text | bytes`** picks how outbound
+  response bodies are decoded. Default remains `json` for backwards
+  compatibility. `bytes` emits `EventData::Bytes` — enables downloading
+  ZIP archives, image blobs, or other binary payloads without lossy UTF-8
+  coercion.
+
+- **`object_store::write` writes raw bytes.** New `WriteFormat::Bytes`
+  (auto-selected when the incoming event carries `EventData::Bytes`)
+  passes the payload through verbatim with a `.bin` extension.
+
+### Bug fixes
+
+- **`oci_sync` no longer rejects binary layers.** When a pulled layer
+  (or tar entry inside a layer) is not valid UTF-8, the processor emits
+  the bytes as `EventData::Bytes` with `path`, `digest`, and
+  `artifact_digest` on `event.meta`, instead of returning
+  `InvalidLayerEncoding` and failing the pull after retries. oras
+  layers holding UTF-8 content still emit the historical JSON
+  `FileEvent` shape so existing bootstrap flows are unaffected.
+
+- **`oci_sync` merges Docker image layers with overlay-fs semantics.**
+  Layers without the `org.opencontainers.image.title` annotation are
+  classified as Docker image layers and merged in manifest order: later
+  layers override earlier ones, `.wh.<name>` markers delete files from
+  lower layers, and `.wh..wh..opq` markers hide entire subtrees. Only
+  the surviving final state is emitted downstream. oras artifact
+  layers (carrying `image.title`) keep the per-layer emission
+  behaviour, so existing bootstrap flows are unaffected. Detection is
+  fully automatic — no config.
+
 ## 0.122.0
 
 ### Features

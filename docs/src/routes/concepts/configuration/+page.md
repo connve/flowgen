@@ -35,7 +35,7 @@ cache:
   enabled: true
   type: nats
   credentials_path: /etc/nats/credentials.json
-  url: nats://localhost:4222
+  url: "{{env.NATS_URL}}"
   db_name: flowgen_cache
   history: 10
   tombstone_ttl: "1h"

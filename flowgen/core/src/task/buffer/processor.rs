@@ -35,6 +35,8 @@ pub enum Error {
     ExpectedJsonGotArrowRecordBatch,
     #[error("Expected JSON event data, got Avro")]
     ExpectedJsonGotAvro,
+    #[error("Expected JSON event data, got binary Bytes")]
+    ExpectedJsonGotBytes,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
     #[error("Error rendering buffer key template: {source}")]
@@ -310,6 +312,9 @@ impl Processor {
                                 EventData::Avro(_) => {
                                     return Err(Error::ExpectedJsonGotAvro);
                                 }
+                                EventData::Bytes(_) => {
+                                    return Err(Error::ExpectedJsonGotBytes);
+                                }
                             };
 
                             buffer.push(json_data);
@@ -415,6 +420,9 @@ impl Processor {
                                 }
                                 EventData::Avro(_) => {
                                     return Err(Error::ExpectedJsonGotAvro);
+                                }
+                                EventData::Bytes(_) => {
+                                    return Err(Error::ExpectedJsonGotBytes);
                                 }
                             };
 

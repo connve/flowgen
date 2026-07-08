@@ -69,7 +69,7 @@ worker:
     # JWT with local HMAC secret:
     # auth:
     #   type: jwt
-    #   secret: "your-hmac-secret"
+    #   secret: "your-password"
     #   audience: "flowgen-api"        # optional: validate audience claim
     #   issuer: "https://auth.example.com"  # optional: validate issuer claim
     #   user_id_claim: "sub"           # optional: claim to extract as user_id (defaults to "sub")

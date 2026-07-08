@@ -11,7 +11,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 ```yaml
 - git_sync:
     name: sync_flows
-    repository_url: "https://git.example.com/org/configs.git"
+    repository_url: "{{env.GIT_FLOWS_URL}}"
     branch: main
     path: "flows/"
     credentials_path: /etc/flowgen/credentials/git.json
@@ -22,7 +22,7 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `repository_url` | string | required | Git repository URL (HTTPS). |
+| `repository_url` | string | required | Git repository URL (HTTPS). Supports `{{env.VAR_NAME}}` templates. |
 | `branch` | string | `main` | Branch to track. |
 | `path` | string | | Directory within the repo to scan. All files under this path are emitted. |
 | `clone_path` | string | `<temp>/<flow_name>/<task_name>` | Local path to clone into. Defaults to a per-task subdirectory of the system temp directory so multiple `git_sync` tasks in one worker do not collide. Override only when you need a stable path on a persistent volume. Paths containing `..` are rejected. |
@@ -43,7 +43,7 @@ flow:
 
     - git_sync:
         name: pull_repo
-        repository_url: "https://git.example.com/org/configs.git"
+        repository_url: "{{env.GIT_FLOWS_URL}}"
         path: "flows/"
         credentials_path: /etc/flowgen/credentials/git.json
 
@@ -60,6 +60,7 @@ flow:
         bucket: flowgen_system
         key: "{{event.data.key}}"
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
 ```
 
 ## Output

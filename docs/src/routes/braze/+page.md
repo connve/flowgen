@@ -10,7 +10,7 @@ The `credentials_path` field points to a JSON file containing the Braze REST API
 
 ```json
 {
-  "api_key": "YOUR-REST-API-KEY",
+  "api_key": "your-password",
   "rest_endpoint": "https://rest.iad-01.braze.com"
 }
 ```
