@@ -106,10 +106,10 @@ mod tests {
     #[test]
     fn test_credentials() {
         let json = r#"{
-            "token": "ghp_xxxxxxxxxxxx"
+            "token": "your-password"
         }"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.token, "ghp_xxxxxxxxxxxx");
+        assert_eq!(creds.token, "your-password");
         assert!(creds.username.is_none());
     }
 

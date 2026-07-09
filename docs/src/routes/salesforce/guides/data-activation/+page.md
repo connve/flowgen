@@ -183,10 +183,10 @@ Both flows require Salesforce credentials at the configured `credentials_path`:
 
 ```json
 {
-  "client_id": "your_connected_app_client_id",
-  "client_secret": "your_connected_app_client_secret",
-  "username": "your_username",
-  "password": "your_password",
+  "client_id": "your-connected-app-client-id",
+  "client_secret": "your-password",
+  "username": "your-username",
+  "password": "your-password",
   "login_url": "https://login.salesforce.com"
 }
 ```

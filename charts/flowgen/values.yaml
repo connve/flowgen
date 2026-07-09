@@ -49,6 +49,24 @@ flowgen:
   # Termination grace period must be >= preStop sleep duration
   terminationGracePeriodSeconds: 45
 
+  # Optional merge/patch hooks for the Deployment's pod template.
+  # Use these to inject arbitrary pod spec fields (e.g. hostNetwork,
+  # dnsPolicy, topologySpreadConstraints) without expanding the chart
+  # surface for every possible option.
+  #
+  # Example:
+  #   podTemplate:
+  #     merge:
+  #       hostNetwork: true
+  #       dnsPolicy: ClusterFirstWithHostNet
+  #     patch:
+  #       - op: add
+  #         path: /nodeSelector/kubernetes.io~1os
+  #         value: linux
+  podTemplate:
+    merge: {}
+    patch: []
+
   securityContext:
     allowPrivilegeEscalation: false
     capabilities:

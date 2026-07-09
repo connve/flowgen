@@ -8,9 +8,12 @@
 # worker config — no ConfigMap mount required for them.
 #
 # Required:
+#   - GIT_FLOWS_URL env var, e.g.
+#       https://github.com/org/flows.git
 #   - /etc/flowgen/credentials/git.json with
-#       { "token": "<github_pat_or_gitlab_deploy_token>" }
+#       { "token": "..." }
 #   - /etc/nats/credentials.json for NATS KV writes.
+#   - NATS_URL env var (e.g. nats://localhost:4222)
 flow:
   name: system_sync_flows
   require_leader_election: true
@@ -24,7 +27,7 @@ flow:
     # self-hosted. SSH URLs are not supported — use HTTPS + token.
     - git_sync:
         name: pull_repo
-        repository_url: "https://git.example.com/your-org/your-flows.git"
+        repository_url: "{{env.GIT_FLOWS_URL}}"
         branch: main
         path: "flows/"
         credentials_path: /etc/flowgen/credentials/git.json
@@ -49,6 +52,7 @@ flow:
     - nats_kv_store:
         name: list_existing
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: list
         key_prefix: "flowgen.flows."
@@ -140,6 +144,7 @@ flow:
     - nats_kv_store:
         name: write_to_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: put
         key: "{{event.data.key}}"
@@ -148,6 +153,7 @@ flow:
     - nats_kv_store:
         name: delete_from_cache
         credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: delete
         key: "{{event.data.key}}"

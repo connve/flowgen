@@ -57,6 +57,12 @@ pub struct Processor {
     /// Intermediate events from downstream tasks are streamed as they arrive.
     #[serde(default)]
     pub stream: bool,
+    /// How to decode outbound HTTP response bodies (http_request only).
+    /// `json` parses as JSON (default, current behaviour); `text` wraps
+    /// the raw body as a JSON string; `bytes` emits `EventData::Bytes`
+    /// for binary payloads like ZIP archives or image blobs.
+    #[serde(default)]
+    pub response_type: ResponseType,
     /// Optional user authentication configuration.
     /// When `auth.required` is true, requests must include a valid bearer token
     /// validated by the worker-level auth provider (JWT, OIDC, or session).
@@ -89,6 +95,7 @@ impl Default for Processor {
             connect_timeout: default_connect_timeout(),
             max_body_bytes: default_max_body_bytes(),
             stream: false,
+            response_type: ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,
@@ -142,6 +149,19 @@ pub enum Method {
     Head,
 }
 
+/// How to decode outbound HTTP response bodies.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseType {
+    /// Parse body as JSON (default).
+    #[default]
+    Json,
+    /// Wrap the body as a JSON string without parsing.
+    Text,
+    /// Emit the body as `EventData::Bytes` — binary passthrough.
+    Bytes,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +209,7 @@ mod tests {
             connect_timeout: default_connect_timeout(),
             max_body_bytes: default_max_body_bytes(),
             stream: false,
+            response_type: ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,
@@ -219,6 +240,7 @@ mod tests {
             connect_timeout: default_connect_timeout(),
             max_body_bytes: default_max_body_bytes(),
             stream: false,
+            response_type: ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,
@@ -243,6 +265,7 @@ mod tests {
             connect_timeout: default_connect_timeout(),
             max_body_bytes: default_max_body_bytes(),
             stream: false,
+            response_type: ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,
@@ -403,6 +426,7 @@ mod tests {
             connect_timeout: default_connect_timeout(),
             max_body_bytes: default_max_body_bytes(),
             stream: false,
+            response_type: ResponseType::default(),
             auth: None,
             depends_on: None,
             retry: None,

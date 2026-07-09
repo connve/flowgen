@@ -32,7 +32,7 @@ The most common shared format is `HttpCredentials`, used by `http_endpoint`, `ht
 
 ```json
 {
-  "bearer_auth": "your-token-here"
+  "bearer_auth": "your-password"
 }
 ```
 
@@ -41,8 +41,8 @@ Or basic auth:
 ```json
 {
   "basic_auth": {
-    "username": "your-user",
-    "password": "your-pass"
+    "username": "your-username",
+    "password": "your-password"
   }
 }
 ```
@@ -55,7 +55,7 @@ Both fields are optional. If neither is set, no `Authorization` header is added.
 
 ```json
 {
-  "bearer_auth": "shh-my-secret"
+  "bearer_auth": "your-password"
 }
 ```
 
@@ -72,7 +72,7 @@ flow:
         credentials_path: /etc/flowgen/credentials/webhook.json
 ```
 
-Incoming requests must include `Authorization: Bearer shh-my-secret`. Anything else returns 401.
+Incoming requests must include `Authorization: Bearer your-password`. Anything else returns 401.
 
 ## Server-level fallback for HTTP
 

@@ -6,7 +6,7 @@ Events are the data records that flow between tasks. Each task receives events, 
 
 | Field | Type | Description |
 |---|---|---|
-| `data` | EventData | Payload — JSON, Arrow RecordBatch, or Avro. |
+| `data` | EventData | Payload — JSON, Arrow RecordBatch, Avro, or raw bytes. |
 | `subject` | string | Task name that produced the event. |
 | `id` | string | Optional identifier set by the source (e.g., Salesforce record ID, NATS message ID). |
 | `timestamp` | int | Creation time in microseconds since Unix epoch. |
@@ -20,6 +20,7 @@ Events are the data records that flow between tasks. Each task receives events, 
 - **JSON** — default for REST APIs, webhooks, scripts. Accessed as `event.data.field` in templates and scripts.
 - **Arrow RecordBatch** — columnar format for BigQuery, Parquet, CSV. Stays in Arrow through the flow without serialization overhead.
 - **Avro** — binary format for Salesforce Pub/Sub and gRPC streams.
+- **Bytes** — opaque binary payload for content that cannot be safely coerced to UTF-8 (archive contents, binary OCI layers, `http_request` responses with `response_type: bytes`). Handlebars templates against `event.data` see a base64-encoded string so they do not crash on binary; downstream tasks that need the raw bytes pattern-match `EventData::Bytes` directly. Only tasks that opt in accept this variant — text- or JSON-shaped processors reject it with an `UnsupportedEventData` error.
 
 ## Metadata
 

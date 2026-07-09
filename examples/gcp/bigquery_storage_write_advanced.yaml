@@ -14,7 +14,7 @@ flow:
     - nats_jetstream_subscriber:
         name: consume_events
         credentials_path: /etc/nats/credentials.json
-        url: "localhost:4222"
+        url: "{{env.NATS_URL}}"
         subject: bigquery.events.>
         stream:
           create_or_update: true
@@ -58,7 +58,7 @@ flow:
     - nats_jetstream_publisher:
         name: publish_confirmation
         credentials_path: /etc/nats/credentials.json
-        url: "localhost:4222"
+        url: "{{env.NATS_URL}}"
         subject: "bigquery.confirmations.{{event.data.event_type}}"
         stream:
           create_or_update: true

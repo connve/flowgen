@@ -1854,6 +1854,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowgen-chart-tests"
+version = "0.124.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "flowgen_ai_agent"
 version = "0.124.0"
 dependencies = [
@@ -2142,6 +2150,7 @@ version = "0.124.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bytes",
  "flate2",
  "flowgen_core",
  "futures-util",

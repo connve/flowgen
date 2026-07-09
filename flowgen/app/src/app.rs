@@ -17,6 +17,9 @@ use tracing::{debug, error, info, warn, Instrument};
 pub struct FlowHandle {
     /// Unique name of the flow.
     pub flow_name: String,
+    /// Human-readable name extracted from `labels.display_name`. Falls back
+    /// to `flow_name` in UI when absent.
+    pub flow_display_name: Option<String>,
     /// Optional description extracted from flow labels.
     pub flow_description: Option<String>,
     /// Tags extracted from `labels.tags` (empty when none).
@@ -53,6 +56,11 @@ impl FlowHandle {
     /// Returns the flow name.
     pub fn flow_name(&self) -> &str {
         &self.flow_name
+    }
+
+    /// Returns the display name, if any.
+    pub fn display_name(&self) -> Option<&str> {
+        self.flow_display_name.as_deref()
     }
 
     /// Returns the flow description, if any.
@@ -1000,6 +1008,14 @@ impl App {
         for flow in flows {
             let flow_name = flow.name().to_string();
             let from_filesystem = filesystem_flow_names.contains(&flow_name);
+            let flow_display_name = flow
+                .config
+                .flow
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("display_name"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string);
             let flow_description = flow
                 .config
                 .flow
@@ -1050,6 +1066,7 @@ impl App {
                     flow_name.clone(),
                     FlowHandle {
                         flow_name,
+                        flow_display_name,
                         flow_description,
                         flow_tags,
                         require_leader_election,

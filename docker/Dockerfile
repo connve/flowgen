@@ -2,11 +2,17 @@
 # `rust-toolchain.toml`; `rustup` inside this image resolves it at the
 # first `cargo` invocation once the source is copied in.
 FROM rust:slim-bookworm AS rust_base
+# Node is required by `flowgen/app/build.rs`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
     git \
+    ca-certificates \
+    curl \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --version 0.1.68
 RUN cargo install sccache --version 0.8.2

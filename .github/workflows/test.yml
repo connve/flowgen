@@ -21,6 +21,12 @@ jobs:
       run: |
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    # Node is required by `flowgen/app/build.rs` — see docker/Dockerfile.
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: web/package-lock.json
     - name: Add rustfmt and build
       run: |
         rustup component add rustfmt
@@ -42,6 +48,11 @@ jobs:
       run: |
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: web/package-lock.json
     - name: Add rustfmt and build
       run: |
         rustup component add rustfmt
@@ -67,6 +78,11 @@ jobs:
       run: |
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: web/package-lock.json
     - name: Compile with MSRV
       run: cargo +1.88 check --workspace --locked --verbose
 
@@ -87,4 +103,27 @@ jobs:
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
     - name: Run oci_sync integration tests
+      env:
+        FLOWGEN_SKIP_WEB_BUILD: "1"
       run: cargo test -p flowgen_oci --test sync_integration -- --ignored --nocapture
+
+  # Renders the flowgen Helm chart with `helm template` and asserts on
+  # the resulting manifests. Split out because the crate shells out to
+  # the `helm` binary, which is not needed by the rest of the workspace.
+  test-helm-chart:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Install system dependencies
+      run: |
+        sudo apt update -qq
+        sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.14.0
+    - name: Run helm chart tests
+      run: cargo test -p flowgen-chart-tests

@@ -10,7 +10,7 @@ Git tasks authenticate via a JSON credentials file referenced by `credentials_pa
 
 ```json
 {
-  "token": "ghp_xxxxxxxxxxxx"
+  "token": "your-password"
 }
 ```
 
@@ -20,7 +20,7 @@ The token is presented to the server through a gix credential helper that respon
 
 ```json
 {
-  "token": "glpat-xxxxxxxxxxxx",
+  "token": "your-password",
   "username": "oauth2"
 }
 ```

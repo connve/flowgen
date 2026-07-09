@@ -8,7 +8,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 - nats_jetstream_subscriber:
     name: order_events
     credentials_path: /etc/nats/credentials.json
-    url: nats://localhost:4222
+    url: "{{env.NATS_URL}}"
     subject: "orders.>"
     durable_name: order_processor
     stream:

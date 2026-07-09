@@ -298,6 +298,14 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         }
     }
 
+    let flow_display_name = new_flow
+        .config
+        .flow
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("display_name"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
     let flow_description = new_flow
         .config
         .flow
@@ -357,6 +365,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
                 flow_name.clone(),
                 FlowHandle {
                     flow_name: flow_name.clone(),
+                    flow_display_name,
                     flow_description,
                     flow_tags,
                     require_leader_election,

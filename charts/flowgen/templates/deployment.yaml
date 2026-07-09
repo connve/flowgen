@@ -27,16 +27,20 @@ spec:
       labels:
         {{- include "flowgen.selectorLabels" . | nindent 8 }}
     spec:
+      {{- $podSpec := dict "serviceAccountName" (include "flowgen.serviceAccountName" .) "securityContext" $worker.podSecurityContext }}
       {{- with .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+      {{- $_ := set $podSpec "imagePullSecrets" . }}
       {{- end }}
-      serviceAccountName: {{ include "flowgen.serviceAccountName" . }}
       {{- with $worker.terminationGracePeriodSeconds }}
-      terminationGracePeriodSeconds: {{ . }}
+      {{- $_ := set $podSpec "terminationGracePeriodSeconds" . }}
       {{- end }}
-      securityContext:
-        {{- toYaml $worker.podSecurityContext | nindent 8 }}
+      {{- if $worker.podTemplate.merge }}
+      {{- $podSpec = mergeOverwrite $podSpec $worker.podTemplate.merge }}
+      {{- end }}
+      {{- if $worker.podTemplate.patch }}
+      {{- $podSpec = get (include "jsonpatch" (dict "doc" $podSpec "patch" $worker.podTemplate.patch) | fromJson) "doc" }}
+      {{- end }}
+      {{- toYaml $podSpec | nindent 6 }}
       containers:
       - name: {{ .Chart.Name }}
         command: ["/bin/flowgen", "--config", "{{ $worker.config.path }}"]

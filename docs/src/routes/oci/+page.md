@@ -16,8 +16,8 @@ OCI tasks authenticate via a JSON credentials file referenced by `credentials_pa
 
 ```json
 {
-  "username": "robot",
-  "password": "ghp_xxxxxxxxxxxx"
+  "username": "your-username",
+  "password": "your-password"
 }
 ```
 
@@ -26,8 +26,8 @@ OCI tasks authenticate via a JSON credentials file referenced by `credentials_pa
 ```json
 {
   "auths": {
-    "ghcr.io": { "auth": "<base64 of user:pass>" },
-    "registry.gitlab.com": { "username": "alice", "password": "secret" }
+    "ghcr.io": { "auth": "<base64 of username:password>" },
+    "registry.gitlab.com": { "username": "your-username", "password": "your-token-or-password" }
   }
 }
 ```

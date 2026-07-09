@@ -15,3 +15,5 @@
 /web/.vite
 /web/.env
 /web/.env.*
+# Synced from docs/static/icons/ by npm predev/prebuild — docs owns the source.
+/web/static/icons

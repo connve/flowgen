@@ -12,14 +12,18 @@
   `telemetry`. Migrate existing configs by unindenting one level and
   removing the `worker:` header line.
 
-## 0.123.0
+- **Node.js 22+ required to build from source.** `build.rs` in the
+  `flowgen` crate runs `npm ci && npm run build` in `web/` so a plain
+  `cargo build` produces a complete binary. Set
+  `FLOWGEN_SKIP_WEB_BUILD=1` to skip the UI build when working on
+  unrelated crates. Prebuilt binaries and Docker images are unaffected.
 
 ### Features
 
 - **Admin web UI.** New embedded SvelteKit dashboard served by the
-  worker (opt-in via `worker.web.enabled: true`). Lists loaded flows
-  with description, tags, status, and last-run timestamp; click a row
-  to preview the raw source YAML with Prism syntax highlighting.
+  worker (opt-in via `web.enabled: true`). Lists loaded flows with
+  description, tags, status, and last-run timestamp; click a row to
+  preview the raw source YAML with Prism syntax highlighting.
   Adds a Resources tab that browses everything under the configured
   `resources.path` and renders `.md` files with `marked` plus code
   files with Prism (SQL, YAML, JSON, Rhai, JS/TS, Bash, Python).
@@ -48,6 +52,66 @@
   (`[{"type":"text","text":"..."}]`) even for pure-text turns and
   were rejected with a 422. `Message::content` now accepts either
   shape and flattens the array back to a single string internally.
+
+## 0.17.0
+
+### Helm chart
+
+- **`flowgen.podTemplate.merge` and `flowgen.podTemplate.patch` hooks** let
+  operators inject arbitrary pod spec fields without expanding the chart
+  surface. `merge` overrides top-level fields such as `hostNetwork` and
+  `dnsPolicy`; `patch` applies RFC 6902 JSON Patch operations to the
+  rendered pod spec. The `jsonpatch` helper is included in the chart and
+  follows the same convention used by the NATS Helm chart.
+
+- **Rendered-manifest tests for the chart.** New `flowgen-chart-tests`
+  workspace crate shells out to `helm template` and asserts on the
+  resulting Kubernetes manifests. Covers the `podTemplate.merge` and
+  `podTemplate.patch` hooks so regressions in the pod-spec injection
+  surface are caught in CI. Runs in a dedicated `test-helm-chart` job
+  that installs Helm alongside Rust; the crate is excluded from the
+  workspace `default-members` so `cargo test` at the root does not
+  require `helm` on `PATH`.
+
+## 0.123.0
+
+### Features
+
+- **`EventData::Bytes(bytes::Bytes)`** carries binary payloads through the
+  pipeline for content that cannot be safely coerced to UTF-8. Rendered as
+  a base64 string by `TryFrom<&EventData> for Value` so Handlebars
+  templates against `event.data` do not crash; downstream tasks that need
+  the raw bytes match `EventData::Bytes` directly.
+
+- **`http_request response_type: json | text | bytes`** picks how outbound
+  response bodies are decoded. Default remains `json` for backwards
+  compatibility. `bytes` emits `EventData::Bytes` — enables downloading
+  ZIP archives, image blobs, or other binary payloads without lossy UTF-8
+  coercion.
+
+- **`object_store::write` writes raw bytes.** New `WriteFormat::Bytes`
+  (auto-selected when the incoming event carries `EventData::Bytes`)
+  passes the payload through verbatim with a `.bin` extension.
+
+### Bug fixes
+
+- **`oci_sync` no longer rejects binary layers.** When a pulled layer
+  (or tar entry inside a layer) is not valid UTF-8, the processor emits
+  the bytes as `EventData::Bytes` with `path`, `digest`, and
+  `artifact_digest` on `event.meta`, instead of returning
+  `InvalidLayerEncoding` and failing the pull after retries. oras
+  layers holding UTF-8 content still emit the historical JSON
+  `FileEvent` shape so existing bootstrap flows are unaffected.
+
+- **`oci_sync` merges Docker image layers with overlay-fs semantics.**
+  Layers without the `org.opencontainers.image.title` annotation are
+  classified as Docker image layers and merged in manifest order: later
+  layers override earlier ones, `.wh.<name>` markers delete files from
+  lower layers, and `.wh..wh..opq` markers hide entire subtrees. Only
+  the surviving final state is emitted downstream. oras artifact
+  layers (carrying `image.title`) keep the per-layer emission
+  behaviour, so existing bootstrap flows are unaffected. Detection is
+  fully automatic — no config.
 
 ## 0.122.0
 

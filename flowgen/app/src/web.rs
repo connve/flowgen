@@ -7,7 +7,7 @@
 use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, Uri},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect},
     routing::get,
     Json, Router,
 };
@@ -27,6 +27,9 @@ pub const DEFAULT_WEB_PATH: &str = "/";
 pub struct FlowSummary {
     /// Unique flow name.
     pub name: String,
+    /// Human-readable name taken from `labels.display_name`. UI falls back to
+    /// `name` when absent.
+    pub display_name: Option<String>,
     /// Optional description taken from the `description` label.
     pub description: Option<String>,
     /// Tags taken from the `tags` label array (empty when none).
@@ -52,6 +55,8 @@ pub struct FlowSummary {
 pub struct FlowDetail {
     /// Flow name (echoed back for the client).
     pub name: String,
+    /// Human-readable name taken from `labels.display_name`.
+    pub display_name: Option<String>,
     /// YAML source of the flow config as loaded from disk / cache.
     pub yaml: String,
 }
@@ -191,6 +196,7 @@ async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
                 };
                 FlowSummary {
                     name: handle.flow_name().to_string(),
+                    display_name: handle.display_name().map(ToString::to_string),
                     description: handle.description().map(ToString::to_string),
                     tags: handle.tags().to_vec(),
                     require_leader_election: handle.require_leader_election(),
@@ -225,6 +231,7 @@ async fn get_flow(
     match registry.get(&name) {
         Some(handle) => Ok(Json(FlowDetail {
             name: handle.flow_name().to_string(),
+            display_name: handle.display_name().map(ToString::to_string),
             yaml: handle.flow_yaml().to_string(),
         })),
         None => Err((StatusCode::NOT_FOUND, format!("Flow '{name}' not found"))),
@@ -311,13 +318,20 @@ async fn get_version() -> impl IntoResponse {
 }
 
 /// Serves a file from the embedded asset folder.
-async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> impl IntoResponse {
-    // Strip the mount prefix so `/flowgen/_app/foo.js` looks up
-    // `_app/foo.js` inside the embedded build directory.
+async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> axum::response::Response {
     let raw = uri.path();
-    let stripped = match raw.strip_prefix(&state.prefix) {
-        Some(rest) => rest,
-        None => raw,
+    // When a non-empty prefix is configured, requests outside that prefix
+    // must not surface the UI — the client would then baked-in a wrong
+    // base path and every subsequent API call would 404 into the HTML
+    // fallback. Redirect to the mount point so both UI and API share the
+    // same prefix.
+    let stripped = if state.prefix.is_empty() {
+        raw
+    } else {
+        match raw.strip_prefix(&state.prefix) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+            _ => return Redirect::temporary(&format!("{}/", state.prefix)).into_response(),
+        }
     };
     let path = match stripped.trim_start_matches('/') {
         "" => "index.html".to_string(),

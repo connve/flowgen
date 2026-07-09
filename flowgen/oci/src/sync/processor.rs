@@ -6,6 +6,7 @@
 //! `git_sync` for `oci_sync` with no other changes.
 
 use super::config::{Credentials, Processor as ProcessorConfig};
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::secrets::RegistryAuth;
@@ -34,6 +35,23 @@ pub struct FileEvent {
     pub digest: String,
     /// Whole-artifact manifest digest (same across all events for one pull).
     pub artifact_digest: String,
+}
+
+/// Meta attached to `EventData::Bytes` layer events so downstream tasks
+/// can still route by path and digest even when the payload is binary.
+#[derive(Debug, Clone, serde::Serialize)]
+struct BinaryLayerMeta {
+    path: String,
+    digest: String,
+    artifact_digest: String,
+}
+
+/// Intermediate carrier before per-layer UTF-8 fallback picks JSON or Bytes.
+struct PendingFileEvent {
+    path: String,
+    content: Vec<u8>,
+    digest: String,
+    artifact_digest: String,
 }
 
 /// Errors that can occur during OCI sync processing.
@@ -95,6 +113,11 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to render OCI sync config: {source}")]
+    RenderConfig {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
     #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
@@ -109,11 +132,22 @@ pub enum Error {
     },
 }
 
-/// One extracted file plus the tar entry path (when the source layer was
-/// an archive) or None (when the layer bytes were the file itself).
-struct ExtractedFile {
-    path: Option<String>,
-    content: String,
+/// One entry extracted from a layer. Docker image layers can carry
+/// whiteout markers that delete a file or an entire subtree from lower
+/// layers; oras artifact layers never emit whiteouts.
+enum ExtractedEntry {
+    File {
+        /// Tar entry path when the source layer was an archive, `None`
+        /// when the raw layer bytes were the file itself (oras single-file).
+        path: Option<String>,
+        content: Vec<u8>,
+    },
+    /// Docker `.wh.<name>` marker — delete `<name>` in the same directory
+    /// from lower layers when merging.
+    Whiteout { path: String },
+    /// Docker `.wh..wh..opq` marker — hide everything in the parent
+    /// directory from lower layers when merging.
+    OpaqueWhiteout { parent: String },
 }
 
 /// Layer wire format, chosen by media type. Raw layers come from oras-style
@@ -148,7 +182,7 @@ fn extract_layer_files(
     max_total_size: u64,
     total_so_far: &mut u64,
     reference: &str,
-) -> Result<Vec<ExtractedFile>, Error> {
+) -> Result<Vec<ExtractedEntry>, Error> {
     match format {
         LayerFormat::Raw => {
             let size = buf.len() as u64;
@@ -168,13 +202,9 @@ fn extract_layer_files(
                 });
             }
             *total_so_far = new_total;
-            let content = String::from_utf8(buf).map_err(|source| Error::InvalidLayerEncoding {
-                digest: digest.to_string(),
-                source,
-            })?;
-            Ok(vec![ExtractedFile {
+            Ok(vec![ExtractedEntry::File {
                 path: None,
-                content,
+                content: buf,
             }])
         }
         LayerFormat::Tar => extract_tar(
@@ -206,7 +236,7 @@ fn extract_tar<R: std::io::Read>(
     max_total_size: u64,
     total_so_far: &mut u64,
     reference: &str,
-) -> Result<Vec<ExtractedFile>, Error> {
+) -> Result<Vec<ExtractedEntry>, Error> {
     let mut archive = tar::Archive::new(reader);
     let mut out = Vec::new();
 
@@ -241,9 +271,28 @@ fn extract_tar<R: std::io::Read>(
         }
         let file_name = std::path::Path::new(&path)
             .file_name()
-            .map(|s| s.to_string_lossy());
+            .map(|s| s.to_string_lossy().into_owned());
         if let Some(name) = file_name {
-            if name.starts_with(".wh.") {
+            // Docker overlay whiteout markers; layer-merge turns these into deletions.
+            if name == ".wh..wh..opq" {
+                let parent = std::path::Path::new(&path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push(ExtractedEntry::OpaqueWhiteout { parent });
+                continue;
+            }
+            if let Some(target) = name.strip_prefix(".wh.") {
+                let parent = std::path::Path::new(&path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let full = if parent.is_empty() {
+                    target.to_string()
+                } else {
+                    format!("{parent}/{target}")
+                };
+                out.push(ExtractedEntry::Whiteout { path: full });
                 continue;
             }
         }
@@ -275,14 +324,9 @@ fn extract_tar<R: std::io::Read>(
             source,
         })?;
 
-        let content = String::from_utf8(buf).map_err(|source| Error::InvalidLayerEncoding {
-            digest: digest.to_string(),
-            source,
-        })?;
-
-        out.push(ExtractedFile {
+        out.push(ExtractedEntry::File {
             path: Some(path),
-            content,
+            content: buf,
         });
     }
 
@@ -362,7 +406,15 @@ impl EventHandler {
 
             let layers = manifest.layers;
 
-            let mut file_events: Vec<FileEvent> = Vec::new();
+            // Two-track collection: oras artifact layers (identified by the
+            // `org.opencontainers.image.title` annotation) emit one event
+            // per layer as authored. Untitled layers are Docker image
+            // layers; they compose an overlay filesystem so we merge them
+            // in manifest order, honouring `.wh.` whiteouts, and emit the
+            // final state as one event per surviving path.
+            let mut file_events: Vec<PendingFileEvent> = Vec::new();
+            let mut docker_state: std::collections::BTreeMap<String, PendingFileEvent> =
+                std::collections::BTreeMap::new();
             let mut total_uncompressed: u64 = 0;
             for (index, layer) in layers.iter().enumerate() {
                 let layer_title = layer
@@ -391,31 +443,112 @@ impl EventHandler {
                     &self.config.artifact,
                 )?;
 
-                for file in extracted {
-                    let path = file.path.unwrap_or_else(|| {
-                        layer_title
-                            .clone()
-                            .unwrap_or_else(|| format!("layer-{index}"))
-                    });
-                    file_events.push(FileEvent {
-                        path,
-                        content: file.content,
-                        digest: layer.digest.clone(),
-                        artifact_digest: manifest_digest.clone(),
-                    });
+                let is_oras = layer_title.is_some();
+
+                for entry in extracted {
+                    match entry {
+                        ExtractedEntry::File { path, content } => {
+                            let resolved_path = path.unwrap_or_else(|| {
+                                layer_title
+                                    .clone()
+                                    .unwrap_or_else(|| format!("layer-{index}"))
+                            });
+                            let pending = PendingFileEvent {
+                                path: resolved_path.clone(),
+                                content,
+                                digest: layer.digest.clone(),
+                                artifact_digest: manifest_digest.clone(),
+                            };
+                            if is_oras {
+                                file_events.push(pending);
+                            } else {
+                                docker_state.insert(resolved_path, pending);
+                            }
+                        }
+                        ExtractedEntry::Whiteout { path } => {
+                            docker_state.remove(&path);
+                            let prefix = format!("{path}/");
+                            let doomed: Vec<String> = docker_state
+                                .range(prefix.clone()..)
+                                .take_while(|(k, _)| k.starts_with(&prefix))
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            for key in doomed {
+                                docker_state.remove(&key);
+                            }
+                        }
+                        ExtractedEntry::OpaqueWhiteout { parent } => {
+                            let prefix = if parent.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{parent}/")
+                            };
+                            let doomed: Vec<String> = docker_state
+                                .keys()
+                                .filter(|k| k.starts_with(&prefix) && k.as_str() != parent.as_str())
+                                .cloned()
+                                .collect();
+                            for key in doomed {
+                                docker_state.remove(&key);
+                            }
+                        }
+                    }
                 }
             }
 
-            let total = file_events.len();
-            for (index, file_event) in file_events.into_iter().enumerate() {
-                let data = serde_json::to_value(&file_event)
-                    .map_err(|source| Error::SerdeJson { source })?;
+            file_events.extend(docker_state.into_values());
 
-                let mut e = EventBuilder::new()
-                    .data(EventData::Json(data))
+            let total = file_events.len();
+            for (index, pending) in file_events.into_iter().enumerate() {
+                let PendingFileEvent {
+                    path,
+                    content,
+                    digest,
+                    artifact_digest,
+                } = pending;
+
+                let (data, meta) = match String::from_utf8(content) {
+                    Ok(text) => {
+                        let file_event = FileEvent {
+                            path,
+                            content: text,
+                            digest,
+                            artifact_digest,
+                        };
+                        let data = EventData::Json(
+                            serde_json::to_value(&file_event)
+                                .map_err(|source| Error::SerdeJson { source })?,
+                        );
+                        (data, None)
+                    }
+                    Err(err) => {
+                        // Binary layer: surface path + digests in meta so
+                        // downstream tasks can still route by key.
+                        let bytes = bytes::Bytes::from(err.into_bytes());
+                        let meta_struct = BinaryLayerMeta {
+                            path,
+                            digest,
+                            artifact_digest,
+                        };
+                        let meta_value = serde_json::to_value(&meta_struct)
+                            .map_err(|source| Error::SerdeJson { source })?;
+                        let meta_map = match meta_value {
+                            serde_json::Value::Object(map) => Some(map),
+                            _ => Some(serde_json::Map::new()),
+                        };
+                        (EventData::Bytes(bytes), meta_map)
+                    }
+                };
+
+                let mut builder = EventBuilder::new()
+                    .data(data)
                     .subject(self.config.name.clone())
                     .task_id(self.task_id)
-                    .task_type(self.task_type)
+                    .task_type(self.task_type);
+                if let Some(meta_map) = meta {
+                    builder = builder.meta(meta_map);
+                }
+                let mut e = builder
                     .build()
                     .map_err(|source| Error::EventBuilder { source })?;
 
@@ -575,16 +708,25 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
+        // Render the config at init time so operator-controlled fields such
+        // as `artifact` can reference environment variables via
+        // `{{env.VAR_NAME}}`. Event data is intentionally not in scope here —
+        // the artifact reference is static for the lifetime of the task.
+        let config: ProcessorConfig = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::RenderConfig { source })?;
+
         let reference: Reference =
-            self.config
+            config
                 .artifact
                 .parse()
                 .map_err(|source| Error::InvalidReference {
-                    reference: self.config.artifact.clone(),
+                    reference: config.artifact.clone(),
                     source,
                 })?;
 
-        let auth = load_auth(self.config.credentials_path.as_ref(), reference.registry()).await?;
+        let auth = load_auth(config.credentials_path.as_ref(), reference.registry()).await?;
 
         // Loopback hosts (used by integration tests against a local
         // registry container) do not serve TLS. Anything else stays on
@@ -604,7 +746,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         });
 
         Ok(EventHandler {
-            config: Arc::clone(&self.config),
+            config: Arc::new(config),
             client,
             reference,
             auth,
@@ -762,6 +904,16 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Test helper: extract the `File` variant of `ExtractedEntry`.
+    /// Returns `None` on `Whiteout` / `OpaqueWhiteout`; callers use
+    /// `assert!(file.is_some(), "...")` to surface the failure.
+    fn as_file(entry: &ExtractedEntry) -> Option<(Option<&str>, &[u8])> {
+        match entry {
+            ExtractedEntry::File { path, content } => Some((path.as_deref(), content.as_slice())),
+            ExtractedEntry::Whiteout { .. } | ExtractedEntry::OpaqueWhiteout { .. } => None,
+        }
+    }
+
     // ── Error display ───────────────────────────────────────────────
 
     #[test]
@@ -905,7 +1057,7 @@ mod tests {
 
     #[test]
     fn pick_docker_auth_empty_entry_falls_back_to_anonymous() {
-        // Entry exists but has neither `auth` nor user/pass — caller should
+        // Entry exists but has neither `auth` nor username/password — caller should
         // get anonymous, not a panic.
         let cfg: DockerConfig = serde_json::from_str(
             r#"{
@@ -1194,8 +1346,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result[0].path.is_none());
-        assert_eq!(result[0].content, "hello: world");
+        let (path, content) = as_file(&result[0]).expect("raw layer emits File entry");
+        assert!(path.is_none());
+        assert_eq!(content, b"hello: world");
         assert_eq!(total, 12);
     }
 
@@ -1217,10 +1370,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].path.as_deref(), Some("flow.yaml"));
-        assert_eq!(result[0].content, "name: a");
-        assert_eq!(result[1].path.as_deref(), Some("processors/sms.yaml"));
-        assert_eq!(result[1].content, "kind: sms");
+        let (path0, content0) = as_file(&result[0]).expect("first tar entry emits File");
+        assert_eq!(path0, Some("flow.yaml"));
+        assert_eq!(content0, b"name: a");
+        let (path1, content1) = as_file(&result[1]).expect("second tar entry emits File");
+        assert_eq!(path1, Some("processors/sms.yaml"));
+        assert_eq!(content1, b"kind: sms");
     }
 
     #[test]
@@ -1255,14 +1410,16 @@ mod tests {
             "test:v1",
         )
         .unwrap();
-        assert_eq!(result[0].path.as_deref(), Some("etc/flow.yaml"));
+        let (path, _content) = as_file(&result[0]).expect("stripped-slash entry emits File");
+        assert_eq!(path, Some("etc/flow.yaml"));
     }
 
     #[test]
-    fn extract_tar_skips_whiteout_markers() {
+    fn extract_tar_surfaces_whiteout_and_opaque_markers() {
         let bytes = build_tar(&[
             ("kept.yaml", b"kept"),
             ("dir/.wh.removed.yaml", b"anything"),
+            ("dir/.wh..wh..opq", b"anything"),
         ]);
         let mut total: u64 = 0;
         let result = extract_layer_files(
@@ -1275,8 +1432,17 @@ mod tests {
             "test:v1",
         )
         .unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].path.as_deref(), Some("kept.yaml"));
+        assert_eq!(result.len(), 3);
+        let (kept_path, _kept_content) = as_file(&result[0]).expect("kept.yaml is a File entry");
+        assert_eq!(kept_path, Some("kept.yaml"));
+        assert!(matches!(
+            &result[1],
+            ExtractedEntry::Whiteout { path } if path == "dir/removed.yaml"
+        ));
+        assert!(matches!(
+            &result[2],
+            ExtractedEntry::OpaqueWhiteout { parent } if parent == "dir"
+        ));
     }
 
     #[test]
@@ -1315,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_raw_rejects_non_utf8() {
+    fn extract_raw_preserves_binary_bytes() {
         let mut total: u64 = 0;
         let result = extract_layer_files(
             vec![0xff, 0xfe, 0xfd],
@@ -1325,7 +1491,11 @@ mod tests {
             1024,
             &mut total,
             "test:v1",
-        );
-        assert!(matches!(result, Err(Error::InvalidLayerEncoding { .. })));
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        let (path, content) = as_file(&result[0]).expect("raw layer emits File entry");
+        assert!(path.is_none());
+        assert_eq!(content, &[0xff, 0xfe, 0xfd]);
     }
 }

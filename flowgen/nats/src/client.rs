@@ -132,7 +132,7 @@ impl ClientBuilder {
     /// ```json
     /// {
     ///   "nkey": {
-    ///     "seed": "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY"
+    ///     "seed": "your-private-key"
     ///   }
     /// }
     /// ```
@@ -182,7 +182,7 @@ mod tests {
     fn test_credentials_nkey_deserialization() {
         let json_creds = r#"{
             "nkey": {
-                "seed": "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY"
+                "seed": "your-private-key"
             }
         }"#;
 
@@ -193,10 +193,7 @@ mod tests {
         assert!(creds.nkey.is_some());
 
         let nkey = creds.nkey.unwrap();
-        assert_eq!(
-            nkey.seed,
-            "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY"
-        );
+        assert_eq!(nkey.seed, "your-private-key");
     }
 
     #[test]
@@ -213,7 +210,7 @@ mod tests {
     #[test]
     fn test_nkey_credentials_clone() {
         let nkey = NKeyCredentials {
-            seed: "SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY".to_string(),
+            seed: "your-private-key".to_string(),
         };
 
         let cloned = nkey.clone();

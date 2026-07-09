@@ -1,5 +1,11 @@
 [workspace]
-members = ["flowgen/app"]
+members = ["flowgen/app", "charts/flowgen/tests"]
+# `flowgen-chart-tests` shells out to the `helm` binary, which is not
+# available in every environment. Excluding it from default-members means
+# `cargo test` at the root only touches the main app; the helm-chart tests
+# still run explicitly via `cargo test -p flowgen-chart-tests` in their
+# dedicated CI job.
+default-members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 

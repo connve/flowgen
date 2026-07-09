@@ -1,8 +1,11 @@
 {
 	"name": "flowgen-web",
-	"version": "0.0.1",
+	"version": "0.124.0",
 	"private": true,
 	"scripts": {
+		"sync-icons": "node scripts/sync-icons.mjs",
+		"predev": "npm run sync-icons",
+		"prebuild": "npm run sync-icons",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
@@ -14,6 +17,7 @@
 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
 		"@tailwindcss/typography": "^0.5.20",
 		"@tailwindcss/vite": "^4.2.1",
+		"@types/prismjs": "^1.26.6",
 		"daisyui": "^5.5.19",
 		"prettier": "^3.8.3",
 		"prettier-plugin-svelte": "^3.5.1",
@@ -25,7 +29,11 @@
 	},
 	"type": "module",
 	"dependencies": {
-		"lucide-svelte": "^1.0.1",
+		"@dagrejs/dagre": "^3.0.0",
+		"@iconify/svelte": "^5.2.2",
+		"@types/js-yaml": "^4.0.9",
+		"@xyflow/svelte": "^1.6.2",
+		"js-yaml": "^5.2.1",
 		"marked": "^18.0.5",
 		"prismjs": "^1.30.0"
 	}

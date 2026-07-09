@@ -1,9 +1,24 @@
 <!doctype html>
-<html lang="en" data-theme="mytheme">
+<html lang="en">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" href="%sveltekit.assets%/favicon.png" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<script>
+			// Set theme synchronously before body renders so there's no
+			// light-to-dark flash on load for dark-mode users.
+			(function () {
+				try {
+					var stored = localStorage.getItem('flowgen-theme');
+					var dark =
+						stored === 'dark' ||
+						(!stored && window.matchMedia('(prefers-color-scheme: dark)').matches);
+					document.documentElement.setAttribute('data-theme', dark ? 'mydark' : 'mytheme');
+				} catch (e) {
+					document.documentElement.setAttribute('data-theme', 'mytheme');
+				}
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

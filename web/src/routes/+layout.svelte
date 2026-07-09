@@ -2,12 +2,9 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import Workflow from 'lucide-svelte/icons/workflow';
-	import FileCode from 'lucide-svelte/icons/file-code';
-	import Sun from 'lucide-svelte/icons/sun';
-	import Moon from 'lucide-svelte/icons/moon';
-	import ChevronLeft from 'lucide-svelte/icons/chevron-left';
-	import ChevronRight from 'lucide-svelte/icons/chevron-right';
+	import { apiUrl } from '$lib/api';
+	import Badge from '$lib/Badge.svelte';
+	import Icon from '@iconify/svelte';
 	import '../app.css';
 
 	let { children } = $props();
@@ -18,10 +15,23 @@
 
 	onMount(async () => {
 		const stored = localStorage.getItem('flowgen-theme');
-		dark = stored === 'dark';
+		if (stored === 'dark' || stored === 'light') {
+			dark = stored === 'dark';
+		} else {
+			// Fall back to the OS setting when the user hasn't chosen yet,
+			// then track further OS changes as long as they haven't overridden.
+			const mq = window.matchMedia('(prefers-color-scheme: dark)');
+			dark = mq.matches;
+			mq.addEventListener('change', (e) => {
+				if (!localStorage.getItem('flowgen-theme')) {
+					dark = e.matches;
+					applyTheme();
+				}
+			});
+		}
 		applyTheme();
 		try {
-			const res = await fetch('api/version');
+			const res = await fetch(apiUrl('api/version'));
 			if (res.ok) {
 				const body = await res.json();
 				version = body.version ?? null;
@@ -51,30 +61,18 @@
 				? 'w-16'
 				: 'w-56'}"
 		>
-			<div class="flex h-16 items-center gap-2 border-b border-base-200 px-3">
+			<div class="flex h-16 items-center border-b border-base-200 p-2">
 				<a
 					href="{base}/"
-					class="flex flex-1 items-center gap-2 overflow-hidden"
+					class="flex items-center gap-3 rounded-md px-3 py-2"
 					aria-label="CONNVE home"
 				>
 					{#if collapsed}
-						<img src="{base}/favicon.png" alt="CONNVE" class="h-8 w-8 shrink-0" />
+						<img src="{base}/favicon.png" alt="CONNVE" class="h-6 w-6 shrink-0" />
 					{:else}
-						<img src="{base}/connve.png" alt="CONNVE" class="h-6 w-auto" />
+						<img src="{base}/connve.png" alt="CONNVE" class="h-5 w-auto" />
 					{/if}
 				</a>
-				<button
-					type="button"
-					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-					class="btn btn-ghost btn-xs btn-circle shrink-0"
-					onclick={() => (collapsed = !collapsed)}
-				>
-					{#if collapsed}
-						<ChevronRight class="h-4 w-4" />
-					{:else}
-						<ChevronLeft class="h-4 w-4" />
-					{/if}
-				</button>
 			</div>
 
 			<nav class="flex-1 space-y-1 p-2">
@@ -86,7 +84,7 @@
 						: 'text-base-content'}"
 					title="Flows"
 				>
-					<Workflow class="h-5 w-5 shrink-0" />
+					<Icon icon="tabler:sitemap" class="h-6 w-6 shrink-0" />
 					{#if !collapsed}
 						<span>Flows</span>
 					{/if}
@@ -100,18 +98,34 @@
 						: 'text-base-content'}"
 					title="Resources"
 				>
-					<FileCode class="h-5 w-5 shrink-0" />
+					<Icon icon="tabler:file-code" class="h-6 w-6 shrink-0" />
 					{#if !collapsed}
 						<span>Resources</span>
 					{/if}
 				</a>
 			</nav>
 
-			{#if !collapsed && version}
-				<div class="border-t border-base-200 px-4 py-3 text-xs opacity-60">
-					flowgen v{version}
-				</div>
-			{/if}
+			<div
+				class="flex items-center border-t border-base-200 px-3 py-2 {collapsed
+					? 'justify-center'
+					: 'justify-between'}"
+			>
+				{#if !collapsed && version}
+					<Badge>v{version}</Badge>
+				{/if}
+				<button
+					type="button"
+					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+					class="btn btn-ghost btn-xs btn-circle"
+					onclick={() => (collapsed = !collapsed)}
+				>
+					{#if collapsed}
+						<Icon icon="tabler:chevron-right" class="h-6 w-6" />
+					{:else}
+						<Icon icon="tabler:chevron-left" class="h-6 w-6" />
+					{/if}
+				</button>
+			</div>
 		</aside>
 
 		<div class="flex flex-1 flex-col bg-base-100">
@@ -123,17 +137,18 @@
 					onclick={toggleTheme}
 				>
 					{#if dark}
-						<Sun class="h-5 w-5" />
+						<Icon icon="tabler:sun" class="h-6 w-6" />
 					{:else}
-						<Moon class="h-5 w-5" />
+						<Icon icon="tabler:moon" class="h-6 w-6" />
 					{/if}
 				</button>
 
 				<div
-					class="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary"
-					title="Signed in (OIDC sync coming later)"
+					class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
+					title="Signed in"
+					aria-label="User"
 				>
-					JD
+					<Icon icon="tabler:user" class="h-6 w-6" />
 				</div>
 			</header>
 
