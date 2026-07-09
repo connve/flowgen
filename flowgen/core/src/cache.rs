@@ -5,6 +5,8 @@
 
 pub mod memory;
 
+pub use memory::MemoryCache;
+
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -213,12 +215,18 @@ pub trait Cache: Debug + Send + Sync + 'static {
 
     /// Subscribes to key changes under the given prefix, returning a stream of watch events.
     ///
-    /// Events are emitted whenever a key matching the prefix is created, updated, or deleted.
+    /// When `include_history` is true the stream first replays the retained
+    /// history per key (bounded by the bucket's history setting) before
+    /// switching to live updates — used by consumers that need to reconstruct
+    /// recent state on connect. When false, only events arriving after the
+    /// watcher starts are emitted.
+    ///
     /// The stream ends when the connection is lost; callers should reconnect as needed.
     /// Returns `Err(CacheError::WatchNotSupported)` for backends that do not implement watching.
     async fn watch(
         &self,
         _prefix: &str,
+        _include_history: bool,
     ) -> Result<BoxStream<'static, Result<WatchEvent, Error>>, Error> {
         Err(Error::WatchNotSupported)
     }

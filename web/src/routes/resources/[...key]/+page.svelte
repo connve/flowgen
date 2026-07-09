@@ -5,6 +5,7 @@
 	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import CopyButton from '$lib/CopyButton.svelte';
 	import { apiUrl } from '$lib/api';
 
 	interface ResourceContent {
@@ -16,8 +17,6 @@
 	let content = $state<ResourceContent | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let copied = $state(false);
-	let copyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	let resourceKey = $derived(page.params.key ?? '');
 
@@ -32,18 +31,6 @@
 			loading = false;
 		}
 	});
-
-	async function copyContent() {
-		if (!content) return;
-		try {
-			await navigator.clipboard.writeText(content.content);
-			copied = true;
-			if (copyTimeout) clearTimeout(copyTimeout);
-			copyTimeout = setTimeout(() => (copied = false), 1500);
-		} catch {
-			// Clipboard refused — silent no-op.
-		}
-	}
 </script>
 
 <svelte:head>
@@ -62,21 +49,7 @@
 				<Badge>{content.extension}</Badge>
 			{/if}
 		</div>
-		<button
-			type="button"
-			class="btn btn-ghost btn-sm gap-1"
-			aria-label={copied ? 'Copied' : 'Copy'}
-			onclick={copyContent}
-			disabled={!content}
-		>
-			{#if copied}
-				<Icon icon="tabler:check" class="h-6 w-6 text-primary" />
-				<span class="text-primary">Copied</span>
-			{:else}
-				<Icon icon="tabler:copy" class="h-6 w-6" />
-				<span>Copy</span>
-			{/if}
-		</button>
+		<CopyButton text={content?.content} label="Copy" />
 	</div>
 
 	{#if loading}

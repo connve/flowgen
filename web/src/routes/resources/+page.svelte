@@ -5,6 +5,7 @@
 	import { goto } from '$app/navigation';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import CopyButton from '$lib/CopyButton.svelte';
 	import Icon from '@iconify/svelte';
 	import { apiUrl } from '$lib/api';
 
@@ -45,8 +46,6 @@
 	let selectedContent = $state<ResourceContent | null>(null);
 	let selectedLoading = $state(false);
 	let selectedError = $state<string | null>(null);
-	let selectedCopied = $state(false);
-	let copyTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	onMount(async () => {
 		try {
@@ -134,7 +133,6 @@
 
 	async function openResource(key: string) {
 		pendingResource = key;
-		selectedCopied = false;
 		const cached = contentCache.get(key);
 		if (cached) {
 			selected = key;
@@ -166,19 +164,6 @@
 		selected = null;
 		selectedContent = null;
 		selectedError = null;
-		selectedCopied = false;
-	}
-
-	async function copySelected() {
-		if (!selectedContent) return;
-		try {
-			await navigator.clipboard.writeText(selectedContent.content);
-			selectedCopied = true;
-			if (copyTimeout) clearTimeout(copyTimeout);
-			copyTimeout = setTimeout(() => (selectedCopied = false), 1500);
-		} catch {
-			// Clipboard refused — silent no-op.
-		}
 	}
 
 	function onKeydown(event: KeyboardEvent) {
@@ -245,7 +230,7 @@
 			</div>
 		{:else}
 			<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
-				<table class="table bg-base-100">
+				<table class="table table-sm w-full bg-base-100">
 					<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
 						<tr>
 							<th>Key</th>
@@ -285,11 +270,11 @@
 		{/if}
 	{:else if tree.length === 0}
 		<div class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70">
-			No resources.
+			No resources
 		</div>
 	{:else}
 		<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
-			<table class="table bg-base-100">
+			<table class="table table-sm w-full bg-base-100">
 				<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
 					<tr>
 						<th>Name</th>
@@ -317,11 +302,11 @@
 											style="padding-left: {node.depth * 1.25}rem"
 										>
 											{#if isOpen}
-												<Icon icon="tabler:chevron-down" class="h-6 w-6 opacity-70" />
-												<Icon icon="tabler:folder-open" class="h-6 w-6 opacity-70" />
+												<Icon icon="tabler:chevron-down" class="h-4 w-4 opacity-70" />
+												<Icon icon="tabler:folder-open" class="h-4 w-4 opacity-70" />
 											{:else}
-												<Icon icon="tabler:chevron-right" class="h-6 w-6 opacity-70" />
-												<Icon icon="tabler:folder" class="h-6 w-6 opacity-70" />
+												<Icon icon="tabler:chevron-right" class="h-4 w-4 opacity-70" />
+												<Icon icon="tabler:folder" class="h-4 w-4 opacity-70" />
 											{/if}
 											<span>{node.name}</span>
 										</div>
@@ -354,9 +339,9 @@
 									<td>
 										<div
 											class="flex items-center gap-1.5 font-medium"
-											style="padding-left: {node.depth * 1.25 + 1.125}rem"
+											style="padding-left: {node.depth * 1.25 + 0.75}rem"
 										>
-											<Icon icon="tabler:file" class="h-6 w-6 opacity-70" />
+											<Icon icon="tabler:file" class="h-4 w-4 opacity-70" />
 											<span>{node.name}</span>
 										</div>
 									</td>
@@ -396,7 +381,7 @@
 		tabindex="-1"
 	>
 		<div
-			class="flex max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
+			class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
 		>
 			<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
 				<div class="flex items-center gap-2">
@@ -407,41 +392,30 @@
 				</div>
 				<div class="flex items-center gap-1">
 					{#if selected}
-						<a
-							href="{base}/resources/{selected.split('/').map(encodeURIComponent).join('/')}"
-							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Open full page"
-							title="Open full page"
-						>
-							<Icon icon="tabler:external-link" class="h-6 w-6" />
-						</a>
+						<div class="tooltip tooltip-left" data-tip="Open full page">
+							<a
+								href="{base}/resources/{selected.split('/').map(encodeURIComponent).join('/')}"
+								class="btn btn-ghost btn-sm btn-circle"
+								aria-label="Open full page"
+							>
+								<Icon icon="tabler:external-link" class="h-6 w-6" />
+							</a>
+						</div>
 					{/if}
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label="Close"
-						onclick={closeResource}
-					>
-						<Icon icon="tabler:x" class="h-6 w-6" />
-					</button>
+					<div class="tooltip tooltip-left" data-tip="Close">
+						<button
+							type="button"
+							class="btn btn-ghost btn-sm btn-circle"
+							aria-label="Close"
+							onclick={closeResource}
+						>
+							<Icon icon="tabler:x" class="h-6 w-6" />
+						</button>
+					</div>
 				</div>
 			</div>
 			<div class="flex items-center justify-end border-b border-base-200 bg-base-100 px-4 py-1">
-				<button
-					type="button"
-					class="btn btn-ghost btn-xs gap-1"
-					aria-label={selectedCopied ? 'Copied' : 'Copy'}
-					onclick={copySelected}
-					disabled={!selectedContent}
-				>
-					{#if selectedCopied}
-						<Icon icon="tabler:check" class="h-6 w-6 text-primary" />
-						<span class="text-primary">Copied</span>
-					{:else}
-						<Icon icon="tabler:copy" class="h-6 w-6" />
-						<span>Copy</span>
-					{/if}
-				</button>
+				<CopyButton text={selectedContent?.content} label="Copy" />
 			</div>
 			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
 				{#if selectedLoading}

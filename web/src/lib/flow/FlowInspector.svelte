@@ -1,30 +1,28 @@
 <script lang="ts">
+	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import CopyButton from '$lib/CopyButton.svelte';
+	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
 	import { apiUrl } from '$lib/api';
+
+	interface Activity {
+		flow: string;
+		task: string | null;
+		task_type: string | null;
+		level: 'info' | 'warning' | 'error';
+		ts_ms: number;
+		message: string;
+	}
 
 	interface Props {
 		yaml: string;
+		activities?: Activity[];
 	}
 
-	let { yaml }: Props = $props();
-
-	let copied = $state(false);
-	let copyTimeout: ReturnType<typeof setTimeout> | null = null;
-
-	async function copyYaml() {
-		try {
-			await navigator.clipboard.writeText(yaml);
-			copied = true;
-			if (copyTimeout) clearTimeout(copyTimeout);
-			copyTimeout = setTimeout(() => (copied = false), 1500);
-		} catch {
-			// Clipboard API refused (no permission, insecure context) —
-			// silently no-op; the button just doesn't confirm.
-		}
-	}
+	let { yaml, activities = [] }: Props = $props();
 
 	interface ResourcePreview {
 		key: string;
@@ -36,25 +34,57 @@
 	let previewContent = $state<ResourcePreview | null>(null);
 	let previewLoading = $state(false);
 	let previewError = $state<string | null>(null);
-	let previewCopied = $state(false);
-	let previewCopyTimeout: ReturnType<typeof setTimeout> | null = null;
 
-	async function copyResource() {
-		if (!previewContent) return;
-		try {
-			await navigator.clipboard.writeText(previewContent.content);
-			previewCopied = true;
-			if (previewCopyTimeout) clearTimeout(previewCopyTimeout);
-			previewCopyTimeout = setTimeout(() => (previewCopied = false), 1500);
-		} catch {
-			// Clipboard refused (permissions, insecure context) — silent no-op.
-		}
+	function resourceHref(key: string): string {
+		return `${base}/resources/${key.split('/').map(encodeURIComponent).join('/')}`;
 	}
 
 	let yamlPane = $state<HTMLElement | null>(null);
+	let dagPane = $state<HTMLElement | null>(null);
+	let activityPanel = $state<ActivityPanel | null>(null);
+	let activityExpanded = $state(false);
 	let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
-
 	let flashedEl: HTMLElement | null = null;
+
+	// Persistent per-task state: the level of the most recent activity for
+	// each task. Rendered as a colored dot on each DAG node so the user
+	// can glance at the graph and see which tasks are healthy/degraded/broken.
+	let nodeStates = $derived.by(() => {
+		const map = new Map<string, { level: 'info' | 'warning' | 'error'; ts_ms: number }>();
+		for (const a of activities) {
+			if (!a.task) continue;
+			const prev = map.get(a.task);
+			if (!prev || a.ts_ms >= prev.ts_ms) map.set(a.task, { level: a.level, ts_ms: a.ts_ms });
+		}
+		return map;
+	});
+
+	// Push node states into the DAG DOM as data attributes. TaskNode.svelte
+	// reads them via CSS to render the persistent ring color.
+	$effect(() => {
+		if (!dagPane) return;
+		const nodes = dagPane.querySelectorAll<HTMLElement>('[data-task]');
+		for (const el of nodes) {
+			const name = el.dataset.task;
+			if (!name) continue;
+			const st = nodeStates.get(name);
+			if (st) {
+				el.dataset.level = st.level;
+			} else {
+				delete el.dataset.level;
+			}
+		}
+	});
+
+	function onNodeClick(name: string) {
+		scrollToTask(name);
+		if (!activityExpanded) activityExpanded = true;
+		queueMicrotask(() => activityPanel?.scrollToLatestFor(name));
+	}
+
+	function onActivityRowClick(taskName: string) {
+		scrollToTask(taskName);
+	}
 
 	function scrollToTask(name: string) {
 		if (!yamlPane) return;
@@ -107,42 +137,38 @@
 
 <svelte:window on:keydown={onKeydown} />
 
-<div class="grid min-h-0 flex-1 grid-cols-2 gap-0 divide-x divide-base-200">
-	<div class="flex min-h-0 flex-col">
-		<div class="border-b border-base-200 bg-base-100 px-4 py-2 text-xs font-medium opacity-70">
-			Graph
+<div class="flex min-h-0 flex-1 flex-col">
+	<div class="grid min-h-0 flex-1 grid-cols-2 gap-0 divide-x divide-base-200">
+		<div class="flex min-h-0 flex-col">
+			<div class="border-b border-base-200 bg-base-100 px-4 py-2 text-xs font-medium opacity-70">
+				Graph
+			</div>
+			<div bind:this={dagPane} class="min-h-0 flex-1">
+				<FlowDag {yaml} onNodeClick={onNodeClick} />
+			</div>
 		</div>
-		<div class="min-h-0 flex-1">
-			<FlowDag {yaml} onNodeClick={scrollToTask} />
-		</div>
-	</div>
-	<div class="flex min-h-0 flex-col">
-		<div class="flex items-center justify-between border-b border-base-200 bg-base-100 px-4 py-1">
-			<span class="text-xs font-medium opacity-70">Config</span>
-			<button
-				type="button"
-				class="btn btn-ghost btn-xs gap-1"
-				aria-label={copied ? 'Copied' : 'Copy YAML'}
-				onclick={copyYaml}
-			>
-				{#if copied}
-					<Icon icon="tabler:check" class="h-6 w-6 text-primary" />
-					<span class="text-primary">Copied</span>
-				{:else}
-					<Icon icon="tabler:copy" class="h-6 w-6" />
-					<span>Copy</span>
-				{/if}
-			</button>
-		</div>
-		<div bind:this={yamlPane} class="min-h-0 flex-1 overflow-auto bg-base-200">
-			<ResourceViewer
-				content={yaml}
-				extension="yaml"
-				onResourceClick={openResource}
-				anchorTaskNames
-			/>
+		<div class="flex min-h-0 flex-col">
+			<div class="flex items-center justify-between border-b border-base-200 bg-base-100 px-4 py-1">
+				<span class="text-xs font-medium opacity-70">Config</span>
+				<CopyButton text={yaml} label="Copy YAML" />
+			</div>
+			<div bind:this={yamlPane} class="min-h-0 flex-1 overflow-auto bg-base-200">
+				<ResourceViewer
+					content={yaml}
+					extension="yaml"
+					onResourceClick={openResource}
+					anchorTaskNames
+				/>
+			</div>
 		</div>
 	</div>
+	<ActivityPanel
+		bind:this={activityPanel}
+		{activities}
+		expanded={activityExpanded}
+		onToggle={() => (activityExpanded = !activityExpanded)}
+		onRowClick={onActivityRowClick}
+	/>
 </div>
 
 {#if previewKey}
@@ -170,30 +196,29 @@
 					{/if}
 				</div>
 				<div class="flex items-center gap-1">
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm gap-1"
-						aria-label={previewCopied ? 'Copied' : 'Copy'}
-						onclick={copyResource}
-						disabled={!previewContent}
-					>
-						{#if previewCopied}
-							<Icon icon="tabler:check" class="h-6 w-6 text-primary" />
-							<span class="text-primary">Copied</span>
-						{:else}
-							<Icon icon="tabler:copy" class="h-6 w-6" />
-							<span>Copy</span>
-						{/if}
-					</button>
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label="Close"
-						onclick={closeResource}
-					>
-						<Icon icon="tabler:x" class="h-6 w-6" />
-					</button>
+					<div class="tooltip tooltip-left" data-tip="Open full page">
+						<a
+							href={resourceHref(previewKey)}
+							class="btn btn-ghost btn-sm btn-circle"
+							aria-label="Open full page"
+						>
+							<Icon icon="tabler:external-link" class="h-6 w-6" />
+						</a>
+					</div>
+					<div class="tooltip tooltip-left" data-tip="Close">
+						<button
+							type="button"
+							class="btn btn-ghost btn-sm btn-circle"
+							aria-label="Close"
+							onclick={closeResource}
+						>
+							<Icon icon="tabler:x" class="h-6 w-6" />
+						</button>
+					</div>
 				</div>
+			</div>
+			<div class="flex items-center justify-end border-b border-base-200 bg-base-100 px-4 py-1">
+				<CopyButton text={previewContent?.content} label="Copy" />
 			</div>
 			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
 				{#if previewLoading}
@@ -218,8 +243,6 @@
 {/if}
 
 <style>
-	/* Brief flash on the task name after a DAG node click, so the user
-	   spots where the config pane scrolled to. */
 	:global(.task-flash) {
 		background: rgba(0, 118, 0, 0.22);
 		border-radius: 3px;
@@ -234,4 +257,5 @@
 			background: transparent;
 		}
 	}
+
 </style>

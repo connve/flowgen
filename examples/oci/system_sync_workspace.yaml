@@ -1,0 +1,219 @@
+# Bootstrap flow: reconciles a full flowgen workspace (flows + resources)
+# from a single OCI artifact into the system NATS KV cache. Each tick
+# pulls the artifact, routes each layer by its top-level directory —
+# `flows/` layers are keyed by `flow.name` under `flowgen.flows.`,
+# `resources/` layers are keyed by their path (with the `resources/`
+# prefix stripped) under `flowgen.resources.`. Any other files in the
+# artifact are ignored. Cache entries no longer present in the artifact
+# are deleted.
+#
+# Flows and resources ship together in one release cadence — one image,
+# one digest, one `docker push` per change.
+#
+# The artifact must be built with `FROM scratch` so its final layer
+# contains only `flows/` and `resources/` — a base image (busybox,
+# alpine) drops binaries into the layer that would arrive as
+# `EventData::Bytes` and break the buffer downstream. See
+# docs/flowgen/oci/sync for the Dockerfile pattern.
+#
+# Required:
+#   - OCI_WORKSPACE_ARTIFACT env var, e.g.
+#       registry.example.com/org/flowgen-workspace:prod
+#   - /etc/flowgen/credentials/registry.json with either
+#       { "username": "...", "password": "..." }
+#     or a Docker config.json payload (kubernetes.io/dockerconfigjson).
+#   - /etc/nats/credentials.json for NATS KV writes.
+#   - NATS_URL env var (e.g. nats://localhost:4222)
+flow:
+  name: system_sync_workspace
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: tick
+        interval: "30s"
+
+    - oci_sync:
+        name: pull_repo
+        artifact: "{{env.OCI_WORKSPACE_ARTIFACT}}"
+        credentials_path: /etc/flowgen/credentials/registry.json
+
+    # Aggregate the per-layer events from `pull_repo` into a single
+    # batched event. The diff downstream needs the full present-set at
+    # once to detect which cache keys are missing from the artifact.
+    - buffer:
+        name: collect_layers
+        size: 10000
+        timeout: "5s"
+        flush_on_completion: true
+
+    # Stash the layer batch in meta so it survives the next task which
+    # overwrites event.data with the cache listing.
+    - script:
+        name: stash_layers
+        code: |
+          ctx.meta.layer_batch = event.data.batch;
+          event
+
+    - nats_kv_store:
+        name: list_existing_flows
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        bucket: flowgen_system
+        operation: list
+        key_prefix: "flowgen.flows."
+        # Include current values so compute_diff can skip put actions
+        # when the YAML in cache already matches — every put bumps the
+        # KV revision and fires a watcher hot-reload on every pod,
+        # which races leader-election leases.
+        include_values: true
+
+    - script:
+        name: stash_existing_flows
+        code: |
+          ctx.meta.existing_flows_keys = event.data.keys;
+          ctx.meta.existing_flows_values = event.data.values;
+          event
+
+    - nats_kv_store:
+        name: list_existing_resources
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        bucket: flowgen_system
+        operation: list
+        key_prefix: "flowgen.resources."
+        include_values: true
+
+    # Short-circuit only when nothing has drifted: the artifact digest
+    # matches the last successful sync AND the total cache key count
+    # matches the routable layer count. Anything else drops through so
+    # compute_diff runs and converges the cache back to the artifact
+    # state.
+    - script:
+        name: skip_if_in_sync
+        code: |
+          let current_digest = event.meta.layer_batch[0].artifact_digest;
+          let last_synced = ctx.cache.get("last_synced_digest");
+          let routable = 0;
+          for layer in event.meta.layer_batch {
+              if layer.path.starts_with("flows/") || layer.path.starts_with("resources/") {
+                  routable += 1;
+              }
+          }
+          let key_count = event.meta.existing_flows_keys.len() + event.data.keys.len();
+          if last_synced == current_digest && routable == key_count {
+              ()
+          } else {
+              ctx.meta.current_digest = current_digest;
+              event
+          }
+
+    # Route each layer by its top-level directory:
+    #   flows/foo.yaml     → flowgen.flows.<parsed flow.name>
+    #   resources/bar.sql  → flowgen.resources.bar.sql
+    #   anything else      → dropped (README.md, etc.)
+    # Then diff against both cache prefixes: layers become puts, cache
+    # keys with no matching layer become deletes.
+    - script:
+        name: compute_diff
+        code: |
+          let layers = event.meta.layer_batch;
+          let existing_flows = event.meta.existing_flows_keys;
+          let current_flows = event.meta.existing_flows_values;
+          let existing_resources = event.data.keys;
+          let current_resources = event.data.values;
+          let present = #{};
+          let actions = [];
+          for layer in layers {
+              let key = if layer.path.starts_with("flows/") {
+                  let parsed = parse_yaml(layer.content);
+                  "flowgen.flows." + parsed.flow.name
+              } else if layer.path.starts_with("resources/") {
+                  "flowgen.resources." + layer.path.sub_string(10)
+              } else {
+                  continue;
+              };
+              present[key] = true;
+              // Skip puts when the cache already holds the same content
+              // — every revision bump triggers a watcher hot-reload on
+              // every pod, which races leader-election leases.
+              let cached = if key.starts_with("flowgen.flows.") {
+                  current_flows[key]
+              } else {
+                  current_resources[key]
+              };
+              if cached != layer.content {
+                  actions.push(#{
+                      action: "put",
+                      key: key,
+                      content: layer.content,
+                  });
+              }
+          }
+          for key in existing_flows {
+              if present[key] != true {
+                  actions.push(#{
+                      action: "delete",
+                      key: key,
+                      content: "",
+                  });
+              }
+          }
+          for key in existing_resources {
+              if present[key] != true {
+                  actions.push(#{
+                      action: "delete",
+                      key: key,
+                      content: "",
+                  });
+              }
+          }
+          actions
+
+    - script:
+        name: select_puts
+        code: |
+          if event.data.action == "put" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - script:
+        name: select_deletes
+        code: |
+          if event.data.action == "delete" {
+              event
+          } else {
+              ()
+          }
+        depends_on: [compute_diff]
+
+    - nats_kv_store:
+        name: write_to_cache
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        bucket: flowgen_system
+        operation: put
+        key: "{{event.data.key}}"
+        depends_on: [select_puts]
+
+    - nats_kv_store:
+        name: delete_from_cache
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        bucket: flowgen_system
+        operation: delete
+        key: "{{event.data.key}}"
+        depends_on: [select_deletes]
+
+    # Persist the new digest only after both write branches have
+    # committed. Runs once per put and per delete, idempotent since
+    # they all write the same digest.
+    - script:
+        name: mark_synced
+        code: |
+          ctx.cache.put("last_synced_digest", event.meta.current_digest);
+          event
+        depends_on: [write_to_cache, delete_from_cache]

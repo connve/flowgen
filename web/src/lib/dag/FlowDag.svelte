@@ -51,9 +51,9 @@
 		edges={laidOut.edges}
 		{nodeTypes}
 		fitView
-		fitViewOptions={{ maxZoom: 1, padding: 0.2 }}
+		fitViewOptions={{ maxZoom: 1.5, padding: 0.15 }}
 		minZoom={0.2}
-		maxZoom={1.5}
+		maxZoom={2}
 		proOptions={{ hideAttribution: true }}
 		onnodeclick={({ node }) => onNodeClick?.(node.id)}
 	>

@@ -32,26 +32,27 @@ filesystem source wins.
   rollout in Kubernetes. This is the simplest model and the right
   choice when flows live next to the binary or are mounted from a
   ConfigMap. See [Flow discovery](https://connve.com/docs/flowgen/concepts/flows#flow-discovery).
-- **Git sync.** A bootstrap flow (`system_sync_flows`) pulls flow
-  YAMLs from a Git repository at a fixed interval and writes them to
-  the system cache. Hot-reload picks up changes without restarting
-  the worker — push to the branch and watcher restarts only the
-  affected flows. Works with any HTTPS Git host (GitHub, GitLab,
-  Bitbucket, Gitea, self-hosted). See
+- **Git sync.** A bootstrap flow (`system_sync_workspace`) pulls
+  flow YAMLs and resource files from a Git repository at a fixed
+  interval and writes them to the system cache. Hot-reload picks up
+  changes without restarting the worker — push to the branch and
+  watcher restarts only the affected flows. Works with any HTTPS Git
+  host (GitHub, GitLab, Bitbucket, Gitea, self-hosted). See
   [Git Sync](https://connve.com/docs/flowgen/git/sync) and the
-  [`examples/git/system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_flows.yaml)
+  [`examples/git/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_workspace.yaml)
   bootstrap.
-- **OCI artifact sync.** Same hot-reload shape as Git, but flows are
-  packaged as an OCI artifact and pulled from an OCI registry
-  (GHCR, ECR, GAR, Artifactory, Harbor). OCI registries hold more
-  than container images — any tarball can be pushed as a tagged
-  artifact. If you already operate a registry, you can publish flow
-  bundles to it, version them with tags, and reuse the same
-  authentication. Credentials auto-detect both the flowgen-native
-  `{username, password}` shape and the standard Docker `config.json`
-  payload, so the same `imagePullSecrets` Secret authenticates
-  artifact pulls. See [OCI Sync](https://connve.com/docs/flowgen/oci/sync)
-  and the [`examples/oci/system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_flows.yaml)
+- **OCI artifact sync.** Same hot-reload shape as Git, but the
+  workspace is packaged as an OCI artifact and pulled from an OCI
+  registry (GHCR, ECR, GAR, Artifactory, Harbor). OCI registries
+  hold more than container images — any tarball can be pushed as a
+  tagged artifact. If you already operate a registry, you can
+  publish workspace bundles to it, version them with tags, and reuse
+  the same authentication. Credentials auto-detect both the
+  flowgen-native `{username, password}` shape and the standard
+  Docker `config.json` payload, so the same `imagePullSecrets`
+  Secret authenticates artifact pulls. See
+  [OCI Sync](https://connve.com/docs/flowgen/oci/sync) and the
+  [`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml)
   bootstrap.
 
 Hot-reload requires a system cache that supports key watches (the

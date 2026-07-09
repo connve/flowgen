@@ -67,11 +67,7 @@
 					class="flex items-center gap-3 rounded-md px-3 py-2"
 					aria-label="CONNVE home"
 				>
-					{#if collapsed}
-						<img src="{base}/favicon.png" alt="CONNVE" class="h-6 w-6 shrink-0" />
-					{:else}
-						<img src="{base}/connve.png" alt="CONNVE" class="h-5 w-auto" />
-					{/if}
+					<img src="{base}/favicon.png" alt="CONNVE" class="h-6 w-6 shrink-0" />
 				</a>
 			</div>
 
@@ -111,7 +107,7 @@
 					: 'justify-between'}"
 			>
 				{#if !collapsed && version}
-					<Badge>v{version}</Badge>
+					<Badge>{version}</Badge>
 				{/if}
 				<button
 					type="button"

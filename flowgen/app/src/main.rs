@@ -2,10 +2,15 @@ use clap::Parser;
 use config::Config;
 use flowgen::app::App;
 use flowgen::config::AppConfig;
+use flowgen_core::flow::activity::FlowRegistry;
+use flowgen_core::flow::activity_layer::FlowActivityLayer;
 use std::env;
 use std::process;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "flowgen", version, about = "Data activation with a blast 💥")]
@@ -35,7 +40,7 @@ fn determine_log_format() -> LogFormat {
     }
 }
 
-fn init_tracing() {
+fn init_tracing(flow_registry: Arc<FlowRegistry>) {
     let format = determine_log_format();
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -45,17 +50,26 @@ fn init_tracing() {
         }
     };
 
+    // We compose Registry + EnvFilter + FlowActivityLayer + fmt layer
+    // instead of the `tracing_subscriber::fmt()` shortcut so the
+    // activity layer sees the same events as stdout.
+    let activity_layer = FlowActivityLayer::new(flow_registry);
+
     match format {
         LogFormat::Compact => {
-            tracing_subscriber::fmt()
-                .compact()
-                .with_env_filter(env_filter)
+            let fmt_layer = tracing_subscriber::fmt::layer().compact();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(activity_layer)
+                .with(fmt_layer)
                 .init();
         }
         LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
+            let fmt_layer = tracing_subscriber::fmt::layer().json();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(activity_layer)
+                .with(fmt_layer)
                 .init();
         }
     }
@@ -65,10 +79,11 @@ fn init_tracing() {
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    init_tracing();
-
     let cli = Cli::parse();
 
+    // Config load runs before tracing is up: tracing needs FlowRegistry,
+    // FlowRegistry needs the cache, and the cache is defined in config.
+    // Boot-time errors go straight to stderr — the canonical Rust CLI pattern.
     let config = match Config::builder()
         .add_source(config::File::with_name(&cli.config))
         .add_source(config::Environment::with_prefix("APP"))
@@ -85,7 +100,7 @@ async fn main() {
                 .next()
                 .map(|c| c.to_uppercase().to_string() + &msg[c.len_utf8()..])
                 .unwrap_or(msg);
-            error!("{msg} (working directory: {cwd})");
+            eprintln!("{msg} (working directory: {cwd})");
             process::exit(1);
         }
     };
@@ -93,10 +108,22 @@ async fn main() {
     let app_config = match config.try_deserialize::<AppConfig>() {
         Ok(config) => config,
         Err(e) => {
-            error!("Failed to deserialize app config: {}", e);
+            eprintln!("Failed to deserialize app config: {}", e);
             process::exit(1);
         }
     };
+
+    let cache = match App::build_cache(&app_config).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to build cache: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let flow_registry = FlowRegistry::builder().cache(Arc::clone(&cache)).build();
+
+    init_tracing(Arc::clone(&flow_registry));
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -161,7 +188,11 @@ async fn main() {
         }
     });
 
-    let app = App { config: app_config };
+    let app = App {
+        config: app_config,
+        flow_activity: Arc::clone(&flow_registry),
+        cache: Arc::clone(&cache),
+    };
     if let Err(e) = app.start(shutdown_rx).await {
         error!("Application failed to run: {}", e);
         process::exit(1);

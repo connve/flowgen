@@ -69,6 +69,16 @@ spec:
           containerPort: {{ $worker.mcp_server.port }}
           protocol: TCP
         {{- end }}
+        {{- if $worker.ai_gateway }}
+        - name: ai-gateway
+          containerPort: {{ $worker.ai_gateway.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if $worker.web }}
+        - name: web
+          containerPort: {{ $worker.web.port }}
+          protocol: TCP
+        {{- end }}
         readinessProbe:
           httpGet:
             path: /healthz

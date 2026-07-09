@@ -269,9 +269,50 @@ pub enum Error {
 pub struct App {
     /// Global application configuration.
     pub config: AppConfig,
+    /// Shared FlowRegistry populated by the tracing activity layer, read
+    /// by the admin web API for status and SSE.
+    pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
+    /// Cache backing flow/resource storage, activity publish, and runtime
+    /// state. Built in `main` before tracing so `FlowRegistry` can be
+    /// constructed with a real cache reference from the outset.
+    pub cache: Arc<dyn flowgen_core::cache::Cache>,
 }
 
 impl App {
+    /// Builds the runtime cache from config (NATS if enabled and reachable,
+    /// otherwise in-memory). Callable before tracing is up so `main` can
+    /// hand a real cache to `FlowRegistry::builder().cache(...)`.
+    pub async fn build_cache(
+        app_config: &AppConfig,
+    ) -> Result<Arc<dyn flowgen_core::cache::Cache>, Error> {
+        let Some(cache_config) = &app_config.cache else {
+            return Ok(Arc::new(flowgen_core::cache::memory::MemoryCache::new()));
+        };
+        if !cache_config.enabled {
+            return Ok(Arc::new(flowgen_core::cache::memory::MemoryCache::new()));
+        }
+        let db_name = cache_config
+            .db_name
+            .as_deref()
+            .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
+        let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
+            .credentials_path(cache_config.credentials_path.clone())
+            .url(cache_config.url.clone());
+        if let Some(history) = cache_config.history {
+            cache_builder = cache_builder.history(history);
+        }
+        if let Some(ttl) = cache_config.tombstone_ttl {
+            cache_builder = cache_builder.tombstone_ttl(ttl);
+        }
+        match cache_builder.build() {
+            Ok(builder) => match builder.init(db_name).await {
+                Ok(nats_cache) => Ok(Arc::new(nats_cache)),
+                Err(e) => Err(Error::SystemCacheInit { source: e }),
+            },
+            Err(e) => Err(Error::SystemCacheInit { source: e }),
+        }
+    }
+
     /// Initializes a system cache connection for flow/resource loading.
     /// Separate from the runtime cache to avoid key collisions during list operations.
     fn init_system_cache(
@@ -731,47 +772,7 @@ impl App {
                 None
             };
 
-        let cache: Arc<dyn flowgen_core::cache::Cache> = if let Some(cache_config) =
-            &app_config.cache
-        {
-            if cache_config.enabled {
-                let db_name = cache_config
-                    .db_name
-                    .as_deref()
-                    .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME);
-
-                let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
-                    .credentials_path(cache_config.credentials_path.clone())
-                    .url(cache_config.url.clone());
-                if let Some(history) = cache_config.history {
-                    cache_builder = cache_builder.history(history);
-                }
-                if let Some(ttl) = cache_config.tombstone_ttl {
-                    cache_builder = cache_builder.tombstone_ttl(ttl);
-                }
-                match cache_builder.build().and_then(|builder| {
-                    futures::executor::block_on(async { builder.init(db_name).await })
-                }) {
-                    Ok(nats_cache) => {
-                        info!("Using NATS distributed cache");
-                        Arc::new(nats_cache) as Arc<dyn flowgen_core::cache::Cache>
-                    }
-                    Err(e) => {
-                        warn!("Failed to connect to NATS, falling back to in-memory cache: {e}");
-                        Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                            as Arc<dyn flowgen_core::cache::Cache>
-                    }
-                }
-            } else {
-                info!("Cache disabled in config, using in-memory cache");
-                Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                    as Arc<dyn flowgen_core::cache::Cache>
-            }
-        } else {
-            info!("No cache configured, using in-memory cache");
-            Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-                as Arc<dyn flowgen_core::cache::Cache>
-        };
+        let cache = Arc::clone(&self.cache);
 
         // Build the resource loader. Filesystem and cache sources are
         // independent: configure either, both, or neither. When both are
@@ -1091,6 +1092,8 @@ impl App {
                 flow_registry: Arc::clone(&flow_registry),
                 prefix: String::new(),
                 resource_loader: resource_loader.clone(),
+                flow_activity: Arc::clone(&self.flow_activity),
+                cache: Arc::clone(&cache),
             };
             let web_handle = tokio::spawn(async move {
                 if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {

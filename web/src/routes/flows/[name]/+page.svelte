@@ -12,22 +12,51 @@
 		yaml: string;
 	}
 
+	interface FlowActivity {
+		flow: string;
+		task: string | null;
+		task_type: string | null;
+		level: 'info' | 'warning' | 'error';
+		ts_ms: number;
+		message: string;
+	}
+
 	let detail = $state<FlowDetail | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let activities = $state<FlowActivity[]>([]);
 
 	let flowName = $derived(page.params.name ?? '');
 
-	onMount(async () => {
-		try {
-			const response = await fetch(apiUrl(`api/flows/${encodeURIComponent(flowName)}`));
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			detail = await response.json();
-		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load flow';
-		} finally {
-			loading = false;
-		}
+	onMount(() => {
+		fetch(apiUrl(`api/flows/${encodeURIComponent(flowName)}`))
+			.then((r) => {
+				if (!r.ok) throw new Error(`HTTP ${r.status}`);
+				return r.json();
+			})
+			.then((data) => {
+				detail = data;
+			})
+			.catch((err) => {
+				error = err instanceof Error ? err.message : 'Failed to load flow';
+			})
+			.finally(() => {
+				loading = false;
+			});
+
+		const targetFlow = flowName;
+		const sse = new EventSource(apiUrl('api/flows/stream'));
+		sse.addEventListener('activity', (e) => {
+			let activity: FlowActivity;
+			try {
+				activity = JSON.parse(e.data) as FlowActivity;
+			} catch {
+				return;
+			}
+			if (activity.flow === targetFlow) activities = [...activities, activity];
+		});
+
+		return () => sse.close();
 	});
 </script>
 
@@ -59,7 +88,7 @@
 		</div>
 	{:else if detail}
 		<div class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
-			<FlowInspector yaml={detail.yaml} />
+			<FlowInspector yaml={detail.yaml} {activities} />
 		</div>
 	{/if}
 </section>

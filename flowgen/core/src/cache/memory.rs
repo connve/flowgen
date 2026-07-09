@@ -3,14 +3,20 @@
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::stream::BoxStream;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-/// Entry with value and revision number for optimistic concurrency control.
+/// Mirrors the NATS KV default history so both backends replay the same
+/// number of past revisions per key when `watch(_, true)` is called.
+const DEFAULT_HISTORY: usize = 10_000;
+
+/// Entry with value, revision, and retained history (oldest → newest).
 #[derive(Debug, Clone)]
 struct CacheEntry {
     value: Bytes,
     revision: u64,
+    history: VecDeque<Bytes>,
 }
 
 /// A registered watcher: stores the sender half and the prefix it subscribed to.
@@ -29,6 +35,7 @@ struct Watcher {
 pub struct MemoryCache {
     data: Arc<DashMap<String, CacheEntry>>,
     watchers: Arc<Mutex<Vec<Watcher>>>,
+    history: usize,
 }
 
 impl Default for MemoryCache {
@@ -39,9 +46,14 @@ impl Default for MemoryCache {
 
 impl MemoryCache {
     pub fn new() -> Self {
+        Self::with_history(DEFAULT_HISTORY)
+    }
+
+    pub fn with_history(history: usize) -> Self {
         Self {
             data: Arc::new(DashMap::new()),
             watchers: Arc::new(Mutex::new(Vec::new())),
+            history,
         }
     }
 
@@ -77,15 +89,18 @@ impl super::Cache for MemoryCache {
         value: Bytes,
         _ttl_secs: Option<u64>,
     ) -> Result<(), super::Error> {
+        let history_cap = self.history;
         self.data
             .entry(key.to_string())
             .and_modify(|e| {
+                push_history(&mut e.history, e.value.clone(), history_cap);
                 e.value = value.clone();
                 e.revision += 1;
             })
             .or_insert(CacheEntry {
                 value: value.clone(),
                 revision: 1,
+                history: VecDeque::new(),
             });
 
         self.broadcast(super::WatchEvent::Put {
@@ -119,7 +134,11 @@ impl super::Cache for MemoryCache {
         match self.data.entry(key.to_string()) {
             dashmap::Entry::Occupied(_) => Err(super::CacheError::AlreadyExists),
             dashmap::Entry::Vacant(entry) => {
-                entry.insert(CacheEntry { value, revision: 1 });
+                entry.insert(CacheEntry {
+                    value,
+                    revision: 1,
+                    history: VecDeque::new(),
+                });
                 Ok(1)
             }
         }
@@ -132,6 +151,7 @@ impl super::Cache for MemoryCache {
         expected_revision: u64,
         _ttl_secs: Option<u64>,
     ) -> Result<u64, super::Error> {
+        let history_cap = self.history;
         match self.data.entry(key.to_string()) {
             dashmap::Entry::Occupied(mut entry) => {
                 let current_revision = entry.get().revision;
@@ -142,6 +162,8 @@ impl super::Cache for MemoryCache {
                     });
                 }
                 let new_revision = current_revision + 1;
+                let previous = entry.get().value.clone();
+                push_history(&mut entry.get_mut().history, previous, history_cap);
                 entry.get_mut().value = value;
                 entry.get_mut().revision = new_revision;
                 Ok(new_revision)
@@ -194,8 +216,41 @@ impl super::Cache for MemoryCache {
     async fn watch(
         &self,
         prefix: &str,
+        include_history: bool,
     ) -> Result<BoxStream<'static, Result<super::WatchEvent, super::Error>>, super::Error> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Replay retained history before registering the live watcher so the
+        // subscriber sees a fully ordered stream: old revisions first, then
+        // the current value, then live updates. Snapshot the data by cloning
+        // out of the DashMap under a short lock to avoid holding shard locks
+        // across the sends.
+        if include_history {
+            let snapshot: Vec<(String, VecDeque<Bytes>, Bytes)> = self
+                .data
+                .iter()
+                .filter(|entry| entry.key().starts_with(prefix))
+                .map(|entry| {
+                    (
+                        entry.key().clone(),
+                        entry.history.clone(),
+                        entry.value.clone(),
+                    )
+                })
+                .collect();
+            for (key, history, current) in snapshot {
+                for past in history {
+                    let _ = tx.send(Ok(super::WatchEvent::Put {
+                        key: key.clone(),
+                        value: past,
+                    }));
+                }
+                let _ = tx.send(Ok(super::WatchEvent::Put {
+                    key,
+                    value: current,
+                }));
+            }
+        }
 
         let watcher = Watcher {
             prefix: prefix.to_string(),
@@ -208,13 +263,22 @@ impl super::Cache for MemoryCache {
             .push(watcher);
 
         let stream = UnboundedReceiverStream::new(rx);
-        // Filter is already done at broadcast time, but we box the stream here.
         Ok(Box::pin(stream)
             as BoxStream<
                 'static,
                 Result<super::WatchEvent, super::Error>,
             >)
     }
+}
+
+fn push_history(history: &mut VecDeque<Bytes>, value: Bytes, cap: usize) {
+    if cap == 0 {
+        return;
+    }
+    if history.len() == cap {
+        history.pop_front();
+    }
+    history.push_back(value);
 }
 
 #[cfg(test)]
@@ -313,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_receives_put_events() {
         let cache = MemoryCache::new();
-        let mut stream = cache.watch("test.").await.unwrap();
+        let mut stream = cache.watch("test.", false).await.unwrap();
 
         cache
             .put("test.key1", Bytes::from("value1"), None)
@@ -338,7 +402,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut stream = cache.watch("test.").await.unwrap();
+        let mut stream = cache.watch("test.", false).await.unwrap();
         cache.delete("test.key1").await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
@@ -353,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn test_watch_filters_by_prefix() {
         let cache = MemoryCache::new();
-        let mut stream = cache.watch("flows.").await.unwrap();
+        let mut stream = cache.watch("flows.", false).await.unwrap();
 
         // This should NOT reach the watcher.
         cache
@@ -381,7 +445,7 @@ mod tests {
 
         // Create a watcher and immediately drop its stream.
         {
-            let _stream = cache.watch("test.").await.unwrap();
+            let _stream = cache.watch("test.", false).await.unwrap();
         }
 
         // The broadcast triggered by put should clean up the dead watcher.
@@ -392,5 +456,37 @@ mod tests {
 
         let watchers = cache.watchers.lock().unwrap();
         assert!(watchers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn watch_with_history_replays_retained_revisions() {
+        // History cap = 3, meaning the ring keeps the 3 most recent
+        // *past* revisions; the current value is emitted after them,
+        // for a total of up-to-4 events on connect.
+        let cache = MemoryCache::with_history(3);
+        for v in ["v1", "v2", "v3", "v4"] {
+            cache
+                .put("k", Bytes::from(v.to_string()), None)
+                .await
+                .unwrap();
+        }
+
+        let mut stream = cache.watch("k", true).await.unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            let ev = stream.next().await.unwrap().unwrap();
+            let crate::cache::WatchEvent::Put { value, .. } = ev else {
+                unreachable!("watch only replays Put revisions")
+            };
+            seen.push(String::from_utf8(value.to_vec()).unwrap());
+        }
+        assert_eq!(seen, vec!["v1", "v2", "v3", "v4"]);
+
+        cache.put("k", Bytes::from("v5"), None).await.unwrap();
+        let ev = stream.next().await.unwrap().unwrap();
+        let crate::cache::WatchEvent::Put { value, .. } = ev else {
+            unreachable!("live update after history is a Put")
+        };
+        assert_eq!(value, Bytes::from("v5"));
     }
 }

@@ -179,7 +179,7 @@
 	</article>
 {:else if highlighted}
 	<pre
-		class="language-{lang} overflow-auto p-4 text-xs leading-relaxed"
+		class="language-{lang} whitespace-pre-wrap break-words p-4 text-xs leading-relaxed"
 		onclick={onClick}
 		onkeydown={(e) => {
 			if (e.key === 'Enter') onClick(e as unknown as MouseEvent);
@@ -255,7 +255,7 @@
 		color: var(--prism-variable);
 	}
 	:global([data-theme='mytheme']) {
-		--prism-comment: #6a8a7a;
+		--prism-comment: #8a8a8a;
 		--prism-punctuation: #556b60;
 		--prism-property: #006ba1;
 		--prism-number: #cf3450;
@@ -269,7 +269,7 @@
 		/* Palette tuned for the dark base (#0e1a15). Green is reserved for
 		   strings/values so keywords and identifiers don't blend into each
 		   other. Contrast targets AA against the background. */
-		--prism-comment: #94a89e;
+		--prism-comment: #9ca3af;
 		--prism-punctuation: #d4e0d9;
 		--prism-property: #82d4ff;
 		--prism-number: #ffb0b8;

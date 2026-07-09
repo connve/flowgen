@@ -7,13 +7,17 @@
 use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, Uri},
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
     response::{IntoResponse, Redirect},
     routing::get,
     Json, Router,
 };
+use futures::stream::Stream;
+use futures_util::StreamExt;
 use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tracing::{info, warn};
 
 /// Default port for the admin web server.
@@ -22,7 +26,9 @@ pub const DEFAULT_WEB_PORT: u16 = 8080;
 /// Default path prefix for the admin web UI.
 pub const DEFAULT_WEB_PATH: &str = "/";
 
-/// Summary of a loaded flow returned by the admin API.
+/// Summary of a loaded flow returned by the admin API. Combines static
+/// registration data (name, description, tags…) with live counters
+/// pulled from the FlowRegistry the tracing layer maintains.
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowSummary {
     /// Unique flow name.
@@ -40,14 +46,23 @@ pub struct FlowSummary {
     pub task_count: usize,
     /// Source of the flow configuration: "filesystem" or "cache".
     pub source: String,
-    /// Wall-clock RFC 3339 timestamp of the last observed handle event,
-    /// or `None` when the flow has not yet emitted an event since boot.
-    /// Placeholder until per-flow last-event tracking is wired end-to-end;
-    /// today the API always returns `None` and the UI shows "—".
-    pub last_run: Option<String>,
-    /// Coarse health for the last run. Placeholder — see `last_run` —
-    /// always `Unknown` today.
-    pub status: FlowStatus,
+    /// RFC 3339 timestamp of when the flow supervisor was spawned.
+    pub started_at: Option<String>,
+    /// RFC 3339 timestamp of the most recent info!() inside a task.handle
+    /// scope; `None` when the flow has never processed an event yet.
+    pub last_event_at: Option<String>,
+    /// Same as above but for warn!().
+    pub last_warning_at: Option<String>,
+    /// Same as above but for error!().
+    pub last_error_at: Option<String>,
+    /// Total successful events since process start.
+    pub events_total: u64,
+    /// Total warn events since process start.
+    pub warnings_total: u64,
+    /// Total error events since process start.
+    pub errors_total: u64,
+    /// Coarse status derived from the three "last_*_at" timestamps.
+    pub status: flowgen_core::flow::activity::FlowStatus,
 }
 
 /// Full flow detail returned by `GET /api/flows/{name}` for the inspector modal.
@@ -59,18 +74,6 @@ pub struct FlowDetail {
     pub display_name: Option<String>,
     /// YAML source of the flow config as loaded from disk / cache.
     pub yaml: String,
-}
-
-/// Coarse per-flow health surfaced on the admin API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FlowStatus {
-    /// Last run completed without error.
-    Ok,
-    /// Last run failed on at least one task.
-    Error,
-    /// No run has been observed since boot, or tracking isn't wired yet.
-    Unknown,
 }
 
 /// Errors that can occur while running the admin web server.
@@ -107,6 +110,11 @@ pub struct WebState {
     /// Optional resource loader used by the admin resources endpoints to
     /// list and fetch templates, prompts, SQL files, etc.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Shared activity registry populated by the tracing layer. Used by
+    /// the flow list, the flow detail, and the SSE stream.
+    pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
+    /// Cache the SSE stream subscribes to for cross-replica activity.
+    pub cache: Arc<dyn flowgen_core::cache::Cache>,
 }
 
 /// Summary of a resource returned by the admin API.
@@ -148,6 +156,7 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
 
     let app = Router::new()
         .route(&format!("{api_prefix}/flows"), get(list_flows))
+        .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
         .route(&format!("{api_prefix}/flows/{{name}}"), get(get_flow))
         .route(&format!("{api_prefix}/version"), get(get_version))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
@@ -174,38 +183,7 @@ async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let flows = match state.flow_registry.read() {
         Ok(registry) => registry
             .values()
-            .map(|handle| {
-                // Status is a placeholder until per-event tracking replaces it.
-                // Reporting `is_running()` mislabels legitimately-terminated
-                // supervisors (registration-only flows, one-shot `count: 1`
-                // generators) as errors, so surface `Ok` uniformly and defer
-                // real health to the per-event tracking follow-up.
-                let status = FlowStatus::Ok;
-                let last_run = match handle.started_at().duration_since(std::time::UNIX_EPOCH) {
-                    Ok(d) => {
-                        let secs = d.as_secs() as i64;
-                        let nsecs = d.subsec_nanos();
-                        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs)
-                            .map(|dt| dt.to_rfc3339())
-                    }
-                    Err(_) => None,
-                };
-                let source = match handle.from_filesystem {
-                    true => "filesystem".to_string(),
-                    false => "cache".to_string(),
-                };
-                FlowSummary {
-                    name: handle.flow_name().to_string(),
-                    display_name: handle.display_name().map(ToString::to_string),
-                    description: handle.description().map(ToString::to_string),
-                    tags: handle.tags().to_vec(),
-                    require_leader_election: handle.require_leader_election(),
-                    task_count: handle.task_count(),
-                    source,
-                    last_run,
-                    status,
-                }
-            })
+            .map(|handle| build_summary(handle, &state.flow_activity))
             .collect::<Vec<_>>(),
         Err(_) => {
             warn!("Flow registry is poisoned, returning empty flow list");
@@ -214,6 +192,82 @@ async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     };
 
     Json(flows)
+}
+
+/// Merges the registered flow handle (static config-time data) with
+/// whatever live metrics the tracing layer has collected so far.
+fn build_summary(
+    handle: &crate::app::FlowHandle,
+    activity: &flowgen_core::flow::activity::FlowRegistry,
+) -> FlowSummary {
+    let started_at = system_time_to_rfc3339(handle.started_at());
+    let source = match handle.from_filesystem {
+        true => "filesystem".to_string(),
+        false => "cache".to_string(),
+    };
+    let snapshot = activity.snapshot(handle.flow_name());
+    let (
+        last_event_at,
+        last_warning_at,
+        last_error_at,
+        events_total,
+        warnings_total,
+        errors_total,
+        status,
+    ) = match snapshot {
+        Some(s) => (
+            s.last_event_at_ms.and_then(ms_to_rfc3339),
+            s.last_warning_at_ms.and_then(ms_to_rfc3339),
+            s.last_error_at_ms.and_then(ms_to_rfc3339),
+            s.events_total,
+            s.warnings_total,
+            s.errors_total,
+            s.status,
+        ),
+        None => (
+            None,
+            None,
+            None,
+            0,
+            0,
+            0,
+            flowgen_core::flow::activity::FlowStatus::Idle,
+        ),
+    };
+    FlowSummary {
+        name: handle.flow_name().to_string(),
+        display_name: handle.display_name().map(ToString::to_string),
+        description: handle.description().map(ToString::to_string),
+        tags: handle.tags().to_vec(),
+        require_leader_election: handle.require_leader_election(),
+        task_count: handle.task_count(),
+        source,
+        started_at,
+        last_event_at,
+        last_warning_at,
+        last_error_at,
+        events_total,
+        warnings_total,
+        errors_total,
+        status,
+    }
+}
+
+fn system_time_to_rfc3339(t: std::time::SystemTime) -> Option<String> {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs() as i64;
+            let nsecs = d.subsec_nanos();
+            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs).map(|dt| dt.to_rfc3339())
+        }
+        Err(_) => None,
+    }
+}
+
+fn ms_to_rfc3339(ms: u64) -> Option<String> {
+    let secs = (ms / 1000) as i64;
+    let nsecs = ((ms % 1000) * 1_000_000) as u32;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs).map(|dt| dt.to_rfc3339())
 }
 
 /// Returns the YAML source of a single flow so operators can inspect the
@@ -236,6 +290,71 @@ async fn get_flow(
         })),
         None => Err((StatusCode::NOT_FOUND, format!("Flow '{name}' not found"))),
     }
+}
+
+/// Streams flow activity to the admin UI over Server-Sent Events.
+///
+/// The stream subscribes to the shared cache under [`ACTIVITY_PREFIX`]
+/// with `include_history=true`, so a UI opening the modal receives the
+/// retained per-key history first (letting it replay recent flashes for
+/// the DAG) before switching to live updates. Multi-node deployments
+/// backed by NATS get cross-replica visibility for free — every publish
+/// lands in the same KV bucket regardless of which node runs the flow.
+async fn stream_flows(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
+    use flowgen_core::cache::WatchEvent;
+    use flowgen_core::flow::activity::ACTIVITY_PREFIX;
+
+    let snapshot = state.flow_activity.snapshot_all();
+    let snapshot_frame = SseEvent::default()
+        .event("snapshot")
+        .json_data(&snapshot)
+        .unwrap_or_else(|_| SseEvent::default().data("[]"));
+
+    let watch = state.cache.watch(ACTIVITY_PREFIX, true).await;
+    let live = match watch {
+        Ok(w) => w
+            .filter_map(|res| async move {
+                let ev = match res {
+                    Ok(ev) => ev,
+                    Err(source) => {
+                        warn!(error = %source, "Cache watch error on activity stream");
+                        return None;
+                    }
+                };
+                let bytes = match ev {
+                    WatchEvent::Put { value, .. } => value,
+                    WatchEvent::Delete { .. } => return None,
+                };
+                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(activity) => match SseEvent::default().event("activity").json_data(activity)
+                    {
+                        Ok(ev) => Some(Ok(ev)),
+                        Err(source) => {
+                            warn!(error = %source, "Failed to encode SSE activity frame");
+                            None
+                        }
+                    },
+                    Err(source) => {
+                        warn!(error = %source, "Failed to decode cached activity payload");
+                        None
+                    }
+                }
+            })
+            .boxed(),
+        Err(source) => {
+            warn!(error = %source, "Cache does not support watch; live SSE frames disabled");
+            futures_util::stream::empty().boxed()
+        }
+    };
+
+    let stream = tokio_stream::once(Ok(snapshot_frame)).chain(live);
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
 
 /// Returns the list of resources discoverable from the filesystem loader.
@@ -375,10 +494,16 @@ mod tests {
 
     #[test]
     fn test_web_state_allows_empty_registry() {
+        let cache: Arc<dyn flowgen_core::cache::Cache> =
+            Arc::new(flowgen_core::cache::memory::MemoryCache::new());
         let state = WebState {
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             prefix: String::new(),
             resource_loader: None,
+            flow_activity: flowgen_core::flow::activity::FlowRegistry::builder()
+                .cache(Arc::clone(&cache))
+                .build(),
+            cache,
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());

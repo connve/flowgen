@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Clone, Deserialize)]
 struct Manifest {
     kind: String,
+    metadata: Option<serde_yaml::Value>,
     spec: Option<serde_yaml::Value>,
 }
 
@@ -117,6 +118,69 @@ fn merge_injects_host_network_and_dns_policy() {
         .and_then(|v| v.as_str())
         .expect("dnsPolicy should be a string");
     assert_eq!(dns_policy, "ClusterFirstWithHostNet");
+}
+
+fn service_named(manifests: &[Manifest], suffix: &str) -> Option<Manifest> {
+    manifests
+        .iter()
+        .find(|m| {
+            m.kind == "Service"
+                && m.metadata
+                    .as_ref()
+                    .and_then(|md| md.get("name"))
+                    .and_then(|n| n.as_str())
+                    .is_some_and(|n| n.ends_with(suffix))
+        })
+        .cloned()
+}
+
+fn service_port(svc: &Manifest) -> u64 {
+    svc.spec
+        .as_ref()
+        .and_then(|s| s.get("ports"))
+        .and_then(|p| p.as_sequence())
+        .and_then(|seq| seq.first())
+        .and_then(|p| p.get("port"))
+        .and_then(|v| v.as_u64())
+        .expect("service port should be numeric")
+}
+
+#[test]
+fn ai_gateway_service_renders_when_configured() {
+    let manifests = render(
+        r#"flowgen:
+  ai_gateway:
+    type: ClusterIP
+    port: 3002
+"#,
+    );
+    let svc = service_named(&manifests, "-ai-gateway").expect("ai-gateway Service should render");
+    assert_eq!(service_port(&svc), 3002);
+}
+
+#[test]
+fn ai_gateway_service_omitted_by_default() {
+    let manifests = render("");
+    assert!(service_named(&manifests, "-ai-gateway").is_none());
+}
+
+#[test]
+fn web_service_renders_when_configured() {
+    let manifests = render(
+        r#"flowgen:
+  web:
+    type: ClusterIP
+    port: 8080
+"#,
+    );
+    let svc = service_named(&manifests, "-web").expect("web Service should render");
+    assert_eq!(service_port(&svc), 8080);
+}
+
+#[test]
+fn web_service_omitted_by_default() {
+    let manifests = render("");
+    assert!(service_named(&manifests, "-web").is_none());
 }
 
 #[test]

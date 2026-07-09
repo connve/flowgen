@@ -75,12 +75,10 @@ The cache backend reuses the same cache configuration as the rest of flowgen (se
 
 ### Populating the cache from a repository
 
-The cache backend assumes someone is writing to `flowgen.resources.*`. Two canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree, and reconcile it into the cache (puts for new and changed entries, deletes for entries the source no longer contains):
+The cache backend assumes someone is writing to `flowgen.resources.*`. Canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree containing both `flows/` and `resources/`, and reconcile them into the cache (puts for new and changed entries, deletes for entries the source no longer contains). One release cadence covers both flow YAML and resource changes:
 
-- [`examples/git/system_sync_resources.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_resources.yaml) — pulls from any HTTPS Git host.
-- [`examples/oci/system_sync_resources.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_resources.yaml) — pulls from any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
-
-Both flows pair naturally with their flow-syncing siblings ([`system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_flows.yaml), [`oci`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_flows.yaml)) so flow YAML and resource changes can ship in the same repository but redeploy independently — a resource-only change does not restart any flow whose YAML is unchanged.
+- [`examples/git/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_workspace.yaml) — pulls from any HTTPS Git host.
+- [`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml) — pulls from any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).
 
 ## Inline vs resource trade-offs
 

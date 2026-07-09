@@ -106,14 +106,67 @@ This means both push paths work:
 - `oras push {{env.OCI_FLOWS_ARTIFACT}} flow.yaml:application/yaml` — one raw layer per file, path from the `:mediaType` annotation.
 - `docker push {{env.OCI_FLOWS_ARTIFACT}}` (from a Dockerfile that `COPY`s YAML files across multiple stages) — layers are merged into a single overlay-fs snapshot; the final state emits one event per surviving file.
 
-## Bootstrap flows
+## Packaging with Docker
 
-Two end-to-end bootstrap flows reconcile an OCI artifact into the system cache. They tick on an interval, list existing cache entries, and emit one put per layer and one delete per orphaned key:
+When `oras` is not available in your build environment, `docker build` + `docker push` is the supported alternative. Because every file in the image's final rootfs is emitted as a downstream event, the final stage of the Dockerfile must be `FROM scratch` — any base image (e.g. `busybox`, `alpine`) drops its own `/bin`, `/lib`, `/etc` binaries into the layer, which then arrive at your bootstrap pipeline as `EventData::Bytes` and break tasks like `buffer` that expect JSON.
 
-- [`examples/oci/system_sync_flows.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_flows.yaml) — keys each entry by `flow.name` parsed from the layer body so the filename is incidental. The reconciler reads from `flowgen.flows.*` and starts, stops, and hot-reloads flows accordingly.
-- [`examples/oci/system_sync_resources.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_resources.yaml) — keys each entry by the layer's relative path under `flowgen.resources.*`. The runtime `ResourceLoader` reads from the same keys when tasks reference `resource: <path>`. See [Resources](/docs/flowgen/concepts/resources).
+The recommended layout ships flows and resources together in one artifact, called a **workspace**. Both top-level directories live side by side in the image, and the bootstrap flow routes each layer by its prefix:
 
-Both skip the rest of their pipeline when the artifact digest has not moved, so the only cost on a no-change tick is a manifest HEAD plus a `list_keys` round-trip.
+```
+flowgen-workspace image
+├── flows/
+│   └── ...*.yaml
+└── resources/
+    └── ...
+```
+
+### Dockerfile
+
+```dockerfile
+FROM scratch
+LABEL org.opencontainers.image.title="flowgen-workspace"
+COPY flows/     /flows/
+COPY resources/ /resources/
+```
+
+### Build and push
+
+```sh
+docker build -t registry.example.com/org/flowgen-workspace:prod .
+docker push registry.example.com/org/flowgen-workspace:prod
+```
+
+If your CI mandates a base image for provenance scanning, use a multi-stage build and keep the final stage `FROM scratch`:
+
+```dockerfile
+FROM your-registry/base:latest AS source
+COPY flows/     /source/flows/
+COPY resources/ /source/resources/
+
+FROM scratch
+LABEL org.opencontainers.image.title="flowgen-workspace"
+COPY --from=source /source/ /
+```
+
+Only the final stage ends up in the pushed image, so the layer stays clean.
+
+### Verifying the layer
+
+Before pushing, confirm the image's layer contains only your YAML and resource files — nothing from a base image:
+
+```sh
+docker save registry.example.com/org/flowgen-workspace:prod -o flowgen-workspace.tar
+mkdir -p /tmp/flowgen-workspace && tar -xf flowgen-workspace.tar -C /tmp/flowgen-workspace
+tar -tzf /tmp/flowgen-workspace/blobs/sha256/*   # or /tmp/flowgen-workspace/*/layer.tar on older Docker
+```
+
+Every listed entry should live under `flows/` or `resources/`. Any `bin/`, `lib/`, `etc/`, `usr/` entries mean the final stage picked up a base image rootfs — fix the Dockerfile to end in `FROM scratch` before pushing.
+
+## Bootstrap flow
+
+[`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml) reconciles an OCI artifact into the system cache end-to-end. One artifact carries both `flows/` and `resources/`; the bootstrap routes each layer by its top-level directory — `flows/*` are keyed by `flow.name` parsed from the layer body, `resources/*` are keyed by the path with the `resources/` prefix stripped, and any layer outside those two prefixes (e.g. a `README.md`) is dropped. It ticks on an interval, lists existing cache entries under both prefixes, and emits one put per layer and one delete per orphaned key.
+
+The flow skips the rest of its pipeline when the artifact digest has not moved, so the only cost on a no-change tick is a manifest HEAD plus a `list_keys` round-trip. See [Resources](/docs/flowgen/concepts/resources) for how the runtime `ResourceLoader` reads back from `flowgen.resources.*`.
 
 ## Change detection
 

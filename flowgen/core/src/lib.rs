@@ -44,6 +44,14 @@ pub mod serde;
 pub mod service;
 /// OpenTelemetry integration for metrics and distributed tracing.
 pub mod telemetry;
+/// Flow-scoped runtime bookkeeping: activity metrics fed by a custom
+/// tracing layer, plus the SSE broadcast channel the admin UI reads.
+pub mod flow {
+    /// Atomic counters + broadcast channel used by the admin API.
+    pub mod activity;
+    /// Tracing layer that populates activity from runtime log events.
+    pub mod activity_layer;
+}
 /// Validation helpers for config-supplied identifiers and paths.
 pub mod validate;
 /// Task execution framework with runner trait, context, and manager.

@@ -73,7 +73,7 @@ async fn run_watch_loop(
     shutdown: &CancellationToken,
 ) -> Result<(), Error> {
     let mut stream = cache
-        .watch(prefix)
+        .watch(prefix, false)
         .await
         .map_err(|source| Error::WatchSubscribe {
             prefix: prefix.to_string(),
