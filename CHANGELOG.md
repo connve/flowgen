@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.0
+
+### Helm chart
+
+- **`flowgen.podTemplate.merge` and `flowgen.podTemplate.patch` hooks** let
+  operators inject arbitrary pod spec fields without expanding the chart
+  surface. `merge` overrides top-level fields such as `hostNetwork` and
+  `dnsPolicy`; `patch` applies RFC 6902 JSON Patch operations to the
+  rendered pod spec. The `jsonpatch` helper is included in the chart and
+  follows the same convention used by the NATS Helm chart.
+
+- **Rendered-manifest tests for the chart.** New `flowgen-chart-tests`
+  workspace crate shells out to `helm template` and asserts on the
+  resulting Kubernetes manifests. Covers the `podTemplate.merge` and
+  `podTemplate.patch` hooks so regressions in the pod-spec injection
+  surface are caught in CI. Runs in a dedicated `test-helm-chart` job
+  that installs Helm alongside Rust; the crate is excluded from the
+  workspace `default-members` so `cargo test` at the root does not
+  require `helm` on `PATH`.
+
 ## 0.123.0
 
 ### Features

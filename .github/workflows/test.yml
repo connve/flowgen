@@ -88,3 +88,24 @@ jobs:
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
     - name: Run oci_sync integration tests
       run: cargo test -p flowgen_oci --test sync_integration -- --ignored --nocapture
+
+  # Renders the flowgen Helm chart with `helm template` and asserts on
+  # the resulting manifests. Split out because the crate shells out to
+  # the `helm` binary, which is not needed by the rest of the workspace.
+  test-helm-chart:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Install system dependencies
+      run: |
+        sudo apt update -qq
+        sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.14.0
+    - name: Run helm chart tests
+      run: cargo test -p flowgen-chart-tests
