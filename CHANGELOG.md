@@ -53,6 +53,26 @@
   were rejected with a 422. `Message::content` now accepts either
   shape and flattens the array back to a single string internally.
 
+### Helm chart (0.18.0)
+
+- **Opt-in `Service` blocks for `ai_gateway` and `web`.** Mirrors the
+  existing `mcp_server` pattern — commented out by default so no
+  extra Service is rendered unless the operator opts in. Both default
+  to `ClusterIP` when enabled.
+
+### Security
+
+- **Admin UI is unauthenticated.** The embedded `web` UI does not yet
+  ship with a login flow. Do not expose the admin port publicly.
+  Recommended access patterns:
+  - `kubectl port-forward svc/<release>-web 8080:8080` for one-off use.
+  - An authenticated reverse proxy (OAuth2-proxy, Cloudflare Access,
+    tailnet, etc.) in front of a `ClusterIP` Service for shared team
+    access.
+  The backend `/api/*` handlers are read-only; even so, they expose
+  loaded flow configs and resource contents which may include
+  templated secrets or query text.
+
 ## 0.17.0
 
 ### Helm chart

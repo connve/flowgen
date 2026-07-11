@@ -41,7 +41,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::{error, warn, Instrument};
 
 /// Default port for the AI gateway server.
 pub const DEFAULT_AI_GATEWAY_PORT: u16 = 3002;
@@ -432,10 +432,23 @@ async fn dispatch<A: ProtocolAdapter>(
         gateway_ctx: &gateway_ctx,
     };
 
+    let run_span = tracing::info_span!(
+        "task.run",
+        flow = %ctx.registration.flow_name,
+        task = %ctx.registration.config.name,
+        task_id = ctx.registration.task_id,
+        task_type = %ctx.registration.task_type,
+    );
+    let handle_span = tracing::info_span!(parent: &run_span, "task.handle");
+
     let result = if is_stream {
-        dispatch_streaming::<A>(&ctx.registration, request).await
+        dispatch_streaming::<A>(&ctx.registration, request)
+            .instrument(handle_span)
+            .await
     } else {
-        dispatch_blocking::<A>(&ctx.registration, request).await
+        dispatch_blocking::<A>(&ctx.registration, request)
+            .instrument(handle_span)
+            .await
     };
 
     match result {

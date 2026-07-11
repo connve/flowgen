@@ -12,9 +12,9 @@ cache:
   url: "url_of_cache"
   db_name: "cache_db_name"
   type: nats
-  # Optional: number of historical entries retained per key (defaults to 10).
+  # Optional: number of historical entries retained per key (defaults to 1000).
   # Only applies when the KV bucket is first created.
-  # history: 10
+  # history: 1000
   # Optional: TTL for KV delete/purge tombstone markers (defaults to 1h).
   # Must be set for per-key TTLs on cache entries to work at all.
   # Only applies when the KV bucket is first created.

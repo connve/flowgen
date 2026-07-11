@@ -132,7 +132,7 @@ impl EventHandler {
     }
 
     /// Generates events at scheduled intervals.
-    async fn handle(&self) -> Result<(), Error> {
+    async fn run_loop(&self) -> Result<(), Error> {
         // Note: This generator creates events from scratch (no incoming events),
         // so we don't use with_event_context() here. EventBuilder::new() will create fresh events.
         // create events with meta: None, which is correct for a pipeline starter.
@@ -235,18 +235,7 @@ impl EventHandler {
             let (completion_state, completion_rx) =
                 new_completion_channel(self.task_context.leaf_count);
 
-            // Build and send event with completion channel.
-            let e = EventBuilder::new()
-                .data(EventData::Json(data))
-                .subject(self.config.name.to_owned())
-                .task_id(self.task_id)
-                .task_type(self.task_type)
-                .completion_tx(completion_state)
-                .build()
-                .map_err(|source| Error::EventBuilder { source })?;
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|source| Error::SendMessage { source })?;
+            self.handle(data, completion_state).await?;
 
             // Wait for flow completion before updating cache.
             let success = match self.config.ack_timeout {
@@ -286,6 +275,25 @@ impl EventHandler {
                 Some(_) | None => {}
             }
         }
+    }
+
+    #[tracing::instrument(skip(self, data, completion_state), name = "task.handle")]
+    async fn handle(
+        &self,
+        data: serde_json::Value,
+        completion_state: crate::event::SharedCompletionTx,
+    ) -> Result<(), Error> {
+        let e = EventBuilder::new()
+            .data(EventData::Json(data))
+            .subject(self.config.name.to_owned())
+            .task_id(self.task_id)
+            .task_type(self.task_type)
+            .completion_tx(completion_state)
+            .build()
+            .map_err(|source| Error::EventBuilder { source })?;
+        e.send_with_logging(self.tx.as_ref())
+            .await
+            .map_err(|source| Error::SendMessage { source })
     }
 }
 
@@ -353,11 +361,11 @@ impl crate::task::runner::Runner for Subscriber {
         };
 
         // Drive the cron loop. Cancellation also short-circuits the long
-        // inter-tick sleeps inside `handle()` via the same token.
+        // inter-tick sleeps inside `run_loop()` via the same token.
         let retry_strategy = retry_config.strategy();
         let handle_future = tokio_retry::Retry::spawn(retry_strategy, || async {
             event_handler
-                .handle()
+                .run_loop()
                 .await
                 .map_err(tokio_retry::RetryError::transient)
         });

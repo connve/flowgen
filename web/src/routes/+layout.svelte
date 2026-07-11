@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
+	import { env } from '$env/dynamic/public';
 	import { apiUrl } from '$lib/api';
 	import Badge from '$lib/Badge.svelte';
 	import Icon from '@iconify/svelte';
@@ -12,6 +13,9 @@
 	let dark = $state(false);
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
+
+	// Hides outer chrome when embedded (e.g. console.connve.dev); nav stays.
+	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
 
 	onMount(async () => {
 		const stored = localStorage.getItem('flowgen-theme');
@@ -58,53 +62,54 @@
 	<div class="flex min-h-screen">
 		<aside
 			class="flex flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {collapsed
-				? 'w-16'
+				? 'w-14'
 				: 'w-56'}"
 		>
-			<div class="flex h-16 items-center border-b border-base-200 p-2">
-				<a
-					href="{base}/"
-					class="flex items-center gap-3 rounded-md px-3 py-2"
-					aria-label="CONNVE home"
+			{#if !chromeless}
+				<div
+					class="flex h-16 shrink-0 items-center border-b border-base-200 {collapsed
+						? 'justify-center'
+						: 'px-3'}"
 				>
-					<img src="{base}/favicon.png" alt="CONNVE" class="h-6 w-6 shrink-0" />
-				</a>
-			</div>
+					<a
+						href="{base}/"
+						class="flex h-10 w-10 items-center justify-center"
+						aria-label="CONNVE home"
+					>
+						<img src="{base}/favicon.png" alt="CONNVE" class="h-7 w-7 shrink-0" />
+					</a>
+				</div>
+			{/if}
 
-			<nav class="flex-1 space-y-1 p-2">
-				<a
-					href="{base}/"
-					class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-base-200 {currentPath ===
-						base + '/' || currentPath === base
-						? 'bg-base-200 text-primary'
-						: 'text-base-content'}"
-					title="Flows"
-				>
-					<Icon icon="tabler:sitemap" class="h-6 w-6 shrink-0" />
-					{#if !collapsed}
-						<span>Flows</span>
-					{/if}
-				</a>
-				<a
-					href="{base}/resources"
-					class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium hover:bg-base-200 {currentPath.startsWith(
-						base + '/resources'
-					)
-						? 'bg-base-200 text-primary'
-						: 'text-base-content'}"
-					title="Resources"
-				>
-					<Icon icon="tabler:file-code" class="h-6 w-6 shrink-0" />
-					{#if !collapsed}
-						<span>Resources</span>
-					{/if}
-				</a>
+			<nav
+				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
+			>
+				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }] as item (item.href)}
+					{@const active = item.match(currentPath)}
+					<a
+						href="{base}{item.href}"
+						class="relative flex h-10 items-center rounded-md text-sm font-medium transition-colors hover:bg-base-200 {active
+							? 'bg-base-200 text-primary'
+							: 'text-base-content'} {collapsed ? 'w-10 justify-center' : 'gap-3 px-3'}"
+						title={item.label}
+						aria-label={item.label}
+						aria-current={active ? 'page' : undefined}
+					>
+						{#if active && !collapsed}
+							<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+						{/if}
+						<Icon icon={item.icon} class="h-5 w-5 shrink-0" />
+						{#if !collapsed}
+							<span>{item.label}</span>
+						{/if}
+					</a>
+				{/each}
 			</nav>
 
 			<div
-				class="flex items-center border-t border-base-200 px-3 py-2 {collapsed
+				class="flex h-12 shrink-0 items-center border-t border-base-200 {collapsed
 					? 'justify-center'
-					: 'justify-between'}"
+					: 'justify-between px-3'}"
 			>
 				{#if !collapsed && version}
 					<Badge>{version}</Badge>
@@ -112,41 +117,42 @@
 				<button
 					type="button"
 					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-					class="btn btn-ghost btn-xs btn-circle"
+					class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
 					onclick={() => (collapsed = !collapsed)}
 				>
-					{#if collapsed}
-						<Icon icon="tabler:chevron-right" class="h-6 w-6" />
-					{:else}
-						<Icon icon="tabler:chevron-left" class="h-6 w-6" />
-					{/if}
+					<Icon
+						icon={collapsed ? 'tabler:chevron-right' : 'tabler:chevron-left'}
+						class="h-5 w-5"
+					/>
 				</button>
 			</div>
 		</aside>
 
 		<div class="flex flex-1 flex-col bg-base-100">
-			<header class="flex h-16 items-center justify-end gap-3 border-b border-base-200 px-6">
-				<button
-					type="button"
-					class="btn btn-ghost btn-sm btn-circle"
-					aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-					onclick={toggleTheme}
-				>
-					{#if dark}
-						<Icon icon="tabler:sun" class="h-6 w-6" />
-					{:else}
-						<Icon icon="tabler:moon" class="h-6 w-6" />
-					{/if}
-				</button>
+			{#if !chromeless}
+				<header class="flex h-16 items-center justify-end gap-3 border-b border-base-200 px-6">
+					<button
+						type="button"
+						class="btn btn-ghost btn-sm btn-circle"
+						aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+						onclick={toggleTheme}
+					>
+						{#if dark}
+							<Icon icon="tabler:sun" class="h-6 w-6" />
+						{:else}
+							<Icon icon="tabler:moon" class="h-6 w-6" />
+						{/if}
+					</button>
 
-				<div
-					class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-					title="Signed in"
-					aria-label="User"
-				>
-					<Icon icon="tabler:user" class="h-6 w-6" />
-				</div>
-			</header>
+					<div
+						class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
+						title="Signed in"
+						aria-label="User"
+					>
+						<Icon icon="tabler:user" class="h-6 w-6" />
+					</div>
+				</header>
+			{/if}
 
 			<main class="flex-1 bg-base-100">
 				{@render children()}

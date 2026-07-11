@@ -968,6 +968,7 @@ async fn handle_resources_read(
                 );
             }
         };
+        record_resource_read_activity(&reg.flow_name, &reg.name, &params.uri);
         return resource_read_response(request.id, &reg.uri, &reg.mime_type, text);
     }
 
@@ -1010,7 +1011,23 @@ async fn handle_resources_read(
         }
     };
 
+    record_resource_read_activity(&reg.flow_name, &reg.name, &params.uri);
     resource_read_response(request.id, &params.uri, &reg.mime_type, text)
+}
+
+/// Emits the info!() that lets the activity layer flash the source task
+/// on the DAG. Same pattern as `handle_tools_call` / `handle_prompts_get`.
+fn record_resource_read_activity(flow_name: &str, task_name: &str, uri: &str) {
+    let run_span = tracing::info_span!(
+        "task.run",
+        flow = %flow_name,
+        task = %task_name,
+        task_id = 0,
+        task_type = "mcp_resource",
+    );
+    tracing::info_span!(parent: &run_span, "task.handle").in_scope(|| {
+        info!(resource = %uri, event.subject = %uri, "MCP resource read");
+    });
 }
 
 fn resource_read_response(
@@ -1153,6 +1170,23 @@ async fn handle_prompts_get(
             content: PromptTextContent::text(rendered),
         });
     }
+
+    // task.run > task.handle so the activity layer attributes this
+    // render back to the source task (see execute_tool_call for context).
+    let run_span = tracing::info_span!(
+        "task.run",
+        flow = %reg.flow_name,
+        task = %params.name,
+        task_id = 0,
+        task_type = "mcp_prompt",
+    );
+    tracing::info_span!(parent: &run_span, "task.handle").in_scope(|| {
+        info!(
+            prompt = %params.name,
+            event.subject = %params.name,
+            "MCP prompt rendered"
+        );
+    });
 
     json_rpc_response(
         request.id,
@@ -1327,7 +1361,7 @@ async fn execute_tool_call(
 
     validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
-    let (tool_tx, ack_timeout, auth_required, leaf_count) = state
+    let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = state
         .table
         .get(&params.name)
         .map(|entry| {
@@ -1336,6 +1370,7 @@ async fn execute_tool_call(
                 entry.ack_timeout,
                 entry.auth_required,
                 entry.leaf_count,
+                entry.flow_name.clone(),
             )
         })
         .ok_or_else(|| Error::UnknownTool {
@@ -1394,11 +1429,24 @@ async fn execute_tool_call(
         .await
         .map_err(|e| Error::PipelineSend(e.to_string()))?;
 
-    info!(
-        tool = %params.name,
-        correlation_id = %correlation_id,
-        "MCP tool invoked"
+    // task.run > task.handle so the activity layer attributes this info
+    // to the source task; MCP handlers run in axum's span scope which
+    // carries no flow context on its own.
+    let run_span = tracing::info_span!(
+        "task.run",
+        flow = %flow_name,
+        task = %params.name,
+        task_id = 0,
+        task_type = "mcp_tool",
     );
+    tracing::info_span!(parent: &run_span, "task.handle").in_scope(|| {
+        info!(
+            tool = %params.name,
+            event.subject = %params.name,
+            correlation_id = %correlation_id,
+            "MCP tool invoked"
+        );
+    });
 
     let response_registry = Arc::clone(&state.extras.response_registry);
     let cid_for_cleanup = correlation_id.clone();

@@ -14,6 +14,7 @@
 //! attaching it is safe on the hot path.
 
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
@@ -52,15 +53,20 @@ where
         // carry them so events later can find them via extensions. The
         // built-in registry stores string fields only if we ask for it.
         let name = attrs.metadata().name();
-        if !matches!(name, FLOW_RUN_SPAN | TASK_RUN_SPAN) {
+        if !matches!(name, FLOW_RUN_SPAN | TASK_RUN_SPAN | TASK_HANDLE_SPAN) {
             return;
         }
         let Some(span) = ctx.span(id) else {
             return;
         };
+        let mut ext = span.extensions_mut();
+        if name == TASK_HANDLE_SPAN {
+            // Stash start time so on_event can compute per-handle duration.
+            ext.insert(SpanStart(Instant::now()));
+            return;
+        }
         let mut visitor = FieldCapture::default();
         attrs.record(&mut visitor);
-        let mut ext = span.extensions_mut();
         if name == FLOW_RUN_SPAN {
             if let Some(flow) = visitor.flow {
                 ext.insert(SpanFlow(flow));
@@ -71,6 +77,13 @@ where
             }
             if let Some(task_type) = visitor.task_type {
                 ext.insert(SpanTaskType(task_type));
+            }
+            // Source-task processors (llm_proxy, mcp_*, http_endpoint) attach
+            // their own task.run span from an HTTP handler that has no
+            // flow.run in scope. Accept `flow` here so those spans still
+            // resolve a flow name for the activity layer.
+            if let Some(flow) = visitor.flow {
+                ext.insert(SpanFlow(flow));
             }
         }
     }
@@ -90,13 +103,17 @@ where
         let mut flow: Option<String> = None;
         let mut task: Option<String> = None;
         let mut task_type: Option<String> = None;
+        let mut duration_ms: Option<u64> = None;
 
         for span in scope.from_root() {
             let name = span.name();
+            let ext = span.extensions();
             if name == TASK_HANDLE_SPAN {
                 in_task_handle = true;
+                if let Some(SpanStart(start)) = ext.get::<SpanStart>() {
+                    duration_ms = Some(start.elapsed().as_millis() as u64);
+                }
             }
-            let ext = span.extensions();
             if let Some(SpanFlow(f)) = ext.get::<SpanFlow>() {
                 flow = Some(f.clone());
             }
@@ -123,13 +140,18 @@ where
         if matches!(level, ActivityLevel::Info) && !in_task_handle && !msg.has_event_subject {
             return;
         }
+        let event_id = msg.event_id.clone();
         self.registry.record(
             &flow,
-            task.as_deref(),
-            task_type.as_deref(),
-            level,
-            now_ms(),
-            msg.into_message(),
+            crate::flow::activity::RecordedEvent {
+                task,
+                task_type,
+                level,
+                ts_ms: now_ms(),
+                message: msg.into_message(),
+                duration_ms,
+                event_id,
+            },
         );
     }
 }
@@ -146,6 +168,7 @@ struct MessageCapture {
     /// `error=...` cause alongside the human message.
     fields: Vec<(String, String)>,
     has_event_subject: bool,
+    event_id: Option<String>,
 }
 
 impl MessageCapture {
@@ -168,10 +191,11 @@ impl MessageCapture {
             "event.subject" => {
                 self.has_event_subject = true;
             }
+            "event.id" => self.event_id = Some(value),
             // Span-carried context fields duplicated onto events —
             // already tracked separately, skip them so the message
             // doesn't repeat them.
-            "flow" | "task" | "task_id" | "task_type" | "event.id" => {}
+            "flow" | "task" | "task_id" | "task_type" => {}
             _ => self.fields.push((name.to_string(), value)),
         }
     }
@@ -222,6 +246,11 @@ struct SpanTask(String);
 /// which processor emitted the event without cross-referencing the YAML.
 #[derive(Debug, Clone)]
 struct SpanTaskType(String);
+
+/// Wall-clock start of a `task.handle` span, used to compute per-handle
+/// duration when the terminal event fires.
+#[derive(Debug, Clone)]
+struct SpanStart(Instant);
 
 #[derive(Default)]
 struct FieldCapture {

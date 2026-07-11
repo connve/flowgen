@@ -5,6 +5,7 @@
 	import Icon from '@iconify/svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import { apiUrl } from '$lib/api';
+	import { activitiesFor } from '$lib/activityStore.svelte';
 
 	interface FlowDetail {
 		name: string;
@@ -12,21 +13,12 @@
 		yaml: string;
 	}
 
-	interface FlowActivity {
-		flow: string;
-		task: string | null;
-		task_type: string | null;
-		level: 'info' | 'warning' | 'error';
-		ts_ms: number;
-		message: string;
-	}
-
 	let detail = $state<FlowDetail | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let activities = $state<FlowActivity[]>([]);
 
 	let flowName = $derived(page.params.name ?? '');
+	let activities = $derived(activitiesFor(flowName));
 
 	onMount(() => {
 		fetch(apiUrl(`api/flows/${encodeURIComponent(flowName)}`))
@@ -43,20 +35,6 @@
 			.finally(() => {
 				loading = false;
 			});
-
-		const targetFlow = flowName;
-		const sse = new EventSource(apiUrl('api/flows/stream'));
-		sse.addEventListener('activity', (e) => {
-			let activity: FlowActivity;
-			try {
-				activity = JSON.parse(e.data) as FlowActivity;
-			} catch {
-				return;
-			}
-			if (activity.flow === targetFlow) activities = [...activities, activity];
-		});
-
-		return () => sse.close();
 	});
 </script>
 

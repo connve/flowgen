@@ -193,9 +193,32 @@ pub struct FlowActivity {
     /// Human-readable event message (tracing event body / target). Empty
     /// when the event carried no formatted message.
     pub message: String,
+    /// Wall-clock duration of the `task.handle` span this event fired in,
+    /// in milliseconds. `None` outside a `task.handle` scope (source-task
+    /// pings, ambient warnings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Correlation id of the event this activity was emitted for. Grep target
+    /// for cross-referencing with structured logs / OTel traces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
     /// Post-snapshot metrics for the flow — lets SSE consumers update
     /// counters/status without needing a follow-up REST call.
     pub metrics: FlowMetricsSnapshot,
+}
+
+/// One event recorded by the tracing layer, before it's stamped with
+/// flow metrics and published. Grouped into a struct so `record` stays
+/// under clippy's arg-count limit as fields are added.
+#[derive(Debug)]
+pub struct RecordedEvent {
+    pub task: Option<String>,
+    pub task_type: Option<String>,
+    pub level: ActivityLevel,
+    pub ts_ms: u64,
+    pub message: String,
+    pub duration_ms: Option<u64>,
+    pub event_id: Option<String>,
 }
 
 /// Shared handle carried around by app and telemetry: aggregates
@@ -260,27 +283,21 @@ impl FlowRegistry {
     /// local counters synchronously and fires an async publish onto the
     /// cache — errors are swallowed because activity is best-effort UI
     /// signal, not a correctness-critical write.
-    pub fn record(
-        &self,
-        flow: &str,
-        task: Option<&str>,
-        task_type: Option<&str>,
-        level: ActivityLevel,
-        ts_ms: u64,
-        message: String,
-    ) {
+    pub fn record(&self, flow: &str, event: RecordedEvent) {
         let metrics = self.slot(flow);
-        metrics.record(level, ts_ms);
-        self.emit_otel(flow, task, level);
+        metrics.record(event.level, event.ts_ms);
+        self.emit_otel(flow, event.task.as_deref(), event.level);
 
         let snapshot = metrics.snapshot(flow.to_string());
         let activity = FlowActivity {
             flow: flow.to_string(),
-            task: task.map(str::to_string),
-            task_type: task_type.map(str::to_string),
-            level,
-            ts_ms,
-            message,
+            task: event.task,
+            task_type: event.task_type,
+            level: event.level,
+            ts_ms: event.ts_ms,
+            message: event.message,
+            duration_ms: event.duration_ms,
+            event_id: event.event_id,
             metrics: snapshot,
         };
         self.publish(activity);
@@ -422,19 +439,27 @@ mod tests {
         let mut stream = cache.watch(ACTIVITY_PREFIX, false).await.unwrap();
         reg.record(
             "f",
-            Some("t"),
-            Some("script"),
-            ActivityLevel::Info,
-            100,
-            "handled".into(),
+            RecordedEvent {
+                task: Some("t".into()),
+                task_type: Some("script".into()),
+                level: ActivityLevel::Info,
+                ts_ms: 100,
+                message: "handled".into(),
+                duration_ms: None,
+                event_id: None,
+            },
         );
         reg.record(
             "f",
-            Some("t"),
-            Some("script"),
-            ActivityLevel::Error,
-            200,
-            "boom".into(),
+            RecordedEvent {
+                task: Some("t".into()),
+                task_type: Some("script".into()),
+                level: ActivityLevel::Error,
+                ts_ms: 200,
+                message: "boom".into(),
+                duration_ms: None,
+                event_id: None,
+            },
         );
 
         let snapshot = reg.snapshot("f").unwrap();

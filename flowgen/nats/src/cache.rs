@@ -5,13 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Number of historical entries retained per key in the KV bucket.
-///
-/// Sized to double as a short-term audit log for flow activity: at ~10k
-/// per-key revisions, a flow triggering every 5 seconds retains roughly
-/// 15 hours of history — enough for a customer to open the UI the next
-/// morning and see what went wrong last night without falling back to
-/// external observability (Grafana, Loki).
-const DEFAULT_HISTORY: i64 = 10_000;
+const DEFAULT_HISTORY: i64 = 1_000;
 
 /// Default TTL for KV delete and purge tombstone markers.
 ///

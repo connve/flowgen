@@ -6,6 +6,7 @@
 	import Badge from '$lib/Badge.svelte';
 	import { apiUrl } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
+	import { activitiesFor, allMetrics } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 
 	type FlowStatus = 'idle' | 'running' | 'warning' | 'error';
@@ -63,38 +64,75 @@
 	let nowTick = $state(Date.now());
 
 	let search = $state('');
+	let selectedTags = $state<Set<string>>(new Set());
+	let statusFilter = $state<Record<FlowStatus, boolean>>({
+		idle: true,
+		running: true,
+		warning: true,
+		error: true,
+	});
+
+	let statusCounts = $derived.by(() => {
+		const c: Record<FlowStatus, number> = { idle: 0, running: 0, warning: 0, error: 0 };
+		for (const f of flowsView) c[f.status] += 1;
+		return c;
+	});
+
+	function toggleStatus(s: FlowStatus) {
+		statusFilter = { ...statusFilter, [s]: !statusFilter[s] };
+	}
+
+	// Unique tag list from the currently-loaded flows. Sorted alphabetically
+	// so the chip row is stable across refreshes.
+	let allTags = $derived.by(() => {
+		const s = new Set<string>();
+		for (const f of flows) for (const t of f.tags) s.add(t);
+		return [...s].sort((a, b) => a.localeCompare(b));
+	});
+
+	function toggleTag(tag: string) {
+		const next = new Set(selectedTags);
+		if (next.has(tag)) next.delete(tag);
+		else next.add(tag);
+		selectedTags = next;
+	}
 
 	let selected = $state<string | null>(null);
 	let selectedDetail = $state<FlowDetail | null>(null);
 	let selectedLoading = $state(false);
 	let selectedError = $state<string | null>(null);
-	let modalActivities = $state<FlowActivity[]>([]);
-	const activityHistory = new Map<string, FlowActivity[]>();
+	// Modal activities come straight from the shared store so opening the
+	// modal after the detail page has already primed the buffer doesn't
+	// re-fetch history (which the old per-page EventSource used to do).
+	let modalActivities = $derived(selected ? activitiesFor(selected) : []);
 
-	let sse: EventSource | null = null;
 	let tickerId: ReturnType<typeof setInterval> | null = null;
 
-	function applyActivity(a: FlowActivity) {
-		const idx = flows.findIndex((f) => f.name === a.flow);
-		if (idx === -1) return;
-		const current = flows[idx];
-		flows[idx] = {
-			...current,
-			events_total: a.metrics.events_total,
-			warnings_total: a.metrics.warnings_total,
-			errors_total: a.metrics.errors_total,
-			last_event_at: a.metrics.last_event_at_ms
-				? new Date(a.metrics.last_event_at_ms).toISOString()
-				: current.last_event_at,
-			last_warning_at: a.metrics.last_warning_at_ms
-				? new Date(a.metrics.last_warning_at_ms).toISOString()
-				: current.last_warning_at,
-			last_error_at: a.metrics.last_error_at_ms
-				? new Date(a.metrics.last_error_at_ms).toISOString()
-				: current.last_error_at,
-			status: a.metrics.status
-		};
-	}
+	// Merge live metrics from the shared store onto the initial /api/flows
+	// snapshot so the table stays live without each row wiring its own SSE.
+	let liveMetrics = $derived(allMetrics());
+	let flowsView = $derived(
+		flows.map((f) => {
+			const m = liveMetrics[f.name];
+			if (!m) return f;
+			return {
+				...f,
+				events_total: m.events_total,
+				warnings_total: m.warnings_total,
+				errors_total: m.errors_total,
+				last_event_at: m.last_event_at_ms
+					? new Date(m.last_event_at_ms).toISOString()
+					: f.last_event_at,
+				last_warning_at: m.last_warning_at_ms
+					? new Date(m.last_warning_at_ms).toISOString()
+					: f.last_warning_at,
+				last_error_at: m.last_error_at_ms
+					? new Date(m.last_error_at_ms).toISOString()
+					: f.last_error_at,
+				status: m.status
+			};
+		}),
+	);
 
 	onMount(() => {
 		const url = apiUrl('api/flows');
@@ -117,27 +155,9 @@
 				loading = false;
 			});
 
-		sse = new EventSource(apiUrl('api/flows/stream'));
-		sse.addEventListener('activity', (e) => {
-			let activity: FlowActivity;
-			try {
-				activity = JSON.parse(e.data) as FlowActivity;
-			} catch {
-				return;
-			}
-			applyActivity(activity);
-			const bucket = activityHistory.get(activity.flow) ?? [];
-			bucket.push(activity);
-			activityHistory.set(activity.flow, bucket);
-			if (selected === activity.flow) {
-				modalActivities = [...modalActivities, activity];
-			}
-		});
-
 		tickerId = setInterval(() => (nowTick = Date.now()), 1000);
 
 		return () => {
-			sse?.close();
 			if (tickerId !== null) clearInterval(tickerId);
 		};
 	});
@@ -152,7 +172,6 @@
 
 	async function openFlow(name: string) {
 		pendingFlow = name;
-		modalActivities = [...(activityHistory.get(name) ?? [])];
 		const cached = flowCache.get(name);
 		if (cached) {
 			selected = name;
@@ -221,13 +240,18 @@
 
 	let filtered = $derived.by(() => {
 		const term = search.toLowerCase();
-		const matched = flows.filter(
-			(flow) =>
+		const requiredTags = selectedTags;
+		const matched = flowsView.filter((flow) => {
+			if (!statusFilter[flow.status]) return false;
+			for (const t of requiredTags) if (!flow.tags.includes(t)) return false;
+			if (term.length === 0) return true;
+			return (
 				flow.name.toLowerCase().includes(term) ||
 				(flow.display_name?.toLowerCase().includes(term) ?? false) ||
 				(flow.description?.toLowerCase().includes(term) ?? false) ||
 				flow.tags.some((tag) => tag.toLowerCase().includes(term))
-		);
+			);
+		});
 		const sign = sortDir === 'asc' ? 1 : -1;
 		return matched.slice().sort((a, b) => sign * compareFlows(a, b, sortKey));
 	});
@@ -247,7 +271,117 @@
 <svelte:window on:keydown={onKeydown} />
 
 <section class="p-6">
-	<div class="mb-4 flex items-center justify-end">
+	<div class="mb-4 flex flex-wrap items-center gap-2">
+		<div class="flex items-center gap-1">
+			<button
+				type="button"
+				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.idle
+					? 'border-base-300 bg-base-200/50'
+					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				aria-pressed={statusFilter.idle}
+				onclick={() => toggleStatus('idle')}
+			>
+				<span>Idle</span>
+				<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
+			</button>
+			<button
+				type="button"
+				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.running
+					? 'border-primary/50 bg-primary/10'
+					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				aria-pressed={statusFilter.running}
+				onclick={() => toggleStatus('running')}
+			>
+				<span>Running</span>
+				<span class="tabular-nums opacity-60">{statusCounts.running}</span>
+			</button>
+			<button
+				type="button"
+				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.warning
+					? 'border-warning/50 bg-warning/10'
+					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				aria-pressed={statusFilter.warning}
+				onclick={() => toggleStatus('warning')}
+			>
+				<span>Warning</span>
+				<span class="tabular-nums opacity-60">{statusCounts.warning}</span>
+			</button>
+			<button
+				type="button"
+				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.error
+					? 'border-error/50 bg-error/10'
+					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				aria-pressed={statusFilter.error}
+				onclick={() => toggleStatus('error')}
+			>
+				<span>Error</span>
+				<span class="tabular-nums opacity-60">{statusCounts.error}</span>
+			</button>
+		</div>
+		{#if allTags.length > 0}
+			<div class="dropdown">
+				<button
+					type="button"
+					tabindex="0"
+					class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200"
+				>
+					<Icon icon="tabler:tag" class="h-4 w-4 opacity-70" />
+					<span>Filter by tag</span>
+					{#if selectedTags.size > 0}
+						<span class="badge badge-sm bg-primary/20 text-primary">{selectedTags.size}</span>
+					{/if}
+					<Icon icon="tabler:chevron-down" class="h-3.5 w-3.5 opacity-60" />
+				</button>
+				<div
+					tabindex="-1"
+					class="dropdown-content z-10 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-base-200 bg-base-100 p-1 shadow-lg"
+				>
+					{#each allTags as tag}
+						<button
+							type="button"
+							class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-base-200"
+							onclick={() => toggleTag(tag)}
+						>
+							<span
+								class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border {selectedTags.has(
+									tag,
+								)
+									? 'border-primary bg-primary text-primary-content'
+									: 'border-base-300'}"
+							>
+								{#if selectedTags.has(tag)}
+									<Icon icon="tabler:check" class="h-2.5 w-2.5" />
+								{/if}
+							</span>
+							<span class="truncate">{tag}</span>
+						</button>
+					{/each}
+				</div>
+			</div>
+			{#if selectedTags.size > 0}
+				<div class="flex flex-wrap items-center gap-1">
+					{#each [...selectedTags] as tag}
+						<button
+							type="button"
+							class="flex items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5 text-xs"
+							onclick={() => toggleTag(tag)}
+							aria-label={`Remove ${tag} filter`}
+						>
+							<span>{tag}</span>
+							<Icon icon="tabler:x" class="h-3 w-3 opacity-60" />
+						</button>
+					{/each}
+					<button
+						type="button"
+						class="ml-1 text-xs opacity-60 hover:opacity-100"
+						onclick={() => (selectedTags = new Set())}
+					>
+						Clear
+					</button>
+				</div>
+			{/if}
+		{/if}
+		<div class="flex-1"></div>
 		<label
 			class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 		>
@@ -377,7 +511,19 @@
 								{:else}
 									<div class="flex flex-wrap gap-1">
 										{#each flow.tags as tag}
-											<Badge>{tag}</Badge>
+											<button
+												type="button"
+												class="rounded-full border px-2 py-0.5 text-xs transition-colors {selectedTags.has(tag)
+													? 'border-primary/50 bg-primary/10'
+													: 'border-base-300 opacity-70 hover:opacity-100'}"
+												aria-pressed={selectedTags.has(tag)}
+												onclick={(e) => {
+													e.stopPropagation();
+													toggleTag(tag);
+												}}
+											>
+												{tag}
+											</button>
 										{/each}
 									</div>
 								{/if}

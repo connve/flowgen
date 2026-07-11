@@ -15,6 +15,7 @@
 		level: 'info' | 'warning' | 'error';
 		ts_ms: number;
 		message: string;
+		duration_ms?: number;
 	}
 
 	interface Props {
@@ -46,21 +47,33 @@
 	let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
 	let flashedEl: HTMLElement | null = null;
 
-	// Persistent per-task state: the level of the most recent activity for
-	// each task. Rendered as a colored dot on each DAG node so the user
-	// can glance at the graph and see which tasks are healthy/degraded/broken.
+	// Latest-per-task snapshot: level for the status pill, duration for the
+	// inline badge. Both feed the DAG so the user sees "just processed, took Xms".
+	interface NodeState {
+		level: 'info' | 'warning' | 'error';
+		ts_ms: number;
+		duration_ms?: number;
+	}
 	let nodeStates = $derived.by(() => {
-		const map = new Map<string, { level: 'info' | 'warning' | 'error'; ts_ms: number }>();
+		const map = new Map<string, NodeState>();
 		for (const a of activities) {
 			if (!a.task) continue;
 			const prev = map.get(a.task);
-			if (!prev || a.ts_ms >= prev.ts_ms) map.set(a.task, { level: a.level, ts_ms: a.ts_ms });
+			if (!prev || a.ts_ms >= prev.ts_ms) {
+				map.set(a.task, { level: a.level, ts_ms: a.ts_ms, duration_ms: a.duration_ms });
+			}
 		}
 		return map;
 	});
 
-	// Push node states into the DAG DOM as data attributes. TaskNode.svelte
-	// reads them via CSS to render the persistent ring color.
+	function formatDuration(ms: number): string {
+		if (ms < 1000) return `${ms}ms`;
+		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+		return `${Math.floor(ms / 60_000)}m`;
+	}
+
+	// Push node states into the DAG DOM as data attributes / text. TaskNode
+	// renders the persistent status pill + duration badge from these.
 	$effect(() => {
 		if (!dagPane) return;
 		const nodes = dagPane.querySelectorAll<HTMLElement>('[data-task]');
@@ -68,10 +81,20 @@
 			const name = el.dataset.task;
 			if (!name) continue;
 			const st = nodeStates.get(name);
+			const badge = el.querySelector<HTMLElement>('.duration-badge');
 			if (st) {
 				el.dataset.level = st.level;
+				if (st.duration_ms !== undefined) {
+					el.dataset.duration = String(st.duration_ms);
+					if (badge) badge.textContent = formatDuration(st.duration_ms);
+				} else {
+					delete el.dataset.duration;
+					if (badge) badge.textContent = '—';
+				}
 			} else {
 				delete el.dataset.level;
+				delete el.dataset.duration;
+				if (badge) badge.textContent = '—';
 			}
 		}
 	});
