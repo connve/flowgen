@@ -413,18 +413,16 @@
 			<dd class="font-mono">{formatAbsolute(selected.ts_ms)}</dd>
 			<dt class="opacity-50">When</dt>
 			<dd>{formatRelative(selected.ts_ms)}</dd>
-			{#if selected.duration_ms !== undefined}
-				<dt class="opacity-50">Duration</dt>
-				<dd class="font-mono tabular-nums">{formatDuration(selected.duration_ms)}</dd>
-			{/if}
-			{#if selected.event_id}
-				<dt class="opacity-50">Event</dt>
-				<dd class="font-mono">{selected.event_id}</dd>
-			{/if}
+			<dt class="opacity-50">Duration</dt>
+			<dd class="font-mono tabular-nums">{formatDuration(selected.duration_ms)}</dd>
+			<dt class="opacity-50">Event</dt>
+			<dd class="font-mono">{selected.event_id ?? '—'}</dd>
 		</dl>
 		<div class="flex min-h-0 flex-1 flex-col border-t border-base-200 px-4 py-2">
 			<div class="pb-1 text-xs opacity-50">Message</div>
-			<pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-xs opacity-80">{selected.message}</pre>
+			<pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.message
+					? 'opacity-80'
+					: 'opacity-40'}">{selected.message || '—'}</pre>
 		</div>
 	</div>
 {/if}
