@@ -9,6 +9,8 @@ docker
 /vendor
 /local
 /docs
+!/docs/static/icons
+!/docs/static/icons/**
 **/*.md
 
 # web (SvelteKit) — build outputs & deps, keep sources for embed
