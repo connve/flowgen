@@ -1304,10 +1304,8 @@ fn match_uri_template(
                     None => (u.len(), u.len()),
                     Some(next_open) => {
                         let next_literal = &t[..next_open];
-                        match u[..].find(next_literal) {
-                            Some(idx) => (idx, idx + next_literal.len()),
-                            None => return None,
-                        }
+                        let idx = u[..].find(next_literal)?;
+                        (idx, idx + next_literal.len())
                     }
                 };
                 let value = &u[..value_end];
