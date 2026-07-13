@@ -165,7 +165,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!("{}{}", &store.prefix, key);
+        let subject = format!("{}{}", store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
@@ -230,7 +230,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!("{}{}", &store.prefix, key);
+        let subject = format!("{}{}", store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
@@ -282,7 +282,7 @@ impl flowgen_core::cache::Cache for Cache {
             .as_ref()
             .ok_or_else(|| flowgen_core::cache::CacheError::StoreNotInitialized)?;
 
-        let subject = format!("{}{}", &store.prefix, key);
+        let subject = format!("{}{}", store.prefix, key);
 
         let mut headers = async_nats::HeaderMap::new();
         if let Some(ttl) = ttl_secs {
