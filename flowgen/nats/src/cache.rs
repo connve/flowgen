@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Number of historical entries retained per key in the KV bucket.
-const DEFAULT_HISTORY: i64 = 1_000;
+/// NATS server caps this at 64 for KV buckets.
+const DEFAULT_HISTORY: i64 = 64;
 
 /// Default TTL for KV delete and purge tombstone markers.
 ///

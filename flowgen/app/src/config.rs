@@ -595,14 +595,19 @@ pub struct HttpServerOptions {
     pub auth: Option<flowgen_core::auth::AuthConfig>,
 }
 
-/// OpenTelemetry configuration options for metrics and distributed tracing.
+/// OpenTelemetry configuration for metrics, tracing, and log export.
+///
+/// When `enabled` is false the runtime skips telemetry entirely. When
+/// enabled without a `backend` block the runtime falls back to the
+/// in-memory backend, so `enabled: true` with no other fields is a
+/// valid standalone configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct TelemetryOptions {
     /// Whether OpenTelemetry is enabled.
     pub enabled: bool,
-    /// OTLP endpoint for exporting metrics and traces (defaults to "http://localhost:4317").
-    #[serde(default = "default_otlp_endpoint")]
-    pub otlp_endpoint: String,
+    /// Backend selection. Omitted means in-memory.
+    #[serde(default)]
+    pub backend: Option<TelemetryBackendOptions>,
     /// Service name for resource identification (defaults to "flowgen").
     #[serde(default = "default_service_name")]
     pub service_name: String,
@@ -612,8 +617,20 @@ pub struct TelemetryOptions {
     pub metrics_export_interval: Duration,
 }
 
-fn default_otlp_endpoint() -> String {
-    "http://localhost:4317".to_string()
+/// User-facing backend selection.
+///
+/// Serialized as a tagged enum: either `{ type: memory }` or
+/// `{ type: otlp, endpoint: "http://..." }`.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TelemetryBackendOptions {
+    /// Keep all signals in-process.
+    Memory,
+    /// Push all signals to an OTLP-compatible collector.
+    Otlp {
+        /// gRPC endpoint of the collector (e.g. "http://otel-collector:4317").
+        endpoint: String,
+    },
 }
 
 fn default_service_name() -> String {
@@ -1055,19 +1072,21 @@ mod tests {
     }
 
     #[test]
-    fn test_telemetry_options_creation() {
+    fn test_telemetry_options_otlp_backend() {
         let telemetry_options = TelemetryOptions {
             enabled: true,
-            otlp_endpoint: "http://otel-collector:4317".to_string(),
+            backend: Some(TelemetryBackendOptions::Otlp {
+                endpoint: "http://otel-collector:4317".to_string(),
+            }),
             service_name: "flowgen".to_string(),
             metrics_export_interval: Duration::from_secs(30),
         };
 
         assert!(telemetry_options.enabled);
-        assert_eq!(
-            telemetry_options.otlp_endpoint,
-            "http://otel-collector:4317"
-        );
+        assert!(matches!(
+            &telemetry_options.backend,
+            Some(TelemetryBackendOptions::Otlp { endpoint }) if endpoint == "http://otel-collector:4317"
+        ));
         assert_eq!(telemetry_options.service_name, "flowgen");
         assert_eq!(
             telemetry_options.metrics_export_interval,
@@ -1076,15 +1095,16 @@ mod tests {
     }
 
     #[test]
-    fn test_telemetry_options_default_values() {
+    fn test_telemetry_options_defaults_to_no_backend() {
         let telemetry_options = TelemetryOptions {
-            enabled: false,
-            otlp_endpoint: "http://localhost:4317".to_string(),
+            enabled: true,
+            backend: None,
             service_name: default_service_name(),
             metrics_export_interval: default_metrics_interval(),
         };
 
-        assert!(!telemetry_options.enabled);
+        assert!(telemetry_options.enabled);
+        assert!(telemetry_options.backend.is_none());
         assert_eq!(telemetry_options.service_name, "flowgen");
         assert_eq!(
             telemetry_options.metrics_export_interval,
@@ -1093,10 +1113,12 @@ mod tests {
     }
 
     #[test]
-    fn test_telemetry_options_serialization() {
+    fn test_telemetry_options_serialization_roundtrip() {
         let telemetry_options = TelemetryOptions {
             enabled: true,
-            otlp_endpoint: "http://grafana:4317".to_string(),
+            backend: Some(TelemetryBackendOptions::Otlp {
+                endpoint: "http://grafana:4317".to_string(),
+            }),
             service_name: "flowgen-prod".to_string(),
             metrics_export_interval: Duration::from_secs(120),
         };
@@ -1104,6 +1126,20 @@ mod tests {
         let serialized = serde_json::to_string(&telemetry_options).unwrap();
         let deserialized: TelemetryOptions = serde_json::from_str(&serialized).unwrap();
         assert_eq!(telemetry_options, deserialized);
+    }
+
+    #[test]
+    fn test_telemetry_backend_tagged_enum_yaml() {
+        let yaml_otlp = "type: otlp\nendpoint: http://otel:4317\n";
+        let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_otlp).unwrap();
+        assert!(matches!(
+            &parsed,
+            TelemetryBackendOptions::Otlp { endpoint } if endpoint == "http://otel:4317"
+        ));
+
+        let yaml_memory = "type: memory\n";
+        let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_memory).unwrap();
+        assert!(matches!(parsed, TelemetryBackendOptions::Memory));
     }
 
     #[test]
@@ -1123,7 +1159,9 @@ mod tests {
             event_buffer_size: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
-                otlp_endpoint: "http://otel-collector:4317".to_string(),
+                backend: Some(TelemetryBackendOptions::Otlp {
+                    endpoint: "http://otel-collector:4317".to_string(),
+                }),
                 service_name: "flowgen".to_string(),
                 metrics_export_interval: Duration::from_secs(60),
             }),
@@ -1132,7 +1170,10 @@ mod tests {
         assert!(app_config.telemetry.is_some());
         let telemetry = app_config.telemetry.as_ref().unwrap();
         assert!(telemetry.enabled);
-        assert_eq!(telemetry.otlp_endpoint, "http://otel-collector:4317");
+        assert!(matches!(
+            &telemetry.backend,
+            Some(TelemetryBackendOptions::Otlp { endpoint }) if endpoint == "http://otel-collector:4317"
+        ));
         assert_eq!(telemetry.service_name, "flowgen");
         assert_eq!(telemetry.metrics_export_interval, Duration::from_secs(60));
     }

@@ -39,12 +39,16 @@ flows:
 resources:
   path: "path_to_resources_folder"
 
-# OpenTelemetry configuration for metrics and distributed tracing (optional).
-# Exports metrics and traces to an OTLP endpoint (e.g., OpenTelemetry Collector, Grafana Cloud, Honeycomb).
+# OpenTelemetry configuration for metrics, traces, and logs (optional).
+# When enabled without a backend, signals stay in-process (memory backend).
+# When configured with the otlp backend, signals ship to any OTLP-compatible
+# collector (OpenTelemetry Collector, Grafana Cloud, Honeycomb, Datadog, etc.).
 telemetry:
   enabled: false
-  # Optional: OTLP endpoint (defaults to "http://localhost:4317").
-  # otlp_endpoint: "http://localhost:4317"
+  # Optional: backend selection.
+  # backend:
+  #   type: otlp
+  #   endpoint: "http://otel-collector:4317"
   # Optional: service name (defaults to "flowgen").
   # service_name: "flowgen"
   # Optional: metrics export interval using human-readable format (defaults to "60s").

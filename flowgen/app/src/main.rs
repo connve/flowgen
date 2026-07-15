@@ -4,6 +4,8 @@ use flowgen::app::App;
 use flowgen::config::AppConfig;
 use flowgen_core::flow::activity::FlowRegistry;
 use flowgen_core::flow::activity_layer::FlowActivityLayer;
+use opentelemetry_appender_tracing::layer as otel_appender;
+use opentelemetry_sdk::logs::LoggerProvider;
 use std::env;
 use std::process;
 use std::sync::Arc;
@@ -40,7 +42,7 @@ fn determine_log_format() -> LogFormat {
     }
 }
 
-fn init_tracing(flow_registry: Arc<FlowRegistry>) {
+fn init_tracing(flow_registry: Arc<FlowRegistry>, logger_provider: &LoggerProvider) {
     let format = determine_log_format();
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -50,10 +52,8 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>) {
         }
     };
 
-    // We compose Registry + EnvFilter + FlowActivityLayer + fmt layer
-    // instead of the `tracing_subscriber::fmt()` shortcut so the
-    // activity layer sees the same events as stdout.
     let activity_layer = FlowActivityLayer::new(flow_registry);
+    let otlp_layer = otel_appender::OpenTelemetryTracingBridge::new(logger_provider);
 
     match format {
         LogFormat::Compact => {
@@ -61,6 +61,7 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>) {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(activity_layer)
+                .with(otlp_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -69,6 +70,7 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>) {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(activity_layer)
+                .with(otlp_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -113,7 +115,7 @@ async fn main() {
         }
     };
 
-    let cache = match App::build_cache(&app_config).await {
+    let cache = match App::init_cache(&app_config, None).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to build cache: {}", e);
@@ -123,7 +125,37 @@ async fn main() {
 
     let flow_registry = FlowRegistry::builder().cache(Arc::clone(&cache)).build();
 
-    init_tracing(Arc::clone(&flow_registry));
+    let telemetry_config = match &app_config.telemetry {
+        Some(t) if t.enabled => {
+            let backend = match &t.backend {
+                Some(flowgen::config::TelemetryBackendOptions::Otlp { endpoint }) => {
+                    flowgen_core::telemetry::Backend::Otlp {
+                        endpoint: endpoint.clone(),
+                    }
+                }
+                _ => flowgen_core::telemetry::Backend::Memory,
+            };
+            flowgen_core::telemetry::TelemetryConfig {
+                backend,
+                service_name: t.service_name.clone(),
+                service_version: env!("CARGO_PKG_VERSION").to_string(),
+                metrics_export_interval_secs: t.metrics_export_interval.as_secs(),
+            }
+        }
+        _ => flowgen_core::telemetry::TelemetryConfig::default(),
+    };
+    let telemetry_guard = match flowgen_core::telemetry::init_telemetry(telemetry_config) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Failed to initialize OpenTelemetry: {e}");
+            process::exit(1);
+        }
+    };
+
+    init_tracing(
+        Arc::clone(&flow_registry),
+        telemetry_guard.logger_provider(),
+    );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
