@@ -15,6 +15,29 @@ export interface NavSection {
 	subsections?: NavSubsection[];
 }
 
+export function flattenNav(sections: NavSection[]): NavItem[] {
+	const flat: NavItem[] = [];
+	for (const section of sections) {
+		for (const item of section.items) flat.push(item);
+		if (section.subsections) {
+			for (const sub of section.subsections) {
+				for (const item of sub.items) flat.push(item);
+			}
+		}
+	}
+	return flat;
+}
+
+export function prevNext(sections: NavSection[], relativePath: string): { prev?: NavItem; next?: NavItem } {
+	const flat = flattenNav(sections);
+	const idx = flat.findIndex((item) => item.href === relativePath);
+	if (idx === -1) return {};
+	return {
+		prev: idx > 0 ? flat[idx - 1] : undefined,
+		next: idx < flat.length - 1 ? flat[idx + 1] : undefined
+	};
+}
+
 export const navigation: NavSection[] = [
 	{
 		title: 'Getting Started',

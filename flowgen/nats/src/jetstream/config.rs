@@ -55,8 +55,11 @@ fn default_nats_url() -> String {
 pub struct Config {
     /// The unique name / identifier of the task.
     pub name: String,
-    /// Path to credentials file containing NATS authentication details.
-    pub credentials_path: PathBuf,
+    /// Path to credentials file containing NATS authentication
+    /// details. `None` connects anonymously — matches the NATS
+    /// server default when no `authorization` block is configured.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
     #[serde(default = "default_nats_url")]
     pub url: String,
@@ -211,7 +214,7 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.name, String::new());
-        assert_eq!(config.credentials_path, PathBuf::new());
+        assert_eq!(config.credentials_path, None);
         assert_eq!(config.subject, String::new());
         assert_eq!(config.stream, None);
         assert_eq!(config.durable_name, None);
@@ -223,7 +226,7 @@ mod tests {
     fn test_subscriber_creation() {
         let subscriber = Subscriber {
             name: "test_subscriber".to_string(),
-            credentials_path: PathBuf::from("/path/to/nats.creds"),
+            credentials_path: Some(PathBuf::from("/path/to/nats.creds")),
             subject: "test.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "test_stream".to_string(),
@@ -242,7 +245,7 @@ mod tests {
         assert_eq!(subscriber.name, "test_subscriber");
         assert_eq!(
             subscriber.credentials_path,
-            PathBuf::from("/path/to/nats.creds")
+            Some(PathBuf::from("/path/to/nats.creds"))
         );
         assert_eq!(subscriber.subject, "test.subject");
         assert!(subscriber.stream.is_some());
@@ -255,7 +258,7 @@ mod tests {
     fn test_subscriber_serialization() {
         let subscriber = Subscriber {
             name: "serial_sub".to_string(),
-            credentials_path: PathBuf::from("/credentials/nats.jwt"),
+            credentials_path: Some(PathBuf::from("/credentials/nats.jwt")),
             subject: "my.subject.*".to_string(),
             stream: Some(StreamOptions {
                 name: "my_stream".to_string(),
@@ -280,7 +283,7 @@ mod tests {
     fn test_subscriber_clone() {
         let subscriber = Subscriber {
             name: "clone_sub".to_string(),
-            credentials_path: PathBuf::from("/test/creds.jwt"),
+            credentials_path: Some(PathBuf::from("/test/creds.jwt")),
             subject: "clone.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "clone_stream".to_string(),
@@ -304,7 +307,7 @@ mod tests {
     fn test_publisher_default() {
         let publisher = Publisher::default();
         assert_eq!(publisher.name, String::new());
-        assert_eq!(publisher.credentials_path, PathBuf::new());
+        assert_eq!(publisher.credentials_path, None);
         assert_eq!(publisher.subject, String::new());
         assert_eq!(publisher.stream, None);
         assert_eq!(publisher.durable_name, None);
@@ -328,7 +331,7 @@ mod tests {
 
         let publisher = Publisher {
             name: "test_publisher".to_string(),
-            credentials_path: PathBuf::from("/path/to/pub.creds"),
+            credentials_path: Some(PathBuf::from("/path/to/pub.creds")),
             subject: "pub.subject.1".to_string(),
             stream: Some(stream_opts.clone()),
             durable_name: None,
@@ -340,7 +343,7 @@ mod tests {
         assert_eq!(publisher.name, "test_publisher");
         assert_eq!(
             publisher.credentials_path,
-            PathBuf::from("/path/to/pub.creds")
+            Some(PathBuf::from("/path/to/pub.creds"))
         );
         assert_eq!(publisher.subject, "pub.subject.1");
         assert!(publisher.stream.is_some());
@@ -356,7 +359,7 @@ mod tests {
     fn test_publisher_serialization() {
         let publisher = Publisher {
             name: "serial_pub".to_string(),
-            credentials_path: PathBuf::from("/creds/publisher.jwt"),
+            credentials_path: Some(PathBuf::from("/creds/publisher.jwt")),
             subject: "test.serialize".to_string(),
             stream: Some(StreamOptions {
                 name: "serialization_stream".to_string(),
@@ -383,7 +386,7 @@ mod tests {
     fn test_publisher_clone() {
         let publisher = Publisher {
             name: "clone_pub".to_string(),
-            credentials_path: PathBuf::from("/test/pub.creds"),
+            credentials_path: Some(PathBuf::from("/test/pub.creds")),
             subject: "clone.subject".to_string(),
             stream: Some(StreamOptions {
                 name: "clone_stream".to_string(),
@@ -409,7 +412,7 @@ mod tests {
     fn test_publisher_without_stream() {
         let publisher = Publisher {
             name: "no_stream_pub".to_string(),
-            credentials_path: PathBuf::from("/no/stream.creds"),
+            credentials_path: Some(PathBuf::from("/no/stream.creds")),
             subject: "simple.subject".to_string(),
             stream: None,
             durable_name: None,
@@ -440,7 +443,7 @@ mod tests {
 
         let publisher = Publisher {
             name: "multi_pub".to_string(),
-            credentials_path: PathBuf::from("/multi/subjects.creds"),
+            credentials_path: Some(PathBuf::from("/multi/subjects.creds")),
             subject: "subject.1".to_string(),
             stream: Some(stream_opts),
             durable_name: None,
@@ -460,7 +463,7 @@ mod tests {
     fn test_config_equality() {
         let sub1 = Subscriber {
             name: "eq_sub".to_string(),
-            credentials_path: PathBuf::from("/path/creds.jwt"),
+            credentials_path: Some(PathBuf::from("/path/creds.jwt")),
             subject: "subject1".to_string(),
             stream: Some(StreamOptions {
                 name: "stream1".to_string(),
@@ -478,7 +481,7 @@ mod tests {
 
         let sub2 = Subscriber {
             name: "eq_sub".to_string(),
-            credentials_path: PathBuf::from("/path/creds.jwt"),
+            credentials_path: Some(PathBuf::from("/path/creds.jwt")),
             subject: "subject1".to_string(),
             stream: Some(StreamOptions {
                 name: "stream1".to_string(),
@@ -550,7 +553,7 @@ mod tests {
     fn test_backoff_skipped_in_serialization_when_empty() {
         let config = Config {
             name: "test".to_string(),
-            credentials_path: PathBuf::from("/path/to/creds.jwt"),
+            credentials_path: Some(PathBuf::from("/path/to/creds.jwt")),
             subject: "test.subject".to_string(),
             ..Default::default()
         };

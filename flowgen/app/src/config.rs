@@ -338,8 +338,9 @@ pub struct CacheOptions {
     /// Cache backend type.
     #[serde(rename = "type")]
     pub cache_type: CacheType,
-    /// Path to cache credentials file.
-    pub credentials_path: PathBuf,
+    /// Path to cache credentials file. Omit to connect anonymously.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".
     #[serde(default = "default_nats_url")]
     pub url: String,
@@ -795,7 +796,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: true,
                 cache_type: CacheType::Nats,
-                credentials_path: PathBuf::from("/test/cache"),
+                credentials_path: Some(PathBuf::from("/test/cache")),
                 url: "localhost:4222".to_string(),
                 db_name: None,
                 history: None,
@@ -853,7 +854,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: false,
                 cache_type: CacheType::Nats,
-                credentials_path: PathBuf::from("/serialize/cache"),
+                credentials_path: Some(PathBuf::from("/serialize/cache")),
                 url: "localhost:4222".to_string(),
                 db_name: Some("test_db".to_string()),
                 history: None,
@@ -884,7 +885,7 @@ mod tests {
             cache: Some(CacheOptions {
                 enabled: true,
                 cache_type: CacheType::Nats,
-                credentials_path: PathBuf::from("/clone/cache"),
+                credentials_path: Some(PathBuf::from("/clone/cache")),
                 url: "localhost:4222".to_string(),
                 db_name: None,
                 history: None,
@@ -913,7 +914,7 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: true,
             cache_type: CacheType::Nats,
-            credentials_path: PathBuf::from("/test/credentials_path"),
+            credentials_path: Some(PathBuf::from("/test/credentials_path")),
             url: "localhost:4222".to_string(),
             db_name: None,
             history: None,
@@ -923,7 +924,7 @@ mod tests {
         assert!(cache_options.enabled);
         assert_eq!(
             cache_options.credentials_path,
-            PathBuf::from("/test/credentials_path")
+            Some(PathBuf::from("/test/credentials_path"))
         );
     }
 
@@ -932,7 +933,7 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: false,
             cache_type: CacheType::Nats,
-            credentials_path: PathBuf::from("/disabled/cache"),
+            credentials_path: Some(PathBuf::from("/disabled/cache")),
             url: "localhost:4222".to_string(),
             db_name: Some("custom_db".to_string()),
             history: None,
@@ -942,7 +943,7 @@ mod tests {
         assert!(!cache_options.enabled);
         assert_eq!(
             cache_options.credentials_path,
-            PathBuf::from("/disabled/cache")
+            Some(PathBuf::from("/disabled/cache"))
         );
     }
 
@@ -951,7 +952,7 @@ mod tests {
         let cache_options = CacheOptions {
             enabled: true,
             cache_type: CacheType::Nats,
-            credentials_path: PathBuf::from("/serialize/credentials_path"),
+            credentials_path: Some(PathBuf::from("/serialize/credentials_path")),
             url: "localhost:4222".to_string(),
             db_name: None,
             history: None,

@@ -34,7 +34,7 @@
 </script>
 
 <svelte:head>
-	<title>Flowgen | {resourceKey}</title>
+	<title>{resourceKey} | Flowgen</title>
 </svelte:head>
 
 <section class="p-6">

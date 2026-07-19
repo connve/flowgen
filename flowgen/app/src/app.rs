@@ -302,9 +302,11 @@ impl App {
                 .as_deref()
                 .unwrap_or(crate::config::DEFAULT_CACHE_DB_NAME)
         });
-        let mut cache_builder = flowgen_nats::cache::CacheBuilder::new()
-            .credentials_path(cache_config.credentials_path.clone())
-            .url(cache_config.url.clone());
+        let mut cache_builder =
+            flowgen_nats::cache::CacheBuilder::new().url(cache_config.url.clone());
+        if let Some(path) = cache_config.credentials_path.clone() {
+            cache_builder = cache_builder.credentials_path(path);
+        }
         if let Some(history) = cache_config.history {
             cache_builder = cache_builder.history(history);
         }

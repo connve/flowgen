@@ -113,10 +113,10 @@ Distributed cache backend. When omitted, flowgen uses an in-memory cache (single
 |---|---|---|---|
 | `enabled` | bool | required | Set `false` to fall back to in-memory cache. |
 | `type` | string | required | Backend type. Currently `nats`. |
-| `credentials_path` | string | required | Path to NATS credentials file. |
+| `credentials_path` | string | optional | Path to NATS credentials file. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `db_name` | string | `flowgen_cache` | KV bucket name. |
-| `history` | int | `10` | Historical entries retained per key. Only applies when the bucket is created. |
+| `history` | int | `64` | Historical entries retained per key. Only applies when the bucket is created. Server caps at 64. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete/purge tombstones. Required for per-key TTLs on cache entries to work. |
 
 If NATS is configured but unreachable, flowgen falls back to in-memory automatically and logs a warning. See [Caching](/docs/flowgen/concepts/caching).

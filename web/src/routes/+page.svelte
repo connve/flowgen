@@ -265,7 +265,7 @@
 </script>
 
 <svelte:head>
-	<title>Flowgen | Flows Overview</title>
+	<title>Flows Overview | Flowgen</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />

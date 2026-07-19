@@ -179,7 +179,7 @@
 </script>
 
 <svelte:head>
-	<title>Flowgen | Resources Overview</title>
+	<title>Resources Overview | Flowgen</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />

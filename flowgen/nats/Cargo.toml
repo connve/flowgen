@@ -33,5 +33,9 @@ tokio-retry = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 
+[dev-dependencies]
+testcontainers = { workspace = true }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

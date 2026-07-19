@@ -52,6 +52,8 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+testcontainers = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true

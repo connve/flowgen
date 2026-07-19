@@ -23,7 +23,7 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `credentials_path` | string | required | Path to NATS credentials file. |
+| `credentials_path` | string | optional | Path to NATS credentials file. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `subject` | string | required | Subject to subscribe to (supports wildcards). |
 | `durable_name` | string | | Durable consumer name for persistent subscriptions. |

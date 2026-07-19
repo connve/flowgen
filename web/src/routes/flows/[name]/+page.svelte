@@ -39,7 +39,7 @@
 </script>
 
 <svelte:head>
-	<title>Flowgen | {detail?.display_name ?? flowName}</title>
+	<title>{detail?.display_name ?? flowName} | Flowgen</title>
 </svelte:head>
 
 <section class="p-6">

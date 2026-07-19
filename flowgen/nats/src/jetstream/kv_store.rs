@@ -37,8 +37,10 @@ fn default_nats_url() -> String {
 pub struct Config {
     /// Task name.
     pub name: String,
-    /// Path to credentials file containing NATS authentication details.
-    pub credentials_path: PathBuf,
+    /// Path to credentials file containing NATS authentication
+    /// details. `None` connects anonymously.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
     /// NATS server URL. Defaults to "localhost:4222".
     #[serde(default = "default_nats_url")]
     pub url: String,
@@ -426,9 +428,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                 let credentials_path = config.credentials_path.clone();
                 let url = config.url.clone();
                 async move {
-                    let client = crate::client::ClientBuilder::new()
-                        .credentials_path(credentials_path)
-                        .url(url)
+                    let mut builder = crate::client::ClientBuilder::new();
+                    builder.url(url);
+                    if let Some(path) = credentials_path {
+                        builder.credentials_path(path);
+                    }
+                    let client = builder
                         .build()
                         .map_err(|source| Error::Client { source })?
                         .connect()
@@ -611,7 +616,7 @@ mod tests {
         assert_eq!(cfg.name, "kv_task");
         assert_eq!(
             cfg.credentials_path,
-            std::path::PathBuf::from("/etc/nats/creds.json")
+            Some(std::path::PathBuf::from("/etc/nats/creds.json"))
         );
         assert_eq!(cfg.bucket, "my_bucket");
         assert_eq!(cfg.operation, Operation::Get);
@@ -698,7 +703,7 @@ mod tests {
     fn config_roundtrip() {
         let cfg = Config {
             name: "rt".to_string(),
-            credentials_path: std::path::PathBuf::from("/c.json"),
+            credentials_path: Some(std::path::PathBuf::from("/c.json")),
             url: "nats://host:4222".to_string(),
             bucket: "bkt".to_string(),
             operation: Operation::Put,

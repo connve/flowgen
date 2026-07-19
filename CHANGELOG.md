@@ -85,6 +85,24 @@
   the per-event UI. Errors and warnings that arise in the same
   scope still surface — the marker only filters info-level noise.
 
+- **NATS `credentials_path` is now optional.** The `cache`,
+  `nats_kv_store`, `nats_jetstream_subscriber`, and
+  `nats_jetstream_publisher` config sections accept an omitted
+  `credentials_path`. When omitted, flowgen sends no credentials on
+  connect — the connection then succeeds only against a NATS server
+  that does not require authentication.
+
+- **Integration test coverage for NATS.** The `flowgen_nats` crate
+  gains `cache_integration`, `jetstream_integration`, and
+  `kv_store_integration` test suites that spin up a real NATS
+  JetStream server via testcontainers and exercise every method on
+  the `Cache` trait plus the publisher / subscriber / KV-store
+  processors. `flowgen` adds `init_cache_regression` covering the
+  unified `App::init_cache` code path against a real broker. All
+  integration tests are `#[ignore]`-gated and run in the
+  `test-integration` CI job with a single
+  `cargo test --workspace --tests -- --ignored` invocation.
+
 ### Fixes
 
 - **`init_cache` unified between system + user cache paths.** The two
@@ -99,6 +117,13 @@
   hard-caps per-subject history at 64; the previous default caused
   `too long history` errors on real deploys. Callers that want fewer
   retained versions can still lower the value via `cache.history`.
+
+- **`Cache::delete_with_revision` returns `RevisionMismatch` on
+  stale revisions.** The NATS backend used to fold every underlying
+  `UpdateError` into the generic `DeleteFailed` variant, so lease
+  release code that pattern-matched on `RevisionMismatch` never
+  detected loss of ownership. Mapping now mirrors what
+  `Cache::update` already did.
 
 ## 0.124.0
 

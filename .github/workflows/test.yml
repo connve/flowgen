@@ -86,10 +86,10 @@ jobs:
     - name: Compile with MSRV
       run: cargo +1.88 check --workspace --locked --verbose
 
-  # Runs `#[ignore]`-marked integration tests that spin up real
-  # containers via testcontainers (currently: `oci_sync` against
-  # `registry:2.8.3`). Separated from the main suite so a registry
-  # image pull hiccup does not fail the fast unit-test job.
+  # Runs every `#[ignore]`-marked integration test in the workspace.
+  # These spin up real containers via testcontainers (NATS JetStream,
+  # OCI registry, ...) so they are gated behind `--ignored` to keep
+  # the main unit-test job fast and image-pull-hiccup-free.
   test-integration:
     runs-on: ubuntu-latest
     steps:
@@ -102,10 +102,10 @@ jobs:
       run: |
         sudo apt update -qq
         sudo apt-get -qq install pkg-config libssl-dev protobuf-compiler git
-    - name: Run oci_sync integration tests
+    - name: Run integration tests
       env:
         FLOWGEN_SKIP_WEB_BUILD: "1"
-      run: cargo test -p flowgen_oci --test sync_integration -- --ignored --nocapture
+      run: cargo test --workspace --tests -- --ignored --nocapture
 
   # Renders the flowgen Helm chart with `helm template` and asserts on
   # the resulting manifests. Split out because the crate shells out to

@@ -10,5 +10,4 @@
 
 <svelte:head>
 	<meta http-equiv="refresh" content="0; url=/docs/flowgen/getting-started/why-flowgen" />
-	<link rel="canonical" href="/docs/flowgen/getting-started/why-flowgen" />
 </svelte:head>

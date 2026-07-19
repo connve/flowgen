@@ -20,7 +20,7 @@ cache:
   credentials_path: /etc/nats/credentials.json
   url: "{{env.NATS_URL}}"
   db_name: flowgen_cache
-  history: 10
+  history: 64
   tombstone_ttl: "1h"
 ```
 
@@ -28,10 +28,10 @@ cache:
 |---|---|---|---|
 | `enabled` | bool | required | Enable distributed cache. |
 | `type` | string | required | Cache backend: `nats`. |
-| `credentials_path` | string | required | Path to NATS credentials. |
+| `credentials_path` | string | optional | Path to NATS credentials. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `db_name` | string | `flowgen_cache` | KV bucket name. |
-| `history` | int | 10 | Historical entries retained per key. |
+| `history` | int | 64 | Historical entries retained per key. Server caps at 64. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete markers. Enables per-key TTL on entries. |
 
 ## Operations

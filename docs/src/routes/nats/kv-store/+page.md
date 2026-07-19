@@ -29,7 +29,7 @@ Read, write, list, and delete keys in a NATS JetStream Key-Value bucket.
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `operation` | string | required | One of `get`, `put`, `list`, `delete`. |
-| `credentials_path` | string | required | Path to NATS credentials file. |
+| `credentials_path` | string | optional | Path to NATS credentials file. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `bucket` | string | required | KV bucket name. |
 | `key` | string | | Key for get, put, and delete. Supports templating. |

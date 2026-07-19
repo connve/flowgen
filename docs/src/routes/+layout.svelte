@@ -3,10 +3,42 @@
 	import 'prismjs/themes/prism-tomorrow.css';
 	import { base } from '$app/paths';
 	import Sidebar from '$lib/components/Sidebar.svelte';
+	import PrevNext from '$lib/components/PrevNext.svelte';
 	import { initPosthog, identify, capture } from '$lib/posthog';
 	import { onMount } from 'svelte';
 
-	let { children } = $props();
+	let { data, children } = $props();
+
+	const jsonLd = $derived(
+		JSON.stringify({
+			'@context': 'https://schema.org',
+			'@type': 'TechArticle',
+			headline: data.seo.title,
+			description: data.seo.description,
+			url: data.seo.canonical,
+			inLanguage: 'en',
+			image: 'https://connve.com/og.png',
+			author: {
+				'@type': 'Organization',
+				name: 'CONNVE',
+				url: 'https://connve.com'
+			},
+			publisher: {
+				'@type': 'Organization',
+				name: 'CONNVE',
+				url: 'https://connve.com',
+				logo: {
+					'@type': 'ImageObject',
+					url: 'https://connve.com/favicon.png'
+				}
+			},
+			isPartOf: {
+				'@type': 'WebSite',
+				name: 'Flowgen documentation',
+				url: 'https://connve.com/docs/flowgen/'
+			}
+		})
+	);
 
 	let nlEmail = $state('');
 	let nlConsent = $state(false);
@@ -59,17 +91,22 @@
 </script>
 
 <svelte:head>
-	<title>CONNVE — Act on live signals. At radically lower cost.</title>
-	<meta name="description" content="Data Activation Platform for Sales, Customer Engagement and Operations. Powered by open-source, real-time infrastructure. Self-hosted or managed." />
-	<link rel="canonical" href="https://connve.com/docs/flowgen/" />
-	<meta property="og:type" content="website" />
-	<meta property="og:url" content="https://connve.com/docs/flowgen/" />
-	<meta property="og:title" content="CONNVE — Act on live signals. At radically lower cost." />
-	<meta property="og:description" content="Data Activation Platform for Sales, Customer Engagement and Operations. Powered by open-source, real-time infrastructure. Self-hosted or managed." />
+	<title>{data.seo.title}</title>
+	<meta name="description" content={data.seo.description} />
+	<link rel="canonical" href={data.seo.canonical} />
+	<meta property="og:type" content="article" />
+	<meta property="og:url" content={data.seo.canonical} />
+	<meta property="og:title" content={data.seo.title} />
+	<meta property="og:description" content={data.seo.description} />
 	<meta property="og:site_name" content="CONNVE" />
 	<meta property="og:image" content="https://connve.com/og.png" />
 	<meta property="og:image:width" content="1200" />
 	<meta property="og:image:height" content="630" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content={data.seo.title} />
+	<meta name="twitter:description" content={data.seo.description} />
+	<meta name="twitter:image" content="https://connve.com/og.png" />
+	{@html `<script type="application/ld+json">${jsonLd}</script>`}
 </svelte:head>
 
 <div class="drawer lg:drawer-open">
@@ -95,6 +132,7 @@
 				<article class="prose">
 					{@render children()}
 				</article>
+				<PrevNext prev={data.nav.prev} next={data.nav.next} />
 			</div>
 		</main>
 	</div>
