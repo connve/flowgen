@@ -55,9 +55,7 @@ pub enum Error {
 /// NATS client with optional JetStream context for reliable messaging.
 #[derive(Debug)]
 pub struct Client {
-    /// Optional path to the NATS credentials file. `None` connects
-    /// anonymously — matches the server default when no
-    /// `authorization` block is configured on the NATS side.
+    /// Optional path to the NATS credentials file.
     credentials_path: Option<PathBuf>,
     /// NATS server URL (e.g., "nats://localhost:4222" or "localhost:4222").
     /// If not set, defaults to "localhost:4222".
@@ -145,8 +143,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Builds a new NATS client instance. Anonymous when
-    /// `credentials_path` is not set.
+    /// Builds a new NATS client instance.
     pub fn build(&self) -> Result<Client, Error> {
         Ok(Client {
             credentials_path: self.credentials_path.clone(),

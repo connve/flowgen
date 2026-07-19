@@ -338,7 +338,7 @@ pub struct CacheOptions {
     /// Cache backend type.
     #[serde(rename = "type")]
     pub cache_type: CacheType,
-    /// Path to cache credentials file. Omit to connect anonymously.
+    /// Optional path to cache credentials file.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
     /// NATS server URL (e.g., "nats://localhost:4222"). Defaults to "localhost:4222".

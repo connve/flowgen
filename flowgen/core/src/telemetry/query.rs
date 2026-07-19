@@ -76,18 +76,22 @@ impl LogFilter {
 /// Backend-agnostic log query facade.
 #[async_trait]
 pub trait LogsQuery: Send + Sync {
+    /// Returns retained records matching `filter`, oldest first, capped
+    /// at `limit`.
     async fn query(
         &self,
         filter: LogFilter,
         limit: usize,
     ) -> Result<Vec<StoredLog>, LogsQueryError>;
 
+    /// Subscribes to records matching `filter` as they arrive.
     async fn tail(
         &self,
         filter: LogFilter,
     ) -> Result<BoxStream<'static, StoredLog>, LogsQueryError>;
 }
 
+/// Errors returned by [`LogsQuery`] implementations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum LogsQueryError {

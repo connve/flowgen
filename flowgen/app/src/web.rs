@@ -114,9 +114,7 @@ pub struct WebState {
     /// the flow list, the flow detail, and the SSE stream.
     pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
     /// Backend-agnostic log query used by the SSE stream and the
-    /// history endpoint. `None` when the configured telemetry backend
-    /// does not expose a query surface (e.g. remote OTLP without a
-    /// paired Loki/VL client wired yet).
+    /// history endpoint.
     pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
 }
 
@@ -297,12 +295,8 @@ async fn get_flow(
 
 /// Streams flow activity to the admin UI over Server-Sent Events.
 ///
-/// The initial `snapshot` frame carries the current per-flow metrics so
-/// the UI can render counters/status immediately. Follow-up `activity`
-/// frames are pulled from the configured `LogsQuery` backend: the
-/// memory backend replays its ring buffer for history and tails a
-/// broadcast channel for live events; remote backends (Loki / VL) will
-/// use their native history query and tail HTTP endpoints once wired.
+/// Emits a `snapshot` frame with per-flow metrics, then streams
+/// `activity` frames pulled from the configured `LogsQuery` backend.
 async fn stream_flows(
     State(state): State<Arc<WebState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {

@@ -37,8 +37,8 @@ fn default_nats_url() -> String {
 pub struct Config {
     /// Task name.
     pub name: String,
-    /// Path to credentials file containing NATS authentication
-    /// details. `None` connects anonymously.
+    /// Optional path to credentials file containing NATS
+    /// authentication details.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
     /// NATS server URL. Defaults to "localhost:4222".

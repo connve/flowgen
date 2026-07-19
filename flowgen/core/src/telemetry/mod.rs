@@ -99,14 +99,14 @@ impl Default for TelemetryConfig {
 pub struct Telemetry {
     /// Owns the OTel providers; drop to shut them down.
     pub guard: TelemetryGuard,
-    /// `None` for remote; a backend-specific crate builds the query
-    /// (e.g. `flowgen/loki`) once we wire it.
+    /// Backend log query handle for the admin UI.
     pub logs_query: Option<Arc<dyn query::LogsQuery>>,
-    /// Writer factory the tracing `fmt` layer uses to feed the memory
-    /// backend a copy of every JSON log line. `None` for remote.
+    /// Writer the tracing `fmt` layer feeds a copy of every JSON log line.
     pub logs_writer: Option<query::MemoryLogsWriter>,
 }
 
+/// Builds the telemetry providers for the selected backend and
+/// returns a [`Telemetry`] handle owning them.
 pub fn init_telemetry(config: TelemetryConfig) -> Result<Telemetry, Error> {
     let resource = Resource::new(vec![
         KeyValue::new("service.name", config.service_name.clone()),
@@ -180,6 +180,7 @@ fn build_memory(logs_per_flow: usize, _metrics_per_flow: usize) -> Telemetry {
     }
 }
 
+/// Owns the OTel meter and tracer providers; shuts them down on drop.
 pub struct TelemetryGuard {
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<opentelemetry_sdk::trace::TracerProvider>,

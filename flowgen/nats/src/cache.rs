@@ -528,9 +528,8 @@ impl CacheBuilder {
         self
     }
 
-    /// Builds the [`Cache`]. Anonymous when `credentials_path` is
-    /// not set. Cache is returned unconnected; call `init()` to
-    /// connect.
+    /// Builds the [`Cache`]. Cache is returned unconnected; call
+    /// `init()` to connect.
     pub fn build(self) -> Result<Cache, Error> {
         Ok(Cache {
             credentials_path: self.credentials_path,
@@ -578,7 +577,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn builder_build_without_credentials_defaults_to_anonymous() {
+    fn builder_build_without_credentials_leaves_field_none() {
         let cache = CacheBuilder::new().build().unwrap();
         assert!(cache.credentials_path.is_none());
         assert_eq!(cache.url, crate::client::DEFAULT_NATS_URL);
