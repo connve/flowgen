@@ -37,9 +37,7 @@ async fn tracing_events_flow_through_json_writer_into_query_backend() {
         .clone()
         .expect("memory backend always exposes a logs writer");
 
-    let layer = tracing_subscriber::fmt::layer()
-        .json()
-        .with_writer(writer);
+    let layer = tracing_subscriber::fmt::layer().json().with_writer(writer);
     let subscriber = Registry::default().with(layer);
 
     with_default(subscriber, || {
@@ -64,7 +62,11 @@ async fn tracing_events_flow_through_json_writer_into_query_backend() {
         .await
         .expect("query must succeed");
 
-    assert_eq!(records.len(), 2, "expected two log records, got {records:?}");
+    assert_eq!(
+        records.len(),
+        2,
+        "expected two log records, got {records:?}"
+    );
     let bodies: Vec<&str> = records.iter().map(|r| r.body.as_str()).collect();
     assert!(bodies.contains(&"task.handle completed"));
     assert!(bodies.contains(&"task.handle failed"));

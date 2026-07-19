@@ -1167,8 +1167,7 @@ mod tests {
             }
         ));
 
-        let yaml_memory_custom =
-            "type: memory\nlogs_per_flow: 250\nmetrics_per_flow: 500\n";
+        let yaml_memory_custom = "type: memory\nlogs_per_flow: 250\nmetrics_per_flow: 500\n";
         let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_memory_custom).unwrap();
         assert!(matches!(
             parsed,

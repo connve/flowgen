@@ -316,9 +316,7 @@ mod tests {
 
     #[test]
     fn captures_events_under_flow_and_task_handle_scopes() {
-        let reg = FlowRegistry::builder()
-            
-            .build();
+        let reg = FlowRegistry::builder().build();
         let _g = install(Arc::clone(&reg));
 
         // Simulate the flow.run > task.run > task.handle > event stack.
@@ -341,9 +339,7 @@ mod tests {
 
     #[test]
     fn ignores_info_outside_task_handle_scope() {
-        let reg = FlowRegistry::builder()
-            
-            .build();
+        let reg = FlowRegistry::builder().build();
         let _g = install(Arc::clone(&reg));
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
@@ -355,9 +351,7 @@ mod tests {
 
     #[test]
     fn counts_info_with_event_subject_outside_task_handle() {
-        let reg = FlowRegistry::builder()
-            
-            .build();
+        let reg = FlowRegistry::builder().build();
         let _g = install(Arc::clone(&reg));
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
@@ -372,9 +366,7 @@ mod tests {
 
     #[test]
     fn counts_init_errors_on_task_run_span() {
-        let reg = FlowRegistry::builder()
-            
-            .build();
+        let reg = FlowRegistry::builder().build();
         let _g = install(Arc::clone(&reg));
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
@@ -391,9 +383,7 @@ mod tests {
 
     #[test]
     fn ignores_events_outside_any_flow_scope() {
-        let reg = FlowRegistry::builder()
-            
-            .build();
+        let reg = FlowRegistry::builder().build();
         let _g = install(Arc::clone(&reg));
         // Ambient info!() outside flow.run should be silently dropped.
         info!("boot message");

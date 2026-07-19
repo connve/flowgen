@@ -366,7 +366,6 @@ impl FlowRegistry {
     }
 }
 
-
 /// Convenience: unix-epoch milliseconds for `SystemTime::now()`.
 pub fn now_ms() -> u64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {

@@ -226,11 +226,8 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 // consumers (admin UI, log shipper) can split them back
                 // into individual attributes instead of parsing a joined
                 // string.
-                let map: std::collections::BTreeMap<&str, &str> = self
-                    .fields
-                    .iter()
-                    .map(|(k, v)| (*k, v.as_str()))
-                    .collect();
+                let map: std::collections::BTreeMap<&str, &str> =
+                    self.fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
                 let context_json = serde_json::to_string(&map).unwrap_or_default();
 
                 info!(
