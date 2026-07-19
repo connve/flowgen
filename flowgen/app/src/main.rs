@@ -4,8 +4,7 @@ use flowgen::app::App;
 use flowgen::config::AppConfig;
 use flowgen_core::flow::activity::FlowRegistry;
 use flowgen_core::flow::activity_layer::FlowActivityLayer;
-use opentelemetry_appender_tracing::layer as otel_appender;
-use opentelemetry_sdk::logs::LoggerProvider;
+use flowgen_core::telemetry::query::MemoryLogsWriter;
 use std::env;
 use std::process;
 use std::sync::Arc;
@@ -42,7 +41,7 @@ fn determine_log_format() -> LogFormat {
     }
 }
 
-fn init_tracing(flow_registry: Arc<FlowRegistry>, logger_provider: &LoggerProvider) {
+fn init_tracing(flow_registry: Arc<FlowRegistry>, logs_writer: Option<MemoryLogsWriter>) {
     let format = determine_log_format();
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -53,7 +52,9 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>, logger_provider: &LoggerProvid
     };
 
     let activity_layer = FlowActivityLayer::new(flow_registry);
-    let otlp_layer = otel_appender::OpenTelemetryTracingBridge::new(logger_provider);
+    // Memory backend gets its own JSON fmt layer feeding the in-process
+    // ring buffer. Absent on remote backends.
+    let memory_layer = logs_writer.map(|w| tracing_subscriber::fmt::layer().json().with_writer(w));
 
     match format {
         LogFormat::Compact => {
@@ -61,7 +62,7 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>, logger_provider: &LoggerProvid
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(activity_layer)
-                .with(otlp_layer)
+                .with(memory_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -70,7 +71,7 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>, logger_provider: &LoggerProvid
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(activity_layer)
-                .with(otlp_layer)
+                .with(memory_layer)
                 .with(fmt_layer)
                 .init();
         }
@@ -123,17 +124,27 @@ async fn main() {
         }
     };
 
-    let flow_registry = FlowRegistry::builder().cache(Arc::clone(&cache)).build();
+    let flow_registry = FlowRegistry::builder().build();
 
     let telemetry_config = match &app_config.telemetry {
         Some(t) if t.enabled => {
             let backend = match &t.backend {
-                Some(flowgen::config::TelemetryBackendOptions::Otlp { endpoint }) => {
-                    flowgen_core::telemetry::Backend::Otlp {
+                Some(flowgen::config::TelemetryBackendOptions::Remote { endpoint }) => {
+                    flowgen_core::telemetry::Backend::Remote {
                         endpoint: endpoint.clone(),
                     }
                 }
-                _ => flowgen_core::telemetry::Backend::Memory,
+                Some(flowgen::config::TelemetryBackendOptions::Memory {
+                    logs_per_flow,
+                    metrics_per_flow,
+                }) => flowgen_core::telemetry::Backend::Memory {
+                    logs_per_flow: *logs_per_flow,
+                    metrics_per_flow: *metrics_per_flow,
+                },
+                None => flowgen_core::telemetry::Backend::Memory {
+                    logs_per_flow: flowgen_core::telemetry::MEMORY_LOG_CAPACITY,
+                    metrics_per_flow: flowgen_core::telemetry::MEMORY_METRIC_CAPACITY,
+                },
             };
             flowgen_core::telemetry::TelemetryConfig {
                 backend,
@@ -144,18 +155,15 @@ async fn main() {
         }
         _ => flowgen_core::telemetry::TelemetryConfig::default(),
     };
-    let telemetry_guard = match flowgen_core::telemetry::init_telemetry(telemetry_config) {
-        Ok(g) => g,
+    let telemetry = match flowgen_core::telemetry::init_telemetry(telemetry_config) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("Failed to initialize OpenTelemetry: {e}");
             process::exit(1);
         }
     };
 
-    init_tracing(
-        Arc::clone(&flow_registry),
-        telemetry_guard.logger_provider(),
-    );
+    init_tracing(Arc::clone(&flow_registry), telemetry.logs_writer.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -224,6 +232,7 @@ async fn main() {
         config: app_config,
         flow_activity: Arc::clone(&flow_registry),
         cache: Arc::clone(&cache),
+        logs_query: telemetry.logs_query.clone(),
     };
     if let Err(e) = app.start(shutdown_rx).await {
         error!("Application failed to run: {}", e);

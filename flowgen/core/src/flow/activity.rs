@@ -6,26 +6,23 @@
 //!
 //! 1. Bumps atomic counters + last-seen timestamps on a [`FlowRegistry`]
 //!    shared with the admin API.
-//! 2. Fans the same event out onto a broadcast channel that feeds the SSE
-//!    endpoint the UI subscribes to.
-//! 3. Records the same signal into OpenTelemetry counters so downstream
+//! 2. Records the same signal into OpenTelemetry counters so downstream
 //!    dashboards see identical numbers.
 //!
-//! The layer lives in `telemetry.rs`; this module owns the plain-data
+//! Log body + attributes for the admin UI come from the native
+//! `tracing_subscriber::fmt::json()` writer through
+//! `flowgen_core::telemetry::query::MemoryLogsWriter` — no re-emit here.
+//!
+//! The layer lives in `activity_layer.rs`; this module owns the plain-data
 //! primitives so it can be depended on without pulling the tracing layer
 //! in.
 
-use crate::cache::Cache;
 use opentelemetry::metrics::Counter;
 use opentelemetry::KeyValue;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-
-/// KV subject prefix all flow-activity events are published under.
-/// Keys are of the form `<PREFIX>.<flow>.<task_or__flow>`.
-pub const ACTIVITY_PREFIX: &str = "flowgen.activity";
 
 /// Reason a flow's last activity happened. Mirrors tracing levels the
 /// runtime uses so callers can render icons/badges without ad-hoc mapping.
@@ -87,6 +84,23 @@ pub struct FlowMetricsSnapshot {
     pub last_error_at_ms: Option<u64>,
     /// Derived status (`FlowStatus`) computed from the three timestamps.
     pub status: FlowStatus,
+}
+
+impl FlowMetricsSnapshot {
+    /// Returns a zeroed snapshot for a flow that has not emitted any
+    /// tracked events yet.
+    pub fn empty(flow: &str) -> Self {
+        Self {
+            flow: flow.to_string(),
+            events_total: 0,
+            warnings_total: 0,
+            errors_total: 0,
+            last_event_at_ms: None,
+            last_warning_at_ms: None,
+            last_error_at_ms: None,
+            status: FlowStatus::Idle,
+        }
+    }
 }
 
 /// Atomic counter block used per flow. Lives behind an Arc so the tracing
@@ -202,6 +216,12 @@ pub struct FlowActivity {
     /// for cross-referencing with structured logs / OTel traces.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
+    /// Custom structured fields carried by the tracing event beyond the
+    /// system attributes above (e.g. `error`, `http_status`,
+    /// `retry_attempt`). Rendered by the UI as a `key: value` list
+    /// under the message.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<(String, String)>,
     /// Post-snapshot metrics for the flow — lets SSE consumers update
     /// counters/status without needing a follow-up REST call.
     pub metrics: FlowMetricsSnapshot,
@@ -222,48 +242,32 @@ pub struct RecordedEvent {
 }
 
 /// Shared handle carried around by app and telemetry: aggregates
-/// per-flow metrics and publishes activity to the cache-backed KV so
-/// SSE subscribers on any replica can replay recent history + live
-/// events for a flow they open in the UI.
+/// per-flow metrics and re-emits each classified event through the
+/// tracing subscriber so the OTel logs bridge can forward it to
+/// whichever telemetry backend is configured. SSE subscribers on any
+/// replica then read the same records back through `LogsQuery`.
 #[derive(Debug)]
 pub struct FlowRegistry {
     inner: RwLock<HashMap<String, Arc<FlowMetrics>>>,
-    cache: Arc<dyn Cache>,
     counters: OnceLock<Counters>,
 }
 
 /// Builder for [`FlowRegistry`]. Follows the same shape as
 /// `flowgen_nats::cache::CacheBuilder` so consumers stay consistent
 /// across the workspace.
-pub struct FlowRegistryBuilder {
-    cache: Option<Arc<dyn Cache>>,
-}
+#[derive(Default)]
+pub struct FlowRegistryBuilder {}
 
 impl FlowRegistryBuilder {
     pub fn new() -> Self {
-        Self { cache: None }
-    }
-
-    pub fn cache(mut self, cache: Arc<dyn Cache>) -> Self {
-        self.cache = Some(cache);
-        self
+        Self::default()
     }
 
     pub fn build(self) -> Arc<FlowRegistry> {
-        let cache = self
-            .cache
-            .expect("FlowRegistryBuilder requires a cache; call .cache(...) before build()");
         Arc::new(FlowRegistry {
             inner: RwLock::new(HashMap::new()),
-            cache,
             counters: OnceLock::new(),
         })
-    }
-}
-
-impl Default for FlowRegistryBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -280,43 +284,13 @@ impl FlowRegistry {
     }
 
     /// Called by the tracing layer for every classified event. Bumps
-    /// local counters synchronously and fires an async publish onto the
-    /// cache — errors are swallowed because activity is best-effort UI
-    /// signal, not a correctness-critical write.
+    /// local counters synchronously and updates the OTel metrics
+    /// counter. The tracing event itself already flows to stdout / the
+    /// memory logs writer through the `fmt::json` layer.
     pub fn record(&self, flow: &str, event: RecordedEvent) {
         let metrics = self.slot(flow);
         metrics.record(event.level, event.ts_ms);
         self.emit_otel(flow, event.task.as_deref(), event.level);
-
-        let snapshot = metrics.snapshot(flow.to_string());
-        let activity = FlowActivity {
-            flow: flow.to_string(),
-            task: event.task,
-            task_type: event.task_type,
-            level: event.level,
-            ts_ms: event.ts_ms,
-            message: event.message,
-            duration_ms: event.duration_ms,
-            event_id: event.event_id,
-            metrics: snapshot,
-        };
-        self.publish(activity);
-    }
-
-    fn publish(&self, activity: FlowActivity) {
-        let cache = Arc::clone(&self.cache);
-        let key = activity_key(&activity.flow, activity.task.as_deref());
-        let payload = match serde_json::to_vec(&activity) {
-            Ok(v) => bytes::Bytes::from(v),
-            Err(_) => return,
-        };
-        let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-        handle.spawn(async move {
-            let _ = cache.put(&key, payload, None).await;
-        });
     }
 
     fn slot(&self, flow: &str) -> Arc<FlowMetrics> {
@@ -392,15 +366,6 @@ impl FlowRegistry {
     }
 }
 
-/// KV key used to publish a single flow-task activity event. The `_flow`
-/// sentinel keeps flow-scoped events (no task) in the same namespace so
-/// `watch("flowgen.activity.")` sees them alongside task events.
-fn activity_key(flow: &str, task: Option<&str>) -> String {
-    match task {
-        Some(t) => format!("{ACTIVITY_PREFIX}.{flow}.{t}"),
-        None => format!("{ACTIVITY_PREFIX}.{flow}._flow"),
-    }
-}
 
 /// Convenience: unix-epoch milliseconds for `SystemTime::now()`.
 pub fn now_ms() -> u64 {
@@ -429,14 +394,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn record_updates_counters_and_publishes_to_cache() {
-        use crate::cache::{Cache, MemoryCache, WatchEvent};
-        use futures_util::StreamExt;
-
-        let cache: Arc<dyn Cache> = Arc::new(MemoryCache::new());
-        let reg = FlowRegistry::builder().cache(Arc::clone(&cache)).build();
-        let mut stream = cache.watch(ACTIVITY_PREFIX, false).await.unwrap();
+    #[test]
+    fn record_updates_counters_across_levels() {
+        let reg = FlowRegistry::builder().build();
         reg.record(
             "f",
             RecordedEvent {
@@ -462,22 +422,11 @@ mod tests {
             },
         );
 
-        let snapshot = reg.snapshot("f").unwrap();
+        let snapshot = reg.snapshot("f").expect("flow must be registered");
         assert_eq!(snapshot.events_total, 1);
         assert_eq!(snapshot.errors_total, 1);
         assert_eq!(snapshot.last_event_at_ms, Some(100));
         assert_eq!(snapshot.last_error_at_ms, Some(200));
         assert_eq!(snapshot.status, FlowStatus::Error);
-
-        let first = stream.next().await.unwrap().unwrap();
-        let second = stream.next().await.unwrap().unwrap();
-        let WatchEvent::Put { key: k1, .. } = first else {
-            unreachable!("watch only publishes Put")
-        };
-        let WatchEvent::Put { key: k2, .. } = second else {
-            unreachable!("watch only publishes Put")
-        };
-        assert_eq!(k1, "flowgen.activity.f.t");
-        assert_eq!(k2, "flowgen.activity.f.t");
     }
 }

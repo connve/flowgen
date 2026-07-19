@@ -79,10 +79,12 @@ resources:
   #   prefix: "resources."
   #   db_name: flowgen_system
 
-# OpenTelemetry metrics and tracing.
+# OpenTelemetry metrics, traces, and logs.
 # telemetry:
 #   enabled: true
-#   otlp_endpoint: "http://localhost:4317"
+#   backend:
+#     type: remote
+#     endpoint: "http://otel-collector:4317"
 #   service_name: flowgen
 #   metrics_export_interval: "60s"
 

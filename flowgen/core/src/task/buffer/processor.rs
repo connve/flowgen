@@ -247,7 +247,12 @@ impl Processor {
                     error!(error = %e, "Failed to send flush event");
                 }
             }
-            .instrument(tracing::Span::current()),
+            .instrument(tracing::info_span!(
+                parent: tracing::Span::current(),
+                "task.handle",
+                activity = true,
+                duration_ms = tracing::field::Empty,
+            )),
         );
     }
 

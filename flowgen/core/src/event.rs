@@ -222,17 +222,21 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                     event.id = %event_id,
                 );
             } else {
-                let field_str = self
+                // Serialize context fields as a JSON object so downstream
+                // consumers (admin UI, log shipper) can split them back
+                // into individual attributes instead of parsing a joined
+                // string.
+                let map: std::collections::BTreeMap<&str, &str> = self
                     .fields
                     .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .map(|(k, v)| (*k, v.as_str()))
+                    .collect();
+                let context_json = serde_json::to_string(&map).unwrap_or_default();
 
                 info!(
                     event.subject = %subject,
                     event.id = %event_id,
-                    context = %field_str,
+                    context = %context_json,
                 );
             }
 

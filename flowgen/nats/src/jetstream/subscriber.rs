@@ -105,7 +105,14 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Processes a single message result.
+    /// Processes a single message result. Wrapped in a `task.handle`
+    /// span so the admin UI's activity feed reports per-message
+    /// duration, matching how processors expose it.
+    #[tracing::instrument(
+        skip(self, message_result),
+        name = "task.handle",
+        fields(activity = true, duration_ms = tracing::field::Empty)
+    )]
     async fn process_message(
         &self,
         message_result: Result<

@@ -82,7 +82,9 @@ event_buffer_size: 10000
 
 telemetry:
   enabled: true
-  otlp_endpoint: http://localhost:4317
+  backend:
+    type: remote
+    endpoint: http://otel-collector:4317
   service_name: flowgen
   metrics_export_interval: "60s"
 ```
@@ -201,16 +203,20 @@ The default (10,000) is sufficient for most workloads. The buffer only needs to 
 
 ## `telemetry`
 
-OpenTelemetry export over OTLP/gRPC. See [Telemetry](/docs/flowgen/concepts/telemetry).
+OpenTelemetry providers for metrics, traces, and logs. See [Telemetry](/docs/flowgen/concepts/telemetry).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Set `true` to start the OTLP exporter. |
-| `otlp_endpoint` | string | `http://localhost:4317` | OTLP/gRPC endpoint. |
+| `enabled` | bool | required | Set `true` to initialize the provider. |
+| `backend` | object | in-memory | Backend selection. Omit for the in-memory backend. |
+| `backend.type` | string | — | Either `memory` or `remote`. |
+| `backend.endpoint` | string | — | Required for `remote`. gRPC endpoint of the collector. |
+| `backend.logs_per_flow` | usize | `1000` | Memory backend only. Log records retained per flow. |
+| `backend.metrics_per_flow` | usize | `1000` | Memory backend only. Metric samples retained per flow. |
 | `service_name` | string | `flowgen` | `service.name` resource attribute. |
-| `metrics_export_interval` | duration | `60s` | How often metric snapshots are pushed. |
+| `metrics_export_interval` | duration | `60s` | How often metric snapshots are pushed. Ignored by the memory backend. |
 
-When `telemetry` is omitted entirely, no OTLP exporter starts but tracing logs still go to stderr.
+When `telemetry` is omitted entirely, no telemetry stack is started.
 
 ## Running
 

@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "arrow",
  "atty",
@@ -1839,8 +1839,6 @@ dependencies = [
  "humantime-serde",
  "mime_guess",
  "native-tls",
- "opentelemetry-appender-tracing",
- "opentelemetry_sdk 0.27.1",
  "rust-embed",
  "rustls",
  "serde",
@@ -1858,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -1866,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1896,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "braze",
@@ -1913,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -1934,7 +1932,6 @@ dependencies = [
  "humantime-serde",
  "jsonwebtoken 9.3.1",
  "opentelemetry 0.27.1",
- "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk 0.27.1",
  "parquet",
@@ -1961,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -1989,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2007,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2023,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2049,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -2077,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2100,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2127,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2150,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2173,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.124.0"
+version = "0.125.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -5143,18 +5140,6 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "opentelemetry-appender-tracing"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab5feffc321035ad94088a7e5333abb4d84a8726e54a802e736ce9dd7237e85b"
-dependencies = [
- "opentelemetry 0.27.1",
- "tracing",
- "tracing-core",
- "tracing-subscriber",
 ]
 
 [[package]]

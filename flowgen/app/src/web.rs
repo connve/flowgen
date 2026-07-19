@@ -113,8 +113,11 @@ pub struct WebState {
     /// Shared activity registry populated by the tracing layer. Used by
     /// the flow list, the flow detail, and the SSE stream.
     pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
-    /// Cache the SSE stream subscribes to for cross-replica activity.
-    pub cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// Backend-agnostic log query used by the SSE stream and the
+    /// history endpoint. `None` when the configured telemetry backend
+    /// does not expose a query surface (e.g. remote OTLP without a
+    /// paired Loki/VL client wired yet).
+    pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
 }
 
 /// Summary of a resource returned by the admin API.
@@ -294,17 +297,16 @@ async fn get_flow(
 
 /// Streams flow activity to the admin UI over Server-Sent Events.
 ///
-/// The stream subscribes to the shared cache under [`ACTIVITY_PREFIX`]
-/// with `include_history=true`, so a UI opening the modal receives the
-/// retained per-key history first (letting it replay recent flashes for
-/// the DAG) before switching to live updates. Multi-node deployments
-/// backed by NATS get cross-replica visibility for free — every publish
-/// lands in the same KV bucket regardless of which node runs the flow.
+/// The initial `snapshot` frame carries the current per-flow metrics so
+/// the UI can render counters/status immediately. Follow-up `activity`
+/// frames are pulled from the configured `LogsQuery` backend: the
+/// memory backend replays its ring buffer for history and tails a
+/// broadcast channel for live events; remote backends (Loki / VL) will
+/// use their native history query and tail HTTP endpoints once wired.
 async fn stream_flows(
     State(state): State<Arc<WebState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
-    use flowgen_core::cache::WatchEvent;
-    use flowgen_core::flow::activity::ACTIVITY_PREFIX;
+    use flowgen_core::telemetry::query::LogFilter;
 
     let snapshot = state.flow_activity.snapshot_all();
     let snapshot_frame = SseEvent::default()
@@ -312,39 +314,44 @@ async fn stream_flows(
         .json_data(&snapshot)
         .unwrap_or_else(|_| SseEvent::default().data("[]"));
 
-    let watch = state.cache.watch(ACTIVITY_PREFIX, true).await;
-    let live = match watch {
-        Ok(w) => w
-            .filter_map(|res| async move {
-                let ev = match res {
-                    Ok(ev) => ev,
-                    Err(source) => {
-                        warn!(error = %source, "Cache watch error on activity stream");
-                        return None;
-                    }
-                };
-                let bytes = match ev {
-                    WatchEvent::Put { value, .. } => value,
-                    WatchEvent::Delete { .. } => return None,
-                };
-                match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    Ok(activity) => match SseEvent::default().event("activity").json_data(activity)
-                    {
+    let live = match state.logs_query.as_ref() {
+        Some(query) => {
+            let filter = LogFilter::default();
+            let history = match query.query(filter.clone(), usize::MAX).await {
+                Ok(records) => records,
+                Err(source) => {
+                    warn!(error = %source, "Log query history read failed");
+                    Vec::new()
+                }
+            };
+            let tail = match query.tail(filter).await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    warn!(error = %source, "Log query tail subscription failed");
+                    futures_util::stream::empty().boxed()
+                }
+            };
+            let flow_activity = Arc::clone(&state.flow_activity);
+            let history_stream = futures_util::stream::iter(history);
+            history_stream
+                .chain(tail)
+                .filter_map(move |record| {
+                    let flow_activity = Arc::clone(&flow_activity);
+                    async move { activity_from_stored(&record, &flow_activity) }
+                })
+                .filter_map(|activity| async move {
+                    match SseEvent::default().event("activity").json_data(&activity) {
                         Ok(ev) => Some(Ok(ev)),
                         Err(source) => {
                             warn!(error = %source, "Failed to encode SSE activity frame");
                             None
                         }
-                    },
-                    Err(source) => {
-                        warn!(error = %source, "Failed to decode cached activity payload");
-                        None
                     }
-                }
-            })
-            .boxed(),
-        Err(source) => {
-            warn!(error = %source, "Cache does not support watch; live SSE frames disabled");
+                })
+                .boxed()
+        }
+        None => {
+            warn!("No logs query backend configured; live SSE frames disabled");
             futures_util::stream::empty().boxed()
         }
     };
@@ -355,6 +362,98 @@ async fn stream_flows(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// Turns a `StoredLog` from the telemetry backend into a `FlowActivity`
+/// frame the admin UI understands. Returns `None` for records that do
+/// not belong to a flow (background logs, framework messages).
+fn activity_from_stored(
+    record: &flowgen_core::telemetry::StoredLog,
+    flow_activity: &flowgen_core::flow::activity::FlowRegistry,
+) -> Option<flowgen_core::flow::activity::FlowActivity> {
+    use flowgen_core::flow::activity::ActivityLevel;
+    let mut flow: Option<&str> = None;
+    let mut task: Option<&str> = None;
+    let mut task_type: Option<&str> = None;
+    let mut level = ActivityLevel::Info;
+    let mut ts_ms: u64 = 0;
+    let mut duration_ms: Option<u64> = None;
+    let mut event_id: Option<String> = None;
+    let mut extra: Vec<(String, String)> = Vec::new();
+    let mut is_activity = false;
+    for (k, v) in &record.attributes {
+        match k.as_str() {
+            "flow" => flow = Some(v),
+            "task" => task = Some(v),
+            "task_type" => task_type = Some(v),
+            "task_id" => {}
+            "activity" => is_activity = v == "true",
+            "level" => {
+                level = match v.as_str() {
+                    "warning" | "warn" => ActivityLevel::Warning,
+                    "error" => ActivityLevel::Error,
+                    _ => ActivityLevel::Info,
+                };
+            }
+            "timestamp" => {
+                // RFC3339 from tracing_subscriber::fmt::json().
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
+                    ts_ms = dt.timestamp_millis().max(0) as u64;
+                }
+            }
+            "duration_ms" => {
+                if let Ok(parsed) = v.parse::<u64>() {
+                    duration_ms = Some(parsed);
+                }
+            }
+            "event_id" | "event.id" => event_id = Some(v.clone()),
+            "target" | "ts_ms" | "event.subject" => {}
+            "context" => {
+                // `EventLogger::context()` serializes fields as a JSON
+                // object; split them back into individual entries so the
+                // admin UI renders each as its own attribute row.
+                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(v) {
+                    Ok(map) => {
+                        for (ck, cv) in map {
+                            let cv_str = match cv {
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            extra.push((ck, cv_str));
+                        }
+                    }
+                    Err(_) => extra.push((k.clone(), v.clone())),
+                }
+            }
+            _ => extra.push((k.clone(), v.clone())),
+        }
+    }
+    let flow = flow?.to_string();
+    // Drop framework logs that never entered a task scope — the admin
+    // UI shows per-task activity, so a row without task_type is noise.
+    let task_type = task_type?.to_string();
+    // Drop lifecycle logs emitted outside a `task.handle` scope
+    // (registration, startup, shutdown). Every `task.handle` span
+    // declares `activity = true`; its absence means the log came from
+    // task lifecycle and does not belong in the per-event feed.
+    if !is_activity {
+        return None;
+    }
+    let metrics = flow_activity
+        .snapshot(&flow)
+        .unwrap_or_else(|| flowgen_core::flow::activity::FlowMetricsSnapshot::empty(&flow));
+    Some(flowgen_core::flow::activity::FlowActivity {
+        flow,
+        task: task.map(str::to_string),
+        task_type: Some(task_type),
+        level,
+        ts_ms,
+        message: record.body.clone(),
+        duration_ms,
+        event_id,
+        extra,
+        metrics,
+    })
 }
 
 /// Returns the list of resources discoverable from the filesystem loader.
@@ -494,16 +593,12 @@ mod tests {
 
     #[test]
     fn test_web_state_allows_empty_registry() {
-        let cache: Arc<dyn flowgen_core::cache::Cache> =
-            Arc::new(flowgen_core::cache::memory::MemoryCache::new());
         let state = WebState {
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             prefix: String::new(),
             resource_loader: None,
-            flow_activity: flowgen_core::flow::activity::FlowRegistry::builder()
-                .cache(Arc::clone(&cache))
-                .build(),
-            cache,
+            flow_activity: flowgen_core::flow::activity::FlowRegistry::builder().build(),
+            logs_query: None,
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());

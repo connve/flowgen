@@ -93,7 +93,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by executing the configured SQL query.
-    #[tracing::instrument(skip(self, event), name = "task.handle")]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());

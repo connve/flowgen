@@ -120,6 +120,27 @@
 		taskFilter = null;
 	}
 
+	// Serialize the selected activity to a JSON payload. Copies the full
+	// record — timestamp, level, flow/task/processor, message, event id,
+	// and every extra attribute — so ops can paste one blob into
+	// tickets, chat, or grep without stitching fields together by hand.
+	function buildClipboard(a: Activity): string {
+		const payload: Record<string, unknown> = {
+			timestamp: new Date(a.ts_ms).toISOString(),
+			level: a.level,
+			flow: a.flow,
+			task: a.task,
+			processor: a.task_type,
+			message: a.message,
+		};
+		if (a.duration_ms !== undefined) payload.duration_ms = a.duration_ms;
+		if (a.event_id) payload.event_id = a.event_id;
+		if (a.extra && a.extra.length > 0) {
+			payload.attributes = Object.fromEntries(a.extra);
+		}
+		return JSON.stringify(payload, null, 2);
+	}
+
 	// Search-and-scroll used by DAG node clicks; falls back to top when the
 	// requested task hasn't emitted anything yet. Also locks the task filter
 	// so subsequent rows narrow to just the clicked node.
@@ -395,7 +416,7 @@
 				<span class="font-mono opacity-80">{selected.task ?? '_flow'}</span>
 			</div>
 			<div class="flex items-center gap-1">
-				<CopyButton text={selected.message} label="Copy message" />
+				<CopyButton text={buildClipboard(selected)} label="Copy log" />
 				<div class="tooltip tooltip-left" data-tip="Close">
 					<button
 						type="button"
@@ -418,11 +439,22 @@
 			<dt class="opacity-50">Event</dt>
 			<dd class="font-mono">{selected.event_id ?? '—'}</dd>
 		</dl>
-		<div class="flex min-h-0 flex-1 flex-col border-t border-base-200 px-4 py-2">
+		<div class="border-t border-base-200 px-4 py-2">
 			<div class="pb-1 text-xs opacity-50">Message</div>
-			<pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.message
+			<pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.message
 					? 'opacity-80'
 					: 'opacity-40'}">{selected.message || '—'}</pre>
 		</div>
+		{#if selected.extra && selected.extra.length > 0}
+			<div class="border-t border-base-200 px-4 py-2">
+				<div class="pb-1 text-xs opacity-50">Attributes</div>
+				<dl class="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-1 text-xs">
+					{#each selected.extra as [key, value] (key)}
+						<dt class="truncate font-mono opacity-70" title={key}>{key}</dt>
+						<dd class="whitespace-pre-wrap break-words font-mono opacity-80">{value}</dd>
+					{/each}
+				</dl>
+			</div>
+		{/if}
 	</div>
 {/if}

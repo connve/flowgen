@@ -439,7 +439,12 @@ async fn dispatch<A: ProtocolAdapter>(
         task_id = ctx.registration.task_id,
         task_type = %ctx.registration.task_type,
     );
-    let handle_span = tracing::info_span!(parent: &run_span, "task.handle");
+    let handle_span = tracing::info_span!(
+        parent: &run_span,
+        "task.handle",
+        activity = true,
+        duration_ms = tracing::field::Empty,
+    );
 
     let result = if is_stream {
         dispatch_streaming::<A>(&ctx.registration, request)

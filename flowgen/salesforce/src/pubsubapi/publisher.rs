@@ -108,7 +108,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by publishing it to Salesforce Pub/Sub.
-    #[tracing::instrument(skip(self, event), name = "task.handle")]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();

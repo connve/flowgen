@@ -348,6 +348,11 @@ pub struct EventHandler {
 impl EventHandler {
     /// Handles a trigger event by pulling the artifact and emitting layer
     /// events.
+    #[tracing::instrument(
+        skip(self, event),
+        name = "task.handle",
+        fields(activity = true, duration_ms = tracing::field::Empty)
+    )]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());

@@ -47,8 +47,13 @@ telemetry:
   enabled: false
   # Optional: backend selection.
   # backend:
-  #   type: otlp
+  #   type: remote
   #   endpoint: "http://otel-collector:4317"
+  # Or, for the in-memory backend (demo / single-node dev):
+  # backend:
+  #   type: memory
+  #   logs_per_flow: 1000
+  #   metrics_per_flow: 1000
   # Optional: service name (defaults to "flowgen").
   # service_name: "flowgen"
   # Optional: metrics export interval using human-readable format (defaults to "60s").

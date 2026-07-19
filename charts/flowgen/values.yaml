@@ -124,7 +124,7 @@ flowgen:
     #     telemetry:
     #       enabled: true
     #       backend:
-    #         type: otlp
+    #         type: remote
     #         endpoint: "http://otel-collector:4317"
     #       service_name: "flowgen"
     #       metrics_export_interval: "60s"

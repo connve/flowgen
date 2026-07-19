@@ -332,7 +332,12 @@ pub async fn dispatch(
         task_id = registration.task_id,
         task_type = %registration.task_type,
     );
-    let handle_span = tracing::info_span!(parent: &run_span, "task.handle");
+    let handle_span = tracing::info_span!(
+        parent: &run_span,
+        "task.handle",
+        activity = true,
+        duration_ms = tracing::field::Empty,
+    );
 
     if registration.config.stream {
         dispatch_stream(registration, headers, body)

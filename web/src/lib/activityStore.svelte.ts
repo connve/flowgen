@@ -32,6 +32,7 @@ export interface FlowActivity {
 	message: string;
 	duration_ms?: number;
 	event_id?: string;
+	extra?: Array<[string, string]>;
 	metrics: FlowMetricsSnapshot;
 }
 

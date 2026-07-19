@@ -276,6 +276,10 @@ pub struct App {
     /// state. Built in `main` before tracing so `FlowRegistry` can be
     /// constructed with a real cache reference from the outset.
     pub cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// Backend-agnostic log query source used by the admin web API for
+    /// history queries and SSE tail. `None` when the selected telemetry
+    /// backend does not (yet) expose a query surface.
+    pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
 }
 
 impl App {
@@ -1050,7 +1054,7 @@ impl App {
                 prefix: String::new(),
                 resource_loader: resource_loader.clone(),
                 flow_activity: Arc::clone(&self.flow_activity),
-                cache: Arc::clone(&cache),
+                logs_query: self.logs_query.clone(),
             };
             let web_handle = tokio::spawn(async move {
                 if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {

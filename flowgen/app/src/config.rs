@@ -619,15 +619,27 @@ pub struct TelemetryOptions {
 
 /// User-facing backend selection.
 ///
-/// Serialized as a tagged enum: either `{ type: memory }` or
-/// `{ type: otlp, endpoint: "http://..." }`.
+/// Serialized as a tagged enum. Each variant carries only the fields
+/// that make sense for that backend, so an invalid combination
+/// (e.g. `logs_per_flow` on the `remote` backend) fails at parse time.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TelemetryBackendOptions {
-    /// Keep all signals in-process.
-    Memory,
-    /// Push all signals to an OTLP-compatible collector.
-    Otlp {
+    /// Keep all signals in-process behind bounded per-flow ring buffers.
+    /// Intended for demo and single-node dev; multi-replica deploys
+    /// should use `remote` instead.
+    Memory {
+        /// Log records retained per flow before oldest entries are
+        /// dropped. Defaults to 1000.
+        #[serde(default = "default_logs_per_flow")]
+        logs_per_flow: usize,
+        /// Metric samples retained per flow before oldest entries are
+        /// dropped. Defaults to 1000.
+        #[serde(default = "default_metrics_per_flow")]
+        metrics_per_flow: usize,
+    },
+    /// Push all signals over OTLP/gRPC to a remote collector.
+    Remote {
         /// gRPC endpoint of the collector (e.g. "http://otel-collector:4317").
         endpoint: String,
     },
@@ -639,6 +651,14 @@ fn default_service_name() -> String {
 
 fn default_metrics_interval() -> Duration {
     Duration::from_secs(60)
+}
+
+fn default_logs_per_flow() -> usize {
+    1000
+}
+
+fn default_metrics_per_flow() -> usize {
+    1000
 }
 
 #[cfg(test)]
@@ -1072,10 +1092,10 @@ mod tests {
     }
 
     #[test]
-    fn test_telemetry_options_otlp_backend() {
+    fn test_telemetry_options_remote_backend() {
         let telemetry_options = TelemetryOptions {
             enabled: true,
-            backend: Some(TelemetryBackendOptions::Otlp {
+            backend: Some(TelemetryBackendOptions::Remote {
                 endpoint: "http://otel-collector:4317".to_string(),
             }),
             service_name: "flowgen".to_string(),
@@ -1085,7 +1105,7 @@ mod tests {
         assert!(telemetry_options.enabled);
         assert!(matches!(
             &telemetry_options.backend,
-            Some(TelemetryBackendOptions::Otlp { endpoint }) if endpoint == "http://otel-collector:4317"
+            Some(TelemetryBackendOptions::Remote { endpoint }) if endpoint == "http://otel-collector:4317"
         ));
         assert_eq!(telemetry_options.service_name, "flowgen");
         assert_eq!(
@@ -1116,7 +1136,7 @@ mod tests {
     fn test_telemetry_options_serialization_roundtrip() {
         let telemetry_options = TelemetryOptions {
             enabled: true,
-            backend: Some(TelemetryBackendOptions::Otlp {
+            backend: Some(TelemetryBackendOptions::Remote {
                 endpoint: "http://grafana:4317".to_string(),
             }),
             service_name: "flowgen-prod".to_string(),
@@ -1130,16 +1150,33 @@ mod tests {
 
     #[test]
     fn test_telemetry_backend_tagged_enum_yaml() {
-        let yaml_otlp = "type: otlp\nendpoint: http://otel:4317\n";
-        let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_otlp).unwrap();
+        let yaml_remote = "type: remote\nendpoint: http://otel:4317\n";
+        let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_remote).unwrap();
         assert!(matches!(
             &parsed,
-            TelemetryBackendOptions::Otlp { endpoint } if endpoint == "http://otel:4317"
+            TelemetryBackendOptions::Remote { endpoint } if endpoint == "http://otel:4317"
         ));
 
         let yaml_memory = "type: memory\n";
         let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_memory).unwrap();
-        assert!(matches!(parsed, TelemetryBackendOptions::Memory));
+        assert!(matches!(
+            parsed,
+            TelemetryBackendOptions::Memory {
+                logs_per_flow: 1000,
+                metrics_per_flow: 1000,
+            }
+        ));
+
+        let yaml_memory_custom =
+            "type: memory\nlogs_per_flow: 250\nmetrics_per_flow: 500\n";
+        let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_memory_custom).unwrap();
+        assert!(matches!(
+            parsed,
+            TelemetryBackendOptions::Memory {
+                logs_per_flow: 250,
+                metrics_per_flow: 500,
+            }
+        ));
     }
 
     #[test]
@@ -1159,7 +1196,7 @@ mod tests {
             event_buffer_size: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
-                backend: Some(TelemetryBackendOptions::Otlp {
+                backend: Some(TelemetryBackendOptions::Remote {
                     endpoint: "http://otel-collector:4317".to_string(),
                 }),
                 service_name: "flowgen".to_string(),
@@ -1172,7 +1209,7 @@ mod tests {
         assert!(telemetry.enabled);
         assert!(matches!(
             &telemetry.backend,
-            Some(TelemetryBackendOptions::Otlp { endpoint }) if endpoint == "http://otel-collector:4317"
+            Some(TelemetryBackendOptions::Remote { endpoint }) if endpoint == "http://otel-collector:4317"
         ));
         assert_eq!(telemetry.service_name, "flowgen");
         assert_eq!(telemetry.metrics_export_interval, Duration::from_secs(60));

@@ -1,5 +1,105 @@
 # Changelog
 
+## 0.125.0
+
+### Breaking
+
+- **`telemetry.otlp_endpoint` replaced by `telemetry.backend`.** The
+  telemetry section now selects between an in-process backend and a
+  remote OTLP collector through a tagged `backend` block. Existing
+  configs that set `enabled: true` with no other fields still work
+  (they fall back to the in-memory backend). To keep pushing to a
+  collector, replace:
+
+  ```yaml
+  telemetry:
+    enabled: true
+    otlp_endpoint: "http://otel-collector:4317"
+  ```
+
+  with:
+
+  ```yaml
+  telemetry:
+    enabled: true
+    backend:
+      type: remote
+      endpoint: "http://otel-collector:4317"
+  ```
+
+### Features
+
+- **JSON stdout logs consumable by the admin UI.** Logs continue to be
+  written as JSON via `tracing_subscriber::fmt::json()`. In `memory`
+  backend mode a copy of that stream is parsed into an in-process
+  per-flow ring buffer (default 1000 entries per flow, configurable
+  via `backend.logs_per_flow`) exposed through the `LogsQuery` trait
+  the admin UI reads. In `remote` mode logs stay on stdout only —
+  operators plug in Fluent Bit / Vector / Grafana Alloy to forward
+  them to Loki, VictoriaLogs, Elasticsearch, or wherever.
+
+- **Backend-agnostic `LogsQuery` trait.** The web layer no longer
+  knows what backend serves its activity view; a memory
+  implementation ships today, remote backends (Loki, VictoriaLogs)
+  land in follow-up work through backend-specific crates.
+
+- **`telemetry.backend` tagged enum with per-backend fields.** The
+  `memory` variant accepts `logs_per_flow` and `metrics_per_flow`;
+  the `remote` variant accepts `endpoint`. Invalid combinations fail
+  at parse time.
+
+- **Per-invocation `task.handle` span on source tasks.** NATS
+  JetStream subscribers, Salesforce Pub/Sub subscribers, HTTP
+  endpoints, MCP handlers, the AI gateway LLM proxy, `git_sync`,
+  `oci_sync`, and `buffer` flushes now emit a `task.handle` span per
+  message / request / tick. The DAG duration badge and the activity
+  panel show live per-invocation timing for these tasks instead of
+  `—`.
+
+- **`duration_ms` backfilled onto every `task.handle` span.** The
+  activity layer records the elapsed wall-clock on the current
+  `task.handle` span via a `field::Empty` placeholder declared on
+  the `#[instrument]` macro. `tracing_subscriber::fmt::json()` then
+  includes it in the emitted `spans` array, so downstream consumers
+  (admin UI, log shippers, OTel span exporters) all see the same
+  per-event duration.
+
+- **Admin activity panel renders structured attributes.** Custom
+  tracing fields beyond the known system attributes (flow, task,
+  level, timestamp, event.id, duration_ms) now surface as a
+  key/value list under the message in the drawer. Context fields
+  attached via `EventLogger::context()` are serialized as a JSON
+  object so consumers can split them back into individual
+  attributes rather than parsing a joined string.
+
+- **Copy full log JSON from the activity drawer.** The drawer's
+  copy button now serializes the entire selected record — message,
+  timestamps, level, flow/task/processor, event id, duration, and
+  every extra attribute — into one JSON blob suitable for pasting
+  into tickets or chat.
+
+- **Explicit `activity = true` marker on every `task.handle` span.**
+  The admin activity feed filters on this marker so lifecycle logs
+  emitted from `task.run` scope (endpoint registration, resource
+  registration, startup traces) stay in stdout but do not clutter
+  the per-event UI. Errors and warnings that arise in the same
+  scope still surface — the marker only filters info-level noise.
+
+### Fixes
+
+- **`init_cache` unified between system + user cache paths.** The two
+  cache init call sites in `App` previously diverged on the
+  `history` / `tombstone_ttl` overrides. Both paths now go through a
+  single `App::init_cache` so per-tenant history overrides
+  (e.g. NATS KV's server-side cap of 64) apply uniformly and the
+  system cache no longer races with the runtime cache during
+  bootstrap.
+
+- **Default KV history dropped from 1000 → 64.** The NATS KV server
+  hard-caps per-subject history at 64; the previous default caused
+  `too long history` errors on real deploys. Callers that want fewer
+  retained versions can still lower the value via `cache.history`.
+
 ## 0.124.0
 
 ### Breaking
