@@ -364,7 +364,15 @@ impl EventHandler {
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
             // Cheap change-signal via HEAD — avoids the manifest GET
             // and the config-blob GET that `pull_manifest_and_config`
-            // would issue unconditionally.
+            // would issue unconditionally. HEAD returns the digest of
+            // whatever manifest the registry advertises for the tag —
+            // for multi-arch images that is the index digest, for
+            // single-arch it's the per-platform manifest digest. We
+            // cache whatever HEAD saw so the next HEAD can match it,
+            // instead of caching the per-platform digest that
+            // `pull_manifest_and_config` returns (which won't line up
+            // with the index digest on multi-arch tags and would
+            // defeat the skip).
             let cache = &self.task_context.cache;
             let flow_name = &self.task_context.flow.name;
             let sanitized_artifact = sanitize_artifact_ref(&self.config.artifact);
@@ -375,8 +383,10 @@ impl EventHandler {
                 .ok()
                 .flatten()
                 .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
-            if !self.config.force_pull {
-                let head_digest = self
+            let head_digest = if self.config.force_pull {
+                None
+            } else {
+                let digest = self
                     .client
                     .fetch_manifest_digest(&self.reference, &self.auth)
                     .await
@@ -384,10 +394,10 @@ impl EventHandler {
                         reference: self.config.artifact.clone(),
                         source,
                     })?;
-                if cached_digest.as_deref() == Some(head_digest.as_str()) {
+                if cached_digest.as_deref() == Some(digest.as_str()) {
                     info!(
                         artifact = %self.config.artifact,
-                        digest = %head_digest,
+                        digest = %digest,
                         "OCI manifest digest unchanged since last pull, skipping layer fetch"
                     );
                     if let Some(arc) = completion_tx_arc.as_ref() {
@@ -398,7 +408,8 @@ impl EventHandler {
                     }
                     return Ok(());
                 }
-            }
+                Some(digest)
+            };
 
             let (manifest, manifest_digest, _config_blob) = self
                 .client
@@ -584,15 +595,18 @@ impl EventHandler {
                 }
             }
 
+            // Persist the digest HEAD returned (falling back to the
+            // manifest digest on force_pull, where HEAD was skipped).
             // Persist only after every layer event was sent — a mid-pull
             // failure must re-emit the full batch on the next tick.
+            let digest_to_cache = head_digest.unwrap_or_else(|| manifest_digest.clone());
             if let Err(e) = cache
-                .put(&cache_key, manifest_digest.clone().into(), None)
+                .put(&cache_key, digest_to_cache.clone().into(), None)
                 .await
             {
                 error!(
                     artifact = %self.config.artifact,
-                    digest = %manifest_digest,
+                    digest = %digest_to_cache,
                     error = %e,
                     "Failed to persist OCI manifest digest, next tick will re-pull"
                 );

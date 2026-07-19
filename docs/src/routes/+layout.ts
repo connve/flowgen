@@ -9,6 +9,22 @@ const DEFAULT_TITLE = 'Flowgen documentation | CONNVE';
 const DEFAULT_DESCRIPTION =
 	'Flowgen is a real-time data activation platform. Author flows in YAML, run them on Kubernetes, and connect to your existing infrastructure.';
 
+const SECTION_LABELS: Record<string, string> = {
+	'getting-started': 'Flowgen getting started',
+	concepts: 'Flowgen concepts',
+	core: 'Flowgen core tasks',
+	ai: 'Flowgen AI',
+	braze: 'Flowgen Braze',
+	git: 'Flowgen Git',
+	gcp: 'Flowgen Google Cloud',
+	http: 'Flowgen HTTP',
+	mssql: 'Flowgen MSSQL',
+	nats: 'Flowgen NATS JetStream',
+	'object-store': 'Flowgen Object Store',
+	oci: 'Flowgen OCI',
+	salesforce: 'Flowgen Salesforce'
+};
+
 const rawPages = import.meta.glob('./**/+page.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
 interface PageMeta {
@@ -54,7 +70,22 @@ export const load: LayoutLoad = ({ url }) => {
 	const lookup = relativePath.replace(/\/$/, '') || '/';
 	const meta = pageMetaByPath.get(lookup);
 
-	const pageTitle = meta?.title ? `${meta.title} | CONNVE` : DEFAULT_TITLE;
+	const segments = lookup.split('/').filter(Boolean);
+	const sectionLabel = segments.length >= 2 ? SECTION_LABELS[segments[0]] : undefined;
+
+	let displayTitle = meta?.title ?? '';
+	if (sectionLabel && displayTitle) {
+		const lastWord = sectionLabel.split(' ').pop() ?? '';
+		if (lastWord && displayTitle.toLowerCase().startsWith(lastWord.toLowerCase() + ' ')) {
+			displayTitle = displayTitle.slice(lastWord.length + 1);
+		}
+	}
+
+	const pageTitle = displayTitle
+		? sectionLabel
+			? `${sectionLabel} - ${displayTitle} | CONNVE`
+			: `${displayTitle} | CONNVE`
+		: DEFAULT_TITLE;
 	const pageDescription = meta?.description || DEFAULT_DESCRIPTION;
 	const canonicalPath = lookup === '/' ? '/getting-started/why-flowgen' : lookup;
 	const canonical = `${SITE_ORIGIN}${BASE_PATH}${canonicalPath}`;

@@ -989,3 +989,117 @@ async fn oci_sync_docker_opaque_whiteout_hides_lower_directory() {
         "sibling directory must be untouched by opaque whiteout on `secret/`",
     );
 }
+
+/// Shares one MemoryCache across two syncs so the second tick can hit
+/// the HEAD-check skip path. Returns downstream events from that run.
+async fn run_sync_with_shared_cache(
+    sync_config: Arc<OciSyncConfig>,
+    cache: Arc<dyn flowgen_core::cache::Cache>,
+) -> Vec<flowgen_core::event::Event> {
+    let task_manager = Arc::new(
+        flowgen_core::task::manager::TaskManagerBuilder::new()
+            .build()
+            .expect("build TaskManager"),
+    );
+    let task_context = Arc::new(
+        flowgen_core::task::context::TaskContextBuilder::new()
+            .flow_name("test_flow".to_string())
+            .task_manager(task_manager)
+            .cache(cache)
+            .build()
+            .expect("build TaskContext"),
+    );
+
+    let (trigger_tx, trigger_rx) = mpsc::channel(8);
+    let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
+
+    let processor = ProcessorBuilder::new()
+        .config(sync_config)
+        .receiver(trigger_rx)
+        .sender(downstream_tx)
+        .task_id(1)
+        .task_type("oci_sync")
+        .task_context(task_context)
+        .build()
+        .await
+        .expect("build oci_sync processor");
+
+    let handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        processor.run().await.expect("oci_sync run must succeed");
+    });
+
+    let (completion_state, _completion_rx) = flowgen_core::event::new_completion_channel(1);
+    trigger_tx
+        .send(
+            flowgen_core::event::EventBuilder::new()
+                .data(flowgen_core::event::EventData::Json(
+                    serde_json::json!({"trigger": true}),
+                ))
+                .subject("tick".to_string())
+                .task_id(0)
+                .task_type("generate")
+                .completion_tx(completion_state)
+                .build()
+                .expect("build trigger event"),
+        )
+        .await
+        .expect("send trigger event");
+
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), downstream_rx.recv()).await {
+            Ok(Some(event)) => events.push(event),
+            Ok(None) | Err(_) if !events.is_empty() => break,
+            _ => continue,
+        }
+    }
+
+    drop(trigger_tx);
+    let _ = handle.await;
+    events
+}
+
+/// Regression: the HEAD-check must actually short-circuit the second
+/// tick when the tag is unchanged. Before the fix the cache stored the
+/// per-platform manifest digest returned by `pull_manifest_and_config`,
+/// while HEAD returned the (differing) index digest for multi-arch
+/// tags — so the compare always missed and every tick re-pulled every
+/// layer. Now we cache whatever HEAD saw, so the compare hits.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn oci_sync_second_tick_skips_when_manifest_unchanged() {
+    let (_registry, host) = boot_registry().await;
+
+    let tar_gzip = gzip_bytes(&build_tar_bytes(&[("flows/one.yaml", b"content")]));
+    let reference = push_layer(
+        &host,
+        "flowgen/skip-when-unchanged",
+        "application/vnd.oci.image.layer.v1.tar+gzip",
+        tar_gzip,
+    )
+    .await;
+
+    let sync_config = Arc::new(OciSyncConfig {
+        name: "pull".to_string(),
+        artifact: reference,
+        ..Default::default()
+    });
+
+    let cache: Arc<dyn flowgen_core::cache::Cache> =
+        Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+
+    let first = run_sync_with_shared_cache(Arc::clone(&sync_config), Arc::clone(&cache)).await;
+    assert!(
+        !first.is_empty(),
+        "first tick must emit at least one file event"
+    );
+
+    let second = run_sync_with_shared_cache(sync_config, cache).await;
+    assert!(
+        second.is_empty(),
+        "second tick against an unchanged tag must emit zero events, got {}",
+        second.len()
+    );
+}

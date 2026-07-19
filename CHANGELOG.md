@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.126.0
+
+### Fixes
+
+- **`oci_sync` HEAD-check now skips unchanged multi-arch tags.** The
+  cache stored the per-platform manifest digest, while HEAD returned
+  the index digest for multi-arch tags — so the compare never matched
+  and every tick re-pulled every layer. The cache now stores whatever
+  HEAD returned. Integration test
+  `oci_sync_second_tick_skips_when_manifest_unchanged` covers the
+  single-arch skip path.
+
 ## 0.125.0
 
 ### Breaking
