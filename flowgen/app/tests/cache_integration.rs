@@ -1,17 +1,18 @@
-//! Regression test for `App::init_cache`.
+//! Integration tests for `App::init_cache` against a real NATS server.
 //!
-//! Reproduces the production incident where the app had two separate
-//! `Cache::init` call sites — one for the runtime `flowgen_cache`
-//! bucket, one for the `flowgen_system` bucket used by flow/resource
-//! loaders. Only the runtime path passed `history` and `tombstone_ttl`
-//! through to the builder, so the system bucket ended up with
-//! `AllowMsgTTL=false`, and every per-message TTL put on it failed
-//! with `per-message TTL is disabled (code 400, error code 10166)`.
+//! Covers:
 //!
-//! The unified `App::init_cache(config, Option<&str>)` now goes
-//! through one code path. This test asserts that regardless of which
-//! bucket name a caller passes, the returned `Cache` propagates the
-//! config's TTL settings so per-message TTL puts succeed on both.
+//! - Both cache buckets (`flowgen_cache` runtime + `flowgen_system` loader)
+//!   accept per-message TTL puts. This is the regression from the incident
+//!   where the two `Cache::init` call sites had diverged on the `history`
+//!   and `tombstone_ttl` overrides — the system bucket ended up with
+//!   `AllowMsgTTL=false` and every per-message TTL put on it failed with
+//!   `per-message TTL is disabled (code 400, error code 10166)`. The
+//!   unified `App::init_cache(config, Option<&str>)` now flows both bucket
+//!   names through the same builder.
+//!
+//! - Disabling the cache falls back to the in-memory backend without
+//!   touching NATS.
 //!
 //! Requires a running Docker daemon. Marked `#[ignore]` so a default
 //! `cargo test` skips it; CI runs the ignored set explicitly.
@@ -61,6 +62,7 @@ fn app_config_with_cache(url: String) -> AppConfig {
         mcp_server: None,
         ai_gateway: None,
         web: None,
+        health: Default::default(),
         retry: None,
         event_buffer_size: None,
         telemetry: None,

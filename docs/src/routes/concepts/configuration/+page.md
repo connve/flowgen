@@ -10,6 +10,7 @@ http_server:       # Webhook / metrics HTTP server (optional).
 mcp_server:        # MCP server for tools/resources/prompts (optional).
 ai_gateway:        # OpenAI-compatible LLM gateway (optional).
 web:               # Admin web UI (optional).
+health:            # k8s liveness/readiness listener (defaults on).
 retry:             # Default retry policy for every task (optional).
 event_buffer_size: # Per-edge channel capacity (optional).
 telemetry:         # OpenTelemetry export (optional).
@@ -73,6 +74,10 @@ web:
   enabled: true
   port: 8080
   path: /flowgen
+
+health:
+  enabled: true
+  port: 8081
 
 retry:
   max_attempts: 10

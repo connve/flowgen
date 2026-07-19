@@ -203,3 +203,88 @@ fn patch_adds_host_network() {
         .expect("hostNetwork should be a boolean");
     assert!(host_network, "hostNetwork should be true after patch");
 }
+
+fn container(pod: &serde_yaml::Value) -> &serde_yaml::Value {
+    pod.get("containers")
+        .and_then(|v| v.as_sequence())
+        .and_then(|s| s.first())
+        .expect("pod spec should have at least one container")
+}
+
+/// Regression: `http_server` is declared `Option<HttpServerOptions>` in
+/// the app config, so setting it to null in values.yaml must render a
+/// valid chart without a `nil pointer evaluating interface {}.port` from
+/// helm. Both the containerPort declaration and the Service manifest have
+/// to be guarded on the section being present.
+#[test]
+fn http_server_disabled_renders_without_port_or_service() {
+    let manifests = render(
+        r#"flowgen:
+  http_server: null
+"#,
+    );
+
+    let deployment = find_deployment(&manifests);
+    let container = container(pod_spec(&deployment));
+    let ports = container
+        .get("ports")
+        .and_then(|v| v.as_sequence())
+        .expect("container should still declare ports (health at minimum)");
+    assert!(
+        !ports
+            .iter()
+            .any(|p| p.get("name").and_then(|n| n.as_str()) == Some("http")),
+        "container should not declare an `http` port when http_server is null, got: {ports:?}"
+    );
+
+    assert!(
+        service_named(&manifests, "-http-server").is_none(),
+        "http-server Service should not render when http_server is null"
+    );
+}
+
+#[test]
+fn probes_point_to_dedicated_health_port() {
+    let manifests = render("");
+    let deployment = find_deployment(&manifests);
+    let container = container(pod_spec(&deployment));
+
+    let health_port = container
+        .get("ports")
+        .and_then(|v| v.as_sequence())
+        .expect("container should declare ports")
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("health"))
+        .expect("container should expose a `health` port");
+    assert_eq!(
+        health_port.get("containerPort").and_then(|v| v.as_u64()),
+        Some(8081),
+        "health port should default to 8081"
+    );
+
+    let readiness = container
+        .get("readinessProbe")
+        .and_then(|p| p.get("httpGet"))
+        .expect("container should have a readinessProbe httpGet");
+    assert_eq!(
+        readiness.get("path").and_then(|v| v.as_str()),
+        Some("/readyz")
+    );
+    assert_eq!(
+        readiness.get("port").and_then(|v| v.as_str()),
+        Some("health")
+    );
+
+    let liveness = container
+        .get("livenessProbe")
+        .and_then(|p| p.get("httpGet"))
+        .expect("container should have a livenessProbe httpGet");
+    assert_eq!(
+        liveness.get("path").and_then(|v| v.as_str()),
+        Some("/livez")
+    );
+    assert_eq!(
+        liveness.get("port").and_then(|v| v.as_str()),
+        Some("health")
+    );
+}

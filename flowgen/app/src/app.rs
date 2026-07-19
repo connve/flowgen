@@ -1066,6 +1066,26 @@ impl App {
             background_handles.push(web_handle);
         }
 
+        // Start the dedicated k8s health listener. Readiness reports true once
+        // at least one flow is registered; liveness is always 200.
+        if app_config.health.enabled {
+            let port = app_config.health.port;
+            let registry_for_health = Arc::clone(&flow_registry);
+            let readiness: flowgen_core::health::ReadinessCheck =
+                Arc::new(move || match registry_for_health.read() {
+                    Ok(guard) => !guard.is_empty(),
+                    Err(_) => false,
+                });
+            let health_handle = tokio::spawn(async move {
+                if let Err(source) =
+                    flowgen_core::health::start_health_server(port, readiness).await
+                {
+                    error!("{}", source);
+                }
+            });
+            background_handles.push(health_handle);
+        }
+
         // Spawn the hot-reload watcher and reconciler if the system cache supports watching.
         // The watcher subscribes to flow key changes and the reconciler applies them.
         let watcher_shutdown = tokio_util::sync::CancellationToken::new();

@@ -98,6 +98,13 @@ flowgen:
   #   type: ClusterIP
   #   port: 8080
 
+  # Kubernetes liveness/readiness listener. Independent from the API
+  # listeners so probes keep working regardless of which surfaces are
+  # enabled. Endpoints: /livez (always 200), /readyz (200 once >=1 flow
+  # is registered), /healthz (alias of /livez for pre-1.16 convention).
+  health:
+    port: 8081
+
   serviceAccount:
     # Specifies whether a service account should be created
     create: true

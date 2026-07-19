@@ -1839,6 +1839,7 @@ dependencies = [
  "humantime-serde",
  "mime_guess",
  "native-tls",
+ "reqwest 0.13.2",
  "rust-embed",
  "rustls",
  "serde",

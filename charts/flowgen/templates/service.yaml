@@ -1,5 +1,6 @@
 {{- $worker := index .Values "flowgen" -}}
 {{- if $worker.enabled }}
+{{- if $worker.http_server }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -15,6 +16,7 @@ spec:
     targetPort: http
     protocol: TCP
     name: http
+{{- end }}
 {{- if $worker.mcp_server }}
 ---
 apiVersion: v1

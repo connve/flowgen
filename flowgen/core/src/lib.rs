@@ -21,6 +21,8 @@ pub mod credentials;
 pub mod event;
 /// Executor for distributed coordination via cache-based leases.
 pub mod executor;
+/// Dedicated liveness/readiness listener for Kubernetes probes.
+pub mod health;
 /// Generic HTTP server with role-specific dispatchers (webhook / MCP / AI gateway).
 pub mod http_server;
 /// Peer discovery and flow distribution via consistent hashing.

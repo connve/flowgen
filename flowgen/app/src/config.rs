@@ -313,6 +313,12 @@ pub struct AppConfig {
     pub ai_gateway: Option<AiGatewayOptions>,
     /// Optional admin web UI configuration for inspecting loaded flows.
     pub web: Option<WebOptions>,
+    /// Kubernetes-facing liveness/readiness listener. Independent of the
+    /// API listeners so probes keep working regardless of which surfaces
+    /// (http_server / mcp_server / ai_gateway / web) are enabled.
+    /// Defaults to enabled on port 8081 if omitted.
+    #[serde(default)]
+    pub health: HealthOptions,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
     /// Per-edge event channel capacity in events (defaults to 10,000).
@@ -567,6 +573,35 @@ pub struct WebOptions {
     pub path: String,
 }
 
+/// Default health listener port.
+fn default_health_port() -> u16 {
+    8081
+}
+
+/// Default `enabled: true` for HealthOptions when the field is omitted.
+fn default_health_enabled() -> bool {
+    true
+}
+
+/// Kubernetes liveness/readiness listener configuration.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HealthOptions {
+    /// Whether the health listener is enabled. Defaults to true.
+    pub enabled: bool,
+    /// Health listener port. Defaults to 8081.
+    pub port: u16,
+}
+
+impl Default for HealthOptions {
+    fn default() -> Self {
+        Self {
+            enabled: default_health_enabled(),
+            port: default_health_port(),
+        }
+    }
+}
+
 /// Default webhook HTTP server port.
 fn default_http_port() -> u16 {
     3000
@@ -811,6 +846,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: None,
@@ -839,6 +875,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: None,
@@ -869,6 +906,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: None,
@@ -900,6 +938,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: None,
@@ -1080,6 +1119,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: None,
@@ -1192,6 +1232,7 @@ mod tests {
             mcp_server: None,
             ai_gateway: None,
             web: None,
+            health: Default::default(),
             retry: None,
             event_buffer_size: None,
             telemetry: Some(TelemetryOptions {

@@ -4,6 +4,16 @@
 
 ### Breaking
 
+- **Kubernetes probes moved to a dedicated port.** The helm chart
+  (v0.19.0) points `livenessProbe` at `/livez` and `readinessProbe`
+  at `/readyz` on a new `health` port (default 8081), instead of
+  `/healthz` on the API port. Pins that override `livenessProbe` or
+  `readinessProbe` in `values.yaml` need to be updated. Anything
+  hardcoding `/healthz` on port 3000 in external tooling (ingress
+  health checks, external monitors) needs to switch to `/livez` on
+  port 8081. `/healthz` is preserved as an alias of `/livez` on the
+  new listener for pre-1.16 k8s convention.
+
 - **`telemetry.otlp_endpoint` replaced by `telemetry.backend`.** The
   telemetry section now selects between an in-process backend and a
   remote OTLP collector through a tagged `backend` block. Existing
@@ -28,6 +38,15 @@
   ```
 
 ### Features
+
+- **Dedicated k8s health listener at `flowgen_core::health`.** Spawns
+  its own axum listener on `health.port` (default 8081), independent
+  of the API listeners. Exposes `GET /livez` (always 200), `GET
+  /readyz` (200 once at least one flow is registered, 503 before),
+  and `GET /healthz` as an alias for `/livez`. Probes keep working
+  regardless of which API surfaces (`http_server`, `mcp_server`,
+  `ai_gateway`, `web`) are enabled. Set `health.enabled: false` to
+  disable the listener entirely.
 
 - **JSON stdout logs consumable by the admin UI.** Logs continue to be
   written as JSON via `tracing_subscriber::fmt::json()`. In `memory`
@@ -104,6 +123,15 @@
   `cargo test --workspace --tests -- --ignored` invocation.
 
 ### Fixes
+
+- **k8s probes no longer 404.** During the earlier HTTP server
+  refactor from `flowgen_http::server` into
+  `flowgen_core::http_server` the previous `/healthz` handler was
+  lost, silently — probes returned 404 and pods crashlooped as soon
+  as the readiness `failureThreshold` was reached. Replaced with the
+  dedicated health listener above so the regression cannot recur:
+  even a service with every API listener disabled still answers
+  probes.
 
 - **`init_cache` unified between system + user cache paths.** The two
   cache init call sites in `App` previously diverged on the
