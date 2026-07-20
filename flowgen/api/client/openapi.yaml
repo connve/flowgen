@@ -1,0 +1,327 @@
+openapi: 3.0.3
+info:
+  title: Flowgen API
+  description: |
+    HTTP API for flowgen. Two listeners: `web` (flow / resource /
+    SSE endpoints under `web.path`) and `health` (Kubernetes probes
+    on the root path).
+  version: 0.127.0
+  license:
+    name: MPL-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local admin API (web listener)
+  - url: http://localhost:8081
+    description: Local health listener
+paths:
+  /api/flows:
+    get:
+      operationId: listFlows
+      summary: List every loaded flow.
+      description: Sorted alphabetically by name.
+      tags: [flows]
+      responses:
+        "200":
+          description: One entry per loaded flow.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FlowSummary"
+
+  /api/flows/{name}:
+    get:
+      operationId: getFlow
+      summary: Fetch the full source YAML for one flow.
+      tags: [flows]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Flow name as it appears in the flow registry.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Flow detail including raw YAML source.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowDetail"
+        "404":
+          description: No flow with that name is loaded.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/flows/stream:
+    get:
+      operationId: streamFlows
+      summary: Live activity stream.
+      description: |
+        Server-Sent Events with two named event types:
+        `snapshot` (JSON array of the retained history, sent once)
+        and `activity` (JSON object per event).
+      tags: [flows]
+      responses:
+        "200":
+          description: Long-lived event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /api/resources:
+    get:
+      operationId: listResources
+      summary: List every resource discoverable by the resource loader.
+      tags: [resources]
+      responses:
+        "200":
+          description: One entry per resource (filesystem + cache combined).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ResourceSummary"
+
+  /api/resources/{key}:
+    get:
+      operationId: getResource
+      summary: Fetch one resource's raw text content.
+      description: The `{key}` path parameter is greedy and matches slashes.
+      tags: [resources]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: Resource key relative to the loader's base path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full text content of the resource.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceContent"
+        "404":
+          description: Resource not found in filesystem or cache.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/version:
+    get:
+      operationId: getVersion
+      summary: Return the running flowgen build version.
+      tags: [meta]
+      responses:
+        "200":
+          description: Build version derived from `CARGO_PKG_VERSION`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionInfo"
+
+  /livez:
+    get:
+      operationId: livez
+      summary: Kubernetes liveness probe.
+      description: Always returns 200 while the health listener is running.
+      tags: [health]
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Kubernetes readiness probe.
+      description: Returns 200 once at least one flow is registered, 503 before.
+      tags: [health]
+      responses:
+        "200":
+          description: Ready to serve.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+        "503":
+          description: Not ready — no flows registered yet.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: not ready
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Alias of `/livez`.
+      tags: [health]
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+
+components:
+  schemas:
+    FlowSummary:
+      type: object
+      description: Registry entry combined with tracing-derived counters.
+      required:
+        - name
+        - display_name
+        - description
+        - tags
+        - require_leader_election
+        - task_count
+        - source
+        - started_at
+        - last_event_at
+        - last_warning_at
+        - last_error_at
+        - events_total
+        - warnings_total
+        - errors_total
+        - status
+      properties:
+        name:
+          type: string
+          description: Unique flow name.
+        display_name:
+          type: string
+          nullable: true
+          description: |
+            Human-readable name taken from `labels.display_name`. UI
+            falls back to `name` when absent.
+        description:
+          type: string
+          nullable: true
+          description: Optional description taken from the `description` label.
+        tags:
+          type: array
+          description: Tags taken from the `tags` label array (empty when none).
+          items:
+            type: string
+        require_leader_election:
+          type: boolean
+          description: Whether the flow requires distributed leader election.
+        task_count:
+          type: integer
+          minimum: 0
+          description: Number of tasks in the flow.
+        source:
+          type: string
+          description: Where the config was loaded from.
+          enum: [filesystem, cache]
+        started_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: RFC 3339 timestamp of when the flow supervisor was spawned.
+        last_event_at:
+          type: string
+          nullable: true
+          format: date-time
+          description: |
+            RFC 3339 timestamp of the most recent `info!` inside a
+            `task.handle` scope. Null when the flow has never
+            processed an event.
+        last_warning_at:
+          type: string
+          nullable: true
+          format: date-time
+        last_error_at:
+          type: string
+          nullable: true
+          format: date-time
+        events_total:
+          type: integer
+          format: int64
+          minimum: 0
+        warnings_total:
+          type: integer
+          format: int64
+          minimum: 0
+        errors_total:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          $ref: "#/components/schemas/FlowStatus"
+
+    FlowStatus:
+      type: string
+      description: |
+        Coarse status derived from the last-seen info / warn / error
+        timestamps. Wins by recency — an error after an info stays
+        `error` until the next info arrives.
+      enum: [idle, running, warning, error]
+
+    FlowDetail:
+      type: object
+      required: [name, display_name, yaml]
+      properties:
+        name:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        yaml:
+          type: string
+          description: Raw YAML source of the flow config.
+
+    ResourceSummary:
+      type: object
+      required: [key, extension, size]
+      properties:
+        key:
+          type: string
+          description: Resource key relative to the loader's base path.
+        extension:
+          type: string
+          nullable: true
+          description: Filename extension — used by the UI to pick a viewer.
+        size:
+          type: integer
+          nullable: true
+          format: int64
+          minimum: 0
+          description: File size in bytes; null for cache-backed entries.
+
+    ResourceContent:
+      type: object
+      required: [key, extension, content]
+      properties:
+        key:
+          type: string
+        extension:
+          type: string
+          nullable: true
+        content:
+          type: string
+          description: UTF-8 file contents.
+
+    VersionInfo:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: string
+          description: SemVer version derived from `CARGO_PKG_VERSION`.

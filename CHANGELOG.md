@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.127.0
+
+### Features
+
+- **Generated `flowgen_client` crate + `openapi.yaml` spec.** The
+  admin API (`/api/flows`, `/api/flows/{name}`, `/api/flows/stream`,
+  `/api/resources`, `/api/resources/{key}`, `/api/version`) and the
+  health endpoints (`/livez`, `/readyz`, `/healthz`) are now
+  described by `flowgen/api/client/openapi.yaml`, from which
+  `flowgen_client` is generated via `progenitor` at build time.
+  Consumers (web UI, CLI, external tooling) can depend on the crate
+  or fetch the spec directly.
+
+### Fixes
+
+- **Admin web UI works at any `web.path`.** The SvelteKit bundle
+  hardcodes `/flowgen` as its base at build time. `serve_embedded`
+  now rewrites `/flowgen/…` and bare `"/flowgen"` in every text
+  asset to whatever `web.path` the operator set, so mounting the UI
+  on `/`, `/admin`, or any custom prefix works without a rebuild.
+
 ## 0.126.0
 
 ### Fixes

@@ -1,11 +1,12 @@
 {
 	"name": "flowgen-web",
-	"version": "0.126.0",
+	"version": "0.127.0",
 	"private": true,
 	"scripts": {
 		"sync-icons": "node scripts/sync-icons.mjs",
-		"predev": "npm run sync-icons",
-		"prebuild": "npm run sync-icons",
+		"gen-api": "openapi-typescript ../flowgen/api/client/openapi.yaml -o src/lib/api/generated.ts",
+		"predev": "npm run sync-icons && npm run gen-api",
+		"prebuild": "npm run sync-icons && npm run gen-api",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
@@ -19,6 +20,7 @@
 		"@tailwindcss/vite": "^4.2.1",
 		"@types/prismjs": "^1.26.6",
 		"daisyui": "^5.5.19",
+		"openapi-typescript": "^7.4.0",
 		"prettier": "^3.8.3",
 		"prettier-plugin-svelte": "^3.5.1",
 		"svelte": "^5.55.5",

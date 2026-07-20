@@ -6,13 +6,7 @@
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
-	import { apiUrl } from '$lib/api';
-
-	interface ResourceContent {
-		key: string;
-		extension: string | null;
-		content: string;
-	}
+	import { apiUrl, type ResourceContent } from '$lib/api';
 
 	let content = $state<ResourceContent | null>(null);
 	let loading = $state(true);

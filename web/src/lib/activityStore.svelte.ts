@@ -6,11 +6,11 @@
 // double-count, and keeps rAF batching centralized.
 
 import { browser } from '$app/environment';
-import { apiUrl } from '$lib/api';
+import { apiUrl, type FlowStatus } from '$lib/api';
 import { rafBatch } from '$lib/rafBatch';
 
 export type ActivityLevel = 'info' | 'warning' | 'error';
-export type FlowStatus = 'idle' | 'running' | 'warning' | 'error';
+export type { FlowStatus };
 
 export interface FlowMetricsSnapshot {
 	flow: string;

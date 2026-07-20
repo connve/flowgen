@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 flowgen_core = { path = "../core" }
+flowgen_client = { workspace = true }
 flowgen_http = { path = "../http" }
 flowgen_html = { path = "../html" }
 flowgen_salesforce = { path = "../salesforce" }

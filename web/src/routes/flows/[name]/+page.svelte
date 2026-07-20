@@ -4,14 +4,8 @@
 	import { onMount } from 'svelte';
 	import Icon from '@iconify/svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
-	import { apiUrl } from '$lib/api';
+	import { apiUrl, type FlowDetail } from '$lib/api';
 	import { activitiesFor } from '$lib/activityStore.svelte';
-
-	interface FlowDetail {
-		name: string;
-		display_name: string | null;
-		yaml: string;
-	}
 
 	let detail = $state<FlowDetail | null>(null);
 	let loading = $state(true);

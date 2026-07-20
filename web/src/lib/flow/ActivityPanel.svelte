@@ -12,6 +12,18 @@
 		message: string;
 		duration_ms?: number;
 		event_id?: string;
+		extra?: Array<[string, string]>;
+	}
+
+	// Some upstream sites emit a generic message (e.g. rig-core's "SSE error")
+	// and stash the useful cause in an `error` / `err` attribute. Surface a
+	// truncated version inline so the row conveys context without a click.
+	function enrichedMessage(a: Activity): string {
+		if (!a.extra) return a.message;
+		const cause = a.extra.find(([k]) => k === 'error' || k === 'err');
+		if (!cause) return a.message;
+		const snippet = cause[1].slice(0, 120);
+		return `${a.message} — ${snippet}`;
 	}
 
 	function formatDuration(ms: number | undefined): string {
@@ -377,7 +389,9 @@
 						<span class="truncate font-mono opacity-60" title={event.event_id ?? ''}>
 							{event.event_id ?? '—'}
 						</span>
-						<span class="truncate font-mono opacity-70" title={event.message}>{event.message}</span>
+						<span class="truncate font-mono opacity-70" title={enrichedMessage(event)}
+							>{enrichedMessage(event)}</span
+						>
 					</button>
 				{/each}
 				<div style="height: {bottomPad}px"></div>
@@ -388,7 +402,7 @@
 
 {#if selected}
 	<div
-		class="fixed inset-y-0 right-0 z-40 flex w-full max-w-xl flex-col border-l border-base-200 bg-base-100 shadow-xl"
+		class="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l border-base-200 bg-base-100 shadow-xl"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Activity detail"
@@ -448,10 +462,13 @@
 		{#if selected.extra && selected.extra.length > 0}
 			<div class="border-t border-base-200 px-4 py-2">
 				<div class="pb-1 text-xs opacity-50">Attributes</div>
-				<dl class="grid grid-cols-[10rem_1fr] gap-x-4 gap-y-1 text-xs">
+				<dl class="grid grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
 					{#each selected.extra as [key, value] (key)}
 						<dt class="truncate font-mono opacity-70" title={key}>{key}</dt>
-						<dd class="whitespace-pre-wrap break-words font-mono opacity-80">{value}</dd>
+						<dd class="min-w-0">
+							<pre
+								class="max-h-64 overflow-auto whitespace-pre-wrap break-all font-mono opacity-80">{value}</pre>
+						</dd>
 					{/each}
 				</dl>
 			</div>

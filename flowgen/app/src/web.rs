@@ -12,10 +12,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use flowgen_client::types as api;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use rust_embed::RustEmbed;
-use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -26,55 +26,12 @@ pub const DEFAULT_WEB_PORT: u16 = 8080;
 /// Default path prefix for the admin web UI.
 pub const DEFAULT_WEB_PATH: &str = "/";
 
-/// Summary of a loaded flow returned by the admin API. Combines static
-/// registration data (name, description, tags…) with live counters
-/// pulled from the FlowRegistry the tracing layer maintains.
-#[derive(Debug, Clone, Serialize)]
-pub struct FlowSummary {
-    /// Unique flow name.
-    pub name: String,
-    /// Human-readable name taken from `labels.display_name`. UI falls back to
-    /// `name` when absent.
-    pub display_name: Option<String>,
-    /// Optional description taken from the `description` label.
-    pub description: Option<String>,
-    /// Tags taken from the `tags` label array (empty when none).
-    pub tags: Vec<String>,
-    /// Whether the flow requires leader election.
-    pub require_leader_election: bool,
-    /// Number of tasks in the flow.
-    pub task_count: usize,
-    /// Source of the flow configuration: "filesystem" or "cache".
-    pub source: String,
-    /// RFC 3339 timestamp of when the flow supervisor was spawned.
-    pub started_at: Option<String>,
-    /// RFC 3339 timestamp of the most recent info!() inside a task.handle
-    /// scope; `None` when the flow has never processed an event yet.
-    pub last_event_at: Option<String>,
-    /// Same as above but for warn!().
-    pub last_warning_at: Option<String>,
-    /// Same as above but for error!().
-    pub last_error_at: Option<String>,
-    /// Total successful events since process start.
-    pub events_total: u64,
-    /// Total warn events since process start.
-    pub warnings_total: u64,
-    /// Total error events since process start.
-    pub errors_total: u64,
-    /// Coarse status derived from the three "last_*_at" timestamps.
-    pub status: flowgen_core::flow::activity::FlowStatus,
-}
+/// Base path the SvelteKit bundle was compiled with (`PUBLIC_BASE`
+/// in `web/svelte.config.js`). `serve_embedded` rewrites this to
+/// whatever `web.path` was configured.
+const BUILT_BASE_PATH: &str = "/flowgen";
 
-/// Full flow detail returned by `GET /api/flows/{name}` for the inspector modal.
-#[derive(Debug, Clone, Serialize)]
-pub struct FlowDetail {
-    /// Flow name (echoed back for the client).
-    pub name: String,
-    /// Human-readable name taken from `labels.display_name`.
-    pub display_name: Option<String>,
-    /// YAML source of the flow config as loaded from disk / cache.
-    pub yaml: String,
-}
+// Response types come from `flowgen_client::types` — see openapi.yaml.
 
 /// Errors that can occur while running the admin web server.
 #[derive(thiserror::Error, Debug)]
@@ -118,29 +75,6 @@ pub struct WebState {
     pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
 }
 
-/// Summary of a resource returned by the admin API.
-#[derive(Debug, Clone, Serialize)]
-pub struct ResourceSummary {
-    /// Resource key relative to the loader's base path (e.g. `"gcp/create_demo_tables.sql"`).
-    pub key: String,
-    /// Filename extension (`sql`, `md`, `yaml`, …) — used by the UI to pick
-    /// a syntax hint and a viewer.
-    pub extension: Option<String>,
-    /// File size in bytes when known, `None` for cache-backed entries.
-    pub size: Option<u64>,
-}
-
-/// Full-content resource response.
-#[derive(Debug, Clone, Serialize)]
-pub struct ResourceContent {
-    /// Resource key echoed back for the client.
-    pub key: String,
-    /// Filename extension (`sql`, `md`, `yaml`, …).
-    pub extension: Option<String>,
-    /// UTF-8 file contents.
-    pub content: String,
-}
-
 /// Starts the admin web server on the given port.
 ///
 /// The server mounts the embedded UI at `path` and exposes `GET /api/flows`
@@ -160,6 +94,7 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
         .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
         .route(&format!("{api_prefix}/flows/{{name}}"), get(get_flow))
         .route(&format!("{api_prefix}/version"), get(get_version))
+        .route(&format!("{api_prefix}/openapi.yaml"), get(get_openapi))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
         .route(
             &format!("{api_prefix}/resources/{{*key}}"),
@@ -200,11 +135,10 @@ async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 fn build_summary(
     handle: &crate::app::FlowHandle,
     activity: &flowgen_core::flow::activity::FlowRegistry,
-) -> FlowSummary {
-    let started_at = system_time_to_rfc3339(handle.started_at());
+) -> api::FlowSummary {
     let source = match handle.from_filesystem {
-        true => "filesystem".to_string(),
-        false => "cache".to_string(),
+        true => api::FlowSummarySource::Filesystem,
+        false => api::FlowSummarySource::Cache,
     };
     let snapshot = activity.snapshot(handle.flow_name());
     let (
@@ -217,58 +151,54 @@ fn build_summary(
         status,
     ) = match snapshot {
         Some(s) => (
-            s.last_event_at_ms.and_then(ms_to_rfc3339),
-            s.last_warning_at_ms.and_then(ms_to_rfc3339),
-            s.last_error_at_ms.and_then(ms_to_rfc3339),
+            s.last_event_at_ms.and_then(ms_to_datetime),
+            s.last_warning_at_ms.and_then(ms_to_datetime),
+            s.last_error_at_ms.and_then(ms_to_datetime),
             s.events_total,
             s.warnings_total,
             s.errors_total,
-            s.status,
+            core_status_to_api(s.status),
         ),
-        None => (
-            None,
-            None,
-            None,
-            0,
-            0,
-            0,
-            flowgen_core::flow::activity::FlowStatus::Idle,
-        ),
+        None => (None, None, None, 0, 0, 0, api::FlowStatus::Idle),
     };
-    FlowSummary {
+    api::FlowSummary {
         name: handle.flow_name().to_string(),
         display_name: handle.display_name().map(ToString::to_string),
         description: handle.description().map(ToString::to_string),
         tags: handle.tags().to_vec(),
         require_leader_election: handle.require_leader_election(),
-        task_count: handle.task_count(),
+        task_count: handle.task_count() as u64,
         source,
-        started_at,
+        started_at: system_time_to_datetime(handle.started_at()),
         last_event_at,
         last_warning_at,
         last_error_at,
-        events_total,
-        warnings_total,
-        errors_total,
+        events_total: events_total as i64,
+        warnings_total: warnings_total as i64,
+        errors_total: errors_total as i64,
         status,
     }
 }
 
-fn system_time_to_rfc3339(t: std::time::SystemTime) -> Option<String> {
-    match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => {
-            let secs = d.as_secs() as i64;
-            let nsecs = d.subsec_nanos();
-            chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs).map(|dt| dt.to_rfc3339())
-        }
-        Err(_) => None,
+fn core_status_to_api(s: flowgen_core::flow::activity::FlowStatus) -> api::FlowStatus {
+    use flowgen_core::flow::activity::FlowStatus as Core;
+    match s {
+        Core::Idle => api::FlowStatus::Idle,
+        Core::Running => api::FlowStatus::Running,
+        Core::Warning => api::FlowStatus::Warning,
+        Core::Error => api::FlowStatus::Error,
     }
 }
 
-fn ms_to_rfc3339(ms: u64) -> Option<String> {
+fn system_time_to_datetime(t: std::time::SystemTime) -> Option<chrono::DateTime<chrono::Utc>> {
+    let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+}
+
+fn ms_to_datetime(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
     let secs = (ms / 1000) as i64;
     let nsecs = ((ms % 1000) * 1_000_000) as u32;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs).map(|dt| dt.to_rfc3339())
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs)
 }
 
 /// Returns the YAML source of a single flow so operators can inspect the
@@ -276,7 +206,7 @@ fn ms_to_rfc3339(ms: u64) -> Option<String> {
 async fn get_flow(
     State(state): State<Arc<WebState>>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<FlowDetail>, (StatusCode, String)> {
+) -> Result<Json<api::FlowDetail>, (StatusCode, String)> {
     let Ok(registry) = state.flow_registry.read() else {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -284,7 +214,7 @@ async fn get_flow(
         ));
     };
     match registry.get(&name) {
-        Some(handle) => Ok(Json(FlowDetail {
+        Some(handle) => Ok(Json(api::FlowDetail {
             name: handle.flow_name().to_string(),
             display_name: handle.display_name().map(ToString::to_string),
             yaml: handle.flow_yaml().to_string(),
@@ -453,7 +383,7 @@ fn activity_from_stored(
 /// Returns the list of resources discoverable from the filesystem loader.
 /// Cache-backed loaders are not walked today (no listing API on the cache
 /// abstraction); those installations get an empty list until we add one.
-async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<ResourceSummary>> {
+async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<api::ResourceSummary>> {
     let Some(loader) = &state.resource_loader else {
         return Json(Vec::new());
     };
@@ -461,7 +391,7 @@ async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<Resource
         return Json(Vec::new());
     };
 
-    let mut entries: Vec<ResourceSummary> = walkdir::WalkDir::new(base)
+    let mut entries: Vec<api::ResourceSummary> = walkdir::WalkDir::new(base)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
@@ -474,8 +404,8 @@ async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<Resource
                 .extension()
                 .and_then(|s| s.to_str())
                 .map(str::to_string);
-            let size = e.metadata().ok().map(|m| m.len());
-            Some(ResourceSummary {
+            let size = e.metadata().ok().map(|m| m.len() as i64);
+            Some(api::ResourceSummary {
                 key,
                 extension,
                 size,
@@ -490,7 +420,7 @@ async fn list_resources(State(state): State<Arc<WebState>>) -> Json<Vec<Resource
 async fn get_resource(
     State(state): State<Arc<WebState>>,
     AxumPath(key): AxumPath<String>,
-) -> Result<Json<ResourceContent>, (StatusCode, String)> {
+) -> Result<Json<api::ResourceContent>, (StatusCode, String)> {
     let Some(loader) = &state.resource_loader else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -508,7 +438,7 @@ async fn get_resource(
                 .extension()
                 .and_then(|s| s.to_str())
                 .map(str::to_string);
-            Ok(Json(ResourceContent {
+            Ok(Json(api::ResourceContent {
                 key,
                 extension,
                 content,
@@ -519,14 +449,20 @@ async fn get_resource(
 }
 
 /// Returns the running flowgen version so the UI can render it in the sidebar.
-async fn get_version() -> impl IntoResponse {
-    #[derive(serde::Serialize)]
-    struct Version {
-        version: &'static str,
-    }
-    Json(Version {
-        version: env!("CARGO_PKG_VERSION"),
+async fn get_version() -> Json<api::VersionInfo> {
+    Json(api::VersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Returns the bundled OpenAPI spec.
+async fn get_openapi() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/yaml"),
+    );
+    (StatusCode::OK, headers, flowgen_client::OPENAPI_YAML)
 }
 
 /// Serves a file from the embedded asset folder.
@@ -550,28 +486,53 @@ async fn serve_embedded(State(state): State<Arc<WebState>>, uri: Uri) -> axum::r
         rest => rest.to_string(),
     };
 
-    match WebAssets::get(&path) {
-        Some(content) => {
-            let content_type = mime_guess::from_path(&path).first_or_octet_stream();
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                axum::http::header::CONTENT_TYPE,
-                content_type.to_string().parse().unwrap(),
-            );
-            (StatusCode::OK, headers, content.data).into_response()
-        }
+    let (asset_path, content) = match WebAssets::get(&path) {
+        Some(content) => (path, content),
         None => match WebAssets::get("index.html") {
-            Some(content) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/html".parse().unwrap(),
-                );
-                (StatusCode::OK, headers, content.data).into_response()
-            }
-            None => (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new()).into_response(),
+            Some(content) => ("index.html".to_string(), content),
+            None => return (StatusCode::NOT_FOUND, HeaderMap::new(), Vec::new()).into_response(),
         },
+    };
+
+    let content_type = mime_guess::from_path(&asset_path).first_or_octet_stream();
+    let content_type_header = match axum::http::HeaderValue::from_str(content_type.as_ref()) {
+        Ok(v) => v,
+        Err(_) => axum::http::HeaderValue::from_static("application/octet-stream"),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(axum::http::header::CONTENT_TYPE, content_type_header);
+
+    let body = match rewrite_base_path(&asset_path, &content.data, &state.prefix) {
+        Some(rewritten) => rewritten,
+        None => content.data.into_owned(),
+    };
+
+    (StatusCode::OK, headers, body).into_response()
+}
+
+/// Rewrites `BUILT_BASE_PATH` occurrences in text assets to `prefix`.
+/// Returns `None` for binary assets or when `prefix == BUILT_BASE_PATH`.
+fn rewrite_base_path(asset_path: &str, bytes: &[u8], prefix: &str) -> Option<Vec<u8>> {
+    if prefix == BUILT_BASE_PATH {
+        return None;
     }
+    let ext = asset_path.rsplit('.').next()?;
+    match ext {
+        "html" | "js" | "css" | "json" | "map" | "webmanifest" => {}
+        _ => return None,
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    // Slashed form first so the bare replace does not overwrite
+    // asset URLs that share the `/flowgen` prefix.
+    let slashed_replacement = match prefix {
+        "" => "/".to_string(),
+        other => format!("{other}/"),
+    };
+    let slashed_needle = format!("{BUILT_BASE_PATH}/");
+    let rewritten = text
+        .replace(&slashed_needle, &slashed_replacement)
+        .replace(BUILT_BASE_PATH, prefix);
+    Some(rewritten.into_bytes())
 }
 
 #[cfg(test)]
@@ -596,5 +557,62 @@ mod tests {
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn rewrite_base_path_is_noop_when_prefix_matches_build() {
+        let html = br#"<script src="/flowgen/_app/foo.js"></script>"#;
+        let out = rewrite_base_path("index.html", html, BUILT_BASE_PATH);
+        assert!(out.is_none(), "no rewrite needed when prefix == built base");
+    }
+
+    #[test]
+    fn rewrite_base_path_replaces_prefix_in_html() {
+        let html = br#"<script src="/flowgen/_app/foo.js"></script>"#;
+        let out = rewrite_base_path("index.html", html, "/ortofan").expect("rewrite");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(text, r#"<script src="/ortofan/_app/foo.js"></script>"#);
+    }
+
+    #[test]
+    fn rewrite_base_path_replaces_prefix_in_js() {
+        let js = br#"const base = "/flowgen"; fetch("/flowgen/api/flows");"#;
+        let out = rewrite_base_path("app.js", js, "/nested/path").expect("rewrite");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert!(text.contains(r#"fetch("/nested/path/api/flows")"#));
+        assert!(text.contains(r#"const base = "/nested/path""#));
+    }
+
+    #[test]
+    fn rewrite_base_path_replaces_both_bare_and_slashed_forms() {
+        let html = br#"<script>base="/flowgen"</script><link href="/flowgen/style.css">"#;
+        let out = rewrite_base_path("index.html", html, "/test").expect("rewrite");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(
+            text,
+            r#"<script>base="/test"</script><link href="/test/style.css">"#
+        );
+    }
+
+    #[test]
+    fn rewrite_base_path_maps_empty_prefix_to_root() {
+        let html = br#"<link href="/flowgen/style.css">"#;
+        let out = rewrite_base_path("index.html", html, "").expect("rewrite");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(text, r#"<link href="/style.css">"#);
+    }
+
+    #[test]
+    fn rewrite_base_path_skips_binary_assets() {
+        let png = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        let out = rewrite_base_path("logo.png", png, "/anything");
+        assert!(out.is_none(), "binary assets must not be rewritten");
+    }
+
+    #[test]
+    fn rewrite_base_path_returns_input_when_no_hits() {
+        let css = br#"body { color: red; }"#;
+        let out = rewrite_base_path("style.css", css, "/other").expect("rewrite");
+        assert_eq!(out, css);
     }
 }

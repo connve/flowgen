@@ -179,15 +179,40 @@ OpenAI-compatible LLM gateway that serves every registered `llm_proxy` flow.
 
 ## `web`
 
-Embedded admin dashboard for inspecting loaded flows and resources at runtime.
+Embedded admin dashboard and read-only JSON API.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | required | Set `true` to start the admin server. |
+| `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
-| `path` | string | `/` | Path prefix. Use a subpath (e.g. `/flowgen`) when co-hosting under a tenant subdomain like `tenant.example.com/flowgen`. |
+| `path` | string | `/` | Path prefix for both the UI and the API. |
 
-The UI lists loaded flows with description, tags, status, and last-run timestamp; click a row to preview the raw source YAML with syntax highlighting. A Resources tab browses everything under the configured `resources.path` and renders `.md` files as HTML plus code files (SQL, YAML, JSON, Rhai, JS/TS, Bash, Python) with Prism.
+The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.yaml`.
+
+| Endpoint | Description |
+|---|---|
+| `GET <path>/api/flows` | List loaded flows with live counters. |
+| `GET <path>/api/flows/{name}` | Full YAML source of one flow. |
+| `GET <path>/api/flows/stream` | Server-Sent Events with `snapshot` and `activity` frames. |
+| `GET <path>/api/resources` | List discoverable resources. |
+| `GET <path>/api/resources/{key}` | Fetch one resource's content. |
+| `GET <path>/api/version` | Running build version. |
+| `GET <path>/api/openapi.yaml` | The spec itself. |
+
+## `health`
+
+Kubernetes liveness/readiness listener.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enable the listener. |
+| `port` | int | `8081` | Listening port. |
+
+| Endpoint | Response |
+|---|---|
+| `GET /livez` | `200 OK`. |
+| `GET /readyz` | `200 OK` once at least one flow is registered, `503` before. |
+| `GET /healthz` | Alias of `/livez`. |
 
 ## `retry`
 

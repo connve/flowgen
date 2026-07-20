@@ -1,5 +1,5 @@
 [workspace]
-members = ["flowgen/app", "charts/flowgen/tests"]
+members = ["flowgen/app", "flowgen/api/client", "charts/flowgen/tests"]
 # `flowgen-chart-tests` shells out to the `helm` binary, which is not
 # available in every environment. Excluding it from default-members means
 # `cargo test` at the root only touches the main app; the helm-chart tests
@@ -19,7 +19,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.126.0"
+version = "0.127.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -53,6 +53,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 serde_yaml = { version = "0.9" }
+progenitor = { version = "0.13" }
+progenitor-client = { version = "0.13" }
+openapiv3 = { version = "2.2", default-features = false }
+flowgen_client = { path = "flowgen/api/client" }
 tokio = { version = "1.48", features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["compat"] }

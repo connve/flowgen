@@ -8,32 +8,7 @@
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
-
-	type FlowStatus = 'idle' | 'running' | 'warning' | 'error';
-
-	interface Flow {
-		name: string;
-		display_name: string | null;
-		description: string | null;
-		tags: string[];
-		require_leader_election: boolean;
-		task_count: number;
-		source: string;
-		started_at: string | null;
-		last_event_at: string | null;
-		last_warning_at: string | null;
-		last_error_at: string | null;
-		events_total: number;
-		warnings_total: number;
-		errors_total: number;
-		status: FlowStatus;
-	}
-
-	interface FlowDetail {
-		name: string;
-		display_name: string | null;
-		yaml: string;
-	}
+	import type { FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
 
 	interface FlowActivity {
 		flow: string;

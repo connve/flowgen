@@ -7,19 +7,7 @@
 	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
 	import Icon from '@iconify/svelte';
-	import { apiUrl } from '$lib/api';
-
-	interface Resource {
-		key: string;
-		extension: string | null;
-		size: number | null;
-	}
-
-	interface ResourceContent {
-		key: string;
-		extension: string | null;
-		content: string;
-	}
+	import { apiUrl, type ResourceSummary as Resource, type ResourceContent } from '$lib/api';
 
 	// Node in the collapsible resource tree — either a folder (with children
 	// nested one level deep) or a leaf file.
