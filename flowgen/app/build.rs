@@ -28,7 +28,7 @@ fn main() {
     let npm = which_npm();
     let node_modules = web_dir.join("node_modules");
     if !node_modules.exists() {
-        run(&npm, &["ci"], &web_dir, "npm ci");
+        run(&npm, &["ci", "--legacy-peer-deps"], &web_dir, "npm ci");
     }
     run(&npm, &["run", "build"], &web_dir, "npm run build");
 
