@@ -1,5 +1,96 @@
 # Changelog
 
+## 0.128.0
+
+### Breaking
+
+- **Flow identity is the file path, not `flow.name`.** A flow's identity
+  is now the file path relative to `flows.path` with the extension
+  stripped (e.g. `flows/demo/salesforce/reader.yaml` → identity
+  `demo/salesforce/reader`). This value drives the registry key, cache
+  namespaces, MCP URIs, activity keys, and the tracing `flow=` field.
+  Two flows with the same basename in different folders no longer
+  collide. The YAML `flow.name` field is now optional and only
+  meaningful when a flow is constructed programmatically (e.g. via the
+  admin API) without a filesystem path. `FlowConfig` validation rejects
+  configs without either a `source_path` or a `name`. Rhai `ctx.cache`
+  keys owned by flows loaded from a nested path change from
+  `<basename>.<key>` to `<full/path>.<key>` — cached state under old
+  keys becomes orphaned on upgrade.
+
+- **`log` task: `structured` field removed; body is always pretty JSON.**
+  The `structured` boolean is gone. The log line body is now always the
+  pretty-printed JSON of `event.data`, and the event `id` / `subject`
+  are emitted as structured tracing fields (`event.id`,
+  `event.subject`). A leftover `structured: true` in YAML is silently
+  ignored. Use `include_meta: true` to fold `event.meta` into the body.
+
+- **`FlowStatus` API enum renamed.** The admin API `status` value on
+  `/api/flows` changes `running` → `ok` and `warning` → `warn`
+  (`idle` and `error` unchanged). External consumers of the flow list
+  that match on these strings must update.
+
+- **JWT HMAC secret is redacted when config is serialized.** The
+  `auth.secret` field (MCP server / AI gateway JWT config) is now a
+  `secrecy::SecretString`: it never appears in `Debug` output or logs,
+  and serializes as `"***"`. The system config viewer therefore shows
+  `secret: "***"` instead of the plaintext key. Token validation is
+  unchanged. Anything that serialized this config and read the value
+  back out would now get `"***"` — the runtime never round-trips config
+  from its serialized form, so this only affects the read-only viewer.
+
+### Features
+
+- **System console at `/system`.** A new read-only admin view (reached
+  from the sidebar footer) renders the running `AppConfig` as YAML so
+  operators can inspect cache, telemetry, server, and flow settings
+  without shelling into the pod. Secrets are redacted (see above).
+  Backed by `GET /api/config`.
+
+- **Global log viewer at `/logs`.** A new admin UI tab streams every
+  retained log record (framework, lifecycle, and per-task activity) with
+  level filters, free-text search, live tail with pause/resume, a
+  detail drawer, and an adjustable line limit (default 1000, up to
+  10000). Backed by `GET /api/logs` (snapshot, `?limit=` capped at
+  10000) and `GET /api/logs/stream` (SSE). The per-flow activity feed
+  (`/api/flows/stream`) is a client-filtered subset of the same source;
+  both now ship the raw `LogRecord` shape and classify client-side.
+
+- **Three-way theme toggle.** The admin UI theme control is now
+  System / Light / Dark. `System` tracks the OS `prefers-color-scheme`
+  and reacts to it changing at runtime; the choice persists under the
+  `flowgen-theme` localStorage key (values `system` | `light` | `dark`,
+  replacing the previous boolean).
+
+- **Version badge links to release notes.** The version badge in the
+  sidebar footer links to the matching GitHub release
+  (`github.com/connve/flowgen/releases/tag/v<version>`).
+
+- **Activity events surface task-scope failures.** The admin UI's per-
+  flow activity panel now shows warnings and errors emitted from any
+  span inside `task.run` or `task.handle`, not just successful event
+  handling. Subscriber init failures ("Subscriber initialization
+  failed", DNS errors, permission denied) that used to only bump the
+  error counter without appearing in the feed are now visible with
+  their full context. Framework logs outside task scope (leader
+  election, HTTP server startup, cache reconnects) remain excluded.
+
+### Fixes
+
+- **Admin UI folder sidebar.** Flows and resources pages get a
+  collapsible folder tree derived from the identity path. Breadcrumb
+  shows the selected scope; row display is `display_name` (bold) +
+  path (mono, dimmed). Persists collapsed state per view.
+
+### Internal
+
+- **`activity = true` marker removed from every processor.** Activity
+  classification is now purely topological (span chain contains
+  `task.run` or `task.handle`) instead of a per-emit boolean that every
+  processor had to remember to declare. `StoredLog` gains structural
+  fields (`level`, `timestamp`, `target`, `spans: Vec<StoredSpan>`,
+  `fields`) so consumers no longer parse a flat `attributes` bag.
+
 ## 0.127.0
 
 ### Features

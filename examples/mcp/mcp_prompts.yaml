@@ -8,7 +8,10 @@
 #       resources/mcp/completions/tone.txt
 #       resources/mcp/completions/languages.txt
 flow:
-  name: mcp_prompts_examples
+  labels:
+    display_name: "MCP Prompts"
+    description: "Registers slash-command prompt templates (single- and multi-message, with argument completions) that the MCP server serves to clients via prompts/list and prompts/get."
+    tags: ["mcp", "prompts", "completion", "example"]
   tasks:
 
     # Single-message prompt. `template` renders as one user turn.

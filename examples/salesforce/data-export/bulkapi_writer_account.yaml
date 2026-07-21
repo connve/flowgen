@@ -13,7 +13,10 @@
 #   - NATS_URL, GCP_PROJECT_ID, GCS_BUCKET_PATH env vars
 #   - resources/salesforce/schema_account.json
 flow:
-  name: salesforce_bulkapi_writer_account
+  labels:
+    display_name: "Salesforce Account Bulk Writer"
+    description: "Consumes Account query results from NATS, casts them to an Arrow schema, and fans out to an object-store archive and a BigQuery upsert table."
+    tags: ["salesforce", "bulk-api", "bigquery", "object-store", "example"]
   tasks:
 
     - nats_jetstream_subscriber:

@@ -10,7 +10,10 @@
 #   - /etc/nats/credentials.json
 #   - NATS_URL env var
 flow:
-  name: salesforce_bulkapi_job_listener
+  labels:
+    display_name: "Salesforce Bulk API Job Listener"
+    description: "Subscribes to BulkApi2JobEvent notifications, downloads completed Bulk API query results as Arrow batches, and publishes them to NATS on a per-object subject."
+    tags: ["salesforce", "bulk-api", "export", "nats", "example"]
   require_leader_election: true
   tasks:
 

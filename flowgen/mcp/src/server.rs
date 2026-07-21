@@ -1025,9 +1025,10 @@ fn record_resource_read_activity(flow_name: &str, task_name: &str, uri: &str) {
         task_id = 0,
         task_type = "mcp_resource",
     );
-    tracing::info_span!(parent: &run_span, "task.handle", activity = true, duration_ms = tracing::field::Empty).in_scope(|| {
-        info!(resource = %uri, event.subject = %uri, "MCP resource read");
-    });
+    tracing::info_span!(parent: &run_span, "task.handle", duration_ms = tracing::field::Empty)
+        .in_scope(|| {
+            info!(resource = %uri, event.subject = %uri, "MCP resource read");
+        });
 }
 
 fn resource_read_response(
@@ -1180,13 +1181,14 @@ async fn handle_prompts_get(
         task_id = 0,
         task_type = "mcp_prompt",
     );
-    tracing::info_span!(parent: &run_span, "task.handle", activity = true, duration_ms = tracing::field::Empty).in_scope(|| {
-        info!(
-            prompt = %params.name,
-            event.subject = %params.name,
-            "MCP prompt rendered"
-        );
-    });
+    tracing::info_span!(parent: &run_span, "task.handle", duration_ms = tracing::field::Empty)
+        .in_scope(|| {
+            info!(
+                prompt = %params.name,
+                event.subject = %params.name,
+                "MCP prompt rendered"
+            );
+        });
 
     json_rpc_response(
         request.id,
@@ -1437,14 +1439,15 @@ async fn execute_tool_call(
         task_id = 0,
         task_type = "mcp_tool",
     );
-    tracing::info_span!(parent: &run_span, "task.handle", activity = true, duration_ms = tracing::field::Empty).in_scope(|| {
-        info!(
-            tool = %params.name,
-            event.subject = %params.name,
-            correlation_id = %correlation_id,
-            "MCP tool invoked"
-        );
-    });
+    tracing::info_span!(parent: &run_span, "task.handle", duration_ms = tracing::field::Empty)
+        .in_scope(|| {
+            info!(
+                tool = %params.name,
+                event.subject = %params.name,
+                correlation_id = %correlation_id,
+                "MCP tool invoked"
+            );
+        });
 
     let response_registry = Arc::clone(&state.extras.response_registry);
     let cid_for_cleanup = correlation_id.clone();

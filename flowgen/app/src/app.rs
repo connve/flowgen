@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, FlowConfig};
+use crate::config::{AppConfig, FlowConfig, FlowConfigRaw};
 use config::Config;
 use std::{
     collections::{HashMap, HashSet},
@@ -373,28 +373,39 @@ impl App {
                     source,
                 })?;
 
-            match config.try_deserialize::<FlowConfig>() {
-                Ok(mut flow_config) => {
-                    flow_config.raw_source = Some(content.clone());
-                    flow_config.source_path = key
+            match config.try_deserialize::<FlowConfigRaw>() {
+                Ok(raw) => {
+                    let identity_path = match key
                         .strip_prefix(prefix)
                         .and_then(|rest| rest.strip_prefix('.'))
-                        .map(str::to_string);
-                    if let Err(reason) = flow_config.validate() {
-                        error!(
-                            key = %key,
-                            error = %reason,
-                            "Flow config from cache failed name validation, skipping"
-                        );
-                        continue;
+                    {
+                        Some(p) => p.to_string(),
+                        None => {
+                            error!(
+                                key = %key,
+                                prefix = %prefix,
+                                "Cache key does not start with the configured prefix, skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    match FlowConfig::from_path(raw, identity_path, Some(content.clone())) {
+                        Ok(flow_config) => {
+                            info!(
+                                flow = %flow_config.identity(),
+                                key = %key,
+                                "Loaded flow from cache",
+                            );
+                            flow_configs.push((key, flow_config));
+                        }
+                        Err(reason) => {
+                            error!(
+                                key = %key,
+                                error = %reason,
+                                "Flow config from cache failed validation, skipping"
+                            );
+                        }
                     }
-                    info!(
-                        flow = %flow_config.identity(),
-                        key = %key,
-                        source_path = ?flow_config.source_path,
-                        "Loaded flow from cache",
-                    );
-                    flow_configs.push((key, flow_config));
                 }
                 Err(source) => {
                     error!(
@@ -500,25 +511,42 @@ impl App {
                             }
                         };
 
-                        match config.try_deserialize::<FlowConfig>() {
-                            Ok(mut flow_config) => {
-                                flow_config.raw_source = Some(contents);
-                                flow_config.source_path =
-                                    compute_source_path(&canonical_path, source_root.as_deref());
-                                if let Err(reason) = flow_config.validate() {
-                                    error!(
-                                        path = %path.display(),
-                                        error = %reason,
-                                        "Flow config failed name validation, skipping this flow"
-                                    );
-                                    return None;
+                        match config.try_deserialize::<FlowConfigRaw>() {
+                            Ok(raw) => {
+                                let identity_path = match compute_source_path(
+                                    &canonical_path,
+                                    source_root.as_deref(),
+                                ) {
+                                    Some(p) => p,
+                                    None => {
+                                        error!(
+                                            path = %path.display(),
+                                            "Cannot derive flow identity from path (outside `flows.path` or missing root), skipping this flow"
+                                        );
+                                        return None;
+                                    }
+                                };
+                                match FlowConfig::from_path(
+                                    raw,
+                                    identity_path,
+                                    Some(contents),
+                                ) {
+                                    Ok(flow_config) => {
+                                        info!(
+                                            flow = %flow_config.identity(),
+                                            "Loaded flow",
+                                        );
+                                        Some(flow_config)
+                                    }
+                                    Err(reason) => {
+                                        error!(
+                                            path = %path.display(),
+                                            error = %reason,
+                                            "Flow config failed validation, skipping this flow"
+                                        );
+                                        None
+                                    }
                                 }
-                                info!(
-                                    flow = %flow_config.identity(),
-                                    source_path = ?flow_config.source_path,
-                                    "Loaded flow",
-                                );
-                                Some(flow_config)
                             }
                             Err(source) => {
                                 let err = Error::FlowConfigDeserialize {
@@ -1087,6 +1115,7 @@ impl App {
                 resource_loader: resource_loader.clone(),
                 flow_activity: Arc::clone(&self.flow_activity),
                 logs_query: self.logs_query.clone(),
+                app_config: Arc::clone(&app_config),
             };
             let web_handle = tokio::spawn(async move {
                 if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {

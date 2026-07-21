@@ -38,7 +38,6 @@ http_server:
 
 ```yaml
 flow:
-  name: streaming_endpoint
   tasks:
     - http_endpoint:
         name: receive

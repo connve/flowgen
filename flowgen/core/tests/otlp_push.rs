@@ -72,10 +72,21 @@ async fn tracing_events_flow_through_json_writer_into_query_backend() {
     assert!(bodies.contains(&"task.handle failed"));
 
     for record in &records {
-        let attrs: std::collections::HashMap<_, _> = record.attributes.iter().cloned().collect();
-        assert_eq!(attrs.get("flow").map(String::as_str), Some("orders"));
-        assert_eq!(attrs.get("task").map(String::as_str), Some("handle"));
-        assert!(attrs.contains_key("event_id"));
+        let span_field = |key: &str| -> Option<String> {
+            record
+                .spans
+                .iter()
+                .rev()
+                .flat_map(|s| s.fields.iter())
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(span_field("flow").as_deref(), Some("orders"));
+        assert_eq!(span_field("task").as_deref(), Some("handle"));
+        assert!(
+            record.fields.iter().any(|(k, _)| k == "event_id"),
+            "event_id missing from {record:?}"
+        );
     }
 }
 
@@ -209,11 +220,27 @@ async fn non_string_fields_are_stringified_via_json_writer() {
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    let attrs: std::collections::HashMap<_, _> = records[0].attributes.iter().cloned().collect();
-    assert_eq!(attrs.get("task_id").map(String::as_str), Some("7"));
-    assert_eq!(attrs.get("duration_ms").map(String::as_str), Some("123"));
-    assert_eq!(attrs.get("cache_hit").map(String::as_str), Some("true"));
-    assert_eq!(attrs.get("task_type").map(String::as_str), Some("script"));
+    let record = &records[0];
+    let span_field = |key: &str| -> Option<String> {
+        record
+            .spans
+            .iter()
+            .rev()
+            .flat_map(|s| s.fields.iter())
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let event_field = |key: &str| -> Option<String> {
+        record
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(span_field("task_id").as_deref(), Some("7"));
+    assert_eq!(span_field("task_type").as_deref(), Some("script"));
+    assert_eq!(event_field("duration_ms").as_deref(), Some("123"));
+    assert_eq!(event_field("cache_hit").as_deref(), Some("true"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -258,7 +285,7 @@ async fn per_flow_ring_buffer_evicts_oldest_when_full() {
     let idx: Vec<&str> = records
         .iter()
         .filter_map(|r| {
-            r.attributes
+            r.fields
                 .iter()
                 .find(|(k, _)| k == "idx")
                 .map(|(_, v)| v.as_str())

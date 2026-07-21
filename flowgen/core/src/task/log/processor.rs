@@ -42,43 +42,44 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event by logging its data and passing it through.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
+    ///
+    /// Message body is the pretty-printed JSON of `event.data`; identity
+    /// fields (`event_id`, `event.subject`) travel as structured fields
+    /// on the tracing event so they land as top-level attributes in the
+    /// log store (Loki, VictoriaLogs, etc.). `event.meta` is included in
+    /// the body when `include_meta` is true, so per-event logs stay
+    /// scoped to the payload by default.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
 
-        // Build the view to log: by default strip `meta` so per-event log
-        // lines stay scoped to the payload. Operators that want to see the
-        // running meta (correlation ids, stashed batches, etc.) opt in
-        // explicitly via `include_meta: true`. The pass-through event sent
-        // downstream below is unchanged either way — this only controls
-        // what hits the log target.
-        let logged: std::borrow::Cow<'_, Event> = if self.config.include_meta {
-            std::borrow::Cow::Borrowed(&event)
-        } else {
-            let mut view = event.clone();
-            view.meta = None;
-            std::borrow::Cow::Owned(view)
+        let body = format_body(&event, self.config.include_meta);
+        // Match the identifier convention used by `EventLogger`: prefer the
+        // event's assigned `id` (nuid/uuid), fall back to the ingest
+        // timestamp so every log line still carries a per-event identifier
+        // an operator can correlate downstream.
+        let event_id = match &event.id {
+            Some(id) => id.clone(),
+            None => event.timestamp.to_string(),
         };
-
-        if self.config.structured {
-            // Structured logging mode for Grafana/Loki.
-            match self.config.level {
-                super::config::LogLevel::Trace => trace!(event = ?logged),
-                super::config::LogLevel::Debug => debug!(event = ?logged),
-                super::config::LogLevel::Info => info!(event = ?logged),
-                super::config::LogLevel::Warn => warn!(event = ?logged),
-                super::config::LogLevel::Error => error!(event = ?logged),
+        let subject = event.subject.as_str();
+        match self.config.level {
+            super::config::LogLevel::Trace => {
+                trace!(event.id = %event_id, event.subject = subject, "{body}");
             }
-        } else {
-            // Pretty-printed mode for console readability.
-            match self.config.level {
-                super::config::LogLevel::Trace => trace!("{}", logged),
-                super::config::LogLevel::Debug => debug!("{}", logged),
-                super::config::LogLevel::Info => info!("{}", logged),
-                super::config::LogLevel::Warn => warn!("{}", logged),
-                super::config::LogLevel::Error => error!("{}", logged),
+            super::config::LogLevel::Debug => {
+                debug!(event.id = %event_id, event.subject = subject, "{body}");
+            }
+            super::config::LogLevel::Info => {
+                info!(event.id = %event_id, event.subject = subject, "{body}");
+            }
+            super::config::LogLevel::Warn => {
+                warn!(event.id = %event_id, event.subject = subject, "{body}");
+            }
+            super::config::LogLevel::Error => {
+                error!(event.id = %event_id, event.subject = subject, "{body}");
             }
         }
 
@@ -100,6 +101,37 @@ impl EventHandler {
         }
 
         Ok(())
+    }
+}
+
+/// Renders the message body written to the log line: pretty-printed
+/// JSON of `event.data`, with `meta` appended when `include_meta` is
+/// true. Falls back to a debug rendering only when JSON conversion
+/// fails (e.g. binary payloads that cannot be represented as JSON).
+fn format_body(event: &Event, include_meta: bool) -> String {
+    let data = match event.data_as_json() {
+        Ok(v) => v,
+        Err(_) => return format!("{:?}", event.data),
+    };
+    if include_meta {
+        let mut wrapped = serde_json::Map::new();
+        wrapped.insert("data".to_string(), data);
+        wrapped.insert(
+            "meta".to_string(),
+            match &event.meta {
+                Some(m) => serde_json::Value::Object(m.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        match serde_json::to_string_pretty(&serde_json::Value::Object(wrapped)) {
+            Ok(s) => s,
+            Err(_) => format!("{:?}", event.data),
+        }
+    } else {
+        match serde_json::to_string_pretty(&data) {
+            Ok(s) => s,
+            Err(_) => format!("{:?}", event.data),
+        }
     }
 }
 
@@ -316,7 +348,6 @@ mod tests {
         let config = Arc::new(crate::task::log::config::Processor {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
-            structured: false,
             include_meta: false,
             depends_on: None,
             retry: None,
@@ -354,7 +385,6 @@ mod tests {
         let config = Arc::new(crate::task::log::config::Processor {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
-            structured: false,
             include_meta: false,
             depends_on: None,
             retry: None,
@@ -386,7 +416,6 @@ mod tests {
         let config = Arc::new(crate::task::log::config::Processor {
             name: "test".to_string(),
             level: crate::task::log::config::LogLevel::Info,
-            structured: false,
             include_meta: false,
             depends_on: None,
             retry: None,

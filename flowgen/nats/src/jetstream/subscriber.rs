@@ -111,7 +111,7 @@ impl EventHandler {
     #[tracing::instrument(
         skip(self, message_result),
         name = "task.handle",
-        fields(activity = true, duration_ms = tracing::field::Empty)
+        fields(duration_ms = tracing::field::Empty)
     )]
     async fn process_message(
         &self,

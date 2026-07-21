@@ -8,7 +8,7 @@
 //! `tracing_subscriber::fmt::json()` writes to stdout, so no extra
 //! serialization path is introduced.
 
-use crate::telemetry::StoredLog;
+use crate::telemetry::{StoredLog, StoredSpan};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
@@ -37,40 +37,44 @@ pub struct LogFilter {
 impl LogFilter {
     /// Returns `true` when `record` satisfies every populated field.
     pub fn matches(&self, record: &StoredLog) -> bool {
-        let mut flow_ok = self.flow.is_none();
-        let mut task_ok = self.task.is_none();
-        let mut level_ok = self.level.is_none();
-        let mut since_ok = self.since_ms.is_none();
-        for (k, v) in &record.attributes {
-            match k.as_str() {
-                "flow" => {
-                    if let Some(expected) = &self.flow {
-                        flow_ok = expected == v;
-                    }
-                }
-                "task" => {
-                    if let Some(expected) = &self.task {
-                        task_ok = expected == v;
-                    }
-                }
-                "level" => {
-                    if let Some(expected) = &self.level {
-                        level_ok = expected.eq_ignore_ascii_case(v);
-                    }
-                }
-                "ts_ms" => {
-                    if let Some(cutoff) = self.since_ms {
-                        match v.parse::<u64>() {
-                            Ok(ts) => since_ok = ts >= cutoff,
-                            Err(_) => since_ok = false,
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        let level_ok = match &self.level {
+            Some(expected) => expected.eq_ignore_ascii_case(&record.level),
+            None => true,
+        };
+        let since_ok = match self.since_ms {
+            None => true,
+            Some(cutoff) => match record.timestamp.as_deref() {
+                None => false,
+                Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                    Ok(dt) => dt.timestamp_millis() as u64 >= cutoff,
+                    Err(_) => false,
+                },
+            },
+        };
+        let flow_ok = match (&self.flow, span_field(record, "flow")) {
+            (None, _) => true,
+            (Some(expected), Some(v)) => expected == v,
+            (Some(_), None) => false,
+        };
+        let task_ok = match (&self.task, span_field(record, "task")) {
+            (None, _) => true,
+            (Some(expected), Some(v)) => expected == v,
+            (Some(_), None) => false,
+        };
         flow_ok && task_ok && level_ok && since_ok
     }
+}
+
+/// Returns the first field value with `key` found across the span chain,
+/// leaf-to-root (so an inner span shadowing an outer span wins).
+fn span_field<'a>(record: &'a StoredLog, key: &str) -> Option<&'a str> {
+    record
+        .spans
+        .iter()
+        .rev()
+        .flat_map(|s| s.fields.iter())
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// Backend-agnostic log query facade.
@@ -286,11 +290,7 @@ fn push_bounded(buffer: &mut VecDeque<StoredLog>, record: &StoredLog, capacity: 
 }
 
 fn flow_of(record: &StoredLog) -> Option<String> {
-    record
-        .attributes
-        .iter()
-        .find(|(k, _)| k == "flow")
-        .map(|(_, v)| v.clone())
+    span_field(record, "flow").map(str::to_string)
 }
 
 /// Parsed subset of one `tracing_subscriber::fmt::json()` line.
@@ -310,37 +310,40 @@ struct JsonLogLine {
 
 impl JsonLogLine {
     fn into_stored_log(self) -> StoredLog {
-        let mut attributes: Vec<(String, String)> = Vec::new();
         let mut body = String::new();
-
-        if !self.level.is_empty() {
-            attributes.push(("level".to_string(), self.level.to_ascii_lowercase()));
-        }
-        if !self.target.is_empty() {
-            attributes.push(("target".to_string(), self.target));
-        }
-        if let Some(ts) = self.timestamp {
-            attributes.push(("timestamp".to_string(), ts));
-        }
-
-        for span in self.spans {
-            for (k, v) in span {
-                if k == "name" {
-                    continue;
-                }
-                attributes.push((k, json_value_to_string(&v)));
-            }
-        }
-
+        let mut fields: Vec<(String, String)> = Vec::new();
         for (k, v) in self.fields {
-            if k == "message" {
-                body = json_value_to_string(&v);
-            } else {
-                attributes.push((k, json_value_to_string(&v)));
+            match k.as_str() {
+                "message" => body = json_value_to_string(&v),
+                _ => fields.push((k, json_value_to_string(&v))),
             }
         }
 
-        StoredLog { body, attributes }
+        let spans = self
+            .spans
+            .into_iter()
+            .map(|mut span| {
+                let name = match span.remove("name") {
+                    Some(serde_json::Value::String(s)) => s,
+                    Some(other) => json_value_to_string(&other),
+                    None => String::new(),
+                };
+                let fields = span
+                    .into_iter()
+                    .map(|(k, v)| (k, json_value_to_string(&v)))
+                    .collect();
+                StoredSpan { name, fields }
+            })
+            .collect();
+
+        StoredLog {
+            body,
+            level: self.level.to_ascii_lowercase(),
+            timestamp: self.timestamp,
+            target: self.target,
+            spans,
+            fields,
+        }
     }
 }
 
@@ -359,13 +362,24 @@ mod tests {
     use super::*;
 
     fn record(flow: &str, task: &str, body: &str, ts_ms: u64) -> StoredLog {
+        let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts_ms as i64)
+            .map(|dt| dt.to_rfc3339());
         StoredLog {
             body: body.to_string(),
-            attributes: vec![
-                ("flow".to_string(), flow.to_string()),
-                ("task".to_string(), task.to_string()),
-                ("ts_ms".to_string(), ts_ms.to_string()),
+            level: "info".to_string(),
+            timestamp,
+            target: String::new(),
+            spans: vec![
+                StoredSpan {
+                    name: "flow.run".to_string(),
+                    fields: vec![("flow".to_string(), flow.to_string())],
+                },
+                StoredSpan {
+                    name: "task.run".to_string(),
+                    fields: vec![("task".to_string(), task.to_string())],
+                },
             ],
+            fields: Vec::new(),
         }
     }
 
@@ -407,23 +421,31 @@ mod tests {
     }
 
     #[test]
-    fn json_line_flattens_spans_and_fields() {
+    fn json_line_preserves_spans_and_event_fields() {
         let line = r#"{"timestamp":"2026-07-17T07:12:08.699289Z","level":"WARN","fields":{"message":"boom","index":148},"target":"flowgen_salesforce::restapi::composite","spans":[{"flow":"mssql_to_salesforce","name":"flow.run"},{"task":"upsert","task_id":4,"task_type":"salesforce_restapi_composite","name":"task.run"},{"name":"task.handle"}]}"#;
         let parsed: JsonLogLine = serde_json::from_str(line).unwrap();
         let stored = parsed.into_stored_log();
+
         assert_eq!(stored.body, "boom");
-        let attrs: HashMap<_, _> = stored.attributes.iter().cloned().collect();
+        assert_eq!(stored.level, "warn");
+        assert_eq!(stored.target, "flowgen_salesforce::restapi::composite");
         assert_eq!(
-            attrs.get("flow").map(String::as_str),
-            Some("mssql_to_salesforce")
+            stored.timestamp.as_deref(),
+            Some("2026-07-17T07:12:08.699289Z")
         );
-        assert_eq!(attrs.get("task").map(String::as_str), Some("upsert"));
-        assert_eq!(attrs.get("task_id").map(String::as_str), Some("4"));
+
+        let span_names: Vec<&str> = stored.spans.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(span_names, vec!["flow.run", "task.run", "task.handle"]);
+
+        assert_eq!(span_field(&stored, "flow"), Some("mssql_to_salesforce"));
+        assert_eq!(span_field(&stored, "task"), Some("upsert"));
+        assert_eq!(span_field(&stored, "task_id"), Some("4"));
         assert_eq!(
-            attrs.get("task_type").map(String::as_str),
+            span_field(&stored, "task_type"),
             Some("salesforce_restapi_composite")
         );
-        assert_eq!(attrs.get("level").map(String::as_str), Some("warn"));
-        assert_eq!(attrs.get("index").map(String::as_str), Some("148"));
+
+        let event_fields: HashMap<_, _> = stored.fields.iter().cloned().collect();
+        assert_eq!(event_fields.get("index").map(String::as_str), Some("148"));
     }
 }

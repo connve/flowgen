@@ -62,7 +62,6 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 
 ```yaml
 flow:
-  name: process_orders
   tasks:
     - nats_jetstream_subscriber:
         name: orders

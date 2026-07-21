@@ -5,7 +5,10 @@
 # Required:
 #   - GCP service account at /etc/secrets/gcp-credentials.json
 flow:
-  name: script_incremental_processing
+  labels:
+    display_name: "Incremental File Processing"
+    description: "Lists objects, skips files whose name and hash is already cached (7-day TTL), and loads only new files into BigQuery."
+    tags: ["script", "cache", "incremental", "bigquery", "example"]
   require_leader_election: true
   tasks:
 
@@ -66,4 +69,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: true

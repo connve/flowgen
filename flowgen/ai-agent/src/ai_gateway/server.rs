@@ -442,7 +442,6 @@ async fn dispatch<A: ProtocolAdapter>(
     let handle_span = tracing::info_span!(
         parent: &run_span,
         "task.handle",
-        activity = true,
         duration_ms = tracing::field::Empty,
     );
 

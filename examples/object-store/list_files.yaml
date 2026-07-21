@@ -4,8 +4,11 @@
 # Required:
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
+  labels:
+    display_name: "List Object-Store Files"
+    description: "Lists Parquet files matching a wildcard in a GCS bucket once at startup and logs their metadata."
+    tags: ["object-store", "gcs", "list", "discovery", "example"]
   require_leader_election: true
-  name: list_files
   tasks:
 
     - generate:

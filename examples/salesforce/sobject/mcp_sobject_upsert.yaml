@@ -7,7 +7,10 @@
 #   - /etc/sfdc/credentials.json
 #   - MCP server enabled in worker config
 flow:
-  name: salesforce_mcp_sobject_upsert
+  labels:
+    display_name: "Salesforce Record Upsert (MCP)"
+    description: "Exposes a Salesforce record upsert by external ID as an MCP tool callable by LLM agents."
+    tags: ["salesforce", "upsert", "mcp", "tool", "example"]
   tasks:
 
     - mcp_tool:

@@ -3,8 +3,8 @@
 # election, exactly one pod runs all 5. Look for the `flow_instance`
 # span (instance=1..5) in logs to see which pipeline handled an event.
 flow:
-  name: parallel_instances_example
   labels:
+    display_name: "Parallel Instances"
     description: "Runs 5 independent flow pipelines inside the same process for horizontal throughput within a single pod."
     tags: ["parallel", "example"]
   require_leader_election: true
@@ -21,4 +21,3 @@ flow:
     - log:
         name: log_message
         level: info
-        structured: true

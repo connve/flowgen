@@ -6,6 +6,7 @@
 
 use super::{AuthError, AuthProvider, UserContext};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,10 +14,17 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 /// JWT provider configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+///
+/// `secret` is a [`SecretString`] so the HMAC key never leaks through
+/// `Debug`, logs, or panics. Serialization always emits `"***"` in its
+/// place — nothing in the runtime round-trips config back from its
+/// serialized form, so the redacted value is only ever seen by the
+/// admin config viewer, never re-parsed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JwtConfig {
     /// HMAC secret for HS256 validation (mutually exclusive with `jwks_url`).
-    pub secret: Option<String>,
+    #[serde(default, serialize_with = "serialize_redacted")]
+    pub secret: Option<SecretString>,
     /// JWKS endpoint URL for RS256/ES256 validation (mutually exclusive with `secret`).
     pub jwks_url: Option<String>,
     /// Expected audience claim. When set, tokens without this audience are rejected.
@@ -26,6 +34,31 @@ pub struct JwtConfig {
     /// Claim name to extract as user_id (default: "sub").
     #[serde(default = "default_user_id_claim")]
     pub user_id_claim: String,
+}
+
+impl PartialEq for JwtConfig {
+    /// Compares config for equality, treating the secret by presence only
+    /// (`SecretString` deliberately has no `PartialEq` to discourage
+    /// timing-sensitive comparisons; config equality never needs the value).
+    fn eq(&self, other: &Self) -> bool {
+        self.secret.is_some() == other.secret.is_some()
+            && self.jwks_url == other.jwks_url
+            && self.audience == other.audience
+            && self.issuer == other.issuer
+            && self.user_id_claim == other.user_id_claim
+    }
+}
+
+/// Serializes an optional secret as `"***"` when present, `null` when
+/// absent, so a serialized config never carries the plaintext key.
+fn serialize_redacted<S>(secret: &Option<SecretString>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match secret {
+        Some(_) => s.serialize_some("***"),
+        None => s.serialize_none(),
+    }
 }
 
 fn default_user_id_claim() -> String {
@@ -59,7 +92,7 @@ impl JwtProvider {
         let hmac_key = config
             .secret
             .as_ref()
-            .map(|s| DecodingKey::from_secret(s.as_bytes()));
+            .map(|s| DecodingKey::from_secret(s.expose_secret().as_bytes()));
 
         let jwks = if let Some(ref url) = config.jwks_url {
             let jwks = fetch_jwks(url).await?;
@@ -196,6 +229,21 @@ mod tests {
         assert_eq!(config.user_id_claim, "email");
     }
 
+    #[test]
+    fn test_jwt_secret_redacted_on_serialize() {
+        let config: JwtConfig =
+            serde_json::from_str(r#"{"secret": "super-secret-hmac-key"}"#).unwrap();
+        let out = serde_json::to_string(&config).unwrap();
+        assert!(
+            !out.contains("super-secret-hmac-key"),
+            "plaintext secret leaked into serialized output: {out}"
+        );
+        assert!(
+            out.contains("\"***\""),
+            "expected redaction marker in {out}"
+        );
+    }
+
     #[tokio::test]
     async fn test_jwt_provider_requires_secret_or_jwks() {
         let config = JwtConfig {
@@ -213,7 +261,7 @@ mod tests {
     async fn test_jwt_hs256_validation() {
         let secret = "test-secret-key-at-least-32-bytes!!";
         let config = JwtConfig {
-            secret: Some(secret.to_string()),
+            secret: Some(secret.to_string().into()),
             jwks_url: None,
             audience: None,
             issuer: None,
@@ -243,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn test_jwt_hs256_invalid_token() {
         let config = JwtConfig {
-            secret: Some("my-secret".to_string()),
+            secret: Some("my-secret".to_string().into()),
             jwks_url: None,
             audience: None,
             issuer: None,
@@ -259,7 +307,7 @@ mod tests {
     async fn test_jwt_missing_user_id_claim() {
         let secret = "test-secret-key-at-least-32-bytes!!";
         let config = JwtConfig {
-            secret: Some(secret.to_string()),
+            secret: Some(secret.to_string().into()),
             jwks_url: None,
             audience: None,
             issuer: None,

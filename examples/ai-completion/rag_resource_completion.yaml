@@ -9,7 +9,10 @@
 #   - resources/ai-completion/context/pricing_info.md
 #   - resources/ai-completion/context/support_info.txt
 flow:
-  name: rag_resource_completion
+  labels:
+    display_name: "RAG Resource Completion"
+    description: "Answers webhook-submitted questions with an OpenAI completion grounded in static resource context and a locked-down tool sandbox."
+    tags: ["ai", "rag", "openai", "example"]
   tasks:
 
     # POST /api/flowgen/workers/webhook/ask_question with { "question": "..." }

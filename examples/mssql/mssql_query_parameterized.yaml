@@ -6,7 +6,10 @@
 #   - SQL Server credentials at /etc/mssql/credentials.json
 #   - resources/mssql/queries/fetch_orders.sql (referencing @p1, @p2)
 flow:
-  name: mssql_query_parameterized
+  labels:
+    display_name: "MSSQL Parameterized Query"
+    description: "Polls SQL Server every 5 minutes with a parameterised query loaded from a resource file, converts the Arrow result to JSON, and logs one event per row."
+    tags: ["mssql", "query", "parameterized", "resource-file", "example"]
   require_leader_election: true
   tasks:
 
@@ -38,4 +41,3 @@ flow:
     - log:
         name: log
         level: info
-        structured: false

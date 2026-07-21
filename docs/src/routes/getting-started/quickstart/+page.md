@@ -13,7 +13,6 @@ Create a file called `hello.yaml`:
 
 ```yaml
 flow:
-  name: hello_world
   tasks:
     - generate:
         name: ticker

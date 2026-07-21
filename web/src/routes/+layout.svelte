@@ -8,35 +8,45 @@
 	import Icon from '@iconify/svelte';
 	import '../app.css';
 
+	type ThemePref = 'system' | 'light' | 'dark';
+
 	let { children } = $props();
 	let collapsed = $state(true);
-	let dark = $state(false);
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
 
+	// User's explicit preference; `system` tracks the OS `prefers-color-scheme`.
+	let themePref = $state<ThemePref>('system');
+	// Live OS preference, kept in sync via the media-query listener below so
+	// `system` mode reacts to the OS flipping (e.g. auto dark at night).
+	let osDark = $state(false);
+	// Effective dark state: the OS value when following the system, otherwise
+	// the explicit choice.
+	let dark = $derived(themePref === 'system' ? osDark : themePref === 'dark');
+
 	// Hides outer chrome when embedded (e.g. console.connve.dev); nav stays.
 	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
+
+	// Reapply the DOM theme attribute whenever the effective dark state changes.
+	$effect(() => {
+		document.documentElement.setAttribute('data-theme', dark ? 'mydark' : 'mytheme');
+	});
 
 	onMount(async () => {
 		const navState = localStorage.getItem('flowgen-nav-collapsed');
 		if (navState !== null) collapsed = navState === '1';
 
 		const stored = localStorage.getItem('flowgen-theme');
-		if (stored === 'dark' || stored === 'light') {
-			dark = stored === 'dark';
-		} else {
-			// Fall back to the OS setting when the user hasn't chosen yet,
-			// then track further OS changes as long as they haven't overridden.
-			const mq = window.matchMedia('(prefers-color-scheme: dark)');
-			dark = mq.matches;
-			mq.addEventListener('change', (e) => {
-				if (!localStorage.getItem('flowgen-theme')) {
-					dark = e.matches;
-					applyTheme();
-				}
-			});
+		if (stored === 'dark' || stored === 'light' || stored === 'system') {
+			themePref = stored;
 		}
-		applyTheme();
+
+		const mq = window.matchMedia('(prefers-color-scheme: dark)');
+		osDark = mq.matches;
+		mq.addEventListener('change', (e) => {
+			osDark = e.matches;
+		});
+
 		try {
 			const res = await fetch(apiUrl('api/version'));
 			if (res.ok) {
@@ -48,35 +58,28 @@
 		}
 	});
 
-	function toggleTheme() {
-		dark = !dark;
-		localStorage.setItem('flowgen-theme', dark ? 'dark' : 'light');
-		applyTheme();
-	}
-
-	function applyTheme() {
-		if (typeof document !== 'undefined') {
-			document.documentElement.setAttribute('data-theme', dark ? 'mydark' : 'mytheme');
-		}
+	function setTheme(pref: ThemePref) {
+		themePref = pref;
+		localStorage.setItem('flowgen-theme', pref);
 	}
 </script>
 
-<div class="min-h-screen bg-base-100 text-base-content">
-	<div class="flex min-h-screen">
+<div class="min-h-screen overflow-x-hidden bg-base-100 text-base-content">
+	<div class="flex min-h-screen w-full min-w-0">
 		<aside
-			class="flex flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {collapsed
+			class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {collapsed
 				? 'w-16'
 				: 'w-56'}"
 		>
 			{#if !chromeless}
 				<div
-					class="flex h-16 shrink-0 items-center border-b border-base-200 {collapsed
+					class="flex h-16 shrink-0 items-center border-b border-base-300 {collapsed
 						? 'justify-center'
-						: 'px-3'}"
+						: 'px-6'}"
 				>
 					<a
 						href="{base}/"
-						class="flex h-10 w-10 items-center justify-center text-primary"
+						class="flex h-10 items-center text-primary {collapsed ? 'w-10 justify-center' : ''}"
 						aria-label="CONNVE home"
 					>
 						<svg
@@ -99,7 +102,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }] as item (item.href)}
+				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"
@@ -122,12 +125,38 @@
 			</nav>
 
 			<div
-				class="flex h-12 shrink-0 items-center border-t border-base-200 {collapsed
+				class="flex h-12 shrink-0 items-center border-t border-base-300 {collapsed
 					? 'justify-center'
-					: 'justify-between px-3'}"
+					: 'justify-between pl-6 pr-3'}"
 			>
-				{#if !collapsed && version}
-					<Badge>{version}</Badge>
+				{#if !collapsed}
+					<div class="flex items-center gap-2">
+						{#if version}
+							<div class="tooltip tooltip-right" data-tip="Release notes">
+								<a
+									href="https://github.com/connve/flowgen/releases/tag/v{version}"
+									target="_blank"
+									rel="noopener noreferrer"
+									class="flex h-7 items-center transition-opacity hover:opacity-80"
+								>
+									<Badge>{version}</Badge>
+								</a>
+							</div>
+						{/if}
+						<div class="tooltip tooltip-right" data-tip="System">
+							<a
+								href="{base}/system"
+								class="flex h-7 w-7 items-center justify-center rounded-md text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content {currentPath.startsWith(
+									base + '/system'
+								)
+									? 'bg-base-200 text-primary'
+									: ''}"
+								aria-label="System"
+							>
+								<Icon icon="tabler:gauge" class="h-5 w-5" />
+							</a>
+						</div>
+					</div>
 				{/if}
 				<button
 					type="button"
@@ -148,19 +177,29 @@
 
 		<div class="flex flex-1 flex-col bg-base-100">
 			{#if !chromeless}
-				<header class="flex h-16 items-center justify-end gap-3 border-b border-base-200 px-6">
-					<button
-						type="button"
-						class="btn btn-ghost btn-sm btn-circle"
-						aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-						onclick={toggleTheme}
+				<header class="flex h-16 items-center justify-end gap-3 border-b border-base-300 px-6">
+					<div
+						class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5"
+						role="group"
+						aria-label="Color theme"
 					>
-						{#if dark}
-							<Icon icon="tabler:sun" class="h-6 w-6" />
-						{:else}
-							<Icon icon="tabler:moon" class="h-6 w-6" />
-						{/if}
-					</button>
+						{#each [{ pref: 'system' as ThemePref, icon: 'tabler:device-desktop', label: 'System' }, { pref: 'light' as ThemePref, icon: 'tabler:sun', label: 'Light' }, { pref: 'dark' as ThemePref, icon: 'tabler:moon', label: 'Dark' }] as opt (opt.pref)}
+							<div class="tooltip tooltip-bottom" data-tip={opt.label}>
+								<button
+									type="button"
+									class="flex h-7 w-7 items-center justify-center rounded-full transition-colors {themePref ===
+									opt.pref
+										? 'bg-base-100 text-primary shadow-sm'
+										: 'text-base-content/60 hover:text-base-content'}"
+									aria-label="{opt.label} theme"
+									aria-pressed={themePref === opt.pref}
+									onclick={() => setTheme(opt.pref)}
+								>
+									<Icon icon={opt.icon} class="h-4 w-4" />
+								</button>
+							</div>
+						{/each}
+					</div>
 
 					<div
 						class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
@@ -172,7 +211,7 @@
 				</header>
 			{/if}
 
-			<main class="flex-1 bg-base-100">
+			<main class="min-w-0 flex-1 overflow-hidden bg-base-100">
 				{@render children()}
 			</main>
 		</div>

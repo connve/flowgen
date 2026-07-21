@@ -2,7 +2,10 @@
 # rate limiting, cached profile lookup, transformation tracking,
 # and optional cache cleanup keyed off a flag in the payload.
 flow:
-  name: script_cache_and_metadata
+  labels:
+    display_name: "Cache And Metadata Enrichment"
+    description: "Uses ctx.cache and ctx.meta in one script to apply per-user rate limiting, cached profile lookup, transformation tracking, and optional cache cleanup."
+    tags: ["script", "cache", "metadata", "rate-limit", "example"]
   require_leader_election: true
   tasks:
 
@@ -72,4 +75,3 @@ flow:
     - log:
         name: log_enriched_event
         level: info
-        structured: true

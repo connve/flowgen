@@ -1,7 +1,10 @@
 # Deduplicate events by ID using `ctx.cache`. Duplicate events return
 # null and are dropped; unseen ones are stamped with a 24 h TTL.
 flow:
-  name: script_cache_deduplication
+  labels:
+    display_name: "Cache Deduplication"
+    description: "Deduplicates events by ID using ctx.cache, dropping duplicates and stamping unseen events with a 24-hour TTL."
+    tags: ["script", "cache", "deduplication", "example"]
   require_leader_election: true
   tasks:
 
@@ -32,4 +35,3 @@ flow:
     - log:
         name: log_new_events
         level: info
-        structured: false

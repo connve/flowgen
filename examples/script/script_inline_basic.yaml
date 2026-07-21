@@ -1,6 +1,9 @@
 # Minimal inline Rhai script: doubles a numeric field on each event.
 flow:
-  name: script_inline_basic
+  labels:
+    display_name: "Inline Basic Script"
+    description: "Runs a minimal single-line inline Rhai script that doubles a numeric field on each event."
+    tags: ["script", "rhai", "inline", "transform", "example"]
   require_leader_election: true
   tasks:
 
@@ -17,4 +20,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: false

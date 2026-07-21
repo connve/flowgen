@@ -4,8 +4,11 @@
 #   - NATS credentials at /etc/nats/credentials.json
 #   - examples/data/orders.csv
 flow:
+  labels:
+    display_name: "Read File To NATS"
+    description: "Reads a CSV file, converts it to JSON, splits it into one event per row, and publishes each row to a NATS JetStream subject."
+    tags: ["object-store", "csv", "nats", "iterate", "example"]
   require_leader_election: true
-  name: read_file
   tasks:
 
     - generate:

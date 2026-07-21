@@ -12,7 +12,10 @@
 #   - /etc/gcp/credentials.json
 #   - NATS_URL, GCP_PROJECT_ID, GCS_BUCKET_PATH env vars
 flow:
-  name: salesforce_writer
+  labels:
+    display_name: "Salesforce CDC Fan-Out Writer"
+    description: "Consumes CDC change events from NATS and fans each one out in parallel to an object-store archive and a BigQuery upsert table, acking only after all sinks commit."
+    tags: ["salesforce", "cdc", "bigquery", "object-store", "example"]
   tasks:
 
     - nats_jetstream_subscriber:

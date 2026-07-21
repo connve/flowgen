@@ -52,10 +52,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Live activity stream.
+         * Live flow activity stream.
          * @description Server-Sent Events with two named event types:
-         *     `snapshot` (JSON array of the retained history, sent once)
-         *     and `activity` (JSON object per event).
+         *     `snapshot` (an object keyed by flow identity containing the
+         *     current metrics for every known flow, sent once on connect) and
+         *     `log` (one `LogRecord` per frame — the same shape as
+         *     `/api/logs/stream`). The client filters the log stream down to
+         *     task-scoped records for its per-flow activity panels; the raw
+         *     stream is emitted so both `/logs` and per-flow views share the
+         *     same wire format.
          */
         get: operations["streamFlows"];
         put?: never;
@@ -103,6 +108,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Global log record snapshot.
+         * @description Returns every log record retained by the telemetry backend,
+         *     including framework, lifecycle, and per-task activity records.
+         *     The per-flow activity feed (`/api/flows/stream`) is a scoped
+         *     subset of the same source; this endpoint returns the full set.
+         */
+        get: operations["listLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logs/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live global log stream.
+         * @description Server-Sent Events with a single named event type `log` carrying
+         *     one `LogRecord` per frame. Emits every captured record; the
+         *     admin UI applies level, task, flow, and free-text filters
+         *     client-side.
+         */
+        get: operations["streamLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/version": {
         parameters: {
             query?: never;
@@ -112,6 +163,29 @@ export interface paths {
         };
         /** Return the running flowgen build version. */
         get: operations["getVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Return the running application configuration.
+         * @description The loaded `AppConfig` serialized to YAML, read-only. Secret
+         *     values (JWT HMAC keys) are redacted to `"***"` before
+         *     serialization; file paths, URLs, ports, and other non-secret
+         *     settings are shown verbatim.
+         */
+        get: operations["getConfig"];
         put?: never;
         post?: never;
         delete?: never;
@@ -244,7 +318,7 @@ export interface components {
          *     `error` until the next info arrives.
          * @enum {string}
          */
-        FlowStatus: "idle" | "running" | "warning" | "error";
+        FlowStatus: "idle" | "ok" | "warn" | "error";
         FlowDetail: {
             /** @description Identity of the flow; see `FlowSummary.path`. */
             path: string;
@@ -273,6 +347,51 @@ export interface components {
         VersionInfo: {
             /** @description SemVer version derived from `CARGO_PKG_VERSION`. */
             version: string;
+        };
+        ConfigInfo: {
+            /**
+             * @description The running `AppConfig` serialized to YAML, with secrets
+             *     redacted to `"***"`.
+             */
+            yaml: string;
+        };
+        /** @description One span in a log record's span chain, root-to-leaf. */
+        LogSpan: {
+            /** @description Span name (e.g. `flow.run`, `task.run`, `task.handle`). */
+            name: string;
+            /** @description Fields declared on this span, flattened to strings. */
+            fields: components["schemas"]["KeyValue"][];
+        };
+        /** @description Ordered key/value pair. Kept as an array of these instead of a map so duplicate keys are preserved. */
+        KeyValue: {
+            key: string;
+            value: string;
+        };
+        /**
+         * @description A single log line captured by the telemetry backend, wire-shape
+         *     of the internal `StoredLog`. Framework consumers get span
+         *     topology (`spans`) alongside event-level `fields` so they can
+         *     classify records without parsing a flat attribute bag.
+         */
+        LogRecord: {
+            /** @description The tracing event's `message` field. */
+            body: string;
+            /**
+             * @description Lowercased tracing level.
+             * @enum {string}
+             */
+            level: "info" | "warn" | "error" | "debug" | "trace";
+            /**
+             * Format: date-time
+             * @description RFC 3339 timestamp when present in the source line.
+             */
+            timestamp?: string | null;
+            /** @description The tracing `target` (usually the module path). */
+            target: string;
+            /** @description Span chain from root to leaf. Empty for events emitted outside any span. */
+            spans: components["schemas"]["LogSpan"][];
+            /** @description Fields declared on the event itself (not inherited from spans). */
+            fields: components["schemas"]["KeyValue"][];
         };
     };
     responses: never;
@@ -407,6 +526,49 @@ export interface operations {
             };
         };
     };
+    listLogs: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of records to return (most recent first). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Retained framework logs, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogRecord"][];
+                };
+            };
+        };
+    };
+    streamLogs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Long-lived event stream. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+        };
+    };
     getVersion: {
         parameters: {
             query?: never;
@@ -423,6 +585,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionInfo"];
+                };
+            };
+        };
+    };
+    getConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redacted application configuration as YAML. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigInfo"];
                 };
             };
         };

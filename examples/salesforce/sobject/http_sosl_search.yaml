@@ -6,7 +6,10 @@
 # Required:
 #   - /etc/sfdc/credentials.json
 flow:
-  name: salesforce_sosl_search
+  labels:
+    display_name: "Salesforce SOSL Search (HTTP)"
+    description: "Accepts a search term over an HTTP webhook and runs a SOSL query across Account and Contact records via the REST API."
+    tags: ["salesforce", "sosl", "search", "http", "example"]
   tasks:
 
     - http_endpoint:

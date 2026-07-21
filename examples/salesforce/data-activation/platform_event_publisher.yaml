@@ -8,7 +8,10 @@
 #   - /etc/nats/credentials.json
 #   - NATS_URL env var
 flow:
-  name: salesforce_platform_event_publisher
+  labels:
+    display_name: "Salesforce Platform Event Publisher"
+    description: "Consumes order-status events from NATS and publishes them as Salesforce platform events via the Pub/Sub API to trigger Salesforce automation."
+    tags: ["salesforce", "platform-events", "nats", "pubsub", "example"]
   tasks:
 
     - nats_jetstream_subscriber:

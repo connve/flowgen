@@ -23,7 +23,10 @@
 #   - AI gateway enabled in worker config (worker.ai_gateway.enabled: true)
 #   - Downstream provider credentials under /etc/<alias>/credentials.json
 flow:
-  name: openai_proxy
+  labels:
+    display_name: "OpenAI API Gateway"
+    description: "Exposes an OpenAI-compatible chat completions endpoint that routes a client model alias to a downstream provider and streams the completion back as SSE."
+    tags: ["ai-gateway", "openai", "llm-proxy", "streaming", "example"]
   tasks:
 
     - llm_proxy:

@@ -235,7 +235,6 @@ impl EventHandler {
                     .instrument(tracing::info_span!(
                         parent: tracing::Span::current(),
                         "task.handle",
-                        activity = true,
                         duration_ms = tracing::field::Empty,
                     )),
                 );

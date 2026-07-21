@@ -5,7 +5,10 @@
 #   - Webhook credentials at /etc/cloudflare-emails/credentials.json
 #   - NATS credentials at /etc/nats/credentials.json
 flow:
-  name: cloudflare_email_forwarder_listener
+  labels:
+    display_name: "Cloudflare Email Webhook Listener"
+    description: "Receives forwarded emails from a Cloudflare Email Worker over an HTTP webhook, unwraps the payload, and publishes each message to a NATS JetStream stream."
+    tags: ["cloudflare", "email", "webhook", "nats", "example"]
   tasks:
 
     # POST /api/flowgen/workers/webhook/cloudflare/emails

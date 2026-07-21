@@ -60,11 +60,16 @@ paths:
   /api/flows/stream:
     get:
       operationId: streamFlows
-      summary: Live activity stream.
+      summary: Live flow activity stream.
       description: |
         Server-Sent Events with two named event types:
-        `snapshot` (JSON array of the retained history, sent once)
-        and `activity` (JSON object per event).
+        `snapshot` (an object keyed by flow identity containing the
+        current metrics for every known flow, sent once on connect) and
+        `log` (one `LogRecord` per frame — the same shape as
+        `/api/logs/stream`). The client filters the log stream down to
+        task-scoped records for its per-flow activity panels; the raw
+        stream is emitted so both `/logs` and per-flow views share the
+        same wire format.
       tags: [flows]
       responses:
         "200":
@@ -116,6 +121,53 @@ paths:
               schema:
                 type: string
 
+  /api/logs:
+    get:
+      operationId: listLogs
+      summary: Global log record snapshot.
+      description: |
+        Returns every log record retained by the telemetry backend,
+        including framework, lifecycle, and per-task activity records.
+        The per-flow activity feed (`/api/flows/stream`) is a scoped
+        subset of the same source; this endpoint returns the full set.
+      tags: [logs]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of records to return (most recent first).
+          schema:
+            type: integer
+            minimum: 1
+            default: 500
+      responses:
+        "200":
+          description: Retained framework logs, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogRecord"
+
+  /api/logs/stream:
+    get:
+      operationId: streamLogs
+      summary: Live global log stream.
+      description: |
+        Server-Sent Events with a single named event type `log` carrying
+        one `LogRecord` per frame. Emits every captured record; the
+        admin UI applies level, task, flow, and free-text filters
+        client-side.
+      tags: [logs]
+      responses:
+        "200":
+          description: Long-lived event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   /api/version:
     get:
       operationId: getVersion
@@ -128,6 +180,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionInfo"
+
+  /api/config:
+    get:
+      operationId: getConfig
+      summary: Return the running application configuration.
+      description: |
+        The loaded `AppConfig` serialized to YAML, read-only. Secret
+        values (JWT HMAC keys) are redacted to `"***"` before
+        serialization; file paths, URLs, ports, and other non-secret
+        settings are shown verbatim.
+      tags: [meta]
+      responses:
+        "200":
+          description: Redacted application configuration as YAML.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigInfo"
 
   /livez:
     get:
@@ -284,7 +354,7 @@ components:
         Coarse status derived from the last-seen info / warn / error
         timestamps. Wins by recency — an error after an info stays
         `error` until the next info arrives.
-      enum: [idle, running, warning, error]
+      enum: [idle, ok, warn, error]
 
     FlowDetail:
       type: object
@@ -340,3 +410,72 @@ components:
         version:
           type: string
           description: SemVer version derived from `CARGO_PKG_VERSION`.
+
+    ConfigInfo:
+      type: object
+      required: [yaml]
+      properties:
+        yaml:
+          type: string
+          description: |
+            The running `AppConfig` serialized to YAML, with secrets
+            redacted to `"***"`.
+
+    LogSpan:
+      type: object
+      description: One span in a log record's span chain, root-to-leaf.
+      required: [name, fields]
+      properties:
+        name:
+          type: string
+          description: Span name (e.g. `flow.run`, `task.run`, `task.handle`).
+        fields:
+          type: array
+          description: Fields declared on this span, flattened to strings.
+          items:
+            $ref: "#/components/schemas/KeyValue"
+
+    KeyValue:
+      type: object
+      description: Ordered key/value pair. Kept as an array of these instead of a map so duplicate keys are preserved.
+      required: [key, value]
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+
+    LogRecord:
+      type: object
+      description: |
+        A single log line captured by the telemetry backend, wire-shape
+        of the internal `StoredLog`. Framework consumers get span
+        topology (`spans`) alongside event-level `fields` so they can
+        classify records without parsing a flat attribute bag.
+      required: [body, level, target, spans, fields]
+      properties:
+        body:
+          type: string
+          description: The tracing event's `message` field.
+        level:
+          type: string
+          description: Lowercased tracing level.
+          enum: [info, warn, error, debug, trace]
+        timestamp:
+          type: string
+          nullable: true
+          format: date-time
+          description: RFC 3339 timestamp when present in the source line.
+        target:
+          type: string
+          description: The tracing `target` (usually the module path).
+        spans:
+          type: array
+          description: Span chain from root to leaf. Empty for events emitted outside any span.
+          items:
+            $ref: "#/components/schemas/LogSpan"
+        fields:
+          type: array
+          description: Fields declared on the event itself (not inherited from spans).
+          items:
+            $ref: "#/components/schemas/KeyValue"

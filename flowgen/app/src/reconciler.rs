@@ -6,7 +6,7 @@
 //! without interrupting flows that were not affected.
 
 use crate::app::FlowHandle;
-use crate::config::FlowConfig;
+use crate::config::{FlowConfig, FlowConfigRaw};
 use flowgen_core::cache::{Cache, WatchEvent};
 use std::{
     collections::{HashMap, HashSet},
@@ -228,29 +228,28 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     };
 
     // Parse the YAML config from the cache value.
-    let mut config = match parse_flow_config(key, &value) {
-        Ok(c) => c,
+    let (raw, content) = match parse_flow_config(key, &value) {
+        Ok(parsed) => parsed,
         Err(e) => {
             error!(error = %e);
             return;
         }
     };
 
-    // Cache key suffix (path-shaped) is the identity. Set `source_path`
-    // on the config so downstream code — task context, cache namespaces,
-    // MCP URIs — sees the same identity the reconciler is keying on.
-    // Must happen before `validate()` so path-based identity satisfies
-    // the identity-source requirement.
-    config.source_path = Some(flow_id.clone());
-
-    if let Err(reason) = config.validate() {
-        error!(
-            key = %key,
-            error = %reason,
-            "Hot-reloaded flow config failed validation, skipping"
-        );
-        return;
-    }
+    // Cache key suffix (path-shaped) is the identity. Wrap the raw config
+    // so downstream code — task context, cache namespaces, MCP URIs — sees
+    // the same identity the reconciler is keying on.
+    let config = match FlowConfig::from_path(raw, flow_id.clone(), Some(content)) {
+        Ok(c) => c,
+        Err(reason) => {
+            error!(
+                key = %key,
+                error = %reason,
+                "Hot-reloaded flow config failed validation, skipping"
+            );
+            return;
+        }
+    };
 
     if ctx.filesystem_flow_paths.contains(&flow_id) {
         warn!(
@@ -489,25 +488,25 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
         })
 }
 
-/// Parses a raw cache value as a `FlowConfig`.
-fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<FlowConfig, Error> {
-    let content = String::from_utf8_lossy(value);
-    let format = if key.ends_with(".json") {
-        config::FileFormat::Json
-    } else {
-        config::FileFormat::Yaml
+/// Parses a raw cache value as a `FlowConfigRaw`, returning the deserialized
+/// config along with the original text (so the caller can wrap it with
+/// `FlowConfig::from_path` and retain the verbatim YAML for the admin API).
+fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<(FlowConfigRaw, String), Error> {
+    let content = String::from_utf8_lossy(value).into_owned();
+    let format = match key.ends_with(".json") {
+        true => config::FileFormat::Json,
+        false => config::FileFormat::Yaml,
     };
 
-    let mut flow_config: FlowConfig = config::Config::builder()
+    let raw: FlowConfigRaw = config::Config::builder()
         .add_source(config::File::from_str(&content, format))
         .build()
-        .and_then(|c| c.try_deserialize::<FlowConfig>())
+        .and_then(|c| c.try_deserialize::<FlowConfigRaw>())
         .map_err(|source| Error::FlowConfigParse {
             key: key.to_string(),
             source,
         })?;
-    flow_config.raw_source = Some(content.into_owned());
-    Ok(flow_config)
+    Ok((raw, content))
 }
 
 /// Builds a minimal `ReconcilerContext` for tests that only exercise
@@ -666,9 +665,9 @@ flow:
 "#;
         let result = parse_flow_config("flows.test-flow.yaml", &bytes::Bytes::from(yaml));
         assert!(result.is_ok());
-        let config = result.unwrap();
-        assert_eq!(config.flow.name.as_deref(), Some("test-flow"));
-        assert_eq!(config.flow.tasks.len(), 1);
+        let (raw, _content) = result.unwrap();
+        assert_eq!(raw.flow.name.as_deref(), Some("test-flow"));
+        assert_eq!(raw.flow.tasks.len(), 1);
     }
 
     #[test]
@@ -690,8 +689,8 @@ flow:
         }"#;
         let result = parse_flow_config("flows.json-flow.json", &bytes::Bytes::from(json));
         assert!(result.is_ok());
-        let config = result.unwrap();
-        assert_eq!(config.flow.name.as_deref(), Some("json-flow"));
+        let (raw, _content) = result.unwrap();
+        assert_eq!(raw.flow.name.as_deref(), Some("json-flow"));
     }
 
     // -- collect_batch ------------------------------------------------------

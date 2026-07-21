@@ -6,7 +6,10 @@
 # Required:
 #   - /etc/sfdc/credentials.json
 flow:
-  name: salesforce_sobject_upsert
+  labels:
+    display_name: "Salesforce Record Upsert (HTTP)"
+    description: "Accepts record data over an HTTP webhook and upserts it into Salesforce by external ID via the REST API."
+    tags: ["salesforce", "upsert", "http", "webhook", "example"]
   tasks:
 
     - http_endpoint:

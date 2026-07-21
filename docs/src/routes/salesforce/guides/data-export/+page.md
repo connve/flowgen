@@ -47,7 +47,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_bulkapi_query_account
   require_leader_election: true
   tasks:
 
@@ -100,7 +99,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_bulkapi_job_listener
   require_leader_election: true
   tasks:
 
@@ -192,7 +190,6 @@ graph TD
 
 ```yaml
 flow:
-  name: salesforce_bulkapi_writer_account
   tasks:
 
     - nats_jetstream_subscriber:

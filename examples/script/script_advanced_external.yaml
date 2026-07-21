@@ -5,7 +5,10 @@
 # Required:
 #   - resources/scripts/cache_and_metadata_advanced.rhai
 flow:
-  name: script_advanced_external
+  labels:
+    display_name: "Advanced External Rhai Script"
+    description: "Runs a scheduled trigger through a complex Rhai script loaded from an external resource file for idempotent, stateful processing, then logs the result."
+    tags: ["script", "rhai", "resource-file", "stateful", "example"]
   require_leader_election: true
   tasks:
 
@@ -22,4 +25,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: true

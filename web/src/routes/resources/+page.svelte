@@ -157,7 +157,7 @@
 
 <section class="flex h-[calc(100vh-4rem)]">
 	<aside
-		class="flex shrink-0 flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
+		class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
 			? 'w-64'
 			: 'w-16'}"
 	>
@@ -331,11 +331,11 @@
 				<span>Failed to load resources: {error}</span>
 			</div>
 		{:else if visibleResources.length === 0}
-			<div class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70">
+			<div class="rounded-lg border border-base-300 bg-base-100 p-8 text-center text-sm opacity-70">
 				{searchActive ? `No matches for "${search}".` : 'No resources'}
 			</div>
 		{:else}
-			<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
+			<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 				<table class="table table-sm w-full bg-base-100">
 					<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
 						<tr>
@@ -379,7 +379,7 @@
 
 {#if selected}
 	<div
-		class="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Resource viewer"
@@ -392,7 +392,7 @@
 		tabindex="-1"
 	>
 		<div
-			class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
+			class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-2xl ring-1 ring-base-content/10"
 		>
 			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
 				<div class="min-w-0 flex-1">

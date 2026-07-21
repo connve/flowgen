@@ -197,7 +197,6 @@ query: 'FIND {"{{event.data.search_term}}*"} IN ALL FIELDS RETURNING Account(Id,
 
 ```yaml
 flow:
-  name: salesforce_search
   tasks:
     - http_endpoint:
         name: trigger
@@ -212,6 +211,5 @@ flow:
     - log:
         name: log_results
         level: info
-        structured: true
 ```
 

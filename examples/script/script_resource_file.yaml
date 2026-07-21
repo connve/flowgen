@@ -4,7 +4,10 @@
 # Required:
 #   - resources/scripts/transform_data.rhai
 flow:
-  name: script_resource_file
+  labels:
+    display_name: "External Resource Script"
+    description: "Runs a scheduled trigger through a Rhai transform script loaded from an external resource file, then logs the result."
+    tags: ["script", "rhai", "resource-file", "transform", "example"]
   require_leader_election: true
   tasks:
 
@@ -21,4 +24,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: false

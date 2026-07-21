@@ -8,7 +8,10 @@
 #   - /etc/nats/credentials.json
 #   - NATS_URL env var
 flow:
-  name: salesforce_composite_upsert_contact
+  labels:
+    display_name: "Salesforce Composite Contact Upsert"
+    description: "Consumes events from NATS and batch-upserts up to 200 Contact records into Salesforce via the Composite API with all-or-none transactional guarantees."
+    tags: ["salesforce", "upsert", "nats", "composite-api", "example"]
   tasks:
 
     - nats_jetstream_subscriber:

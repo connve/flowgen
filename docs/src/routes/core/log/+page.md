@@ -15,7 +15,7 @@ Logs event data to stdout.
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `level` | string | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`. |
-| `structured` | bool | false | Output as structured JSON. |
+| `include_meta` | bool | false | Include `event.meta` in the log body alongside the payload. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -25,11 +25,15 @@ Logs event data to stdout.
 |---|---|---|
 | same as input | — | Pass-through — event data is forwarded unchanged. |
 
+The log line body is the pretty-printed JSON of `event.data`. The event's
+`id` and `subject` are emitted as structured tracing fields (`event.id`,
+`event.subject`) so a log store keeps them as top-level attributes.
+
 ## Example
 
 ```yaml
 - log:
     name: debug_output
     level: debug
-    structured: true
+    include_meta: true
 ```

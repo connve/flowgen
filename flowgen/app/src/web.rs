@@ -73,6 +73,9 @@ pub struct WebState {
     /// Backend-agnostic log query used by the SSE stream and the
     /// history endpoint.
     pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
+    /// Running application configuration, surfaced read-only by the admin
+    /// config viewer. Secrets serialize as `"***"` (see `JwtConfig`).
+    pub app_config: Arc<crate::config::AppConfig>,
 }
 
 /// Starts the admin web server on the given port.
@@ -93,7 +96,10 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
         .route(&format!("{api_prefix}/flows"), get(list_flows))
         .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
         .route(&format!("{api_prefix}/flows/{{*path}}"), get(get_flow))
+        .route(&format!("{api_prefix}/logs"), get(list_logs))
+        .route(&format!("{api_prefix}/logs/stream"), get(stream_logs))
         .route(&format!("{api_prefix}/version"), get(get_version))
+        .route(&format!("{api_prefix}/config"), get(get_config))
         .route(&format!("{api_prefix}/openapi.yaml"), get(get_openapi))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
         .route(
@@ -185,8 +191,8 @@ fn core_status_to_api(s: flowgen_core::flow::activity::FlowStatus) -> api::FlowS
     use flowgen_core::flow::activity::FlowStatus as Core;
     match s {
         Core::Idle => api::FlowStatus::Idle,
-        Core::Running => api::FlowStatus::Running,
-        Core::Warning => api::FlowStatus::Warning,
+        Core::Ok => api::FlowStatus::Ok,
+        Core::Warn => api::FlowStatus::Warn,
         Core::Error => api::FlowStatus::Error,
     }
 }
@@ -227,29 +233,27 @@ async fn get_flow(
 
 /// Streams flow activity to the admin UI over Server-Sent Events.
 ///
-/// Emits a `snapshot` frame with per-flow metrics, then streams
-/// `activity` frames pulled from the configured `LogsQuery` backend.
+/// Emits a `snapshot` frame with the current per-flow metrics (kept in
+/// the in-process `FlowRegistry`), then streams `log` frames as new
+/// records arrive. The UI applies topological filtering (records
+/// scoped to a `task.run` / `task.handle` span) and identity hoisting
+/// client-side, using the same helper as `/logs`, so both views agree
+/// on which fields are identity vs metadata.
 async fn stream_flows(
     State(state): State<Arc<WebState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
-    use flowgen_core::telemetry::query::LogFilter;
-
     let snapshot = state.flow_activity.snapshot_all();
-    let snapshot_frame = SseEvent::default()
-        .event("snapshot")
-        .json_data(&snapshot)
-        .unwrap_or_else(|_| SseEvent::default().data("[]"));
+    let snapshot_frame = match SseEvent::default().event("snapshot").json_data(&snapshot) {
+        Ok(ev) => ev,
+        Err(source) => {
+            warn!(error = %source, "Failed to encode SSE snapshot frame");
+            SseEvent::default().data("[]")
+        }
+    };
 
     let live = match state.logs_query.as_ref() {
         Some(query) => {
-            let filter = LogFilter::default();
-            let history = match query.query(filter.clone(), usize::MAX).await {
-                Ok(records) => records,
-                Err(source) => {
-                    warn!(error = %source, "Log query history read failed");
-                    Vec::new()
-                }
-            };
+            let filter = flowgen_core::telemetry::query::LogFilter::default();
             let tail = match query.tail(filter).await {
                 Ok(stream) => stream,
                 Err(source) => {
@@ -257,24 +261,17 @@ async fn stream_flows(
                     futures_util::stream::empty().boxed()
                 }
             };
-            let flow_activity = Arc::clone(&state.flow_activity);
-            let history_stream = futures_util::stream::iter(history);
-            history_stream
-                .chain(tail)
-                .filter_map(move |record| {
-                    let flow_activity = Arc::clone(&flow_activity);
-                    async move { activity_from_stored(&record, &flow_activity) }
-                })
-                .filter_map(|activity| async move {
-                    match SseEvent::default().event("activity").json_data(&activity) {
-                        Ok(ev) => Some(Ok(ev)),
-                        Err(source) => {
-                            warn!(error = %source, "Failed to encode SSE activity frame");
-                            None
-                        }
+            tail.filter_map(|record| async move {
+                let wire = stored_to_wire(record);
+                match SseEvent::default().event("log").json_data(&wire) {
+                    Ok(ev) => Some(Ok(ev)),
+                    Err(source) => {
+                        warn!(error = %source, "Failed to encode SSE log frame");
+                        None
                     }
-                })
-                .boxed()
+                }
+            })
+            .boxed()
         }
         None => {
             warn!("No logs query backend configured; live SSE frames disabled");
@@ -290,96 +287,122 @@ async fn stream_flows(
     )
 }
 
-/// Turns a `StoredLog` from the telemetry backend into a `FlowActivity`
-/// frame the admin UI understands. Returns `None` for records that do
-/// not belong to a flow (background logs, framework messages).
-fn activity_from_stored(
-    record: &flowgen_core::telemetry::StoredLog,
-    flow_activity: &flowgen_core::flow::activity::FlowRegistry,
-) -> Option<flowgen_core::flow::activity::FlowActivity> {
-    use flowgen_core::flow::activity::ActivityLevel;
-    let mut flow: Option<&str> = None;
-    let mut task: Option<&str> = None;
-    let mut task_type: Option<&str> = None;
-    let mut level = ActivityLevel::Info;
-    let mut ts_ms: u64 = 0;
-    let mut duration_ms: Option<u64> = None;
-    let mut event_id: Option<String> = None;
-    let mut extra: Vec<(String, String)> = Vec::new();
-    let mut is_activity = false;
-    for (k, v) in &record.attributes {
-        match k.as_str() {
-            "flow" => flow = Some(v),
-            "task" => task = Some(v),
-            "task_type" => task_type = Some(v),
-            "task_id" => {}
-            "activity" => is_activity = v == "true",
-            "level" => {
-                level = match v.as_str() {
-                    "warning" | "warn" => ActivityLevel::Warning,
-                    "error" => ActivityLevel::Error,
-                    _ => ActivityLevel::Info,
-                };
-            }
-            "timestamp" => {
-                // RFC3339 from tracing_subscriber::fmt::json().
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
-                    ts_ms = dt.timestamp_millis().max(0) as u64;
-                }
-            }
-            "duration_ms" => {
-                if let Ok(parsed) = v.parse::<u64>() {
-                    duration_ms = Some(parsed);
-                }
-            }
-            "event_id" | "event.id" => event_id = Some(v.clone()),
-            "target" | "ts_ms" | "event.subject" => {}
-            "context" => {
-                // `EventLogger::context()` serializes fields as a JSON
-                // object; split them back into individual entries so the
-                // admin UI renders each as its own attribute row.
-                match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(v) {
-                    Ok(map) => {
-                        for (ck, cv) in map {
-                            let cv_str = match cv {
-                                serde_json::Value::String(s) => s,
-                                other => other.to_string(),
-                            };
-                            extra.push((ck, cv_str));
-                        }
-                    }
-                    Err(_) => extra.push((k.clone(), v.clone())),
-                }
-            }
-            _ => extra.push((k.clone(), v.clone())),
+/// Default and maximum `?limit` for `/api/logs` snapshots.
+const LOGS_SNAPSHOT_DEFAULT_LIMIT: usize = 500;
+const LOGS_SNAPSHOT_MAX_LIMIT: usize = 10_000;
+
+/// Returns every retained log record — framework, lifecycle, and
+/// per-task activity in one place. The admin UI's per-flow activity
+/// panel is a scoped subset of the same source; this endpoint returns
+/// the full set for the global log viewer.
+async fn list_logs(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<LogsQuery>,
+) -> Json<Vec<api::LogRecord>> {
+    let query = match state.logs_query.as_ref() {
+        Some(q) => q,
+        None => return Json(Vec::new()),
+    };
+    let limit = match params.limit {
+        Some(n) => n.min(LOGS_SNAPSHOT_MAX_LIMIT),
+        None => LOGS_SNAPSHOT_DEFAULT_LIMIT,
+    };
+    let filter = flowgen_core::telemetry::query::LogFilter::default();
+    let records = match query.query(filter, limit).await {
+        Ok(r) => r,
+        Err(source) => {
+            warn!(error = %source, "Log query history read failed");
+            return Json(Vec::new());
         }
-    }
-    let flow = flow?.to_string();
-    // Drop framework logs that never entered a task scope — the admin
-    // UI shows per-task activity, so a row without task_type is noise.
-    let task_type = task_type?.to_string();
-    // Drop lifecycle logs emitted outside a `task.handle` scope
-    // (registration, startup, shutdown). Every `task.handle` span
-    // declares `activity = true`; its absence means the log came from
-    // task lifecycle and does not belong in the per-event feed.
-    if !is_activity {
-        return None;
-    }
-    let metrics = flow_activity
-        .snapshot(&flow)
-        .unwrap_or_else(|| flowgen_core::flow::activity::FlowMetricsSnapshot::empty(&flow));
-    Some(flowgen_core::flow::activity::FlowActivity {
-        flow,
-        task: task.map(str::to_string),
-        task_type: Some(task_type),
+    };
+    let wire: Vec<api::LogRecord> = records.into_iter().map(stored_to_wire).collect();
+    Json(wire)
+}
+
+/// Streams log records as they arrive. Same scope as `list_logs`: every
+/// captured record, no server-side topological filter — the UI groups
+/// and filters by level / task / flow / free text.
+async fn stream_logs(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
+    // Tail-only: `/api/logs` returns the initial snapshot, this endpoint
+    // streams new records as they arrive. Sending history here too would
+    // duplicate every retained record for a UI that already loaded them.
+    let live = match state.logs_query.as_ref() {
+        Some(query) => {
+            let filter = flowgen_core::telemetry::query::LogFilter::default();
+            let tail = match query.tail(filter).await {
+                Ok(stream) => stream,
+                Err(source) => {
+                    warn!(error = %source, "Log query tail subscription failed");
+                    futures_util::stream::empty().boxed()
+                }
+            };
+            tail.filter_map(|record| async move {
+                let wire = stored_to_wire(record);
+                match SseEvent::default().event("log").json_data(&wire) {
+                    Ok(ev) => Some(Ok(ev)),
+                    Err(source) => {
+                        warn!(error = %source, "Failed to encode SSE log frame");
+                        None
+                    }
+                }
+            })
+            .boxed()
+        }
+        None => {
+            warn!("No logs query backend configured; /api/logs/stream is empty");
+            futures_util::stream::empty().boxed()
+        }
+    };
+    Sse::new(live).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    limit: Option<usize>,
+}
+
+/// Converts an internal `StoredLog` to the OpenAPI wire shape.
+fn stored_to_wire(record: flowgen_core::telemetry::StoredLog) -> api::LogRecord {
+    let spans = record
+        .spans
+        .into_iter()
+        .map(|s| api::LogSpan {
+            name: s.name,
+            fields: s.fields.into_iter().map(kv_to_wire).collect(),
+        })
+        .collect();
+    let timestamp = match record.timestamp.as_deref() {
+        None => None,
+        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+            Ok(dt) => Some(dt.with_timezone(&chrono::Utc)),
+            Err(_) => None,
+        },
+    };
+    let level = match record.level.as_str() {
+        "warn" | "warning" => api::LogRecordLevel::Warn,
+        "error" => api::LogRecordLevel::Error,
+        "debug" => api::LogRecordLevel::Debug,
+        "trace" => api::LogRecordLevel::Trace,
+        _ => api::LogRecordLevel::Info,
+    };
+    api::LogRecord {
+        body: record.body,
         level,
-        ts_ms,
-        message: record.body.clone(),
-        duration_ms,
-        event_id,
-        extra,
-        metrics,
-    })
+        timestamp,
+        target: record.target,
+        spans,
+        fields: record.fields.into_iter().map(kv_to_wire).collect(),
+    }
+}
+
+fn kv_to_wire((k, v): (String, String)) -> api::KeyValue {
+    api::KeyValue { key: k, value: v }
 }
 
 /// Returns the list of resources discoverable from the filesystem loader.
@@ -455,6 +478,20 @@ async fn get_version() -> Json<api::VersionInfo> {
     Json(api::VersionInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Returns the running application configuration as YAML for the admin
+/// config viewer. Secrets are redacted at serialization time (see
+/// `JwtConfig`), so no additional masking is needed here.
+async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo> {
+    let yaml = match serde_yaml::to_string(&*state.app_config) {
+        Ok(yaml) => yaml,
+        Err(source) => {
+            warn!(error = %source, "Failed to serialize app config to YAML");
+            String::new()
+        }
+    };
+    Json(api::ConfigInfo { yaml })
 }
 
 /// Returns the bundled OpenAPI spec.
@@ -550,12 +587,29 @@ mod tests {
 
     #[test]
     fn test_web_state_allows_empty_registry() {
+        let app_config = Arc::new(crate::config::AppConfig {
+            cache: None,
+            flows: crate::config::FlowOptions {
+                path: None,
+                cache: None,
+            },
+            resources: None,
+            http_server: None,
+            mcp_server: None,
+            ai_gateway: None,
+            web: None,
+            health: Default::default(),
+            retry: None,
+            event_buffer_size: None,
+            telemetry: None,
+        });
         let state = WebState {
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             prefix: String::new(),
             resource_loader: None,
             flow_activity: flowgen_core::flow::activity::FlowRegistry::builder().build(),
             logs_query: None,
+            app_config,
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());

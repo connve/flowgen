@@ -5,7 +5,10 @@
 # Required:
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
-  name: bigquery_job_delete
+  labels:
+    display_name: "BigQuery Job Delete"
+    description: "Deletes a BigQuery job's metadata record on a daily schedule, leaving the loaded tables and rows in place."
+    tags: ["bigquery", "gcp", "job", "cleanup", "example"]
   require_leader_election: true
   tasks:
 
@@ -30,4 +33,3 @@ flow:
     - log:
         name: log_deletion
         level: info
-        structured: true

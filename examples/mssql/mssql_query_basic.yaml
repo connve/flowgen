@@ -4,7 +4,10 @@
 # Required:
 #   - SQL Server credentials at /etc/mssql/credentials.json
 flow:
-  name: mssql_query_basic
+  labels:
+    display_name: "MSSQL Basic Query"
+    description: "Runs a one-shot inline SQL Server query for active customers, converts the Arrow result to JSON, and logs one event per row."
+    tags: ["mssql", "query", "sql-server", "example"]
   require_leader_election: true
   tasks:
 
@@ -33,4 +36,3 @@ flow:
     - log:
         name: log
         level: info
-        structured: false

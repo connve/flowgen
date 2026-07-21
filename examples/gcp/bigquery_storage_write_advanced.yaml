@@ -6,7 +6,10 @@
 #   - NATS credentials at /etc/nats/credentials.json
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
-  name: bigquery_storage_write_advanced
+  labels:
+    display_name: "BigQuery Storage Write (Advanced)"
+    description: "Consumes events from NATS, enriches them with ingestion metadata, streams them into BigQuery via the Storage Write API with per-row trace IDs, and publishes a confirmation back to NATS."
+    tags: ["bigquery", "gcp", "storage-write", "nats", "example"]
   require_leader_election: true
   tasks:
 
@@ -72,4 +75,3 @@ flow:
     - log:
         name: log_final
         level: info
-        structured: true

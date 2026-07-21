@@ -14,7 +14,10 @@
 #   - fields_to_export limits which fields Braze returns. Required for
 #     accounts onboarded after 2024-08-22.
 flow:
-  name: braze_export_users_ids_example
+  labels:
+    display_name: "Braze User Export by ID"
+    description: "Triggers once to export two users by external_id from the Braze /users/export/ids API and logs the response."
+    tags: ["braze", "export", "http", "example"]
   tasks:
     - generate:
         name: trigger
@@ -36,4 +39,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: true

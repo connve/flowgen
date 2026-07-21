@@ -88,7 +88,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Processes an event and moves files in the configured object store.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());

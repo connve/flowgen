@@ -42,7 +42,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_composite_upsert_contact
   tasks:
 
     - nats_jetstream_subscriber:
@@ -116,7 +115,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_platform_event_publisher
   tasks:
 
     - nats_jetstream_subscriber:

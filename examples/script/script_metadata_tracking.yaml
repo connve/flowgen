@@ -2,7 +2,10 @@
 # validation, one for enrichment, one for finalisation. Final log
 # emits the full metadata chain.
 flow:
-  name: script_metadata_tracking
+  labels:
+    display_name: "Metadata Tracking Chain"
+    description: "Chains three scripts that carry state through ctx.meta for validation, enrichment, and finalisation, then logs the full metadata chain."
+    tags: ["script", "metadata", "validation", "chaining", "example"]
   require_leader_election: true
   tasks:
 
@@ -56,4 +59,3 @@ flow:
     - log:
         name: log_with_metadata
         level: info
-        structured: true

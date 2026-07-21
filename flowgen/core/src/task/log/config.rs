@@ -10,11 +10,6 @@ pub struct Processor {
     /// Log level for output.
     #[serde(default)]
     pub level: LogLevel,
-    /// Whether to output structured JSON fields instead of pretty-printed strings.
-    /// When true, logs JSON as structured fields for systems like Grafana/Loki.
-    /// When false, logs pretty-printed JSON strings for console readability.
-    #[serde(default)]
-    pub structured: bool,
     /// Whether to include `event.meta` in the log output.
     ///
     /// Defaults to `false` because meta is intended as in-flow context for

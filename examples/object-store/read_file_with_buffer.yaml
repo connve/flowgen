@@ -6,8 +6,11 @@
 #   - NATS credentials at /etc/nats/credentials.json
 #   - examples/data/orders.csv
 flow:
+  labels:
+    display_name: "Read File With Partitioned Buffer"
+    description: "Reads a CSV file, splits it into rows, re-batches rows into partitioned groups of 75 by payment type, and publishes each batch to NATS JetStream."
+    tags: ["object-store", "csv", "nats", "buffer", "example"]
   require_leader_election: true
-  name: read_file_with_buffer
   tasks:
 
     - generate:

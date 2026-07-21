@@ -7,8 +7,8 @@
 #   - resources/ai-completion/prompts/analyst_system.md
 #   - resources/ai-completion/prompts/analyze_data.md
 flow:
-  name: resource_prompt_completion
   labels:
+    display_name: "Resource Prompt Completion"
     description: "Webhook → LLM completion with system and user prompts loaded from resource files."
     tags: ["ai", "webhook", "example"]
   tasks:

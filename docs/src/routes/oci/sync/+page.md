@@ -34,7 +34,6 @@ Both `oras push` artifacts and Docker container images are supported. `oras`-sty
 
 ```yaml
 flow:
-  name: oci_sync_flows
   tasks:
     - generate:
         name: trigger
@@ -55,8 +54,14 @@ flow:
         code: |
           let actions = [];
           for layer in event.data.batch {
-              let parsed = parse_yaml(layer.content);
-              let key = "flowgen.flows." + parsed.flow.name;
+              // Strip `flows/` prefix and the file extension so the cache
+              // key suffix matches the flow's path-based identity.
+              let path = regex_replace(
+                  layer.path.sub_string(6),
+                  "\\.(yaml|yml|json)$",
+                  ""
+              );
+              let key = "flowgen.flows." + path;
               actions.push(#{
                   action: "put",
                   key: key,
@@ -164,7 +169,7 @@ Every listed entry should live under `flows/` or `resources/`. Any `bin/`, `lib/
 
 ## Bootstrap flow
 
-[`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml) reconciles an OCI artifact into the system cache end-to-end. One artifact carries both `flows/` and `resources/`; the bootstrap routes each layer by its top-level directory — `flows/*` are keyed by `flow.name` parsed from the layer body, `resources/*` are keyed by the path with the `resources/` prefix stripped, and any layer outside those two prefixes (e.g. a `README.md`) is dropped. It ticks on an interval, lists existing cache entries under both prefixes, and emits one put per layer and one delete per orphaned key.
+[`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml) reconciles an OCI artifact into the system cache end-to-end. One artifact carries both `flows/` and `resources/`; the bootstrap routes each layer by its top-level directory — `flows/*` are keyed by the layer path with the `flows/` prefix and file extension stripped (so `flows/demo/reader.yaml` becomes cache key suffix `demo/reader`, matching the flow's path-based identity), `resources/*` are keyed by the path with the `resources/` prefix stripped, and any layer outside those two prefixes (e.g. a `README.md`) is dropped. It ticks on an interval, lists existing cache entries under both prefixes, and emits one put per layer and one delete per orphaned key.
 
 The flow skips the rest of its pipeline when the artifact digest has not moved, so the only cost on a no-change tick is a manifest HEAD plus a `list_keys` round-trip. See [Resources](/docs/flowgen/concepts/resources) for how the runtime `ResourceLoader` reads back from `flowgen.resources.*`.
 

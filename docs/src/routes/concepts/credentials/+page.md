@@ -63,7 +63,6 @@ Both fields are optional. If neither is set, no `Authorization` header is added.
 
 ```yaml
 flow:
-  name: secure_webhook
   tasks:
     - http_endpoint:
         name: ingest

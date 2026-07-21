@@ -5,7 +5,10 @@
 #   - GCP service account at /etc/gcp/credentials.json
 #   - resources/gcp/queries/fetch_completed_orders.sql (uses @status, @start_date)
 flow:
-  name: bigquery_query_parameterized
+  labels:
+    display_name: "BigQuery Parameterized Query"
+    description: "Runs a parameterized query loaded from a resource file every 5 minutes to fetch completed orders, then splits and logs each row."
+    tags: ["bigquery", "gcp", "query", "parameterized", "example"]
   require_leader_election: true
   tasks:
 
@@ -35,4 +38,3 @@ flow:
     - log:
         name: log
         level: info
-        structured: false

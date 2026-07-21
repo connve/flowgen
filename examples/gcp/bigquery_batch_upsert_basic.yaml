@@ -7,7 +7,10 @@
 #   - GCP service account at /etc/gcp/credentials.json
 #   - resources/gcp/queries/upsert_orders_batch.sql
 flow:
-  name: bigquery_batch_upsert_basic
+  labels:
+    display_name: "BigQuery Batch Upsert (Basic)"
+    description: "Consumes order batches one at a time from NATS and upserts each into a single-project BigQuery table with one MERGE + UNNEST query per batch."
+    tags: ["bigquery", "gcp", "upsert", "nats", "example"]
   require_leader_election: true
   tasks:
 

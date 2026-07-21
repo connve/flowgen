@@ -8,7 +8,10 @@
 #   - Braze credentials at /etc/braze/credentials.json with:
 #       { "api_key": "...", "rest_endpoint": "https://rest.iad-01.braze.com" }
 flow:
-  name: braze_export_users_ids_upstream
+  labels:
+    display_name: "Braze User Export from Upstream Events"
+    description: "Exports Braze user profiles by rendering each incoming event's user_id into a /users/export/ids call and logging the response."
+    tags: ["braze", "export", "event-driven", "example"]
   tasks:
     - generate:
         name: trigger
@@ -31,4 +34,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: true

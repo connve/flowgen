@@ -19,7 +19,10 @@
 #   - AI gateway enabled in worker config
 #   - Downstream provider credentials under /etc/<alias>/credentials.json
 flow:
-  name: anthropic_proxy
+  labels:
+    display_name: "Anthropic API Gateway"
+    description: "Exposes an Anthropic Messages-compatible endpoint that routes a client model alias to a downstream provider and streams the completion back in Anthropic wire format."
+    tags: ["ai-gateway", "anthropic", "llm-proxy", "streaming", "example"]
   tasks:
 
     - llm_proxy:

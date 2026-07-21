@@ -87,7 +87,6 @@ One source feeding multiple branches that run in parallel:
 
 ```yaml
 flow:
-  name: fan_out_example
   tasks:
     - http_endpoint:
         name: ingest
@@ -119,7 +118,6 @@ Multiple producers feeding the same downstream task:
 
 ```yaml
 flow:
-  name: fan_in_example
   tasks:
     - generate:
         name: tick_fast
@@ -142,7 +140,6 @@ flow:
 
 ```yaml
 flow:
-  name: mixed
   tasks:
     - http_endpoint:
         name: ingest

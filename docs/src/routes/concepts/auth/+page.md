@@ -30,6 +30,8 @@ http_server:
 
 Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `jwks_url`, flowgen fetches the JWKS at startup and matches incoming tokens by their `kid` header.
 
+The `secret` is held as a redacted value: it never appears in logs or the admin System view (config renders it as `"***"`). Token validation uses the real value.
+
 ## OIDC provider
 
 ```yaml

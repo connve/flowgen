@@ -61,7 +61,7 @@
 			<span>Failed to load flow: {error}</span>
 		</div>
 	{:else if detail}
-		<div class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100">
+		<div class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
 			<FlowInspector yaml={detail.yaml} {activities} />
 		</div>
 	{/if}

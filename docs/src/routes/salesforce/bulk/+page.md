@@ -54,7 +54,6 @@ What `event.data` contains depends on the operation:
 
 ```yaml
 flow:
-  name: salesforce_export
   tasks:
     - generate:
         name: trigger

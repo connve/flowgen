@@ -19,3 +19,7 @@ export type FlowSummarySource = Schemas['FlowSummary']['source'];
 export type ResourceSummary = Schemas['ResourceSummary'];
 export type ResourceContent = Schemas['ResourceContent'];
 export type VersionInfo = Schemas['VersionInfo'];
+export type ConfigInfo = Schemas['ConfigInfo'];
+export type LogRecord = Schemas['LogRecord'];
+export type LogSpan = Schemas['LogSpan'];
+export type KeyValue = Schemas['KeyValue'];

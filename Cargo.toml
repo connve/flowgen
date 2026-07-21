@@ -146,6 +146,7 @@ rmcp = { version = "1", features = [
 schemars = { version = "1.2" }
 scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
+secrecy = { version = "0.10", features = ["serde"] }
 walkdir = { version = "2.5" }
 testcontainers = { version = "0.27" }
 rust-embed = { version = "8.7" }

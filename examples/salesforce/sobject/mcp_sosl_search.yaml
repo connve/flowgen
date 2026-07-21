@@ -7,7 +7,10 @@
 #   - /etc/sfdc/credentials.json
 #   - MCP server enabled in worker config
 flow:
-  name: salesforce_mcp_sosl_search
+  labels:
+    display_name: "Salesforce SOSL Search (MCP)"
+    description: "Exposes a SOSL search across Account and Contact records as an MCP tool callable by LLM agents."
+    tags: ["salesforce", "sosl", "mcp", "tool", "example"]
   tasks:
 
     - mcp_tool:

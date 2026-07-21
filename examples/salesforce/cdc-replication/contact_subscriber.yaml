@@ -9,7 +9,10 @@
 #   - /etc/nats/credentials.json
 #   - NATS_URL env var (e.g. nats://localhost:4222)
 flow:
-  name: salesforce_contact_subscriber
+  labels:
+    display_name: "Salesforce Contact CDC Subscriber"
+    description: "Subscribes to Salesforce ContactChangeEvent change events via the Pub/Sub API and republishes them to a NATS JetStream stream."
+    tags: ["salesforce", "cdc", "nats", "example"]
   require_leader_election: true
   tasks:
 

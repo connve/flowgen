@@ -37,7 +37,6 @@ Connects to Salesforce Pub/Sub API and republishes every change event into NATS.
 
 ```yaml
 flow:
-  name: salesforce_account_subscriber
   require_leader_election: true
   tasks:
 
@@ -83,7 +82,6 @@ Consumes from the NATS stream and branches to multiple destinations. Both sinks 
 
 ```yaml
 flow:
-  name: salesforce_writer
   tasks:
 
     - nats_jetstream_subscriber:

@@ -6,3 +6,56 @@
 @theme {
 	--color-primary: #006b55;
 }
+
+/* Shared chip filter styling. Dark mode uses solid text colors; light
+   mode mixes the accent with base-content for readable contrast on the
+   pale tinted background. */
+@utility chip {
+	@apply flex h-8 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors;
+}
+@utility chip-sm {
+	@apply flex h-6 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors;
+}
+@utility chip-inactive {
+	@apply border-base-300 opacity-40 hover:opacity-70;
+}
+@utility chip-neutral {
+	@apply border-base-300 bg-base-200/50;
+}
+@utility chip-info {
+	@apply border-primary/50 bg-primary/10;
+	color: color-mix(in oklab, var(--color-primary) 75%, var(--color-base-content));
+}
+@utility chip-warn {
+	@apply border-warning/50 bg-warning/10;
+	color: color-mix(in oklab, var(--color-warning) 60%, var(--color-base-content));
+}
+@utility chip-error {
+	@apply border-error/50 bg-error/10;
+	color: color-mix(in oklab, var(--color-error) 65%, var(--color-base-content));
+}
+:root[data-theme='mydark'] .chip-info,
+:root[data-theme='mydark'] .chip-warn,
+:root[data-theme='mydark'] .chip-error {
+	color: unset;
+}
+:root[data-theme='mydark'] .chip-info {
+	@apply text-primary;
+}
+:root[data-theme='mydark'] .chip-warn {
+	@apply text-warning;
+}
+:root[data-theme='mydark'] .chip-error {
+	@apply text-error;
+}
+
+/* Hide native number-input spinners so the Limit field matches other inputs. */
+@utility no-spinner {
+	appearance: textfield;
+	-moz-appearance: textfield;
+}
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+}

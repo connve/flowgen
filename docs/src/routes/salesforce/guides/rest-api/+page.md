@@ -37,7 +37,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_sobject_lookup
   tasks:
 
     - http_endpoint:
@@ -58,7 +57,6 @@ flow:
 
 ```yaml
 flow:
-  name: salesforce_mcp_sobject_lookup
   tasks:
 
     - mcp_tool:
@@ -102,7 +100,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_sobject_upsert
   tasks:
 
     - http_endpoint:
@@ -125,7 +122,6 @@ flow:
 
 ```yaml
 flow:
-  name: salesforce_mcp_sobject_upsert
   tasks:
 
     - mcp_tool:
@@ -172,7 +168,6 @@ graph LR
 
 ```yaml
 flow:
-  name: salesforce_sosl_search
   tasks:
 
     - http_endpoint:
@@ -190,7 +185,6 @@ flow:
 
 ```yaml
 flow:
-  name: salesforce_mcp_sosl_search
   tasks:
 
     - mcp_tool:

@@ -40,14 +40,35 @@ pub enum Error {
     },
 }
 
+/// One span in a log record's span chain, root-to-leaf.
+///
+/// Keeps span identity (`name`) with the fields declared on that span
+/// (e.g. `task.run` carries `task`, `task_id`, `task_type`) so consumers
+/// can classify by span topology without losing which span contributed
+/// which field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSpan {
+    /// Span name (e.g. `flow.run`, `task.run`, `task.handle`).
+    pub name: String,
+    /// Fields declared on this span, flattened to strings.
+    pub fields: Vec<(String, String)>,
+}
+
 /// A single log record captured by a telemetry backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredLog {
     /// Log record body (the tracing event's `message` field).
     pub body: String,
-    /// Structured fields flattened to strings, including span-inherited
-    /// context like `flow` and `task`.
-    pub attributes: Vec<(String, String)>,
+    /// Log level as emitted by tracing (lowercased: "info" | "warn" | "error").
+    pub level: String,
+    /// RFC3339 timestamp when present in the source line.
+    pub timestamp: Option<String>,
+    /// The tracing `target` (usually the module path).
+    pub target: String,
+    /// Span chain from root to leaf. Empty for events emitted outside any span.
+    pub spans: Vec<StoredSpan>,
+    /// Fields declared on the event itself (not inherited from spans).
+    pub fields: Vec<(String, String)>,
 }
 
 /// Backend selection for telemetry signals.

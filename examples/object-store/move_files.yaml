@@ -6,8 +6,11 @@
 # Required:
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
+  labels:
+    display_name: "Move Files After Processing"
+    description: "Lists Parquet files in GCS, builds an explicit URI list, loads that exact set into a BigQuery staging table, then archives the same files to a processed prefix."
+    tags: ["object-store", "gcs", "bigquery", "archive", "example"]
   require_leader_election: true
-  name: move_files_after_processing
   tasks:
 
     - generate:

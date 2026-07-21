@@ -26,7 +26,10 @@
 #   - /etc/nats/credentials.json for NATS KV writes.
 #   - NATS_URL env var (e.g. nats://localhost:4222)
 flow:
-  name: system_sync_workspace
+  labels:
+    display_name: "Sync Workspace From Git"
+    description: "Reconciles a full flowgen workspace of flows and resources from a Git repository into the system NATS KV cache each tick, computing put/delete diffs and skipping when the repo commit is unchanged."
+    tags: ["system", "git-sync", "nats-kv", "reconcile", "example"]
   require_leader_election: true
   tasks:
 

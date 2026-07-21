@@ -5,7 +5,10 @@
 # Required:
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
-  name: bigquery_query_advanced
+  labels:
+    display_name: "BigQuery Query (Advanced)"
+    description: "Runs a parameterized EU analytics query every 5 minutes with cross-project billing, cost-tracking labels, a default dataset, and the Storage Read backend, then splits and logs each row."
+    tags: ["bigquery", "gcp", "query", "analytics", "example"]
   require_leader_election: true
   tasks:
 
@@ -47,4 +50,3 @@ flow:
     - log:
         name: log
         level: info
-        structured: false

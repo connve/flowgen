@@ -29,9 +29,12 @@ pub struct FlowOptions {
 
 impl FlowOptions {
     /// Returns the flow identity: `source_path` when the loader assigned
-    /// one, otherwise the YAML `name`.
+    /// one, otherwise the programmatic `name`.
     pub fn identity(&self) -> &str {
-        self.source_path.as_deref().unwrap_or(&self.name)
+        match self.source_path.as_deref() {
+            Some(path) => path,
+            None => &self.name,
+        }
     }
 }
 
@@ -123,10 +126,10 @@ impl TaskContextBuilder {
         Self::default()
     }
 
-    /// Sets the unique flow name.
-    ///
-    /// # Arguments
-    /// * `name` - The unique name for this flow.
+    /// Sets the flow identity string (path-shaped when loaded from
+    /// filesystem/cache, programmatic name when API-constructed).
+    /// This is the value returned by [`FlowOptions::identity`] and used
+    /// as the registry key, cache namespace, and tracing `flow=` field.
     pub fn flow_name(mut self, name: String) -> Self {
         self.flow_name = Some(name);
         self

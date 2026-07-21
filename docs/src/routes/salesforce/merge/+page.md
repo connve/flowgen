@@ -44,7 +44,6 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 
 ```yaml
 flow:
-  name: deduplicate_accounts
   tasks:
     - generate:
         name: trigger
@@ -83,7 +82,6 @@ flow:
 
 ```yaml
 flow:
-  name: nats_dedup_pipeline
   tasks:
     - nats_jetstream_subscriber:
         name: duplicates

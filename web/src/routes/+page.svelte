@@ -49,13 +49,13 @@
 	let selectedTags = $state<Set<string>>(new Set());
 	let statusFilter = $state<Record<FlowStatus, boolean>>({
 		idle: true,
-		running: true,
-		warning: true,
+		ok: true,
+		warn: true,
 		error: true,
 	});
 
 	let statusCounts = $derived.by(() => {
-		const c: Record<FlowStatus, number> = { idle: 0, running: 0, warning: 0, error: 0 };
+		const c: Record<FlowStatus, number> = { idle: 0, ok: 0, warn: 0, error: 0 };
 		for (const f of flowsView) c[f.status] += 1;
 		return c;
 	});
@@ -229,7 +229,7 @@
 	}
 
 	// Order used when sorting by Status column — worst first descending.
-	const STATUS_RANK: Record<FlowStatus, number> = { error: 3, warning: 2, running: 1, idle: 0 };
+	const STATUS_RANK: Record<FlowStatus, number> = { error: 3, warn: 2, ok: 1, idle: 0 };
 
 	function compareFlows(a: Flow, b: Flow, key: SortKey): number {
 		if (key === 'name') {
@@ -326,7 +326,7 @@
 
 <section class="flex h-[calc(100vh-4rem)]">
 	<aside
-		class="flex shrink-0 flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
+		class="flex shrink-0 flex-col border-r border-base-300 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
 			? 'w-64'
 			: 'w-16'}"
 	>
@@ -465,9 +465,7 @@
 		<div class="flex items-center gap-1">
 			<button
 				type="button"
-				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.idle
-					? 'border-base-300 bg-base-200/50'
-					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				class="chip {statusFilter.idle ? 'chip-neutral' : 'chip-inactive'}"
 				aria-pressed={statusFilter.idle}
 				onclick={() => toggleStatus('idle')}
 			>
@@ -476,31 +474,25 @@
 			</button>
 			<button
 				type="button"
-				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.running
-					? 'border-primary/50 bg-primary/10'
-					: 'border-base-300 opacity-40 hover:opacity-70'}"
-				aria-pressed={statusFilter.running}
-				onclick={() => toggleStatus('running')}
+				class="chip {statusFilter.ok ? 'chip-info' : 'chip-inactive'}"
+				aria-pressed={statusFilter.ok}
+				onclick={() => toggleStatus('ok')}
 			>
-				<span>Running</span>
-				<span class="tabular-nums opacity-60">{statusCounts.running}</span>
+				<span>OK</span>
+				<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
 			</button>
 			<button
 				type="button"
-				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.warning
-					? 'border-warning/50 bg-warning/10'
-					: 'border-base-300 opacity-40 hover:opacity-70'}"
-				aria-pressed={statusFilter.warning}
-				onclick={() => toggleStatus('warning')}
+				class="chip {statusFilter.warn ? 'chip-warn' : 'chip-inactive'}"
+				aria-pressed={statusFilter.warn}
+				onclick={() => toggleStatus('warn')}
 			>
-				<span>Warning</span>
-				<span class="tabular-nums opacity-60">{statusCounts.warning}</span>
+				<span>Warn</span>
+				<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
 			</button>
 			<button
 				type="button"
-				class="flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {statusFilter.error
-					? 'border-error/50 bg-error/10'
-					: 'border-base-300 opacity-40 hover:opacity-70'}"
+				class="chip {statusFilter.error ? 'chip-error' : 'chip-inactive'}"
 				aria-pressed={statusFilter.error}
 				onclick={() => toggleStatus('error')}
 			>
@@ -567,9 +559,10 @@
 					{/each}
 					<button
 						type="button"
-						class="ml-1 text-xs opacity-60 hover:opacity-100"
+						class="btn btn-sm btn-ghost gap-1"
 						onclick={() => (selectedTags = new Set())}
 					>
+						<Icon icon="tabler:x" class="h-4 w-4" />
 						Clear
 					</button>
 				</div>
@@ -614,11 +607,11 @@
 			<span>Failed to load flows: {error}</span>
 		</div>
 	{:else if filtered.length === 0}
-		<div class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70">
+		<div class="rounded-lg border border-base-300 bg-base-100 p-8 text-center text-sm opacity-70">
 			No flows found
 		</div>
 	{:else}
-		<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
+		<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
 				<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
 					<tr>
@@ -723,10 +716,10 @@
 								{/if}
 							</td>
 							<td>
-								{#if flow.status === 'running'}
-									<Badge variant="success">Running</Badge>
-								{:else if flow.status === 'warning'}
-									<Badge variant="warning">Warning</Badge>
+								{#if flow.status === 'ok'}
+									<Badge variant="success">OK</Badge>
+								{:else if flow.status === 'warn'}
+									<Badge variant="warning">Warn</Badge>
 								{:else if flow.status === 'error'}
 									<Badge variant="error">Error</Badge>
 								{:else}
@@ -748,7 +741,7 @@
 
 {#if selected}
 	<div
-		class="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
 		role="dialog"
 		aria-modal="true"
 		aria-label="Flow YAML viewer"
@@ -761,7 +754,7 @@
 		tabindex="-1"
 	>
 		<div
-			class="flex h-[90vh] w-full max-w-[95vw] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
+			class="flex h-[90vh] w-full max-w-[95vw] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100 shadow-2xl ring-1 ring-base-content/10"
 		>
 			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
 				<div class="min-w-0 flex-1">

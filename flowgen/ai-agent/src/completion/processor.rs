@@ -397,7 +397,7 @@ impl EventHandler {
     }
 
     /// Non-streaming completion: waits for the full response and emits a single event.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
         let started_at = std::time::Instant::now();
         let client = self.resolve_client(&event).await?;
@@ -689,7 +689,7 @@ impl EventHandler {
     /// then a final chunk with `is_final: true`. Only the final event carries
     /// the completion signal so downstream tasks see all chunks before the
     /// source considers the request complete.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle_streaming(&self, event: Event) -> Result<(), Error> {
         let started_at = std::time::Instant::now();
         let event = Arc::new(event);

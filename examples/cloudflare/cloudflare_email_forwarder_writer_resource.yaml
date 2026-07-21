@@ -5,7 +5,10 @@
 #   - NATS credentials at /etc/nats/credentials.json
 #   - resources/schemas/email_message.avsc
 flow:
-  name: cloudflare_email_forwarder_writer_resource
+  labels:
+    display_name: "Cloudflare Email Writer (Schema File)"
+    description: "Consumes forwarded emails from NATS, converts JSON to Avro using a schema loaded from a resource file, and archives them to the object store partitioned by EventDate."
+    tags: ["cloudflare", "email", "nats", "object-store", "example"]
   tasks:
 
     - nats_jetstream_subscriber:

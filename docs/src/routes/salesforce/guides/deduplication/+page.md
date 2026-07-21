@@ -37,7 +37,6 @@ The input file contains an array of objects, each with the master and duplicate 
 
 ```yaml
 flow:
-  name: salesforce_dedup
   tasks:
 
     - object_store:

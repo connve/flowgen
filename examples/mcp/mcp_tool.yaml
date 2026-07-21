@@ -5,7 +5,10 @@
 # Required:
 #   - MCP server enabled in worker config (worker.mcp_server.enabled: true)
 flow:
-  name: mcp_tool_example
+  labels:
+    display_name: "MCP Tool"
+    description: "Exposes a callable MCP tool that takes a name argument and returns a personalised greeting built by a Rhai script as the tool result."
+    tags: ["mcp", "tool", "script", "example"]
   tasks:
 
     # LLM-facing tool. Arguments arrive as event.data on tools/call.

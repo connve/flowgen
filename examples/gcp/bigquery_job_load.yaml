@@ -5,7 +5,10 @@
 # Required:
 #   - GCP service account at /etc/gcp/credentials.json
 flow:
-  name: bigquery_job_load
+  labels:
+    display_name: "BigQuery Load Job"
+    description: "Creates a BigQuery load job that imports Parquet files from a GCS bucket into a table, appending rows to the destination."
+    tags: ["bigquery", "gcp", "load", "gcs", "example"]
   require_leader_election: true
   tasks:
 
@@ -36,4 +39,3 @@ flow:
     - log:
         name: log_job_info
         level: info
-        structured: true

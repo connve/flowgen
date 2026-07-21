@@ -56,9 +56,9 @@ pub enum FlowStatus {
     /// No events observed yet.
     Idle,
     /// Last observed event was an `info!` — flow is healthy.
-    Running,
+    Ok,
     /// Last observed event was a `warn!`.
-    Warning,
+    Warn,
     /// Last observed event was an `error!`.
     Error,
 }
@@ -163,8 +163,8 @@ fn read_ts(a: &AtomicU64) -> Option<u64> {
 // misbehaving flow doesn't look Warning when it's actually Error.
 fn derive_status(info: Option<u64>, warn: Option<u64>, err: Option<u64>) -> FlowStatus {
     let latest = [
-        (info, FlowStatus::Running),
-        (warn, FlowStatus::Warning),
+        (info, FlowStatus::Ok),
+        (warn, FlowStatus::Warn),
         (err, FlowStatus::Error),
     ];
     let mut winner: Option<(u64, FlowStatus)> = None;
@@ -174,7 +174,7 @@ fn derive_status(info: Option<u64>, warn: Option<u64>, err: Option<u64>) -> Flow
             (Some(t), Some((best, prev))) if t == best => {
                 let level = match (status, prev) {
                     (FlowStatus::Error, _) | (_, FlowStatus::Error) => FlowStatus::Error,
-                    (FlowStatus::Warning, _) | (_, FlowStatus::Warning) => FlowStatus::Warning,
+                    (FlowStatus::Warn, _) | (_, FlowStatus::Warn) => FlowStatus::Warn,
                     _ => status,
                 };
                 winner = Some((t, level));
@@ -187,44 +187,6 @@ fn derive_status(info: Option<u64>, warn: Option<u64>, err: Option<u64>) -> Flow
         Some((_, s)) => s,
         None => FlowStatus::Idle,
     }
-}
-
-/// Single activity notification broadcast to SSE subscribers.
-#[derive(Debug, Clone, Serialize)]
-pub struct FlowActivity {
-    /// Owning flow name.
-    pub flow: String,
-    /// Task name if the event happened inside a `task.run` span.
-    /// `None` for flow-scoped events that don't carry a task.
-    pub task: Option<String>,
-    /// Processor type of the emitting task (e.g. `gcp_bigquery_query`).
-    /// `None` for events outside a `task.run` scope.
-    pub task_type: Option<String>,
-    /// Level bucket derived from the tracing event level.
-    pub level: ActivityLevel,
-    /// Unix milliseconds of the event.
-    pub ts_ms: u64,
-    /// Human-readable event message (tracing event body / target). Empty
-    /// when the event carried no formatted message.
-    pub message: String,
-    /// Wall-clock duration of the `task.handle` span this event fired in,
-    /// in milliseconds. `None` outside a `task.handle` scope (source-task
-    /// pings, ambient warnings).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    /// Correlation id of the event this activity was emitted for. Grep target
-    /// for cross-referencing with structured logs / OTel traces.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_id: Option<String>,
-    /// Custom structured fields carried by the tracing event beyond the
-    /// system attributes above (e.g. `error`, `http_status`,
-    /// `retry_attempt`). Rendered by the UI as a `key: value` list
-    /// under the message.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub extra: Vec<(String, String)>,
-    /// Post-snapshot metrics for the flow — lets SSE consumers update
-    /// counters/status without needing a follow-up REST call.
-    pub metrics: FlowMetricsSnapshot,
 }
 
 /// One event recorded by the tracing layer, before it's stamped with
@@ -381,12 +343,9 @@ mod tests {
     #[test]
     fn status_prefers_latest_timestamp() {
         assert_eq!(derive_status(None, None, None), FlowStatus::Idle);
-        assert_eq!(derive_status(Some(10), None, None), FlowStatus::Running);
-        assert_eq!(derive_status(Some(10), Some(20), None), FlowStatus::Warning);
-        assert_eq!(
-            derive_status(Some(30), Some(20), Some(10)),
-            FlowStatus::Running
-        );
+        assert_eq!(derive_status(Some(10), None, None), FlowStatus::Ok);
+        assert_eq!(derive_status(Some(10), Some(20), None), FlowStatus::Warn);
+        assert_eq!(derive_status(Some(30), Some(20), Some(10)), FlowStatus::Ok);
         assert_eq!(
             derive_status(Some(10), Some(20), Some(30)),
             FlowStatus::Error

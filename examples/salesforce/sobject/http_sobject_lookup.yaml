@@ -6,7 +6,10 @@
 # Required:
 #   - /etc/sfdc/credentials.json
 flow:
-  name: salesforce_sobject_lookup
+  labels:
+    display_name: "Salesforce Record Lookup (HTTP)"
+    description: "Accepts a record ID over an HTTP webhook and returns the matching Salesforce record via the REST API."
+    tags: ["salesforce", "lookup", "http", "webhook", "example"]
   tasks:
 
     - http_endpoint:

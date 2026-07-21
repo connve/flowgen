@@ -8,7 +8,10 @@
 #   - /etc/sfdc/credentials.json
 #   - resources/salesforce/query_account.soql
 flow:
-  name: salesforce_bulkapi_query_account
+  labels:
+    display_name: "Salesforce Account Incremental Query"
+    description: "Runs on a 5-minute cron to create a Bulk API query job for Account records modified since the last run."
+    tags: ["salesforce", "bulk-api", "incremental", "cron", "example"]
   require_leader_election: true
   tasks:
 

@@ -277,7 +277,7 @@ impl EventHandler {
         }
     }
 
-    #[tracing::instrument(skip(self, data, completion_state), name = "task.handle", fields(activity = true, duration_ms = tracing::field::Empty))]
+    #[tracing::instrument(skip(self, data, completion_state), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(
         &self,
         data: serde_json::Value,

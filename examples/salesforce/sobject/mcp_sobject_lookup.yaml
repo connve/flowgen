@@ -8,7 +8,10 @@
 #   - /etc/sfdc/credentials.json
 #   - MCP server enabled in worker config
 flow:
-  name: salesforce_mcp_sobject_lookup
+  labels:
+    display_name: "Salesforce Record Lookup (MCP)"
+    description: "Exposes a Salesforce record lookup by object type and ID as an MCP tool callable by LLM agents."
+    tags: ["salesforce", "lookup", "mcp", "tool", "example"]
   tasks:
 
     - mcp_tool:

@@ -1,6 +1,9 @@
 # Inline multi-line Rhai script: adds derived fields and a timestamp.
 flow:
-  name: script_inline_multiline
+  labels:
+    display_name: "Inline Multiline Script"
+    description: "Runs a multi-line inline Rhai script that adds derived fields (doubled, squared, uppercased category) and a processing timestamp to each event."
+    tags: ["script", "rhai", "inline", "enrichment", "example"]
   require_leader_election: true
   tasks:
 
@@ -25,4 +28,3 @@ flow:
     - log:
         name: log_result
         level: info
-        structured: false

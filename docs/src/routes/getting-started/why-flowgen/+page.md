@@ -34,7 +34,6 @@ We started Flowgen while running data pipelines at a consumer business with hund
 
 ```yaml
 flow:
-  name: webhook_to_nats
   tasks:
     - http_endpoint:
         name: ingest

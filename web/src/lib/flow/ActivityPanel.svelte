@@ -193,24 +193,18 @@
 		</span>
 		{#if !expanded}
 			<span class="h-4 w-px bg-base-300"></span>
-			<span class="flex items-center gap-3 text-xs">
-				<span class="flex items-center gap-1.5">
-					<span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-primary text-white">
-						<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.info}</span>
+			<span class="flex items-center gap-1">
+				<span class="chip-sm chip-info">
+					<span>Info</span>
+					<span class="tabular-nums opacity-60">{counts.info}</span>
 				</span>
-				<span class="flex items-center gap-1.5">
-					<span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-warning text-white">
-						<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.warning}</span>
+				<span class="chip-sm chip-warn">
+					<span>Warn</span>
+					<span class="tabular-nums opacity-60">{counts.warning}</span>
 				</span>
-				<span class="flex items-center gap-1.5">
-					<span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-error text-white">
-						<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.error}</span>
+				<span class="chip-sm chip-error">
+					<span>Error</span>
+					<span class="tabular-nums opacity-60">{counts.error}</span>
 				</span>
 			</span>
 		{/if}
@@ -234,42 +228,30 @@
 			<span class="flex items-center gap-1">
 				<button
 					type="button"
-					class="flex h-6 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {levelFilter.info
-						? 'border-primary/50 bg-primary/10'
-						: 'border-base-300 opacity-40 hover:opacity-70'}"
+					class="chip-sm {levelFilter.info ? 'chip-info' : 'chip-inactive'}"
 					aria-pressed={levelFilter.info}
 					onclick={(e) => toggleLevel('info', e)}
 				>
-					<span class="inline-flex h-3 w-3 items-center justify-center rounded-full bg-primary text-white">
-						<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.info}</span>
+					<span>Info</span>
+					<span class="tabular-nums opacity-60">{counts.info}</span>
 				</button>
 				<button
 					type="button"
-					class="flex h-6 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {levelFilter.warning
-						? 'border-warning/50 bg-warning/10'
-						: 'border-base-300 opacity-40 hover:opacity-70'}"
+					class="chip-sm {levelFilter.warning ? 'chip-warn' : 'chip-inactive'}"
 					aria-pressed={levelFilter.warning}
 					onclick={(e) => toggleLevel('warning', e)}
 				>
-					<span class="inline-flex h-3 w-3 items-center justify-center rounded-full bg-warning text-white">
-						<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.warning}</span>
+					<span>Warn</span>
+					<span class="tabular-nums opacity-60">{counts.warning}</span>
 				</button>
 				<button
 					type="button"
-					class="flex h-6 items-center gap-1.5 rounded-full border px-2 text-xs transition-colors {levelFilter.error
-						? 'border-error/50 bg-error/10'
-						: 'border-base-300 opacity-40 hover:opacity-70'}"
+					class="chip-sm {levelFilter.error ? 'chip-error' : 'chip-inactive'}"
 					aria-pressed={levelFilter.error}
 					onclick={(e) => toggleLevel('error', e)}
 				>
-					<span class="inline-flex h-3 w-3 items-center justify-center rounded-full bg-error text-white">
-						<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-					</span>
-					<span class="tabular-nums">{counts.error}</span>
+					<span>Error</span>
+					<span class="tabular-nums opacity-60">{counts.error}</span>
 				</button>
 			</span>
 
