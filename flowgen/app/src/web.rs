@@ -92,7 +92,7 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
     let app = Router::new()
         .route(&format!("{api_prefix}/flows"), get(list_flows))
         .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
-        .route(&format!("{api_prefix}/flows/{{name}}"), get(get_flow))
+        .route(&format!("{api_prefix}/flows/{{*path}}"), get(get_flow))
         .route(&format!("{api_prefix}/version"), get(get_version))
         .route(&format!("{api_prefix}/openapi.yaml"), get(get_openapi))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
@@ -140,7 +140,7 @@ fn build_summary(
         true => api::FlowSummarySource::Filesystem,
         false => api::FlowSummarySource::Cache,
     };
-    let snapshot = activity.snapshot(handle.flow_name());
+    let snapshot = activity.snapshot(handle.identity());
     let (
         last_event_at,
         last_warning_at,
@@ -162,7 +162,8 @@ fn build_summary(
         None => (None, None, None, 0, 0, 0, api::FlowStatus::Idle),
     };
     api::FlowSummary {
-        name: handle.flow_name().to_string(),
+        path: handle.identity().to_string(),
+        name: handle.identity().to_string(),
         display_name: handle.display_name().map(ToString::to_string),
         description: handle.description().map(ToString::to_string),
         tags: handle.tags().to_vec(),
@@ -205,7 +206,7 @@ fn ms_to_datetime(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
 /// loaded flow from the admin UI.
 async fn get_flow(
     State(state): State<Arc<WebState>>,
-    AxumPath(name): AxumPath<String>,
+    AxumPath(path): AxumPath<String>,
 ) -> Result<Json<api::FlowDetail>, (StatusCode, String)> {
     let Ok(registry) = state.flow_registry.read() else {
         return Err((
@@ -213,13 +214,14 @@ async fn get_flow(
             "Flow registry is poisoned".into(),
         ));
     };
-    match registry.get(&name) {
+    match registry.get(&path) {
         Some(handle) => Ok(Json(api::FlowDetail {
-            name: handle.flow_name().to_string(),
+            path: handle.identity().to_string(),
+            name: handle.identity().to_string(),
             display_name: handle.display_name().map(ToString::to_string),
             yaml: handle.flow_yaml().to_string(),
         })),
-        None => Err((StatusCode::NOT_FOUND, format!("Flow '{name}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, format!("Flow '{path}' not found"))),
     }
 }
 

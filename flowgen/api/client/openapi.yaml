@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.127.0
+  version: 0.128.0
   license:
     name: MPL-2.0
 servers:
@@ -30,16 +30,17 @@ paths:
                 items:
                   $ref: "#/components/schemas/FlowSummary"
 
-  /api/flows/{name}:
+  /api/flows/{path}:
     get:
       operationId: getFlow
       summary: Fetch the full source YAML for one flow.
+      description: The `{path}` parameter is greedy and matches slashes.
       tags: [flows]
       parameters:
-        - name: name
+        - name: path
           in: path
           required: true
-          description: Flow name as it appears in the flow registry.
+          description: Flow identity (see `FlowSummary.path`).
           schema:
             type: string
       responses:
@@ -185,6 +186,7 @@ components:
       type: object
       description: Registry entry combined with tracing-derived counters.
       required:
+        - path
         - name
         - display_name
         - description
@@ -201,9 +203,19 @@ components:
         - errors_total
         - status
       properties:
+        path:
+          type: string
+          description: |
+            Identity of the flow. Filesystem-loaded flows use the path
+            relative to `flows.path` with the extension stripped
+            (e.g. `demo/nba_email_demo`); cache-loaded flows use the
+            KV key suffix after `flowgen.flows.`. Root-level flows
+            have no `/`.
         name:
           type: string
-          description: Unique flow name.
+          description: |
+            Flow name as declared in the YAML `flow.name` field. Not
+            guaranteed to be globally unique — use `path` for identity.
         display_name:
           type: string
           nullable: true
@@ -276,8 +288,11 @@ components:
 
     FlowDetail:
       type: object
-      required: [name, display_name, yaml]
+      required: [path, name, display_name, yaml]
       properties:
+        path:
+          type: string
+          description: Identity of the flow; see `FlowSummary.path`.
         name:
           type: string
         display_name:

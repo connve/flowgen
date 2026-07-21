@@ -202,7 +202,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         };
 
         let registration = crate::server::EndpointRegistration {
-            flow_name: self.task_context.flow.name.clone(),
+            flow_name: self.task_context.flow.identity().to_string(),
             config: Arc::clone(&self.config),
             credentials: event_handler.credentials.clone(),
             auth_provider: event_handler.auth_provider.clone(),

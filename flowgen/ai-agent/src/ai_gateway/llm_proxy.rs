@@ -105,7 +105,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             .ok_or_else(|| Error::MissingBuilderAttribute("sender".to_string()))?;
 
         let registration = super::server::LlmProxyRegistration {
-            flow_name: self.task_context.flow.name.clone(),
+            flow_name: self.task_context.flow.identity().to_string(),
             protocol: self.config.protocol,
             config: Arc::clone(&self.config),
             credentials,
@@ -215,6 +215,7 @@ mod tests {
         Arc::new(flowgen_core::task::context::TaskContext {
             flow: flowgen_core::task::context::FlowOptions {
                 name: "test_flow".to_string(),
+                source_path: None,
                 labels: None,
             },
             task_manager: Arc::new(

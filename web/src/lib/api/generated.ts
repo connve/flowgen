@@ -24,14 +24,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/flows/{name}": {
+    "/api/flows/{path}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Fetch the full source YAML for one flow. */
+        /**
+         * Fetch the full source YAML for one flow.
+         * @description The `{path}` parameter is greedy and matches slashes.
+         */
         get: operations["getFlow"];
         put?: never;
         post?: never;
@@ -180,7 +183,18 @@ export interface components {
     schemas: {
         /** @description Registry entry combined with tracing-derived counters. */
         FlowSummary: {
-            /** @description Unique flow name. */
+            /**
+             * @description Identity of the flow. Filesystem-loaded flows use the path
+             *     relative to `flows.path` with the extension stripped
+             *     (e.g. `demo/nba_email_demo`); cache-loaded flows use the
+             *     KV key suffix after `flowgen.flows.`. Root-level flows
+             *     have no `/`.
+             */
+            path: string;
+            /**
+             * @description Flow name as declared in the YAML `flow.name` field. Not
+             *     guaranteed to be globally unique — use `path` for identity.
+             */
             name: string;
             /**
              * @description Human-readable name taken from `labels.display_name`. UI
@@ -232,6 +246,8 @@ export interface components {
          */
         FlowStatus: "idle" | "running" | "warning" | "error";
         FlowDetail: {
+            /** @description Identity of the flow; see `FlowSummary.path`. */
+            path: string;
             name: string;
             display_name: string | null;
             /** @description Raw YAML source of the flow config. */
@@ -292,8 +308,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description Flow name as it appears in the flow registry. */
-                name: string;
+                /** @description Flow identity (see `FlowSummary.path`). */
+                path: string;
             };
             cookie?: never;
         };

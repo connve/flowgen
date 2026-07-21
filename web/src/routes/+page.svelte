@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import { apiUrl } from '$lib/api';
@@ -9,6 +10,7 @@
 	import { activitiesFor, allMetrics } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import type { FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
+	import { buildTree, type TreeNode } from '$lib/tree';
 
 	interface FlowActivity {
 		flow: string;
@@ -29,8 +31,13 @@
 		};
 	}
 
-	function label(flow: { name: string; display_name: string | null }): string {
+	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;
+	}
+
+	// URL-encode a slash-delimited flow path so it survives fetch and goto.
+	function encodePath(path: string): string {
+		return path.split('/').map(encodeURIComponent).join('/');
 	}
 
 	let flows = $state<Flow[]>([]);
@@ -65,6 +72,19 @@
 		return [...s].sort((a, b) => a.localeCompare(b));
 	});
 
+	// Per-tag counts from the flows visible after status/folder scope but
+	// before tag filtering — so the number next to each chip tells the user
+	// how many flows they'd get by picking that tag on top of the current
+	// filter state.
+	let tagCounts = $derived.by(() => {
+		const counts: Record<string, number> = {};
+		const source = selectedFolder === null
+			? flows
+			: flows.filter((f) => f.path.startsWith(selectedFolder + '/'));
+		for (const f of source) for (const t of f.tags) counts[t] = (counts[t] ?? 0) + 1;
+		return counts;
+	});
+
 	function toggleTag(tag: string) {
 		const next = new Set(selectedTags);
 		if (next.has(tag)) next.delete(tag);
@@ -88,7 +108,7 @@
 	let liveMetrics = $derived(allMetrics());
 	let flowsView = $derived(
 		flows.map((f) => {
-			const m = liveMetrics[f.name];
+			const m = liveMetrics[f.path];
 			if (!m) return f;
 			return {
 				...f,
@@ -110,6 +130,17 @@
 	);
 
 	onMount(() => {
+		const pane = localStorage.getItem('flowgen-folders-pane');
+		if (pane !== null) foldersPaneOpen = pane === '1';
+		const exp = localStorage.getItem('flowgen-folders-expanded');
+		if (exp) {
+			try {
+				for (const p of JSON.parse(exp) as string[]) expandedFolders.add(p);
+			} catch {
+				// ignore corrupt state
+			}
+		}
+
 		const url = apiUrl('api/flows');
 		fetch(url)
 			.then((r) => {
@@ -145,11 +176,11 @@
 	// previously-clicked flow don't overwrite the current one.
 	let pendingFlow: string | null = null;
 
-	async function openFlow(name: string) {
-		pendingFlow = name;
-		const cached = flowCache.get(name);
+	async function openFlow(path: string) {
+		pendingFlow = path;
+		const cached = flowCache.get(path);
 		if (cached) {
-			selected = name;
+			selected = path;
 			selectedDetail = cached;
 			selectedError = null;
 			selectedLoading = false;
@@ -157,20 +188,20 @@
 			selectedLoading = true;
 		}
 		try {
-			const response = await fetch(apiUrl(`api/flows/${encodeURIComponent(name)}`));
+			const response = await fetch(apiUrl(`api/flows/${encodePath(path)}`));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const detail: FlowDetail = await response.json();
-			flowCache.set(name, detail);
-			if (pendingFlow !== name) return;
-			selected = name;
+			flowCache.set(path, detail);
+			if (pendingFlow !== path) return;
+			selected = path;
 			selectedDetail = detail;
 			selectedError = null;
 		} catch (err) {
-			if (pendingFlow !== name) return;
-			selected = name;
+			if (pendingFlow !== path) return;
+			selected = path;
 			selectedError = err instanceof Error ? err.message : 'Failed to load flow';
 		} finally {
-			if (pendingFlow === name) selectedLoading = false;
+			if (pendingFlow === path) selectedLoading = false;
 		}
 	}
 
@@ -221,6 +252,7 @@
 			for (const t of requiredTags) if (!flow.tags.includes(t)) return false;
 			if (term.length === 0) return true;
 			return (
+				flow.path.toLowerCase().includes(term) ||
 				flow.name.toLowerCase().includes(term) ||
 				(flow.display_name?.toLowerCase().includes(term) ?? false) ||
 				(flow.description?.toLowerCase().includes(term) ?? false) ||
@@ -230,6 +262,53 @@
 		const sign = sortDir === 'asc' ? 1 : -1;
 		return matched.slice().sort((a, b) => sign * compareFlows(a, b, sortKey));
 	});
+
+	// Sidebar tree built from all loaded flows (not `filtered`) so the folder
+	// structure is stable while the user filters. `selectedFolder` scopes the
+	// main table to one folder; `null` means "all flows".
+	let expandedFolders = $state(new SvelteSet<string>());
+	let selectedFolder = $state<string | null>(null);
+	let foldersPaneOpen = $state(true);
+
+	// Modal breadcrumb parts derived from `selected` (the currently open flow path).
+	let selectedSegments = $derived(selected ? selected.split('/') : []);
+	let selectedFolders = $derived(selectedSegments.slice(0, -1));
+	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
+	let searchActive = $derived(search.trim().length > 0);
+	let sidebarTree = $derived(buildTree<Flow>(flows, (f) => f.path));
+
+	// Table rows: `filtered` (already respects status/tag/search) further
+	// narrowed to `selectedFolder` when set. Search overrides folder scope
+	// so hits from any folder surface.
+	let visibleFlows = $derived.by(() => {
+		if (searchActive || selectedFolder === null) return filtered;
+		const prefix = selectedFolder + '/';
+		return filtered.filter((f) => f.path.startsWith(prefix));
+	});
+
+	function toggleFolder(path: string) {
+		if (expandedFolders.has(path)) expandedFolders.delete(path);
+		else expandedFolders.add(path);
+		localStorage.setItem(
+			'flowgen-folders-expanded',
+			JSON.stringify(Array.from(expandedFolders)),
+		);
+	}
+
+	function selectFolder(path: string | null) {
+		selectedFolder = path;
+	}
+
+	function toggleFoldersPane() {
+		foldersPaneOpen = !foldersPaneOpen;
+		localStorage.setItem('flowgen-folders-pane', foldersPaneOpen ? '1' : '0');
+	}
+
+	// True for folders that contain at least one nested folder — used to
+	// hide the chevron on leaf folders where nothing would show up.
+	function hasSubfolders(node: TreeNode<Flow>): boolean {
+		return (node.children ?? []).some((c) => c.isFolder);
+	}
 
 	function formatRelative(ts: string | null, tick: number): string {
 		if (!ts) return '—';
@@ -245,8 +324,144 @@
 
 <svelte:window on:keydown={onKeydown} />
 
-<section class="p-6">
-	<div class="mb-4 flex flex-wrap items-center gap-2">
+<section class="flex h-[calc(100vh-4rem)]">
+	<aside
+		class="flex shrink-0 flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
+			? 'w-64'
+			: 'w-16'}"
+	>
+		{#if !foldersPaneOpen}
+			<div class="flex flex-1 flex-col items-center py-2">
+				<button
+					type="button"
+					aria-label="Expand folders"
+					title="Folders"
+					class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
+					onclick={toggleFoldersPane}
+				>
+					<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+					<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
+				</button>
+			</div>
+		{:else}
+			<div class="flex-1 overflow-y-auto px-3 py-2">
+			<ul class="space-y-0.5 text-sm">
+				<li>
+					<button
+						type="button"
+						class="relative flex w-full items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {selectedFolder === null
+							? 'bg-base-200 font-medium text-primary'
+							: 'hover:bg-base-200'}"
+						onclick={() => selectFolder(null)}
+					>
+						{#if selectedFolder === null}
+							<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+						{/if}
+						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
+						<span>All flows</span>
+						<span class="ml-auto text-xs opacity-50">{flows.length}</span>
+					</button>
+				</li>
+				{#snippet sidebarNodes(nodes: TreeNode<Flow>[])}
+					{#each nodes as node (node.fullPath)}
+						{#if node.isFolder}
+							{@const isOpen = expandedFolders.has(node.fullPath)}
+							{@const isSelected = selectedFolder === node.fullPath}
+							{@const canExpand = hasSubfolders(node)}
+							<li>
+								<div class="flex items-center gap-0.5">
+									{#if canExpand}
+										<button
+											type="button"
+											class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
+											aria-label={isOpen ? 'Collapse' : 'Expand'}
+											onclick={() => toggleFolder(node.fullPath)}
+										>
+											<Icon
+												icon={isOpen ? 'tabler:chevron-down' : 'tabler:chevron-right'}
+												class="h-3.5 w-3.5 opacity-70"
+											/>
+										</button>
+									{:else}
+										<span class="h-6 w-6 shrink-0"></span>
+									{/if}
+									<button
+										type="button"
+										class="relative flex flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
+											? 'bg-base-200 font-medium text-primary'
+											: 'hover:bg-base-200'}"
+										style="padding-left: {node.depth * 0.75 + 0.375}rem"
+										onclick={() => selectFolder(node.fullPath)}
+									>
+										{#if isSelected}
+											<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+										{/if}
+										<Icon
+											icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
+											class="h-5 w-5 shrink-0 opacity-70"
+										/>
+										<span class="truncate">{node.name}</span>
+										<span class="ml-auto text-xs opacity-50">{node.fileCount}</span>
+									</button>
+								</div>
+								{#if isOpen && canExpand && node.children}
+									<ul class="space-y-0.5">
+										{@render sidebarNodes(node.children)}
+									</ul>
+								{/if}
+							</li>
+						{/if}
+					{/each}
+				{/snippet}
+				{@render sidebarNodes(sidebarTree)}
+			</ul>
+			</div>
+		{/if}
+		<div
+			class="flex h-12 shrink-0 items-center border-t border-base-200 {foldersPaneOpen
+				? 'justify-end px-3'
+				: 'justify-center'}"
+		>
+			<button
+				type="button"
+				aria-label={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
+				class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+				onclick={toggleFoldersPane}
+			>
+				<Icon
+					icon={foldersPaneOpen ? 'tabler:chevron-left' : 'tabler:chevron-right'}
+					class="h-5 w-5"
+				/>
+			</button>
+		</div>
+	</aside>
+
+	<div class="flex min-w-0 flex-1 flex-col">
+	<div class="shrink-0 space-y-3 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
+	{#if selectedFolder}
+		{@const segments = selectedFolder.split('/')}
+		<div class="flex items-center gap-1.5 text-sm">
+			<button
+				type="button"
+				class="text-primary hover:underline"
+				onclick={() => selectFolder(null)}
+			>All flows</button>
+			{#each segments as segment, i}
+				<span class="opacity-40">/</span>
+				{#if i < segments.length - 1}
+					<button
+						type="button"
+						class="font-mono text-primary hover:underline"
+						onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
+					>{segment}</button>
+				{:else}
+					<span class="font-mono">{segment}</span>
+				{/if}
+			{/each}
+			<span class="text-xs opacity-50">· {visibleFlows.length} {visibleFlows.length === 1 ? 'flow' : 'flows'}</span>
+		</div>
+	{/if}
+	<div class="flex flex-wrap items-center gap-2">
 		<div class="flex items-center gap-1">
 			<button
 				type="button"
@@ -312,9 +527,12 @@
 					class="dropdown-content z-10 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-base-200 bg-base-100 p-1 shadow-lg"
 				>
 					{#each allTags as tag}
+						{@const count = tagCounts[tag] ?? 0}
 						<button
 							type="button"
-							class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-base-200"
+							class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-base-200 {count === 0
+								? 'opacity-40'
+								: ''}"
 							onclick={() => toggleTag(tag)}
 						>
 							<span
@@ -329,6 +547,7 @@
 								{/if}
 							</span>
 							<span class="truncate">{tag}</span>
+							<span class="ml-auto text-xs opacity-60 tabular-nums">{count}</span>
 						</button>
 					{/each}
 				</div>
@@ -383,7 +602,9 @@
 			{/if}
 		</label>
 	</div>
+	</div>
 
+	<div class="min-h-0 flex-1 overflow-y-auto p-6">
 	{#if loading}
 		<div class="flex justify-center py-12">
 			<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -460,22 +681,20 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#each filtered as flow (flow.name)}
+					{#each visibleFlows as flow (flow.path)}
 						<tr
-							class="hover cursor-pointer"
-							onclick={() => openFlow(flow.name)}
-							ondblclick={() => goto(`${base}/flows/${encodeURIComponent(flow.name)}`)}
+							class="cursor-pointer transition-colors hover:bg-base-200"
+							onclick={() => openFlow(flow.path)}
+							ondblclick={() => goto(`${base}/flows/${encodePath(flow.path)}`)}
 							onkeydown={(e) => {
-								if (e.key === 'Enter' || e.key === ' ') openFlow(flow.name);
+								if (e.key === 'Enter' || e.key === ' ') openFlow(flow.path);
 							}}
 							tabindex="0"
 							role="button"
 						>
 							<td class="whitespace-nowrap">
 								<div class="font-medium">{label(flow)}</div>
-								{#if flow.display_name}
-									<div class="font-mono text-[10px] opacity-50">{flow.name}</div>
-								{/if}
+								<div class="font-mono text-xs opacity-70">{flow.path}</div>
 							</td>
 							<td class="max-w-md text-sm">
 								{flow.description ?? '—'}
@@ -523,6 +742,8 @@
 			</table>
 		</div>
 	{/if}
+	</div>
+	</div>
 </section>
 
 {#if selected}
@@ -542,20 +763,25 @@
 		<div
 			class="flex h-[90vh] w-full max-w-[95vw] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
 		>
-			<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
-				<div class="flex items-center gap-2">
-					<span class="text-sm font-medium leading-none">
-						{selectedDetail?.display_name ?? selected}
-					</span>
-					{#if selectedDetail?.display_name}
-						<span class="font-mono text-xs leading-none opacity-50">{selected}</span>
-					{/if}
-					<Badge>flow</Badge>
+			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
+				<div class="min-w-0 flex-1">
+					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
+						<span class="opacity-60">Flows</span>
+						{#each selectedFolders as segment}
+							<span class="opacity-40">/</span>
+							<span class="font-mono opacity-70">{segment}</span>
+						{/each}
+						<span class="opacity-40">/</span>
+						<span class="font-mono">{selectedLeaf}</span>
+					</div>
+					<div class="text-sm font-medium">
+						{selectedDetail?.display_name ?? selectedLeaf}
+					</div>
 				</div>
 				<div class="flex items-center gap-1">
 					<div class="tooltip tooltip-left" data-tip="Open full page">
 						<a
-							href="{base}/flows/{encodeURIComponent(selected)}"
+							href="{base}/flows/{encodePath(selected)}"
 							class="btn btn-ghost btn-sm btn-circle"
 							aria-label="Open full page"
 						>

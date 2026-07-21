@@ -163,7 +163,7 @@
 <div class="flex min-h-0 flex-1 flex-col">
 	<div class="grid min-h-0 flex-1 grid-cols-2 gap-0 divide-x divide-base-200">
 		<div class="flex min-h-0 flex-col">
-			<div class="border-b border-base-200 bg-base-100 px-4 py-2 text-xs font-medium opacity-70">
+			<div class="flex h-10 shrink-0 items-center border-b border-base-200 bg-base-100 px-4 text-xs font-medium opacity-70">
 				Graph
 			</div>
 			<div bind:this={dagPane} class="min-h-0 flex-1">
@@ -171,7 +171,7 @@
 			</div>
 		</div>
 		<div class="flex min-h-0 flex-col">
-			<div class="flex items-center justify-between border-b border-base-200 bg-base-100 px-4 py-1">
+			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
 				<span class="text-xs font-medium opacity-70">Config</span>
 				<CopyButton text={yaml} label="Copy YAML" />
 			</div>

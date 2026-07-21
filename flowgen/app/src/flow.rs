@@ -587,9 +587,19 @@ pub struct Flow {
 }
 
 impl Flow {
-    /// Returns the name of the flow.
+    /// Returns the flow identity — the loader-assigned `source_path` when
+    /// present (filesystem/cache load), otherwise the programmatic
+    /// `flow.name`. Same value as `identity()`; kept as `name()` for
+    /// existing call sites that predate the path-as-identity refactor.
     pub fn name(&self) -> &str {
-        &self.config.flow.name
+        self.identity()
+    }
+
+    /// Returns the flow identity — used as the tracing `flow=` field, the
+    /// registry key, and the cache namespace so activity keys line up with
+    /// the admin API.
+    pub fn identity(&self) -> &str {
+        self.config.identity()
     }
 
     /// Returns a reference to the task manager if initialized.
@@ -629,7 +639,7 @@ impl Flow {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
                     "Flow {} contains a blocking task (webhook, MCP registration, or llm_proxy); `required_leader_election` flag will be ignored.",
-                    self.config.flow.name
+                    self.identity()
                 );
             }
             return false; // Flows with blocking tasks are never leader elected.
@@ -704,7 +714,8 @@ impl Flow {
         let response_registry = Arc::new(flowgen_core::registry::ResponseRegistry::new());
 
         let mut task_context_builder = flowgen_core::task::context::TaskContextBuilder::new()
-            .flow_name(self.config.flow.name.clone())
+            .flow_name(self.identity().to_string())
+            .source_path(self.config.source_path.clone())
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
@@ -861,7 +872,7 @@ impl Flow {
     /// Returns blocking handles (webhook registrations) that must complete
     /// before the HTTP server starts. Background handles are stored for
     /// `monitor_tasks()` to monitor.
-    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.config.flow.name))]
+    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.identity()))]
     pub async fn start_tasks(&self) -> Result<Vec<JoinHandle<Result<(), Error>>>, Error> {
         if self.is_leader_elected() {
             return Ok(Vec::new());
@@ -890,13 +901,13 @@ impl Flow {
     ///
     /// This spawns a single master task that manages the flow's lifecycle,
     /// including leader election and running all background tasks.
-    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.config.flow.name))]
+    #[tracing::instrument(skip(self), name = "flow.run", fields(flow = %self.identity()))]
     pub fn run(self) -> JoinHandle<()> {
-        let flow_name = self.config.flow.name.clone();
+        let flow_id = self.identity().to_string();
         tokio::spawn(
             async move {
                 if let Err(e) = self.monitor_tasks().await {
-                    error!("Flow {} terminated with an error: {}", flow_name, e);
+                    error!("Flow {} terminated with an error: {}", flow_id, e);
                 }
             }
             .instrument(tracing::Span::current()),
@@ -914,7 +925,7 @@ impl Flow {
             .as_ref()
             .ok_or_else(|| Error::TaskManagerNotInitialized)?
             .clone();
-        let flow_id = self.config.flow.name.clone();
+        let flow_id = self.identity().to_string();
 
         let leader_election_options = if is_leader_elected {
             Some(flowgen_core::task::manager::LeaderElectionOptions {})
@@ -997,7 +1008,8 @@ impl Flow {
             } else {
                 info!(
                     "Spawning {} parallel instances for flow: {}",
-                    parallel_instances, self.config.flow.name
+                    parallel_instances,
+                    self.identity()
                 );
                 self.spawn_parallel_instances(parallel_instances).await?
             }
@@ -2088,13 +2100,14 @@ mod tests {
     fn test_flow_builder_config() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let builder = FlowBuilder::new().config(flow_config.clone());
@@ -2132,13 +2145,14 @@ mod tests {
     fn test_flow_builder_build_without_http_server() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
         let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
             as Arc<dyn flowgen_core::cache::Cache>;
@@ -2158,13 +2172,14 @@ mod tests {
     fn test_flow_builder_build_success() {
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "success_flow".to_string(),
+                name: Some("success_flow".to_string()),
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
         let server = Arc::new(flowgen_core::http_server::HttpServer::<
             flowgen_http::server::EndpointDispatcher,
@@ -2193,7 +2208,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
@@ -2204,6 +2219,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2235,7 +2251,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![TaskType::script(
                     flowgen_core::task::script::config::Processor::default(),
@@ -2244,6 +2260,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2264,7 +2281,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![
                     TaskType::http_endpoint(flowgen_http::config::Processor::default()),
@@ -2275,6 +2292,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2307,13 +2325,14 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2327,7 +2346,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![
                     TaskType::script(flowgen_core::task::script::config::Processor::default()),
@@ -2338,6 +2357,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2361,7 +2381,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "fan_out_fan_in".to_string(),
+                name: Some("fan_out_fan_in".to_string()),
                 labels: None,
                 tasks: vec![
                     script_with_deps("trigger", None),
@@ -2377,6 +2397,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2418,7 +2439,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "fan_out".to_string(),
+                name: Some("fan_out".to_string()),
                 labels: None,
                 tasks: vec![
                     script_with_deps("source", None),
@@ -2429,6 +2450,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2461,7 +2483,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "nested_diamonds".to_string(),
+                name: Some("nested_diamonds".to_string()),
                 labels: None,
                 tasks: vec![
                     script_with_deps("src", None),
@@ -2476,6 +2498,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2516,7 +2539,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "mixed".to_string(),
+                name: Some("mixed".to_string()),
                 labels: None,
                 tasks: vec![
                     script_with_deps("src", None),
@@ -2531,6 +2554,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2571,7 +2595,7 @@ mod tests {
 
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "linear".to_string(),
+                name: Some("linear".to_string()),
                 labels: None,
                 tasks: vec![
                     script_with_deps("t0", None),
@@ -2583,6 +2607,7 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2618,13 +2643,14 @@ mod tests {
         // the other as a parent.
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "registration_only".to_string(),
+                name: Some("registration_only".to_string()),
                 labels: None,
                 tasks: vec![mcp_prompt("a"), mcp_prompt("b")],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
@@ -2671,13 +2697,14 @@ mod tests {
         // prompt as its parent.
         let flow_config = Arc::new(FlowConfig {
             flow: Flow {
-                name: "skip_registration".to_string(),
+                name: Some("skip_registration".to_string()),
                 labels: None,
                 tasks: vec![script("first"), mcp_prompt("register"), script("last")],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         });
 
         let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();

@@ -154,10 +154,12 @@ impl EventHandler {
             let mut ctx_map = rhai::Map::new();
 
             // Add cache handle to enable distributed caching from scripts.
-            // Cache keys are automatically namespaced by flow name.
+            // Cache keys are namespaced by flow identity (`source_path` when
+            // set, otherwise `flow.name`) so two flows with the same name in
+            // different folders do not collide.
             let cache_handle = CacheHandle {
                 cache: Arc::clone(&self.task_context.cache),
-                flow_name: self.task_context.flow.name.clone(),
+                flow_name: self.task_context.flow.identity().to_string(),
             };
             ctx_map.insert("cache".into(), Dynamic::from(cache_handle));
 
@@ -462,215 +464,7 @@ impl crate::task::runner::Runner for Processor {
             tracing::debug!(target: "rhai::script", source = src, line = pos.line().unwrap_or(0), "{msg}");
         });
 
-        // Register function to parse RFC 2822 timestamps to Unix milliseconds.
-        engine.register_fn(
-            "parse_rfc2822_timestamp",
-            |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Parse RFC 2822 format like "Mon, 5 Jan 2026 15:03:34 +0100".
-                // Returns Unix timestamp in milliseconds.
-                chrono::DateTime::parse_from_rfc2822(timestamp_str)
-                    .map(|dt| dt.timestamp_millis())
-                    .map_err(|source| {
-                        let err = Error::ParseRFC2822Timestamp {
-                            timestamp: timestamp_str.to_string(),
-                            source,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to parse ISO 8601 timestamps to Unix milliseconds.
-        // Uses RFC 3339 format (ISO 8601 profile for internet timestamps).
-        engine.register_fn(
-            "parse_timestamp",
-            |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Parse ISO 8601 timestamp format like "2026-01-07T11:16:13.869Z".
-                // Returns Unix timestamp in milliseconds.
-                chrono::DateTime::parse_from_rfc3339(timestamp_str)
-                    .map(|dt| dt.timestamp_millis())
-                    .map_err(|source| {
-                        let err = Error::ParseRFC3339Timestamp {
-                            timestamp: timestamp_str.to_string(),
-                            source,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to convert Unix timestamp to ISO 8601 format.
-        engine.register_fn(
-            "timestamp_to_iso",
-            |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
-                // Convert Unix timestamp in seconds to ISO 8601 format.
-                // Returns ISO 8601 string like "2026-02-02T12:00:00Z".
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register overload for Dynamic type from Rhai maps.
-        engine.register_fn(
-            "timestamp_to_iso",
-            |timestamp_dynamic: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
-                // Handle Dynamic type from Rhai - try to cast to i64.
-                let timestamp_secs: i64 = timestamp_dynamic.as_int().map_err(|_| {
-                    let err = Error::TimestampTypeError {
-                        type_name: timestamp_dynamic.type_name().to_string(),
-                    };
-                    err.to_string()
-                })?;
-
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to generate a timestamp-ordered UUID v7 string.
-        engine.register_fn("uuid", || -> String { uuid::Uuid::now_v7().to_string() });
-
-        // Register function to compute SHA-256 hash of a string.
-        // Returns lowercase hexadecimal string. Useful for deterministic message identifiers
-        // composed from multiple fields (e.g., campaign_id + reference_id).
-        engine.register_fn("sha256", |input: &str| -> String {
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(input.as_bytes());
-            format!("{hash:x}")
-        });
-
-        // Register function to compute SHA-512 hash of a string.
-        // Returns lowercase hexadecimal string.
-        engine.register_fn("sha512", |input: &str| -> String {
-            use sha2::Digest;
-            let hash = sha2::Sha512::digest(input.as_bytes());
-            format!("{hash:x}")
-        });
-
-        engine.register_fn("timestamp_now", || -> i64 {
-            chrono::Utc::now().timestamp()
-        });
-
-        engine.register_fn(
-            "timestamp_format",
-            |timestamp_secs: i64, format: &str| -> Result<String, Box<rhai::EvalAltResult>> {
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.format(format).to_string())
-                    .ok_or_else(|| {
-                        Box::new(rhai::EvalAltResult::ErrorRuntime(
-                            format!("Invalid timestamp: {timestamp_secs}").into(),
-                            rhai::Position::NONE,
-                        ))
-                    })
-            },
-        );
-
-        // Register function to extract year from Unix timestamp.
-        engine.register_fn(
-            "timestamp_to_year",
-            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Extract year from Unix timestamp in seconds.
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.year() as i64)
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to extract month from Unix timestamp.
-        engine.register_fn(
-            "timestamp_to_month",
-            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Extract month (1-12) from Unix timestamp in seconds.
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.month() as i64)
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to extract day from Unix timestamp.
-        engine.register_fn(
-            "timestamp_to_day",
-            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Extract day of month (1-31) from Unix timestamp in seconds.
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.day() as i64)
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to extract hour from Unix timestamp.
-        engine.register_fn(
-            "timestamp_to_hour",
-            |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
-                // Extract hour (0-23) from Unix timestamp in seconds.
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| dt.hour() as i64)
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to format timestamp as Hive partition path.
-        engine.register_fn(
-            "timestamp_to_hive_path",
-            |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
-                // Format timestamp as Hive partition path: year=YYYY/month=MM/day=DD/hour=HH.
-                chrono::DateTime::from_timestamp(timestamp_secs, 0)
-                    .map(|dt| {
-                        format!(
-                            "year={}/month={:02}/day={:02}/hour={:02}",
-                            dt.year(),
-                            dt.month(),
-                            dt.day(),
-                            dt.hour()
-                        )
-                    })
-                    .ok_or_else(|| {
-                        let err = Error::InvalidUnixTimestamp {
-                            timestamp: timestamp_secs,
-                        };
-                        err.to_string().into()
-                    })
-            },
-        );
-
-        // Register function to round timestamp down to hour boundary.
-        engine.register_fn("timestamp_round_to_hour", |timestamp_secs: i64| -> i64 {
-            // Rounds timestamp down to the start of the hour (e.g., 13:45:30 -> 13:00:00).
-            (timestamp_secs / 3600) * 3600
-        });
-
+        register_helpers(&mut engine);
         // Register cache methods on CacheHandle type to enable distributed caching from Rhai scripts.
         // These methods bridge Rhai's synchronous execution model with Rust's async cache operations.
         // by using block_on within each spawned script task.
@@ -1059,12 +853,335 @@ impl ProcessorBuilder {
     }
 }
 
+/// Registers flowgen's stateless helper functions on a Rhai engine.
+/// Callers own the engine (and its limits); this only adds `fn`s that
+/// don't depend on task context — timestamps, hashes, regex, uuid.
+pub(crate) fn register_helpers(engine: &mut Engine) {
+    engine.register_fn(
+        "parse_rfc2822_timestamp",
+        |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::parse_from_rfc2822(timestamp_str)
+                .map(|dt| dt.timestamp_millis())
+                .map_err(|source| {
+                    Error::ParseRFC2822Timestamp {
+                        timestamp: timestamp_str.to_string(),
+                        source,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "parse_timestamp",
+        |timestamp_str: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::parse_from_rfc3339(timestamp_str)
+                .map(|dt| dt.timestamp_millis())
+                .map_err(|source| {
+                    Error::ParseRFC3339Timestamp {
+                        timestamp: timestamp_str.to_string(),
+                        source,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_iso",
+        |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_iso",
+        |timestamp_dynamic: Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
+            let timestamp_secs: i64 = timestamp_dynamic.as_int().map_err(|_| {
+                Error::TimestampTypeError {
+                    type_name: timestamp_dynamic.type_name().to_string(),
+                }
+                .to_string()
+            })?;
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn("uuid", || -> String { uuid::Uuid::now_v7().to_string() });
+
+    engine.register_fn("sha256", |input: &str| -> String {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(input.as_bytes());
+        format!("{hash:x}")
+    });
+
+    engine.register_fn("sha512", |input: &str| -> String {
+        use sha2::Digest;
+        let hash = sha2::Sha512::digest(input.as_bytes());
+        format!("{hash:x}")
+    });
+
+    engine.register_fn("timestamp_now", || -> i64 {
+        chrono::Utc::now().timestamp()
+    });
+
+    // Returns true when `pattern` matches anywhere in `input`.
+    engine.register_fn(
+        "regex_match",
+        |input: &str, pattern: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            regex::Regex::new(pattern)
+                .map(|re| re.is_match(input))
+                .map_err(|source| {
+                    Box::new(rhai::EvalAltResult::ErrorRuntime(
+                        format!("Invalid regex '{pattern}': {source}").into(),
+                        rhai::Position::NONE,
+                    ))
+                })
+        },
+    );
+
+    // Replaces every match of `pattern` in `input` with `replacement`.
+    // Capture groups (`$1`, `$name`) are supported in the replacement.
+    engine.register_fn(
+        "regex_replace",
+        |input: &str,
+         pattern: &str,
+         replacement: &str|
+         -> Result<String, Box<rhai::EvalAltResult>> {
+            regex::Regex::new(pattern)
+                .map(|re| re.replace_all(input, replacement).into_owned())
+                .map_err(|source| {
+                    Box::new(rhai::EvalAltResult::ErrorRuntime(
+                        format!("Invalid regex '{pattern}': {source}").into(),
+                        rhai::Position::NONE,
+                    ))
+                })
+        },
+    );
+
+    // Returns the first match of `pattern` in `input`, or `""` when no match.
+    engine.register_fn(
+        "regex_find",
+        |input: &str, pattern: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+            regex::Regex::new(pattern)
+                .map(|re| {
+                    re.find(input)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default()
+                })
+                .map_err(|source| {
+                    Box::new(rhai::EvalAltResult::ErrorRuntime(
+                        format!("Invalid regex '{pattern}': {source}").into(),
+                        rhai::Position::NONE,
+                    ))
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_format",
+        |timestamp_secs: i64, format: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.format(format).to_string())
+                .ok_or_else(|| {
+                    Box::new(rhai::EvalAltResult::ErrorRuntime(
+                        format!("Invalid timestamp: {timestamp_secs}").into(),
+                        rhai::Position::NONE,
+                    ))
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_year",
+        |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.year() as i64)
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_month",
+        |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.month() as i64)
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_day",
+        |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.day() as i64)
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_hour",
+        |timestamp_secs: i64| -> Result<i64, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| dt.hour() as i64)
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn(
+        "timestamp_to_hive_path",
+        |timestamp_secs: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+            chrono::DateTime::from_timestamp(timestamp_secs, 0)
+                .map(|dt| {
+                    format!(
+                        "year={}/month={:02}/day={:02}/hour={:02}",
+                        dt.year(),
+                        dt.month(),
+                        dt.day(),
+                        dt.hour()
+                    )
+                })
+                .ok_or_else(|| {
+                    Error::InvalidUnixTimestamp {
+                        timestamp: timestamp_secs,
+                    }
+                    .to_string()
+                    .into()
+                })
+        },
+    );
+
+    engine.register_fn("timestamp_round_to_hour", |timestamp_secs: i64| -> i64 {
+        (timestamp_secs / 3600) * 3600
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::task::runner::Runner;
     use serde_json::{json, Map, Value};
     use tokio::sync::mpsc;
+
+    fn engine_with_helpers() -> Engine {
+        let mut engine = Engine::new();
+        register_helpers(&mut engine);
+        engine
+    }
+
+    #[test]
+    fn regex_match_returns_true_on_hit() {
+        let engine = engine_with_helpers();
+        let result: bool = engine
+            .eval(r#"regex_match("flowgen.flows.demo/nba", "^flowgen\\.flows\\.")"#)
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn regex_match_returns_false_on_miss() {
+        let engine = engine_with_helpers();
+        let result: bool = engine
+            .eval(r#"regex_match("flowgen.flows.demo", "^flowgen\\.resources\\.")"#)
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn regex_replace_strips_yaml_extension() {
+        let engine = engine_with_helpers();
+        let result: String = engine
+            .eval(r#"regex_replace("demo/nba.yaml", "\\.(yaml|yml|json)$", "")"#)
+            .unwrap();
+        assert_eq!(result, "demo/nba");
+    }
+
+    #[test]
+    fn regex_replace_preserves_dots_in_directories() {
+        let engine = engine_with_helpers();
+        let result: String = engine
+            .eval(r#"regex_replace("foo.bar/baz.yml", "\\.(yaml|yml|json)$", "")"#)
+            .unwrap();
+        assert_eq!(result, "foo.bar/baz");
+    }
+
+    #[test]
+    fn regex_replace_supports_capture_groups() {
+        let engine = engine_with_helpers();
+        let result: String = engine
+            .eval(r#"regex_replace("hello world", "(\\w+) (\\w+)", "$2 $1")"#)
+            .unwrap();
+        assert_eq!(result, "world hello");
+    }
+
+    #[test]
+    fn regex_find_returns_first_match() {
+        let engine = engine_with_helpers();
+        let result: String = engine
+            .eval(r#"regex_find("build 42 tests 7", "\\d+")"#)
+            .unwrap();
+        assert_eq!(result, "42");
+    }
+
+    #[test]
+    fn regex_find_returns_empty_on_miss() {
+        let engine = engine_with_helpers();
+        let result: String = engine
+            .eval(r#"regex_find("no digits here", "\\d+")"#)
+            .unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn regex_functions_reject_invalid_pattern() {
+        let engine = engine_with_helpers();
+        let err = engine
+            .eval::<bool>(r#"regex_match("foo", "[unclosed")"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid regex"));
+    }
 
     /// Creates a mock TaskContext for testing.
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {

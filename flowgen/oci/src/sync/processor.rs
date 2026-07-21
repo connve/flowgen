@@ -374,7 +374,7 @@ impl EventHandler {
             // with the index digest on multi-arch tags and would
             // defeat the skip).
             let cache = &self.task_context.cache;
-            let flow_name = &self.task_context.flow.name;
+            let flow_name = self.task_context.flow.identity();
             let sanitized_artifact = sanitize_artifact_ref(&self.config.artifact);
             let cache_key = format!("flow.{flow_name}.oci_digest.{sanitized_artifact}");
             let cached_digest = cache

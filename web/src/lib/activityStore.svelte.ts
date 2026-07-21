@@ -64,6 +64,14 @@ function ensureSubscription() {
 	});
 
 	const sse = new EventSource(apiUrl('api/flows/stream'));
+	sse.addEventListener('snapshot', (e) => {
+		try {
+			const initial = JSON.parse(e.data) as Record<string, FlowMetricsSnapshot>;
+			metricsByFlow = { ...metricsByFlow, ...initial };
+		} catch {
+			// ignore malformed snapshot
+		}
+	});
 	sse.addEventListener('activity', (e) => {
 		let activity: FlowActivity;
 		try {

@@ -55,6 +55,8 @@ pub enum Error {
     InvalidNameChars { field: NameField, name: String },
     #[error("{} '{}' contains a '..' segment which is not allowed", field.as_str(), path.display())]
     PathTraversal { field: PathField, path: PathBuf },
+    #[error("Flow has no identity: set `name` in YAML or load via a filesystem/cache path")]
+    MissingFlowIdentity,
 }
 
 /// Validates that a name is safe to use as a filesystem path segment.

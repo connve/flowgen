@@ -9,7 +9,7 @@
 	import '../app.css';
 
 	let { children } = $props();
-	let collapsed = $state(false);
+	let collapsed = $state(true);
 	let dark = $state(false);
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
@@ -18,6 +18,9 @@
 	const chromeless = env.PUBLIC_FLOWGEN_CHROME === 'embedded';
 
 	onMount(async () => {
+		const navState = localStorage.getItem('flowgen-nav-collapsed');
+		if (navState !== null) collapsed = navState === '1';
+
 		const stored = localStorage.getItem('flowgen-theme');
 		if (stored === 'dark' || stored === 'light') {
 			dark = stored === 'dark';
@@ -96,7 +99,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }] as item (item.href)}
+				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"
@@ -130,7 +133,10 @@
 					type="button"
 					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
 					class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
-					onclick={() => (collapsed = !collapsed)}
+					onclick={() => {
+						collapsed = !collapsed;
+						localStorage.setItem('flowgen-nav-collapsed', collapsed ? '1' : '0');
+					}}
 				>
 					<Icon
 						icon={collapsed ? 'tabler:chevron-right' : 'tabler:chevron-left'}

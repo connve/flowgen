@@ -150,7 +150,7 @@ impl EventHandler {
         }
 
         let cache = Arc::clone(&self.task_context.cache);
-        let flow_name = self.task_context.flow.name.clone();
+        let flow_name = self.task_context.flow.identity().to_string();
         let mut handles = Vec::new();
         let last_replay_id = events.last().map(|ce| ce.replay_id.clone());
 
@@ -293,7 +293,7 @@ impl EventHandler {
     async fn handle(self) -> Result<(), Error> {
         // Get cache from task context.
         let cache = &self.task_context.cache;
-        let flow_name = &self.task_context.flow.name;
+        let flow_name = self.task_context.flow.identity();
         // Get topic metadata.
         let topic_info = self
             .pubsub

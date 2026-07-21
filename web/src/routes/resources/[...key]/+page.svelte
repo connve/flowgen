@@ -2,9 +2,7 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
-	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
 	import { apiUrl, type ResourceContent } from '$lib/api';
 
@@ -13,6 +11,9 @@
 	let error = $state<string | null>(null);
 
 	let resourceKey = $derived(page.params.key ?? '');
+	let keySegments = $derived(resourceKey.split('/'));
+	let folderSegments = $derived(keySegments.slice(0, -1));
+	let leafName = $derived(keySegments[keySegments.length - 1] ?? '');
 
 	onMount(async () => {
 		try {
@@ -32,18 +33,17 @@
 </svelte:head>
 
 <section class="p-6">
-	<div class="mb-4 flex items-center justify-between gap-3">
-		<div class="flex items-center gap-3">
-			<a href="{base}/resources" class="btn btn-ghost btn-sm gap-1">
-				<Icon icon="tabler:arrow-left" class="h-6 w-6" />
-				Resources
-			</a>
-			<h1 class="font-mono text-sm font-medium">{resourceKey}</h1>
-			{#if content?.extension}
-				<Badge>{content.extension}</Badge>
-			{/if}
+	<div class="mb-4">
+		<div class="mb-1 flex items-center gap-1.5 text-sm">
+			<a href="{base}/resources" class="text-primary hover:underline">Resources</a>
+			{#each folderSegments as segment}
+				<span class="opacity-40">/</span>
+				<span class="font-mono opacity-70">{segment}</span>
+			{/each}
+			<span class="opacity-40">/</span>
+			<span class="font-mono">{leafName}</span>
 		</div>
-		<CopyButton text={content?.content} label="Copy" />
+		<h1 class="text-lg font-medium">{leafName}</h1>
 	</div>
 
 	{#if loading}
@@ -56,9 +56,17 @@
 		</div>
 	{:else if content}
 		<div
-			class="h-[calc(100vh-10rem)] overflow-auto rounded-lg border border-base-200 bg-base-200"
+			class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"
 		>
-			<ResourceViewer content={content.content} extension={content.extension} />
+			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
+				<span class="text-xs font-medium uppercase opacity-70">
+					{content.extension ?? 'File'}
+				</span>
+				<CopyButton text={content.content} label="Copy" />
+			</div>
+			<div class="min-h-0 flex-1 overflow-auto bg-base-200">
+				<ResourceViewer content={content.content} extension={content.extension} />
+			</div>
 		</div>
 	{/if}
 </section>

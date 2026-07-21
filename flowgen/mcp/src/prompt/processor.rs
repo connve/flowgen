@@ -145,7 +145,7 @@ impl Runner for Processor {
             .collect();
 
         let registration = super::super::server::PromptRegistration {
-            flow_name: self.task_context.flow.name.clone(),
+            flow_name: self.task_context.flow.identity().to_string(),
             name: cfg.name.clone(),
             description: cfg.description.clone(),
             arguments,

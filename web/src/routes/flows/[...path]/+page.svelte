@@ -2,7 +2,6 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import Icon from '@iconify/svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import { apiUrl, type FlowDetail } from '$lib/api';
 	import { activitiesFor } from '$lib/activityStore.svelte';
@@ -11,11 +10,16 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	let flowName = $derived(page.params.name ?? '');
-	let activities = $derived(activitiesFor(flowName));
+	let flowPath = $derived(page.params.path ?? '');
+	let activities = $derived(activitiesFor(flowPath));
+	// Split path into (folder segments, leaf) so the breadcrumb can render
+	// folder segments as visual context and the leaf as the current page.
+	let pathSegments = $derived(flowPath.split('/'));
+	let folderSegments = $derived(pathSegments.slice(0, -1));
+	let leafName = $derived(pathSegments[pathSegments.length - 1] ?? '');
 
 	onMount(() => {
-		fetch(apiUrl(`api/flows/${encodeURIComponent(flowName)}`))
+		fetch(apiUrl(`api/flows/${flowPath.split('/').map(encodeURIComponent).join('/')}`))
 			.then((r) => {
 				if (!r.ok) throw new Error(`HTTP ${r.status}`);
 				return r.json();
@@ -33,22 +37,20 @@
 </script>
 
 <svelte:head>
-	<title>{detail?.display_name ?? flowName} | Flowgen</title>
+	<title>{detail?.display_name ?? flowPath} | Flowgen</title>
 </svelte:head>
 
 <section class="p-6">
-	<div class="mb-4 flex items-center gap-3">
-		<a href="{base}/" class="btn btn-ghost btn-sm gap-1">
-			<Icon icon="tabler:arrow-left" class="h-6 w-6" />
-			Flows
-		</a>
-		<div class="flex items-baseline gap-2">
-			<h1 class="text-lg font-medium">{detail?.display_name ?? flowName}</h1>
-			{#if detail?.display_name}
-				<span class="font-mono text-xs opacity-50">{flowName}</span>
-			{/if}
-		</div>
+	<div class="mb-1 flex items-center gap-1.5 text-sm">
+		<a href="{base}/" class="text-primary hover:underline">Flows</a>
+		{#each folderSegments as segment}
+			<span class="opacity-40">/</span>
+			<span class="font-mono opacity-70">{segment}</span>
+		{/each}
+		<span class="opacity-40">/</span>
+		<span class="font-mono">{leafName}</span>
 	</div>
+	<h1 class="mb-4 text-lg font-medium">{detail?.display_name ?? leafName}</h1>
 
 	{#if loading}
 		<div class="flex justify-center py-12">

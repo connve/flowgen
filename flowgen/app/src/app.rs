@@ -15,10 +15,13 @@ use tracing::{error, info, warn, Instrument};
 /// entries the flow owns from the shared servers (via each server's own
 /// `deregister_flow(flow_name)`).
 pub struct FlowHandle {
-    /// Unique name of the flow.
-    pub flow_name: String,
+    /// Flow identity: the path-shaped key from the loader (filesystem-
+    /// relative or cache-key suffix), or `flow.name` when the flow was
+    /// constructed programmatically. Registry key, cache namespace,
+    /// activity keys, and log fields all derive from this.
+    pub identity: String,
     /// Human-readable name extracted from `labels.display_name`. Falls back
-    /// to `flow_name` in UI when absent.
+    /// to `identity` (or its basename) in UI when absent.
     pub flow_display_name: Option<String>,
     /// Optional description extracted from flow labels.
     pub flow_description: Option<String>,
@@ -53,9 +56,9 @@ pub struct FlowHandle {
 }
 
 impl FlowHandle {
-    /// Returns the flow name.
-    pub fn flow_name(&self) -> &str {
-        &self.flow_name
+    /// Returns the flow identity (registry key, cache namespace, activity key).
+    pub fn identity(&self) -> &str {
+        &self.identity
     }
 
     /// Returns the display name, if any.
@@ -372,6 +375,11 @@ impl App {
 
             match config.try_deserialize::<FlowConfig>() {
                 Ok(mut flow_config) => {
+                    flow_config.raw_source = Some(content.clone());
+                    flow_config.source_path = key
+                        .strip_prefix(prefix)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .map(str::to_string);
                     if let Err(reason) = flow_config.validate() {
                         error!(
                             key = %key,
@@ -380,8 +388,12 @@ impl App {
                         );
                         continue;
                     }
-                    flow_config.raw_source = Some(content.clone());
-                    info!(flow = %flow_config.flow.name, key = %key, "Loaded flow from cache");
+                    info!(
+                        flow = %flow_config.identity(),
+                        key = %key,
+                        source_path = ?flow_config.source_path,
+                        "Loaded flow from cache",
+                    );
                     flow_configs.push((key, flow_config));
                 }
                 Err(source) => {
@@ -410,6 +422,15 @@ impl App {
         };
 
         let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
+
+        // Root is the longest non-wildcard prefix — canonicalized once so we
+        // can compute a stable relative `source_path` per flow.
+        let root_str: String = flows_path_str
+            .split('/')
+            .take_while(|seg| !seg.contains('*'))
+            .collect::<Vec<_>>()
+            .join("/");
+        let source_root = std::fs::canonicalize(&root_str).ok();
 
         // Check if path contains wildcards (backward compatibility).
         let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
@@ -481,6 +502,9 @@ impl App {
 
                         match config.try_deserialize::<FlowConfig>() {
                             Ok(mut flow_config) => {
+                                flow_config.raw_source = Some(contents);
+                                flow_config.source_path =
+                                    compute_source_path(&canonical_path, source_root.as_deref());
                                 if let Err(reason) = flow_config.validate() {
                                     error!(
                                         path = %path.display(),
@@ -489,8 +513,11 @@ impl App {
                                     );
                                     return None;
                                 }
-                                flow_config.raw_source = Some(contents);
-                                info!(flow = %flow_config.flow.name, "Loaded flow");
+                                info!(
+                                    flow = %flow_config.identity(),
+                                    source_path = ?flow_config.source_path,
+                                    "Loaded flow",
+                                );
                                 Some(flow_config)
                             }
                             Err(source) => {
@@ -562,19 +589,22 @@ impl App {
         };
 
         let mut flow_configs = filesystem_flows;
-        // Record filesystem flow names before merging so the reconciler can enforce
-        // the invariant that cache reload events never overwrite filesystem flows.
-        let filesystem_flow_names: HashSet<String> =
-            flow_configs.iter().map(|f| f.flow.name.clone()).collect();
-        let mut seen_names = filesystem_flow_names.clone();
+        // Record filesystem flow identities (path-shaped) before merging so the
+        // reconciler can enforce the invariant that cache reload events never
+        // overwrite filesystem flows.
+        let filesystem_flow_paths: HashSet<String> = flow_configs
+            .iter()
+            .map(|f| f.identity().to_string())
+            .collect();
+        let mut seen_paths = filesystem_flow_paths.clone();
         for (cache_key, cache_flow) in cache_flows {
-            if seen_names.insert(cache_flow.flow.name.clone()) {
+            if seen_paths.insert(cache_flow.identity().to_string()) {
                 flow_configs.push(cache_flow);
             } else {
                 warn!(
-                    flow = %cache_flow.flow.name,
+                    flow = %cache_flow.identity(),
                     key = %cache_key,
-                    "Cache flow shadowed by a filesystem flow with the same name, deleting stale cache entry"
+                    "Cache flow shadowed by a filesystem flow with the same identity, deleting stale cache entry"
                 );
                 if let Some((ref cache, _)) = system_cache {
                     if let Err(e) = cache.delete(&cache_key).await {
@@ -970,8 +1000,8 @@ impl App {
 
         // Start all background flow tasks and populate the registry.
         for flow in flows {
-            let flow_name = flow.name().to_string();
-            let from_filesystem = filesystem_flow_names.contains(&flow_name);
+            let identity = flow.identity().to_string();
+            let from_filesystem = filesystem_flow_paths.contains(&identity);
             let flow_display_name = flow
                 .config
                 .flow
@@ -1027,9 +1057,9 @@ impl App {
 
             if let Ok(mut registry) = flow_registry.write() {
                 registry.insert(
-                    flow_name.clone(),
+                    identity.clone(),
                     FlowHandle {
-                        flow_name,
+                        identity,
                         flow_display_name,
                         flow_description,
                         flow_tags,
@@ -1111,7 +1141,7 @@ impl App {
                 http_server: http_server.clone(),
                 mcp_server: mcp_server.clone(),
                 ai_gateway_server: ai_gateway_server.clone(),
-                filesystem_flow_names: Arc::new(filesystem_flow_names.clone()),
+                filesystem_flow_paths: Arc::new(filesystem_flow_paths.clone()),
                 flow_registry: Arc::clone(&flow_registry),
                 client_registry: Arc::clone(&client_registry),
             };
@@ -1163,5 +1193,75 @@ impl App {
 
         info!("Shutdown complete, all flows stopped and leases released");
         Ok(())
+    }
+}
+
+/// Computes the identity of a filesystem-loaded flow: path relative to
+/// `source_root`, extension stripped, slashes normalized to `/`. Returns
+/// `None` when the file lies outside `source_root` or when either input
+/// is missing — callers use the fallback identity in that case.
+fn compute_source_path(
+    canonical_file: &std::path::Path,
+    source_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let root = source_root?;
+    let rel = canonical_file.strip_prefix(root).ok()?;
+    let mut s = rel.with_extension("").to_string_lossy().replace('\\', "/");
+    if s.is_empty() {
+        return None;
+    }
+    // Trim any leading `./` the strip could leave behind.
+    if let Some(rest) = s.strip_prefix("./") {
+        s = rest.to_string();
+    }
+    Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn compute_source_path_strips_root_and_extension() {
+        let root = PathBuf::from("/etc/flows");
+        let file = PathBuf::from("/etc/flows/demo/nba_email_demo.yaml");
+        assert_eq!(
+            compute_source_path(&file, Some(&root)),
+            Some("demo/nba_email_demo".to_string())
+        );
+    }
+
+    #[test]
+    fn compute_source_path_flat_layout() {
+        let root = PathBuf::from("/etc/flows");
+        let file = PathBuf::from("/etc/flows/single.yml");
+        assert_eq!(
+            compute_source_path(&file, Some(&root)),
+            Some("single".to_string())
+        );
+    }
+
+    #[test]
+    fn compute_source_path_returns_none_when_outside_root() {
+        let root = PathBuf::from("/etc/flows");
+        let file = PathBuf::from("/tmp/elsewhere/flow.yaml");
+        assert!(compute_source_path(&file, Some(&root)).is_none());
+    }
+
+    #[test]
+    fn compute_source_path_returns_none_without_root() {
+        let file = PathBuf::from("/etc/flows/x.yaml");
+        assert!(compute_source_path(&file, None).is_none());
+    }
+
+    #[test]
+    fn compute_source_path_deeply_nested() {
+        let root = PathBuf::from("/repo/flows");
+        let file = PathBuf::from("/repo/flows/a/b/c/deep.json");
+        assert_eq!(
+            compute_source_path(&file, Some(&root)),
+            Some("a/b/c/deep".to_string())
+        );
     }
 }

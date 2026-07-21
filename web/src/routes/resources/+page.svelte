@@ -8,34 +8,41 @@
 	import CopyButton from '$lib/CopyButton.svelte';
 	import Icon from '@iconify/svelte';
 	import { apiUrl, type ResourceSummary as Resource, type ResourceContent } from '$lib/api';
-
-	// Node in the collapsible resource tree — either a folder (with children
-	// nested one level deep) or a leaf file.
-	interface TreeNode {
-		name: string;
-		fullPath: string;
-		depth: number;
-		isFolder: boolean;
-		resource?: Resource;
-		children?: TreeNode[];
-		fileCount?: number;
-	}
+	import { buildTree, type TreeNode } from '$lib/tree';
 
 	let resources = $state<Resource[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let search = $state('');
 
-	// Set of folder paths currently expanded in the tree. Persists across
-	// unrelated state changes so navigation feels stable.
-	let expanded = $state(new SvelteSet<string>());
+	// Folder pane state — mirrors the Flows page: collapsible sidebar with
+	// per-folder expand/collapse, all persisted in localStorage.
+	let expandedFolders = $state(new SvelteSet<string>());
+	let selectedFolder = $state<string | null>(null);
+	let foldersPaneOpen = $state(true);
 
 	let selected = $state<string | null>(null);
 	let selectedContent = $state<ResourceContent | null>(null);
 	let selectedLoading = $state(false);
 	let selectedError = $state<string | null>(null);
 
+	// Modal breadcrumb parts derived from `selected`.
+	let selectedSegments = $derived(selected ? selected.split('/') : []);
+	let selectedFolderSegments = $derived(selectedSegments.slice(0, -1));
+	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
+
 	onMount(async () => {
+		const pane = localStorage.getItem('flowgen-resources-pane');
+		if (pane !== null) foldersPaneOpen = pane === '1';
+		const exp = localStorage.getItem('flowgen-resources-expanded');
+		if (exp) {
+			try {
+				for (const p of JSON.parse(exp) as string[]) expandedFolders.add(p);
+			} catch {
+				// ignore corrupt state
+			}
+		}
+
 		try {
 			const response = await fetch(apiUrl('api/resources'));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -47,70 +54,46 @@
 		}
 	});
 
-	// When searching, we drop folder navigation and show flat matches so users
-	// can find things regardless of directory.
-	let searchActive = $derived(search.trim().length > 0);
+	function toggleFolder(path: string) {
+		if (expandedFolders.has(path)) expandedFolders.delete(path);
+		else expandedFolders.add(path);
+		localStorage.setItem(
+			'flowgen-resources-expanded',
+			JSON.stringify(Array.from(expandedFolders)),
+		);
+	}
 
-	let flatMatches = $derived.by(() => {
-		if (!searchActive) return [];
+	function selectFolder(path: string | null) {
+		selectedFolder = path;
+	}
+
+	function toggleFoldersPane() {
+		foldersPaneOpen = !foldersPaneOpen;
+		localStorage.setItem('flowgen-resources-pane', foldersPaneOpen ? '1' : '0');
+	}
+
+	function hasSubfolders(node: TreeNode<Resource>): boolean {
+		return (node.children ?? []).some((c) => c.isFolder);
+	}
+
+	function encodePath(path: string): string {
+		return path.split('/').map(encodeURIComponent).join('/');
+	}
+
+	let searchActive = $derived(search.trim().length > 0);
+	let sidebarTree = $derived(buildTree<Resource>(resources, (r) => r.key));
+
+	let filteredResources = $derived.by(() => {
+		if (!searchActive) return resources;
 		const term = search.toLowerCase();
 		return resources.filter((r) => r.key.toLowerCase().includes(term));
 	});
 
-	// Builds the full tree once from the flat resource list. Renders as
-	// nested `<ul>`s that collapse/expand purely client-side.
-	function buildTree(items: Resource[]): TreeNode[] {
-		const root: TreeNode = { name: '', fullPath: '', depth: -1, isFolder: true, children: [] };
-		for (const r of items) {
-			const parts = r.key.split('/');
-			let cursor = root;
-			for (let i = 0; i < parts.length; i++) {
-				const name = parts[i];
-				const isLeaf = i === parts.length - 1;
-				const fullPath = parts.slice(0, i + 1).join('/');
-				let child = cursor.children!.find((c) => c.name === name);
-				if (!child) {
-					child = {
-						name,
-						fullPath,
-						depth: i,
-						isFolder: !isLeaf,
-						children: isLeaf ? undefined : [],
-						resource: isLeaf ? r : undefined
-					};
-					cursor.children!.push(child);
-				}
-				cursor = child;
-			}
-		}
-		// Sort each level: folders first, then files, alphabetically.
-		function sortRec(node: TreeNode) {
-			if (!node.children) return;
-			node.children.sort((a, b) => {
-				if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
-				return a.name.localeCompare(b.name);
-			});
-			for (const c of node.children) sortRec(c);
-		}
-		sortRec(root);
-		// Fill in fileCount for folders (recursive descendant leaves).
-		function countLeaves(node: TreeNode): number {
-			if (!node.isFolder) return 1;
-			let n = 0;
-			for (const c of node.children ?? []) n += countLeaves(c);
-			node.fileCount = n;
-			return n;
-		}
-		countLeaves(root);
-		return root.children ?? [];
-	}
-
-	let tree = $derived(buildTree(resources));
-
-	function toggle(path: string) {
-		if (expanded.has(path)) expanded.delete(path);
-		else expanded.add(path);
-	}
+	let visibleResources = $derived.by(() => {
+		if (searchActive || selectedFolder === null) return filteredResources;
+		const prefix = selectedFolder + '/';
+		return filteredResources.filter((r) => r.key.startsWith(prefix));
+	});
 
 	// Same anti-flash pattern as the flows page: only surface the modal once
 	// we actually have content, keep a cache so repeats paint instantly, and
@@ -172,49 +155,184 @@
 
 <svelte:window on:keydown={onKeydown} />
 
-<section class="p-6">
-	<div class="mb-4 flex items-center justify-end">
-		<label
-			class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-		>
-			<svg
-				class="h-4 w-4 opacity-50"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-			>
-				<circle cx="11" cy="11" r="8" />
-				<path d="M21 21l-4.35-4.35" />
-			</svg>
-			<input type="text" placeholder="Search resources..." bind:value={search} />
-			{#if search}
+<section class="flex h-[calc(100vh-4rem)]">
+	<aside
+		class="flex shrink-0 flex-col border-r border-base-200 bg-base-100 transition-[width] duration-200 ease-out {foldersPaneOpen
+			? 'w-64'
+			: 'w-16'}"
+	>
+		{#if !foldersPaneOpen}
+			<div class="flex flex-1 flex-col items-center py-2">
 				<button
 					type="button"
-					class="opacity-50 hover:opacity-100"
-					aria-label="Clear search"
-					onclick={() => (search = '')}
+					aria-label="Expand folders"
+					title="Folders"
+					class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
+					onclick={toggleFoldersPane}
 				>
-					<Icon icon="tabler:x" class="h-6 w-6" />
+					<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+					<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
 				</button>
-			{/if}
-		</label>
-	</div>
-
-	{#if loading}
-		<div class="flex justify-center py-12">
-			<span class="loading loading-spinner loading-lg text-primary"></span>
-		</div>
-	{:else if error}
-		<div class="alert alert-error" role="alert">
-			<span>Failed to load resources: {error}</span>
-		</div>
-	{:else if searchActive}
-		{#if flatMatches.length === 0}
-			<div
-				class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70"
+			</div>
+		{:else}
+			<div class="flex-1 overflow-y-auto px-3 py-2">
+				<ul class="space-y-0.5 text-sm">
+					<li>
+						<button
+							type="button"
+							class="relative flex w-full items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {selectedFolder === null
+								? 'bg-base-200 font-medium text-primary'
+								: 'hover:bg-base-200'}"
+							onclick={() => selectFolder(null)}
+						>
+							{#if selectedFolder === null}
+								<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+							{/if}
+							<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
+							<span>All resources</span>
+							<span class="ml-auto text-xs opacity-50">{resources.length}</span>
+						</button>
+					</li>
+					{#snippet sidebarNodes(nodes: TreeNode<Resource>[])}
+						{#each nodes as node (node.fullPath)}
+							{#if node.isFolder}
+								{@const isOpen = expandedFolders.has(node.fullPath)}
+								{@const isSelected = selectedFolder === node.fullPath}
+								{@const canExpand = hasSubfolders(node)}
+								<li>
+									<div class="flex items-center gap-0.5">
+										{#if canExpand}
+											<button
+												type="button"
+												class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
+												aria-label={isOpen ? 'Collapse' : 'Expand'}
+												onclick={() => toggleFolder(node.fullPath)}
+											>
+												<Icon
+													icon={isOpen ? 'tabler:chevron-down' : 'tabler:chevron-right'}
+													class="h-3.5 w-3.5 opacity-70"
+												/>
+											</button>
+										{:else}
+											<span class="h-6 w-6 shrink-0"></span>
+										{/if}
+										<button
+											type="button"
+											class="relative flex flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
+												? 'bg-base-200 font-medium text-primary'
+												: 'hover:bg-base-200'}"
+											style="padding-left: {node.depth * 0.75 + 0.375}rem"
+											onclick={() => selectFolder(node.fullPath)}
+										>
+											{#if isSelected}
+												<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+											{/if}
+											<Icon
+												icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
+												class="h-5 w-5 shrink-0 opacity-70"
+											/>
+											<span class="truncate">{node.name}</span>
+											<span class="ml-auto text-xs opacity-50">{node.fileCount}</span>
+										</button>
+									</div>
+									{#if isOpen && canExpand && node.children}
+										<ul class="space-y-0.5">
+											{@render sidebarNodes(node.children)}
+										</ul>
+									{/if}
+								</li>
+							{/if}
+						{/each}
+					{/snippet}
+					{@render sidebarNodes(sidebarTree)}
+				</ul>
+			</div>
+		{/if}
+		<div
+			class="flex h-12 shrink-0 items-center border-t border-base-200 {foldersPaneOpen
+				? 'justify-end px-3'
+				: 'justify-center'}"
+		>
+			<button
+				type="button"
+				aria-label={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
+				class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+				onclick={toggleFoldersPane}
 			>
-				No matches for "{search}".
+				<Icon
+					icon={foldersPaneOpen ? 'tabler:chevron-left' : 'tabler:chevron-right'}
+					class="h-5 w-5"
+				/>
+			</button>
+		</div>
+	</aside>
+
+	<div class="flex min-w-0 flex-1 flex-col">
+		<div class="shrink-0 space-y-3 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
+			{#if selectedFolder}
+				{@const segments = selectedFolder.split('/')}
+				<div class="flex items-center gap-1.5 text-sm">
+					<button
+						type="button"
+						class="text-primary hover:underline"
+						onclick={() => selectFolder(null)}
+					>All resources</button>
+					{#each segments as segment, i}
+						<span class="opacity-40">/</span>
+						{#if i < segments.length - 1}
+							<button
+								type="button"
+								class="font-mono text-primary hover:underline"
+								onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
+							>{segment}</button>
+						{:else}
+							<span class="font-mono">{segment}</span>
+						{/if}
+					{/each}
+					<span class="text-xs opacity-50">· {visibleResources.length} {visibleResources.length === 1 ? 'item' : 'items'}</span>
+				</div>
+			{/if}
+			<div class="flex items-center justify-end">
+				<label
+					class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				>
+					<svg
+						class="h-4 w-4 opacity-50"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+					>
+						<circle cx="11" cy="11" r="8" />
+						<path d="M21 21l-4.35-4.35" />
+					</svg>
+					<input type="text" placeholder="Search resources..." bind:value={search} />
+					{#if search}
+						<button
+							type="button"
+							class="opacity-50 hover:opacity-100"
+							aria-label="Clear search"
+							onclick={() => (search = '')}
+						>
+							<Icon icon="tabler:x" class="h-6 w-6" />
+						</button>
+					{/if}
+				</label>
+			</div>
+		</div>
+
+		<div class="min-h-0 flex-1 overflow-y-auto p-6">
+		{#if loading}
+			<div class="flex justify-center py-12">
+				<span class="loading loading-spinner loading-lg text-primary"></span>
+			</div>
+		{:else if error}
+			<div class="alert alert-error" role="alert">
+				<span>Failed to load resources: {error}</span>
+			</div>
+		{:else if visibleResources.length === 0}
+			<div class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70">
+				{searchActive ? `No matches for "${search}".` : 'No resources'}
 			</div>
 		{:else}
 			<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
@@ -227,19 +345,18 @@
 						</tr>
 					</thead>
 					<tbody>
-						{#each flatMatches as resource (resource.key)}
+						{#each visibleResources as resource (resource.key)}
 							<tr
-								class="hover cursor-pointer"
+								class="cursor-pointer transition-colors hover:bg-base-200"
 								onclick={() => openResource(resource.key)}
-								ondblclick={() =>
-									goto(`${base}/resources/${resource.key.split('/').map(encodeURIComponent).join('/')}`)}
+								ondblclick={() => goto(`${base}/resources/${encodePath(resource.key)}`)}
 								onkeydown={(e) => {
 									if (e.key === 'Enter' || e.key === ' ') openResource(resource.key);
 								}}
 								tabindex="0"
 								role="button"
 							>
-								<td class="font-medium">{resource.key}</td>
+								<td class="font-mono text-xs">{resource.key}</td>
 								<td>
 									{#if resource.extension}
 										<Badge>{resource.extension}</Badge>
@@ -256,102 +373,8 @@
 				</table>
 			</div>
 		{/if}
-	{:else if tree.length === 0}
-		<div class="rounded-lg border border-base-200 bg-base-100 p-8 text-center text-sm opacity-70">
-			No resources
 		</div>
-	{:else}
-		<div class="overflow-x-auto rounded-lg border border-base-200 bg-base-100">
-			<table class="table table-sm w-full bg-base-100">
-				<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
-					<tr>
-						<th>Name</th>
-						<th>Type</th>
-						<th class="text-right">Size</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#snippet renderTree(nodes: TreeNode[])}
-						{#each nodes as node (node.fullPath)}
-							{#if node.isFolder}
-								{@const isOpen = expanded.has(node.fullPath)}
-								<tr
-									class="hover cursor-pointer"
-									onclick={() => toggle(node.fullPath)}
-									onkeydown={(e) => {
-										if (e.key === 'Enter' || e.key === ' ') toggle(node.fullPath);
-									}}
-									tabindex="0"
-									role="button"
-								>
-									<td>
-										<div
-											class="flex items-center gap-1.5 font-medium"
-											style="padding-left: {node.depth * 1.25}rem"
-										>
-											{#if isOpen}
-												<Icon icon="tabler:chevron-down" class="h-4 w-4 opacity-70" />
-												<Icon icon="tabler:folder-open" class="h-4 w-4 opacity-70" />
-											{:else}
-												<Icon icon="tabler:chevron-right" class="h-4 w-4 opacity-70" />
-												<Icon icon="tabler:folder" class="h-4 w-4 opacity-70" />
-											{/if}
-											<span>{node.name}</span>
-										</div>
-									</td>
-									<td class="text-xs opacity-60">folder</td>
-									<td class="whitespace-nowrap text-right text-sm opacity-70">
-										{node.fileCount}
-										{node.fileCount === 1 ? 'item' : 'items'}
-									</td>
-								</tr>
-								{#if isOpen && node.children}
-									{@render renderTree(node.children)}
-								{/if}
-							{:else if node.resource}
-								<tr
-									class="hover cursor-pointer"
-									onclick={() => node.resource && openResource(node.resource.key)}
-									ondblclick={() =>
-										node.resource &&
-										goto(
-											`${base}/resources/${node.resource.key.split('/').map(encodeURIComponent).join('/')}`
-										)}
-									onkeydown={(e) => {
-										if ((e.key === 'Enter' || e.key === ' ') && node.resource)
-											openResource(node.resource.key);
-									}}
-									tabindex="0"
-									role="button"
-								>
-									<td>
-										<div
-											class="flex items-center gap-1.5 font-medium"
-											style="padding-left: {node.depth * 1.25 + 0.75}rem"
-										>
-											<Icon icon="tabler:file" class="h-4 w-4 opacity-70" />
-											<span>{node.name}</span>
-										</div>
-									</td>
-									<td>
-										{#if node.resource.extension}
-											<Badge>{node.resource.extension}</Badge>
-										{:else}
-											<span class="opacity-50">—</span>
-										{/if}
-								</td>
-								<td class="whitespace-nowrap text-right text-sm opacity-70">
-									{formatSize(node.resource.size)}
-								</td>
-							</tr>
-						{/if}
-					{/each}
-					{/snippet}
-					{@render renderTree(tree)}
-				</tbody>
-			</table>
-		</div>
-	{/if}
+	</div>
 </section>
 
 {#if selected}
@@ -371,18 +394,24 @@
 		<div
 			class="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100 shadow-lg"
 		>
-			<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
-				<div class="flex items-center gap-2">
-					<span class="font-mono text-sm font-medium leading-none">{selected}</span>
-					{#if selectedContent?.extension}
-						<Badge>{selectedContent.extension}</Badge>
-					{/if}
+			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
+				<div class="min-w-0 flex-1">
+					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
+						<span class="opacity-60">Resources</span>
+						{#each selectedFolderSegments as segment}
+							<span class="opacity-40">/</span>
+							<span class="font-mono opacity-70">{segment}</span>
+						{/each}
+						<span class="opacity-40">/</span>
+						<span class="font-mono">{selectedLeaf}</span>
+					</div>
+					<div class="text-sm font-medium">{selectedLeaf}</div>
 				</div>
 				<div class="flex items-center gap-1">
 					{#if selected}
 						<div class="tooltip tooltip-left" data-tip="Open full page">
 							<a
-								href="{base}/resources/{selected.split('/').map(encodeURIComponent).join('/')}"
+								href="{base}/resources/{encodePath(selected)}"
 								class="btn btn-ghost btn-sm btn-circle"
 								aria-label="Open full page"
 							>
@@ -402,7 +431,10 @@
 					</div>
 				</div>
 			</div>
-			<div class="flex items-center justify-end border-b border-base-200 bg-base-100 px-4 py-1">
+			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
+				<span class="text-xs font-medium uppercase opacity-70">
+					{selectedContent?.extension ?? 'File'}
+				</span>
 				<CopyButton text={selectedContent?.content} label="Copy" />
 			</div>
 			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">

@@ -165,7 +165,7 @@ impl EventHandler {
             // Skip the file walk when HEAD matches the last successful
             // sync — file contents at the same commit are byte-identical.
             let cache = &self.task_context.cache;
-            let flow_name = &self.task_context.flow.name;
+            let flow_name = self.task_context.flow.identity();
             let sanitized_url = sanitize_repo_url(&self.config.repository_url);
             let cache_key = format!("flow.{flow_name}.git_head.{sanitized_url}");
             let cached_commit = cache
@@ -545,7 +545,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 path.to_path_buf()
             }
             None => std::env::temp_dir()
-                .join(&self.task_context.flow.name)
+                .join(self.task_context.flow.identity())
                 .join(&config.name),
         };
 

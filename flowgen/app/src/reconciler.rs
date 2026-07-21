@@ -78,7 +78,7 @@ pub struct ReconcilerContext {
     pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
     pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
     pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-    pub filesystem_flow_names: Arc<HashSet<String>>,
+    pub filesystem_flow_paths: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
     pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
 }
@@ -112,7 +112,7 @@ pub async fn run(
 /// re-appearing after a restart when the user has switched back to file-based
 /// flow management.
 async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
-    if ctx.filesystem_flow_names.is_empty() {
+    if ctx.filesystem_flow_paths.is_empty() {
         return;
     }
 
@@ -138,7 +138,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
             None => continue,
         };
 
-        if ctx.filesystem_flow_names.contains(&flow_name) {
+        if ctx.filesystem_flow_paths.contains(&flow_name) {
             info!(
                 flow = %flow_name,
                 key = %key,
@@ -222,18 +222,26 @@ async fn reconcile_batch(batch: Vec<WatchEvent>, ctx: &ReconcilerContext) {
 async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) {
     // Gate by the cache prefix so non-flow keys are ignored entirely. The
     // derived name is only used until we have the parsed yaml.
-    if derive_flow_name(key, ctx).is_none() {
-        return;
-    }
+    let flow_id = match derive_flow_name(key, ctx) {
+        Some(name) => name,
+        None => return,
+    };
 
     // Parse the YAML config from the cache value.
-    let config = match parse_flow_config(key, &value) {
+    let mut config = match parse_flow_config(key, &value) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e);
             return;
         }
     };
+
+    // Cache key suffix (path-shaped) is the identity. Set `source_path`
+    // on the config so downstream code — task context, cache namespaces,
+    // MCP URIs — sees the same identity the reconciler is keying on.
+    // Must happen before `validate()` so path-based identity satisfies
+    // the identity-source requirement.
+    config.source_path = Some(flow_id.clone());
 
     if let Err(reason) = config.validate() {
         error!(
@@ -244,14 +252,9 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         return;
     }
 
-    // `flow.name` is the source of truth for flow identity. The cache key
-    // derived from the storage path is informational only and never gates
-    // loading.
-    let flow_name = config.flow.name.clone();
-
-    if ctx.filesystem_flow_names.contains(&flow_name) {
+    if ctx.filesystem_flow_paths.contains(&flow_id) {
         warn!(
-            flow = %flow_name,
+            flow = %flow_id,
             key = %key,
             "Ignoring cache update: this flow is loaded from the filesystem and takes precedence"
         );
@@ -270,7 +273,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     if let Err(e) = new_flow.init().await {
         error!(
             error = %Error::FlowInit {
-                flow: flow_name.clone(),
+                flow: flow_id.clone(),
                 source: Box::new(e),
             }
         );
@@ -282,7 +285,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         Err(e) => {
             error!(
                 error = %Error::FlowStartTasks {
-                    flow: flow_name.clone(),
+                    flow: flow_id.clone(),
                     source: Box::new(e),
                 }
             );
@@ -294,7 +297,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     let results = futures::future::join_all(blocking_handles).await;
     for result in results {
         if let Err(e) = result {
-            error!(flow = %flow_name, "Blocking task failed during hot-reload: {e}");
+            error!(flow = %flow_id, "Blocking task failed during hot-reload: {e}");
         }
     }
 
@@ -356,15 +359,15 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     let join_handle = new_flow.run();
 
     // Stop the old flow and bulk-deregister its server entries.
-    stop_and_deregister(&flow_name, ctx).await;
+    stop_and_deregister(&flow_id, ctx).await;
 
     // Insert the new handle into the registry.
     match ctx.flow_registry.write() {
         Ok(mut registry) => {
             registry.insert(
-                flow_name.clone(),
+                flow_id.clone(),
                 FlowHandle {
-                    flow_name: flow_name.clone(),
+                    identity: flow_id.clone(),
                     flow_display_name,
                     flow_description,
                     flow_tags,
@@ -378,7 +381,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
                     task_manager,
                 },
             );
-            info!(flow = %flow_name, key = %key, "Flow hot-reloaded");
+            info!(flow = %flow_id, key = %key, "Flow hot-reloaded");
         }
         Err(_) => {
             error!(error = %Error::RegistryWriteFailed);
@@ -393,7 +396,7 @@ async fn reconcile_delete(key: &str, ctx: &ReconcilerContext) {
         None => return,
     };
 
-    if ctx.filesystem_flow_names.contains(&flow_name) {
+    if ctx.filesystem_flow_paths.contains(&flow_name) {
         warn!(
             flow = %flow_name,
             key = %key,
@@ -543,7 +546,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         http_server: None,
         mcp_server: None,
         ai_gateway_server: None,
-        filesystem_flow_names: Arc::new(HashSet::new()),
+        filesystem_flow_paths: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
         client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
     }
@@ -554,7 +557,7 @@ fn build_flow(
     flow_config: FlowConfig,
     ctx: &ReconcilerContext,
 ) -> Result<crate::flow::Flow, Error> {
-    let flow_name = flow_config.flow.name.clone();
+    let flow_id = flow_config.identity().to_string();
     let mut builder = crate::flow::FlowBuilder::new()
         .config(Arc::new(flow_config))
         .cache(Arc::clone(&ctx.runtime_cache))
@@ -581,7 +584,7 @@ fn build_flow(
     }
 
     builder.build().map_err(|source| Error::FlowBuild {
-        flow: flow_name,
+        flow: flow_id,
         source: Box::new(source),
     })
 }
@@ -641,7 +644,7 @@ mod tests {
             http_server: None,
             mcp_server: None,
             ai_gateway_server: None,
-            filesystem_flow_names: Arc::new(HashSet::new()),
+            filesystem_flow_paths: Arc::new(HashSet::new()),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         };
@@ -664,7 +667,7 @@ flow:
         let result = parse_flow_config("flows.test-flow.yaml", &bytes::Bytes::from(yaml));
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert_eq!(config.flow.name, "test-flow");
+        assert_eq!(config.flow.name.as_deref(), Some("test-flow"));
         assert_eq!(config.flow.tasks.len(), 1);
     }
 
@@ -688,7 +691,7 @@ flow:
         let result = parse_flow_config("flows.json-flow.json", &bytes::Bytes::from(json));
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert_eq!(config.flow.name, "json-flow");
+        assert_eq!(config.flow.name.as_deref(), Some("json-flow"));
     }
 
     // -- collect_batch ------------------------------------------------------
@@ -768,7 +771,7 @@ flow:
             http_server: None,
             mcp_server: None,
             ai_gateway_server: None,
-            filesystem_flow_names: Arc::new(fs_flows),
+            filesystem_flow_paths: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         }

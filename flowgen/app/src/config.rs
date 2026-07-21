@@ -22,7 +22,7 @@ pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
 /// Top-level configuration for an individual flow.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfig {
-    /// Flow definition containing name and tasks.
+    /// Flow definition (tasks and optional labels).
     pub flow: Flow,
     /// Verbatim YAML source the loader read this flow from. Kept for the
     /// admin API so the UI can render the file as authored — round-tripping
@@ -31,18 +31,55 @@ pub struct FlowConfig {
     /// Skipped in (de)serialization so it does not affect config parsing.
     #[serde(skip)]
     pub raw_source: Option<String>,
+    /// Identity of this flow: file path relative to `flows.path` (filesystem
+    /// load) or the KV key suffix after `flowgen.flows.` (cache load), in both
+    /// cases without the file extension. Slashes preserved for folder grouping
+    /// in the UI. Assigned by the loader; parsed configs from YAML have this
+    /// unset.
+    #[serde(skip)]
+    pub source_path: Option<String>,
 }
 
 impl FlowConfig {
-    /// Validates flow and task names so they are safe to use as filesystem
-    /// path segments. Called by the loaders before a flow is accepted.
+    /// Validates task names and ensures the flow has an identity source
+    /// (either a loader-assigned `source_path` or a programmatic `name`).
+    /// Called by loaders and API constructors before a flow is accepted.
     pub fn validate(&self) -> Result<(), flowgen_core::validate::Error> {
         use flowgen_core::validate::{validate_name, NameField};
-        validate_name(NameField::Flow, &self.flow.name)?;
+        if self.source_path.is_none() {
+            match &self.flow.name {
+                Some(name) => validate_name(NameField::Flow, name)?,
+                None => return Err(flowgen_core::validate::Error::MissingFlowIdentity),
+            }
+        }
         for task in &self.flow.tasks {
             validate_name(NameField::Task, task.name())?;
         }
         Ok(())
+    }
+
+    /// Returns the flow identity: `source_path` when the loader assigned
+    /// one (filesystem or cache), otherwise the programmatic `name`.
+    /// `validate()` guarantees at least one is set, so this cannot fail
+    /// for any FlowConfig that came through the loader or API.
+    pub fn identity(&self) -> &str {
+        if let Some(path) = self.source_path.as_deref() {
+            return path;
+        }
+        self.flow.name.as_deref().unwrap_or("")
+    }
+
+    /// Returns the human-facing display name: `flow.name` when set,
+    /// otherwise the basename of `source_path`. Used for UI lists and log
+    /// fields — never for keying.
+    pub fn display_name(&self) -> &str {
+        if let Some(name) = self.flow.name.as_deref() {
+            return name;
+        }
+        self.source_path
+            .as_deref()
+            .and_then(|p| p.rsplit('/').next())
+            .unwrap_or("")
     }
 }
 
@@ -51,11 +88,16 @@ fn default_parallel_instances() -> usize {
     1
 }
 
-/// Flow definition with name and task list.
+/// Flow definition with task list. Identity normally comes from the
+/// file path relative to `flows.path`; `name` is only meaningful when
+/// a flow is constructed programmatically (e.g. via the admin API)
+/// without a filesystem path to derive from.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Flow {
-    /// Unique name for this flow.
-    pub name: String,
+    /// Programmatic identity for API-constructed flows. Ignored when
+    /// `source_path` is set (path always wins).
+    #[serde(default)]
+    pub name: Option<String>,
     /// Optional label for logging.
     pub labels: Option<Map<String, Value>>,
     /// List of tasks to execute in this flow.
@@ -707,16 +749,17 @@ mod tests {
     fn test_flow_config_creation() {
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "test_flow".to_string(),
+                name: Some("test_flow".to_string()),
                 labels: None,
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         };
 
-        assert_eq!(flow_config.flow.name, "test_flow");
+        assert_eq!(flow_config.flow.name.as_deref(), Some("test_flow"));
         assert!(flow_config.flow.labels.is_none());
         assert!(flow_config.flow.tasks.is_empty());
     }
@@ -728,13 +771,14 @@ mod tests {
 
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "serialize_test".to_string(),
+                name: Some("serialize_test".to_string()),
                 labels: Some(labels),
                 tasks: vec![],
                 require_leader_election: None,
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         };
 
         let serialized = serde_json::to_string(&flow_config).unwrap();
@@ -748,14 +792,14 @@ mod tests {
         labels.insert("type".to_string(), Value::String("test".to_string()));
 
         let flow = Flow {
-            name: "test_flow".to_string(),
+            name: Some("test_flow".to_string()),
             labels: Some(labels.clone()),
             tasks: vec![],
             require_leader_election: None,
             parallel_instances: 1,
         };
 
-        assert_eq!(flow.name, "test_flow");
+        assert_eq!(flow.name.as_deref(), Some("test_flow"));
         assert_eq!(flow.labels, Some(labels));
         assert!(flow.tasks.is_empty());
     }
@@ -766,14 +810,14 @@ mod tests {
         let task = TaskType::convert(convert_config);
 
         let flow = Flow {
-            name: "flow_with_tasks".to_string(),
+            name: Some("flow_with_tasks".to_string()),
             labels: None,
             tasks: vec![task],
             require_leader_election: None,
             parallel_instances: 1,
         };
 
-        assert_eq!(flow.name, "flow_with_tasks");
+        assert_eq!(flow.name.as_deref(), Some("flow_with_tasks"));
         assert!(flow.labels.is_none());
         assert_eq!(flow.tasks.len(), 1);
         assert!(matches!(flow.tasks[0], TaskType::convert(_)));
@@ -788,7 +832,7 @@ mod tests {
         );
 
         let flow = Flow {
-            name: "serialize_flow".to_string(),
+            name: Some("serialize_flow".to_string()),
             labels: Some(labels),
             tasks: vec![],
             require_leader_election: None,
@@ -803,7 +847,7 @@ mod tests {
     #[test]
     fn test_flow_clone() {
         let flow = Flow {
-            name: "clone_test".to_string(),
+            name: Some("clone_test".to_string()),
             labels: None,
             tasks: vec![],
             require_leader_election: None,
@@ -1053,7 +1097,7 @@ mod tests {
 
         let flow_config = FlowConfig {
             flow: Flow {
-                name: "complex_flow".to_string(),
+                name: Some("complex_flow".to_string()),
                 labels: Some(labels.clone()),
                 tasks: vec![
                     TaskType::convert(convert_config),
@@ -1063,9 +1107,10 @@ mod tests {
                 parallel_instances: 1,
             },
             raw_source: None,
+            source_path: None,
         };
 
-        assert_eq!(flow_config.flow.name, "complex_flow");
+        assert_eq!(flow_config.flow.name.as_deref(), Some("complex_flow"));
         assert_eq!(flow_config.flow.labels, Some(labels));
         assert_eq!(flow_config.flow.tasks.len(), 2);
         assert!(matches!(flow_config.flow.tasks[0], TaskType::convert(_)));

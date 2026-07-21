@@ -105,7 +105,7 @@ impl Runner for Processor {
         .await?;
 
         let cfg = &event_handler.config;
-        let flow_name = &self.task_context.flow.name;
+        let flow_name = self.task_context.flow.identity();
         let scheme = &self.mcp_server.extras().resource_uri_scheme;
         let key = cfg.registration_key(scheme, flow_name);
 
@@ -156,7 +156,7 @@ impl Runner for Processor {
         }
 
         let registration = super::super::server::ResourceRegistration {
-            flow_name: flow_name.clone(),
+            flow_name: flow_name.to_string(),
             uri: key.clone(),
             name: cfg.name.clone(),
             description: cfg.description.clone(),

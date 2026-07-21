@@ -86,3 +86,10 @@ export function connectorFor(taskType: string): Connector {
 	const module = TASK_TO_MODULE[taskType] ?? 'core';
 	return CONNECTORS[module] ?? CONNECTORS.core;
 }
+
+/// Looks up a connector by its module name directly (`salesforce`, `gcp`,
+/// `nats`, …). Returns `null` when no connector matches — the caller decides
+/// on the fallback (e.g. a generic folder icon).
+export function connectorByModule(name: string): Connector | null {
+	return CONNECTORS[name] ?? null;
+}

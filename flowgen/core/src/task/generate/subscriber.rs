@@ -139,7 +139,7 @@ impl EventHandler {
 
         // Get cache from task context.
         let cache = &self.task_context.cache;
-        let flow_name = &self.task_context.flow.name;
+        let flow_name = self.task_context.flow.identity();
         let task_name = &self.config.name;
 
         // Generate cache keys with flow-scoped namespace.

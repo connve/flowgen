@@ -6,7 +6,6 @@ A flow is a YAML file that defines a sequence of tasks. Flows can be event-drive
 
 ```yaml
 flow:
-  name: my_flow
   require_leader_election: true
   parallel_instances: 1
   tasks:
@@ -23,11 +22,24 @@ flow:
         # ...
 ```
 
+## Flow identity
+
+A flow's identity is its file path relative to `flows.path`, with the extension stripped. For example, a file at `flows/demo/salesforce/bulkapi_account_writer.yaml` loaded from `flows.path: flows/` has identity `demo/salesforce/bulkapi_account_writer`.
+
+Identity is used for:
+
+- The registry key hot-reload targets.
+- The cache namespace for `ctx.cache` inside scripts.
+- The URI for MCP resources exposed by the flow.
+- The tracing `flow=` field on every log line and activity event.
+- Folder grouping in the admin UI (segments before the last `/`).
+
+Because identity is derived from the path, two flows with the same basename can live in different folders without colliding — `demo/salesforce/reader.yaml` and `demo/hubspot/reader.yaml` are distinct identities.
+
 ## Fields
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `name` | string | required | Unique identifier for the flow. Used in logging, metrics, and cache key namespacing. |
 | `require_leader_election` | bool | `false` | When `true`, only the leader pod runs this flow. Other replicas wait in standby. |
 | `parallel_instances` | int | `1` | Number of concurrent instances of this flow to run on the active pod. |
 | `tasks` | list | required | List of tasks that form the flow. |
@@ -38,7 +50,6 @@ By default, tasks run as a linear chain — each task receives events from the p
 
 ```yaml
 flow:
-  name: linear_example
   tasks:
     - http_endpoint:
         name: ingest

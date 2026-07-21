@@ -157,7 +157,7 @@ impl Runner for Processor {
             self.mcp_server.as_ref(),
             tool_name.clone(),
             super::server::ToolRegistration {
-                flow_name: self.task_context.flow.name.clone(),
+                flow_name: self.task_context.flow.identity().to_string(),
                 description: event_handler.config.description.clone(),
                 input_schema: event_handler.config.input_schema.clone(),
                 tx: tool_tx,
