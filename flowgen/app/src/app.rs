@@ -1116,6 +1116,14 @@ impl App {
                 flow_activity: Arc::clone(&self.flow_activity),
                 logs_query: self.logs_query.clone(),
                 app_config: Arc::clone(&app_config),
+                // System cache (out of user-script reach) so one tenant's flow
+                // script can't read another's chats via `ctx.cache`. Falls back
+                // to the runtime cache when no system bucket is configured
+                // (single-binary/in-memory) — that mode has no tenant isolation
+                // to protect anyway.
+                conversation_cache: Arc::clone(&executor_cache),
+                system_bucket_present: system_cache.is_some(),
+                conversation_history_ttl: web_config.agents.conversation_history_ttl,
             };
             let web_handle = tokio::spawn(async move {
                 if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {

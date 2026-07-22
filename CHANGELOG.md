@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.130.0
+
+### Features
+
+- **Agents chat in the admin UI.** A new "Agents" tab (the first nav
+  item) hosts a built-in chat that talks to the AI gateway through the
+  admin server, so the browser stays same-origin and the gateway needs
+  no CORS. Messages stream token-by-token over SSE; assistant replies
+  render Markdown, code (Prism-highlighted), and inline HTML using the
+  same palette as the resource viewer. The model selector is populated
+  from the gateway's `/models` list. Each message has a copy button and
+  a hover timestamp. An "agent" is just a flow with an `llm_proxy`
+  endpoint — there is no separate agent registry.
+
+- **Conversation history for the Agents chat.** Conversations are
+  persisted through the admin API (`GET/PUT/DELETE
+  /api/agents/conversations[/{id}]`) into the configured **system**
+  cache, which is out of user-script reach — one tenant's flow script
+  cannot read another's chats. Each conversation lives under a
+  `/agents/{id}` URL so it deep-links and survives a reload. History is
+  written as soon as a message is sent (not only after the reply) and
+  the TTL is refreshed on every write. Retention defaults to 30 days,
+  configurable via `web.agents.conversation_history_ttl`; long-term
+  history belongs in a database via a persistence flow. When no system
+  cache bucket is configured (single-binary / in-memory), history falls
+  back to the runtime cache with a warning, since that mode has no
+  tenant isolation to protect.
+
+- **`llm_proxy` advertises its models.** The `llm_proxy` config gains a
+  `models` list that the gateway returns from `/models` as full
+  `<proxy>/<model>` ids, so clients (including the built-in chat) can
+  populate a model selector without knowing the routing prefix. Routing
+  itself still lives in the proxy's script — declaring a model does not
+  decide where it goes.
+
+### Fixes
+
+- **Gateway no longer duplicated streamed replies.** When a downstream
+  provider streamed token deltas, the final completion event re-emitted
+  the whole text, so responses appeared twice. The gateway now suppresses
+  the final full-text emission once progress deltas have streamed.
+
+- **Consistent icon buttons, tooltips, and brand green across the admin
+  UI.** Toolbar actions (Live/Pause, Clear, Resume) are now icon-only
+  buttons with styled tooltips instead of icon+text, every icon-only
+  control has a daisyUI tooltip and `aria-label` (replacing bare
+  `title=` attributes), icon sizes are unified, and the dark-mode
+  primary green is tuned to match the brand.
+
+### Internal
+
+- Conversation request/response types are defined in `openapi.yaml` and
+  generated for both the Rust handlers (`flowgen_client::types`) and the
+  web client (`generated.ts`), keeping the two in lockstep.
+
 ## 0.128.0
 
 ### Breaking

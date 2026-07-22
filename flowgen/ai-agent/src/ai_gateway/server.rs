@@ -164,20 +164,32 @@ struct ModelEntry {
     owned_by: &'static str,
 }
 
-/// Returns the list of currently-registered gateway names in the OpenAI
-/// models schema.
+/// Lists advertised models in the OpenAI schema. Each proxy contributes one
+/// `<proxy>/<model>` id per declared model; a proxy with no `models` falls
+/// back to its bare name so it still appears.
 async fn list_models(
     State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
 ) -> Response {
     let created = chrono::Utc::now().timestamp();
+    let entry = |id: String| ModelEntry {
+        id,
+        object: "model",
+        created,
+        owned_by: "flowgen",
+    };
     let data = state
         .table
         .iter()
-        .map(|entry| ModelEntry {
-            id: entry.key().clone(),
-            object: "model",
-            created,
-            owned_by: "flowgen",
+        .flat_map(|e| {
+            let proxy = e.key().clone();
+            let models = &e.value().config.models;
+            match models.is_empty() {
+                true => vec![entry(proxy)],
+                false => models
+                    .iter()
+                    .map(|m| entry(format!("{proxy}/{m}")))
+                    .collect(),
+            }
         })
         .collect();
     axum::Json(ModelsResponse {
@@ -745,11 +757,19 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
             tokio::sync::oneshot::error::RecvError,
         >;
 
+        // When the downstream streams, its per-token progress deltas already
+        // carry the full text; the final event then repeats it as one chunk.
+        // Track whether any delta was sent so the final text isn't streamed
+        // twice. Non-streaming downstreams send no progress, so their final
+        // text is emitted below.
+        let mut streamed_progress = false;
+
         let result: Option<CompletionResult> = loop {
             tokio::select! {
                 progress = progress_rx.recv() => {
                     match progress {
                         Some(evt) => {
+                            streamed_progress = true;
                             for frame in writer.text_delta(evt.status.clone()) {
                                 if sse_tx.send(Ok(frame)).await.is_err() {
                                     registry.remove(&cid).await;
@@ -774,6 +794,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                     registry.remove(&cid).await;
 
                     while let Ok(evt) = progress_rx.try_recv() {
+                        streamed_progress = true;
                         for frame in writer.text_delta(evt.status.clone()) {
                             let _ = sse_tx.send(Ok(frame)).await;
                         }
@@ -800,7 +821,10 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                     },
                     None => String::new(),
                 };
-                if !text.is_empty() {
+                // Skip when progress deltas already streamed this text, or it
+                // would arrive twice. Non-streaming downstreams sent no deltas,
+                // so their final text is emitted here.
+                if !text.is_empty() && !streamed_progress {
                     for frame in writer.text_delta(text) {
                         let _ = sse_tx.send(Ok(frame)).await;
                     }

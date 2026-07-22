@@ -50,6 +50,7 @@ tokio-stream = { workspace = true, features = ["sync"] }
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

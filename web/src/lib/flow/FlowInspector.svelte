@@ -225,7 +225,7 @@
 							class="btn btn-ghost btn-sm btn-circle"
 							aria-label="Open full page"
 						>
-							<Icon icon="tabler:external-link" class="h-6 w-6" />
+							<Icon icon="tabler:external-link" class="h-5 w-5" />
 						</a>
 					</div>
 					<div class="tooltip tooltip-left" data-tip="Close">
@@ -235,7 +235,7 @@
 							aria-label="Close"
 							onclick={closeResource}
 						>
-							<Icon icon="tabler:x" class="h-6 w-6" />
+							<Icon icon="tabler:x" class="h-5 w-5" />
 						</button>
 					</div>
 				</div>

@@ -163,16 +163,17 @@
 	>
 		{#if !foldersPaneOpen}
 			<div class="flex flex-1 flex-col items-center py-2">
-				<button
-					type="button"
-					aria-label="Expand folders"
-					title="Folders"
-					class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
-					onclick={toggleFoldersPane}
-				>
-					<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
-					<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
-				</button>
+				<div class="tooltip tooltip-right" data-tip="Folders">
+					<button
+						type="button"
+						aria-label="Expand folders"
+						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
+						onclick={toggleFoldersPane}
+					>
+						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
+						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0" />
+					</button>
+				</div>
 			</div>
 		{:else}
 			<div class="flex-1 overflow-y-auto px-3 py-2">
@@ -256,7 +257,10 @@
 			<button
 				type="button"
 				aria-label={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
-				class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+				data-tip={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
+				class="tooltip {foldersPaneOpen
+					? 'tooltip-top'
+					: 'tooltip-right'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
 				onclick={toggleFoldersPane}
 			>
 				<Icon
@@ -308,14 +312,16 @@
 					</svg>
 					<input type="text" placeholder="Search resources..." bind:value={search} />
 					{#if search}
-						<button
-							type="button"
-							class="opacity-50 hover:opacity-100"
-							aria-label="Clear search"
-							onclick={() => (search = '')}
-						>
-							<Icon icon="tabler:x" class="h-6 w-6" />
-						</button>
+						<div class="tooltip tooltip-left" data-tip="Clear search">
+							<button
+								type="button"
+								class="opacity-50 hover:opacity-100"
+								aria-label="Clear search"
+								onclick={() => (search = '')}
+							>
+								<Icon icon="tabler:x" class="h-5 w-5" />
+							</button>
+						</div>
 					{/if}
 				</label>
 			</div>
@@ -415,7 +421,7 @@
 								class="btn btn-ghost btn-sm btn-circle"
 								aria-label="Open full page"
 							>
-								<Icon icon="tabler:external-link" class="h-6 w-6" />
+								<Icon icon="tabler:external-link" class="h-5 w-5" />
 							</a>
 						</div>
 					{/if}
@@ -426,7 +432,7 @@
 							aria-label="Close"
 							onclick={closeResource}
 						>
-							<Icon icon="tabler:x" class="h-6 w-6" />
+							<Icon icon="tabler:x" class="h-5 w-5" />
 						</button>
 					</div>
 				</div>

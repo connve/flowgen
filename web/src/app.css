@@ -59,3 +59,106 @@
 	-webkit-appearance: none;
 	margin: 0;
 }
+
+/* Typing indicator: three dots bouncing in a staggered wave. */
+@keyframes typing-bounce {
+	0%,
+	60%,
+	100% {
+		transform: translateY(0);
+		opacity: 0.4;
+	}
+	30% {
+		transform: translateY(-0.25rem);
+		opacity: 1;
+	}
+}
+.typing-dot {
+	animation: typing-bounce 1.2s infinite ease-in-out;
+}
+@media (prefers-reduced-motion: reduce) {
+	.typing-dot {
+		animation: none;
+	}
+}
+
+/* Shared Prism syntax-highlight palette, used by the resource viewer and the
+   Agents chat code blocks. Token colors are theme-scoped variables. */
+[data-theme='mytheme'] {
+	--prism-comment: #8a8a8a;
+	--prism-punctuation: #556b60;
+	--prism-property: #006ba1;
+	--prism-number: #cf3450;
+	--prism-string: #006b55;
+	--prism-operator: #007cf3;
+	--prism-keyword: #7c3aed;
+	--prism-function: #007600;
+	--prism-variable: #ff9804;
+}
+[data-theme='mydark'] {
+	--prism-comment: #9ca3af;
+	--prism-punctuation: #d4e0d9;
+	--prism-property: #82d4ff;
+	--prism-number: #ffb0b8;
+	--prism-string: #7ce8b5;
+	--prism-operator: #d4e0d9;
+	--prism-keyword: #d59fff;
+	--prism-function: #ffe0a0;
+	--prism-variable: #ffb84d;
+}
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+	color: var(--prism-comment);
+	font-style: italic;
+}
+.token.punctuation {
+	color: var(--prism-punctuation);
+}
+.token.property,
+.token.tag,
+.token.constant,
+.token.symbol,
+.token.deleted {
+	color: var(--prism-property);
+}
+.token.boolean,
+.token.number {
+	color: var(--prism-number);
+}
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+	color: var(--prism-string);
+}
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+	color: var(--prism-operator);
+}
+/* YAML keys carry `.key.atrule`; route them to the property color. */
+.token.key.atrule,
+.token.attr-value {
+	color: var(--prism-property);
+	font-weight: 600;
+}
+.token.atrule,
+.token.keyword {
+	color: var(--prism-keyword);
+	font-weight: 600;
+}
+.token.function,
+.token.class-name {
+	color: var(--prism-function);
+}
+.token.regex,
+.token.important,
+.token.variable {
+	color: var(--prism-variable);
+}

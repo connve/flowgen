@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri},
     response::sse::{Event as SseEvent, KeepAlive, Sse},
     response::{IntoResponse, Redirect},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use flowgen_client::types as api;
@@ -76,6 +76,21 @@ pub struct WebState {
     /// Running application configuration, surfaced read-only by the admin
     /// config viewer. Secrets serialize as `"***"` (see `JwtConfig`).
     pub app_config: Arc<crate::config::AppConfig>,
+    /// Cache backing the built-in Agents conversation history — the store our
+    /// UI reads and writes; a persistence flow can later copy it into a
+    /// database. This is the **system** cache (`flowgen_system`), which is out
+    /// of flow-script reach, so chats are not exposed to `ctx.cache`. Proxy
+    /// traffic stays stateless: conversations are our UI's domain, not the
+    /// gateway's.
+    pub conversation_cache: Arc<dyn flowgen_core::cache::Cache>,
+    /// Whether a dedicated system bucket actually backs `conversation_cache`.
+    /// False in single-binary/in-memory mode, where it falls back to the
+    /// runtime cache that flow scripts can reach — `start_web_server` warns
+    /// once at startup so operators know.
+    pub system_bucket_present: bool,
+    /// TTL applied to each conversation write, refreshed on every save. `None`
+    /// persists indefinitely. From `web.agents.conversation_history_ttl`.
+    pub conversation_history_ttl: Option<Duration>,
 }
 
 /// Starts the admin web server on the given port.
@@ -92,6 +107,12 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
     };
     state.prefix = prefix.clone();
 
+    // Without a dedicated system cache bucket, conversation history shares the
+    // runtime cache that flow scripts can read and write via `ctx.cache`. Warn
+    // once at startup so operators know to configure a system bucket when that
+    // access matters.
+    let system_bucket_present = state.system_bucket_present;
+
     let app = Router::new()
         .route(&format!("{api_prefix}/flows"), get(list_flows))
         .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
@@ -100,6 +121,18 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
         .route(&format!("{api_prefix}/logs/stream"), get(stream_logs))
         .route(&format!("{api_prefix}/version"), get(get_version))
         .route(&format!("{api_prefix}/config"), get(get_config))
+        .route(&format!("{api_prefix}/agents/chat"), post(proxy_chat))
+        .route(&format!("{api_prefix}/agents/models"), get(proxy_models))
+        .route(
+            &format!("{api_prefix}/agents/conversations"),
+            get(list_conversations),
+        )
+        .route(
+            &format!("{api_prefix}/agents/conversations/{{id}}"),
+            get(get_conversation)
+                .put(put_conversation)
+                .delete(delete_conversation),
+        )
         .route(&format!("{api_prefix}/openapi.yaml"), get(get_openapi))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
         .route(
@@ -114,6 +147,13 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
         .map_err(|source| Error::BindListener { port, source })?;
 
     info!(port, path = %path, "Starting admin web server");
+
+    if !system_bucket_present {
+        warn!(
+            "Agents conversation history is stored in the runtime cache (no system cache bucket \
+             configured), which flow scripts can read and write via ctx.cache"
+        );
+    }
 
     axum::serve(listener, app)
         .await
@@ -206,6 +246,15 @@ fn ms_to_datetime(ms: u64) -> Option<chrono::DateTime<chrono::Utc>> {
     let secs = (ms / 1000) as i64;
     let nsecs = ((ms % 1000) * 1_000_000) as u32;
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs)
+}
+
+/// Current wall-clock time in epoch milliseconds, for stamping conversation
+/// writes. Saturates to 0 before the epoch, which never happens in practice.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Returns the YAML source of a single flow so operators can inspect the
@@ -494,6 +543,278 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
     Json(api::ConfigInfo { yaml })
 }
 
+/// Resolves the base URL the built-in Agents chat proxies to. Prefers the
+/// explicit `web.ai_gateway_url`; otherwise targets the same-process AI
+/// gateway on loopback. Returns `None` when no gateway is configured.
+fn gateway_base_url(state: &WebState) -> Option<String> {
+    if let Some(url) = state
+        .app_config
+        .web
+        .as_ref()
+        .and_then(|w| w.ai_gateway_url.as_ref())
+    {
+        return Some(url.trim_end_matches('/').to_string());
+    }
+    let gateway = state.app_config.ai_gateway.as_ref()?;
+    let path = gateway.path.trim_end_matches('/');
+    Some(format!("http://127.0.0.1:{}{path}", gateway.port))
+}
+
+/// Proxies a chat-completion request to the AI gateway, streaming the
+/// response body straight back. The browser stays same-origin with the admin
+/// server, so no gateway-side CORS is required and the gateway need not be
+/// publicly reachable.
+async fn proxy_chat(
+    State(state): State<Arc<WebState>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(base) = gateway_base_url(&state) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AI gateway is not configured",
+        )
+            .into_response();
+    };
+    let upstream = reqwest::Client::new()
+        .post(format!("{base}/chat/completions"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .send()
+        .await;
+    match upstream {
+        Ok(resp) => {
+            let status = resp.status();
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let mut headers = HeaderMap::new();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&content_type) {
+                headers.insert(axum::http::header::CONTENT_TYPE, value);
+            }
+            let stream = resp.bytes_stream();
+            let body = axum::body::Body::from_stream(stream);
+            (
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                headers,
+                body,
+            )
+                .into_response()
+        }
+        Err(source) => {
+            warn!(error = %source, "Failed to reach AI gateway from Agents chat proxy");
+            (StatusCode::BAD_GATEWAY, "Failed to reach AI gateway").into_response()
+        }
+    }
+}
+
+/// Proxies the gateway model list so the Agents chat can populate its model
+/// selector without knowing the gateway URL.
+async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Response {
+    let Some(base) = gateway_base_url(&state) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AI gateway is not configured",
+        )
+            .into_response();
+    };
+    match reqwest::Client::new()
+        .get(format!("{base}/models"))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let text = resp.text().await.unwrap_or_default();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            (status, headers, text).into_response()
+        }
+        Err(source) => {
+            warn!(error = %source, "Failed to list AI gateway models from Agents chat proxy");
+            (StatusCode::BAD_GATEWAY, "Failed to reach AI gateway").into_response()
+        }
+    }
+}
+
+// --- Built-in Agents conversation history -------------------------------
+//
+// Persistence for the admin UI's Agents chat. The gateway proxy stays
+// stateless; conversation memory is our UI's domain and lives in the
+// configured system cache (see `WebState::conversation_cache`), out of
+// user-script reach. A persistence flow can later copy these into a database.
+// Types (`api::Conversation`, etc.) are generated from openapi.yaml.
+
+/// Key prefix for conversations in the system cache. The bucket name already
+/// carries "flowgen", so keys stay unprefixed (matching `lease.`/`peers.`).
+const CONVERSATION_KEY_PREFIX: &str = "agents.conversations.";
+
+/// Validates a client-supplied conversation id: `[A-Za-z0-9_-]+`, non-empty.
+/// Anything else is rejected rather than silently sanitized — the id is the
+/// client's own handle, and `.` would break the dotted KV key namespace.
+fn valid_conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn conversation_key(id: &str) -> String {
+    format!("{CONVERSATION_KEY_PREFIX}{id}")
+}
+
+/// Lists stored conversations (summaries only), newest first.
+async fn list_conversations(State(state): State<Arc<WebState>>) -> axum::response::Response {
+    let keys = match state
+        .conversation_cache
+        .list_keys(CONVERSATION_KEY_PREFIX)
+        .await
+    {
+        Ok(keys) => keys,
+        Err(source) => {
+            warn!(error = %source, "Failed to list conversations from cache");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response();
+        }
+    };
+
+    let mut summaries = Vec::with_capacity(keys.len());
+    for key in keys {
+        match state.conversation_cache.get(&key).await {
+            Ok(Some(bytes)) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+                Ok(c) => summaries.push(api::ConversationSummary {
+                    id: c.id,
+                    title: c.title,
+                    updated_at: c.updated_at,
+                    message_count: c.messages.len() as i64,
+                }),
+                // A single corrupt entry shouldn't sink the whole list.
+                Err(source) => {
+                    warn!(key = %key, error = %source, "Skipping unparseable conversation")
+                }
+            },
+            Ok(None) => {}
+            Err(source) => warn!(key = %key, error = %source, "Failed to read conversation"),
+        }
+    }
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+
+    Json(serde_json::json!({ "conversations": summaries })).into_response()
+}
+
+/// Returns a single conversation with its full message history.
+async fn get_conversation(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+) -> axum::response::Response {
+    if !valid_conversation_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    }
+    match state.conversation_cache.get(&conversation_key(&id)).await {
+        Ok(Some(bytes)) => match serde_json::from_slice::<api::Conversation>(&bytes) {
+            Ok(c) => Json(c).into_response(),
+            Err(source) => {
+                warn!(id = %id, error = %source, "Stored conversation is unparseable");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Corrupt conversation").into_response()
+            }
+        },
+        Ok(None) => (StatusCode::NOT_FOUND, "Conversation not found").into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to read conversation from cache");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Creates or overwrites a conversation. The path id is authoritative and the
+/// `updated_at` is server-stamped; the TTL is refreshed on every write, so the
+/// expiry window counts from the last activity.
+async fn put_conversation(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<api::ConversationUpsert>,
+) -> axum::response::Response {
+    if !valid_conversation_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    }
+
+    let conversation = api::Conversation {
+        id: id.clone(),
+        title: body.title,
+        messages: body.messages,
+        updated_at: now_millis(),
+    };
+    let bytes = match serde_json::to_vec(&conversation) {
+        Ok(bytes) => bytes,
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to serialize conversation");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to store conversation",
+            )
+                .into_response();
+        }
+    };
+
+    let ttl_secs = state.conversation_history_ttl.and_then(|d| {
+        let secs = d.as_secs();
+        (secs > 0).then_some(secs)
+    });
+    match state
+        .conversation_cache
+        .put(&conversation_key(&id), bytes.into(), ttl_secs)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to write conversation to cache");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Deletes a conversation. Idempotent — deleting a missing id still succeeds.
+async fn delete_conversation(
+    State(state): State<Arc<WebState>>,
+    AxumPath(id): AxumPath<String>,
+) -> axum::response::Response {
+    if !valid_conversation_id(&id) {
+        return (StatusCode::BAD_REQUEST, "Invalid conversation id").into_response();
+    }
+    match state
+        .conversation_cache
+        .delete(&conversation_key(&id))
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(source) => {
+            warn!(id = %id, error = %source, "Failed to delete conversation from cache");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Conversation store unavailable",
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Returns the bundled OpenAPI spec.
 async fn get_openapi() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
@@ -610,6 +931,9 @@ mod tests {
             flow_activity: flowgen_core::flow::activity::FlowRegistry::builder().build(),
             logs_query: None,
             app_config,
+            conversation_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
+            system_bucket_present: false,
+            conversation_history_ttl: None,
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());

@@ -194,6 +194,109 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/chat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Proxy a chat completion to the AI gateway.
+         * @description Forwards an OpenAI-compatible chat completion request to the
+         *     configured AI gateway (`web.ai_gateway_url`, or the same-process
+         *     gateway on loopback) and streams the response back. Same-origin
+         *     with the admin server, so the built-in Agents chat needs no
+         *     gateway-side CORS. The request and response bodies are the stock
+         *     OpenAI chat-completions shape; route by `model`
+         *     (`"<gateway-name>/<downstream-model>"`).
+         */
+        post: operations["agentsChat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List models available on the AI gateway.
+         * @description Proxies the AI gateway model list so the Agents chat can populate
+         *     its model selector without knowing the gateway URL. Returns the
+         *     stock OpenAI `{ object: "list", data: [{ id, ... }] }` shape.
+         */
+        get: operations["agentsModels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List stored Agents chat conversations.
+         * @description Returns conversation summaries (no message bodies) for the built-in
+         *     Agents chat, newest first. History is our UI's own store in the
+         *     configured system cache — the gateway proxy stays stateless. A
+         *     persistence flow can copy these into a database for long-term
+         *     retention.
+         */
+        get: operations["listConversations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/conversations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Client-supplied conversation id (`[A-Za-z0-9_-]+`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Fetch one conversation with its full message history. */
+        get: operations["getConversation"];
+        /**
+         * Create or overwrite a conversation.
+         * @description The path id is authoritative and `updatedAt` is server-stamped, so
+         *     neither is read from the body. The TTL
+         *     (`web.agents.conversation_history_ttl`) is refreshed on every write,
+         *     so the expiry window counts from the last activity.
+         */
+        put: operations["putConversation"];
+        post?: never;
+        /**
+         * Delete a conversation.
+         * @description Idempotent — deleting a missing id still succeeds.
+         */
+        delete: operations["deleteConversation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/livez": {
         parameters: {
             query?: never;
@@ -354,6 +457,52 @@ export interface components {
              *     redacted to `"***"`.
              */
             yaml: string;
+        };
+        /** @description One message in an Agents chat conversation. */
+        ConversationMessage: {
+            /** @description Message author — `user` or `assistant`. */
+            role: string;
+            /** @description The message text. */
+            content: string;
+            /**
+             * Format: int64
+             * @description When the message was sent, epoch milliseconds.
+             */
+            at: number;
+        };
+        /** @description A stored Agents chat conversation with its full history. */
+        Conversation: {
+            /** @description Client-supplied conversation id (`[A-Za-z0-9_-]+`). */
+            id: string;
+            /** @description Human-readable conversation title. */
+            title: string;
+            messages: components["schemas"]["ConversationMessage"][];
+            /**
+             * Format: int64
+             * @description Last write time, epoch milliseconds (server-stamped).
+             */
+            updatedAt: number;
+        };
+        /** @description A conversation without its messages, for the list view. */
+        ConversationSummary: {
+            id: string;
+            title: string;
+            /**
+             * Format: int64
+             * @description Last write time, epoch milliseconds.
+             */
+            updatedAt: number;
+            /** @description Number of messages in the conversation. */
+            messageCount: number;
+        };
+        /**
+         * @description Body for `PUT /api/agents/conversations/{id}`. `id` and `updatedAt`
+         *     are set by the server (path is authoritative, timestamp is
+         *     server-stamped), so they are not part of this body.
+         */
+        ConversationUpsert: {
+            title: string;
+            messages: components["schemas"]["ConversationMessage"][];
         };
         /** @description One span in a log record's span chain, root-to-leaf. */
         LogSpan: {
@@ -606,6 +755,232 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ConfigInfo"];
                 };
+            };
+        };
+    };
+    agentsChat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description OpenAI-compatible completion, streamed when `stream` is true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description The AI gateway could not be reached. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No AI gateway is configured. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    agentsModels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OpenAI-compatible model list. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description The AI gateway could not be reached. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No AI gateway is configured. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listConversations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Conversation summaries, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        conversations: components["schemas"]["ConversationSummary"][];
+                    };
+                };
+            };
+            /** @description The conversation store is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Client-supplied conversation id (`[A-Za-z0-9_-]+`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The conversation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Conversation"];
+                };
+            };
+            /** @description The conversation id is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No conversation with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The conversation store is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    putConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Client-supplied conversation id (`[A-Za-z0-9_-]+`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversationUpsert"];
+            };
+        };
+        responses: {
+            /** @description The conversation was stored. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The conversation id is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The conversation store is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deleteConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Client-supplied conversation id (`[A-Za-z0-9_-]+`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The conversation is gone. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The conversation id is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The conversation store is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

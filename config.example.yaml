@@ -127,6 +127,16 @@ http_server:
 #   enabled: true
 #   port: 8080
 #   path: "/flowgen"
+#   # Base URL the built-in Agents chat proxies to. Omit to target the
+#   # same-process AI gateway on loopback; set when the gateway runs in a
+#   # separate process or pod.
+#   ai_gateway_url: "http://127.0.0.1:3002/v1"
+#   agents:
+#     # How long a chat conversation lives in the configured cache before it
+#     # expires, refreshed on every write. Defaults to 30 days; set to 0 to
+#     # persist indefinitely. Long-term history belongs in a database via a
+#     # persistence flow, not this cache.
+#     conversation_history_ttl: 30d
 
 # Kubernetes liveness/readiness listener. Independent from the API
 # listeners so probes keep working regardless of which surfaces are

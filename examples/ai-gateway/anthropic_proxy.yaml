@@ -9,27 +9,28 @@
 # Client env:
 #   ANTHROPIC_BASE_URL=http://<host>:3002
 #   ANTHROPIC_AUTH_TOKEN=<any non-empty value; matches worker credentials when configured>
-#   ANTHROPIC_MODEL=flowgen_anthropic/<alias>          # e.g. flowgen_anthropic/kimi
+#   ANTHROPIC_MODEL=flowgen_anthropic/<model>          # e.g. flowgen_anthropic/glm-4.6
 #
-# The `flowgen_anthropic/` prefix picks this flow; `<alias>` selects
-# the downstream provider. Aliases are defined in the shared
-# `route_provider.rhai` script.
+# The `flowgen_anthropic/` prefix picks this flow; `<model>` selects
+# the downstream provider. Models are declared in `models` below and
+# routed by the shared `route_provider.rhai` script.
 #
 # Required:
 #   - AI gateway enabled in worker config
-#   - Downstream provider credentials under /etc/<alias>/credentials.json
+#   - Downstream provider credentials referenced by the routing script
 flow:
   labels:
     display_name: "Anthropic API Gateway"
-    description: "Exposes an Anthropic Messages-compatible endpoint that routes a client model alias to a downstream provider and streams the completion back in Anthropic wire format."
+    description: "Exposes an Anthropic Messages-compatible endpoint that routes the client model to a downstream provider and streams the completion back in Anthropic wire format."
     tags: ["ai-gateway", "anthropic", "llm-proxy", "streaming", "example"]
   tasks:
 
     - llm_proxy:
         name: flowgen_anthropic
+        models: [glm-4.6, kimi-k2.7-code]
         protocol: anthropic
 
-    # Route the client alias to a concrete provider. Shared with
+    # Route the client model to a concrete provider. Shared with
     # openai_proxy.yaml so both endpoints stay in sync.
     - script:
         name: route_provider

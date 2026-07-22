@@ -691,6 +691,39 @@ pub struct WebOptions {
     /// Path prefix for the admin web UI. Defaults to "/".
     #[serde(default = "default_web_path")]
     pub path: String,
+    /// Base URL the admin server proxies the built-in Agents chat to, e.g.
+    /// `http://127.0.0.1:3002/v1`. Omit to target the same-process AI gateway
+    /// on loopback. Set when the gateway runs in a separate process or pod.
+    #[serde(default)]
+    pub ai_gateway_url: Option<String>,
+    /// Settings for the built-in Agents chat (conversation history, etc.).
+    #[serde(default)]
+    pub agents: AgentsOptions,
+}
+
+/// Settings for the built-in Agents chat surface.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+pub struct AgentsOptions {
+    /// How long a conversation lives in the configured cache before it
+    /// expires. Refreshed on every write, so the window counts from the last
+    /// activity. Defaults to 30 days; set to `0` to persist indefinitely.
+    /// Long-term history belongs in a database via a persistence flow, not
+    /// this cache.
+    #[serde(default = "default_conversation_history_ttl", with = "humantime_serde")]
+    pub conversation_history_ttl: Option<Duration>,
+}
+
+impl Default for AgentsOptions {
+    fn default() -> Self {
+        Self {
+            conversation_history_ttl: default_conversation_history_ttl(),
+        }
+    }
+}
+
+/// Default conversation history TTL for the built-in Agents chat: 30 days.
+fn default_conversation_history_ttl() -> Option<Duration> {
+    Some(Duration::from_secs(30 * 24 * 60 * 60))
 }
 
 /// Default health listener port.

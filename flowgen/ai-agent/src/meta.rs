@@ -37,7 +37,7 @@ pub const PROXY_NAME: &str = "proxy_name";
 /// `<name>/<model>` routing key). This is what the client typed —
 /// distinct from `MODEL` on the completion side, which holds the
 /// actual downstream model the leaf ended up calling (e.g. a Rhai
-/// `route_provider` script may rewrite `kimi` → `kimi-k2.7-code`).
+/// `route_provider` script may rewrite an unknown model to a fallback).
 pub const REQUESTED_MODEL: &str = "requested_model";
 /// Model the completion leaf actually called upstream. Set on the
 /// response side; distinct from `REQUESTED_MODEL` which is the

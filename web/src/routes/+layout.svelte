@@ -102,14 +102,14 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
+				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"
 						class="relative flex h-10 items-center rounded-md text-sm font-medium transition-colors hover:bg-base-200 {active
 							? 'bg-base-200 text-primary'
-							: 'text-base-content'} {collapsed ? 'w-10 justify-center' : 'gap-3 px-3'}"
-						title={item.label}
+							: 'text-base-content'} {collapsed ? 'tooltip tooltip-right w-10 justify-center' : 'gap-3 px-3'}"
+						data-tip={collapsed ? item.label : undefined}
 						aria-label={item.label}
 						aria-current={active ? 'page' : undefined}
 					>
@@ -153,7 +153,7 @@
 									: ''}"
 								aria-label="System"
 							>
-								<Icon icon="tabler:gauge" class="h-5 w-5" />
+								<Icon icon="tabler:adjustments" class="h-5 w-5" />
 							</a>
 						</div>
 					</div>
@@ -161,7 +161,10 @@
 				<button
 					type="button"
 					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-					class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+					data-tip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+					class="tooltip {collapsed
+						? 'tooltip-right'
+						: 'tooltip-top'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
 					onclick={() => {
 						collapsed = !collapsed;
 						localStorage.setItem('flowgen-nav-collapsed', collapsed ? '1' : '0');
@@ -202,8 +205,8 @@
 					</div>
 
 					<div
-						class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-						title="Signed in"
+						class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
+						data-tip="Signed in"
 						aria-label="User"
 					>
 						<Icon icon="tabler:user" class="h-6 w-6" />

@@ -94,6 +94,7 @@ fn register_fake_proxy_with_protocol<F>(
 
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
+        models: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -737,6 +738,7 @@ fn register_proxy_with_bearer_token(
 
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
+        models: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,

@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.128.0
+  version: 0.130.0
   license:
     name: MPL-2.0
 servers:
@@ -198,6 +198,151 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConfigInfo"
+
+  /api/agents/chat:
+    post:
+      operationId: agentsChat
+      summary: Proxy a chat completion to the AI gateway.
+      description: |
+        Forwards an OpenAI-compatible chat completion request to the
+        configured AI gateway (`web.ai_gateway_url`, or the same-process
+        gateway on loopback) and streams the response back. Same-origin
+        with the admin server, so the built-in Agents chat needs no
+        gateway-side CORS. The request and response bodies are the stock
+        OpenAI chat-completions shape; route by `model`
+        (`"<gateway-name>/<downstream-model>"`).
+      tags: [agents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: OpenAI-compatible completion, streamed when `stream` is true.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "502":
+          description: The AI gateway could not be reached.
+        "503":
+          description: No AI gateway is configured.
+
+  /api/agents/models:
+    get:
+      operationId: agentsModels
+      summary: List models available on the AI gateway.
+      description: |
+        Proxies the AI gateway model list so the Agents chat can populate
+        its model selector without knowing the gateway URL. Returns the
+        stock OpenAI `{ object: "list", data: [{ id, ... }] }` shape.
+      tags: [agents]
+      responses:
+        "200":
+          description: OpenAI-compatible model list.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "502":
+          description: The AI gateway could not be reached.
+        "503":
+          description: No AI gateway is configured.
+
+  /api/agents/conversations:
+    get:
+      operationId: listConversations
+      summary: List stored Agents chat conversations.
+      description: |
+        Returns conversation summaries (no message bodies) for the built-in
+        Agents chat, newest first. History is our UI's own store in the
+        configured system cache — the gateway proxy stays stateless. A
+        persistence flow can copy these into a database for long-term
+        retention.
+      tags: [agents]
+      responses:
+        "200":
+          description: Conversation summaries, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversations]
+                properties:
+                  conversations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ConversationSummary"
+        "503":
+          description: The conversation store is unavailable.
+
+  /api/agents/conversations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Client-supplied conversation id (`[A-Za-z0-9_-]+`).
+        schema:
+          type: string
+    get:
+      operationId: getConversation
+      summary: Fetch one conversation with its full message history.
+      tags: [agents]
+      responses:
+        "200":
+          description: The conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          description: The conversation id is invalid.
+        "404":
+          description: No conversation with that id.
+        "503":
+          description: The conversation store is unavailable.
+    put:
+      operationId: putConversation
+      summary: Create or overwrite a conversation.
+      description: |
+        The path id is authoritative and `updatedAt` is server-stamped, so
+        neither is read from the body. The TTL
+        (`web.agents.conversation_history_ttl`) is refreshed on every write,
+        so the expiry window counts from the last activity.
+      tags: [agents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationUpsert"
+      responses:
+        "204":
+          description: The conversation was stored.
+        "400":
+          description: The conversation id is invalid.
+        "503":
+          description: The conversation store is unavailable.
+    delete:
+      operationId: deleteConversation
+      summary: Delete a conversation.
+      description: Idempotent — deleting a missing id still succeeds.
+      tags: [agents]
+      responses:
+        "204":
+          description: The conversation is gone.
+        "400":
+          description: The conversation id is invalid.
+        "503":
+          description: The conversation store is unavailable.
 
   /livez:
     get:
@@ -420,6 +565,74 @@ components:
           description: |
             The running `AppConfig` serialized to YAML, with secrets
             redacted to `"***"`.
+
+    ConversationMessage:
+      type: object
+      description: One message in an Agents chat conversation.
+      required: [role, content, at]
+      properties:
+        role:
+          type: string
+          description: Message author — `user` or `assistant`.
+        content:
+          type: string
+          description: The message text.
+        at:
+          type: integer
+          format: int64
+          description: When the message was sent, epoch milliseconds.
+
+    Conversation:
+      type: object
+      description: A stored Agents chat conversation with its full history.
+      required: [id, title, messages, updatedAt]
+      properties:
+        id:
+          type: string
+          description: Client-supplied conversation id (`[A-Za-z0-9_-]+`).
+        title:
+          type: string
+          description: Human-readable conversation title.
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessage"
+        updatedAt:
+          type: integer
+          format: int64
+          description: Last write time, epoch milliseconds (server-stamped).
+
+    ConversationSummary:
+      type: object
+      description: A conversation without its messages, for the list view.
+      required: [id, title, updatedAt, messageCount]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        updatedAt:
+          type: integer
+          format: int64
+          description: Last write time, epoch milliseconds.
+        messageCount:
+          type: integer
+          description: Number of messages in the conversation.
+
+    ConversationUpsert:
+      type: object
+      description: |
+        Body for `PUT /api/agents/conversations/{id}`. `id` and `updatedAt`
+        are set by the server (path is authoritative, timestamp is
+        server-stamped), so they are not part of this body.
+      required: [title, messages]
+      properties:
+        title:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationMessage"
 
     LogSpan:
       type: object

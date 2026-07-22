@@ -202,6 +202,7 @@ mod tests {
     fn test_config() -> Arc<config::Processor> {
         Arc::new(config::Processor {
             name: "test_proxy".to_string(),
+            models: Vec::new(),
             protocol: config::Protocol::Openai,
             credentials_path: None,
             auth: None,

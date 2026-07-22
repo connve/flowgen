@@ -261,14 +261,16 @@
 				<Icon icon="tabler:search" class="h-4 w-4 opacity-50" />
 				<input type="text" placeholder="Search task, processor, message..." bind:value={search} />
 				{#if search}
-					<button
-						type="button"
-						class="opacity-50 hover:opacity-100"
-						aria-label="Clear search"
-						onclick={() => (search = '')}
-					>
-						<Icon icon="tabler:x" class="h-4 w-4" />
-					</button>
+					<div class="tooltip tooltip-left" data-tip="Clear search">
+						<button
+							type="button"
+							class="opacity-50 hover:opacity-100"
+							aria-label="Clear search"
+							onclick={() => (search = '')}
+						>
+							<Icon icon="tabler:x" class="h-5 w-5" />
+						</button>
+					</div>
 				{/if}
 			</label>
 
@@ -420,7 +422,7 @@
 						aria-label="Close"
 						onclick={() => (selected = null)}
 					>
-						<Icon icon="tabler:x" class="h-6 w-6" />
+						<Icon icon="tabler:x" class="h-5 w-5" />
 					</button>
 				</div>
 			</div>

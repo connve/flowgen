@@ -1,39 +1,40 @@
 # OpenAI-compatible AI gateway that fronts several downstream
 # providers behind a single URL. The script inspects the client's
-# `model` alias and rewrites the endpoint, model, and credentials
-# before `ai_completion` runs. Client-supplied tool schemas pass
-# through verbatim so OpenAI-tool-use SDKs work end-to-end.
+# `model` and rewrites the endpoint, model, and credentials before
+# `ai_completion` runs. Client-supplied tool schemas pass through
+# verbatim so OpenAI-tool-use SDKs work end-to-end.
 #
 # Client URL:
 #   POST http://<host>:3002/v1/chat/completions
 #
 # Client request:
 #   {
-#     "model": "flowgen_openai/<alias>",
+#     "model": "flowgen_openai/<model>",
 #     "messages": [{"role":"user","content":"..."}],
 #     "stream": true,
 #     "stream_options": {"include_usage": true}
 #   }
 #
-# The `flowgen_openai/` prefix picks this flow; `<alias>` (kimi, zai,
-# ...) selects the downstream provider. Aliases are defined in the
-# shared `route_provider.rhai` script.
+# The `flowgen_openai/` prefix picks this flow; `<model>` selects the
+# downstream provider. Models are declared in `models` below and routed
+# by the shared `route_provider.rhai` script.
 #
 # Required:
 #   - AI gateway enabled in worker config (worker.ai_gateway.enabled: true)
-#   - Downstream provider credentials under /etc/<alias>/credentials.json
+#   - Downstream provider credentials referenced by the routing script
 flow:
   labels:
     display_name: "OpenAI API Gateway"
-    description: "Exposes an OpenAI-compatible chat completions endpoint that routes a client model alias to a downstream provider and streams the completion back as SSE."
+    description: "Exposes an OpenAI-compatible chat completions endpoint that routes the client model to a downstream provider and streams the completion back as SSE."
     tags: ["ai-gateway", "openai", "llm-proxy", "streaming", "example"]
   tasks:
 
     - llm_proxy:
         name: flowgen_openai
+        models: [glm-4.6, kimi-k2.7-code]
         # protocol: openai  # default
 
-    # Route the client alias to a concrete provider. Shared with
+    # Route the client model to a concrete provider. Shared with
     # anthropic_proxy.yaml so both endpoints stay in sync.
     - script:
         name: route_provider

@@ -25,7 +25,7 @@
 	}
 
 	let btnSize = $derived(size === 'xs' ? 'btn-xs' : 'btn-sm');
-	let iconSize = $derived(size === 'xs' ? 'h-4 w-4' : 'h-6 w-6');
+	let iconSize = $derived(size === 'xs' ? 'h-4 w-4' : 'h-5 w-5');
 </script>
 
 <div class="tooltip tooltip-left" data-tip={copied ? 'Copied' : label}>

@@ -314,9 +314,10 @@
 			</div>
 
 			<label
-				class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200 focus-within:border-primary"
 			>
-				<span class="text-base-content/50">Limit</span>
+				<Icon icon="tabler:stack-2" class="h-4 w-4 opacity-70" />
+				<span>Limit</span>
 				<input
 					type="number"
 					min="1"
@@ -324,29 +325,43 @@
 					step="1000"
 					value={limit}
 					onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
-					class="no-spinner w-16 tabular-nums"
+					class="no-spinner w-12 bg-transparent tabular-nums outline-none"
 					aria-label="Line limit"
 				/>
 			</label>
 
 			{#if !atBottom && live}
 				<div class="tooltip tooltip-bottom" data-tip="Jump to latest">
-					<button type="button" class="btn btn-sm btn-ghost gap-1" onclick={resume}>
-						<Icon icon="tabler:arrow-down" class="h-4 w-4" />
-						Resume
+					<button
+						type="button"
+						class="btn btn-sm btn-ghost btn-circle"
+						aria-label="Jump to latest"
+						onclick={resume}
+					>
+						<Icon icon="tabler:arrow-down" class="h-5 w-5" />
 					</button>
 				</div>
 			{/if}
 			<div class="tooltip tooltip-bottom" data-tip={live ? 'Pause live tail' : 'Resume live tail'}>
-				<button type="button" class="btn btn-sm btn-ghost gap-1" onclick={() => (live = !live)}>
-					<Icon icon={live ? 'tabler:player-pause' : 'tabler:player-play'} class="h-4 w-4" />
-					{live ? 'Live' : 'Paused'}
+				<button
+					type="button"
+					class="btn btn-sm btn-ghost btn-circle"
+					aria-label={live ? 'Pause live tail' : 'Resume live tail'}
+					onclick={() => (live = !live)}
+				>
+					<Icon icon={live ? 'tabler:player-pause' : 'tabler:player-play'} class="h-5 w-5" />
 				</button>
 			</div>
-			<button type="button" class="btn btn-sm btn-ghost gap-1" onclick={clearView}>
-				<Icon icon="tabler:x" class="h-4 w-4" />
-				Clear
-			</button>
+			<div class="tooltip tooltip-bottom" data-tip="Clear view">
+				<button
+					type="button"
+					class="btn btn-sm btn-ghost btn-circle"
+					aria-label="Clear view"
+					onclick={clearView}
+				>
+					<Icon icon="tabler:x" class="h-5 w-5" />
+				</button>
+			</div>
 
 			<div class="flex-1"></div>
 
@@ -365,14 +380,16 @@
 				</svg>
 				<input type="text" placeholder="Search logs..." bind:value={search} />
 				{#if search}
-					<button
-						type="button"
-						class="opacity-50 hover:opacity-100"
-						aria-label="Clear search"
-						onclick={() => (search = '')}
-					>
-						<Icon icon="tabler:x" class="h-6 w-6" />
-					</button>
+					<div class="tooltip tooltip-left" data-tip="Clear search">
+						<button
+							type="button"
+							class="opacity-50 hover:opacity-100"
+							aria-label="Clear search"
+							onclick={() => (search = '')}
+						>
+							<Icon icon="tabler:x" class="h-5 w-5" />
+						</button>
+					</div>
 				{/if}
 			</label>
 		</div>
@@ -497,7 +514,7 @@
 						aria-label="Close"
 						onclick={() => (selected = null)}
 					>
-						<Icon icon="tabler:x" class="h-6 w-6" />
+						<Icon icon="tabler:x" class="h-5 w-5" />
 					</button>
 				</div>
 			</div>
@@ -525,7 +542,6 @@
 						<a
 							href="{base}/flows/{encodePath(selectedSummary.flow)}"
 							class="font-mono text-primary hover:underline"
-							title="Open flow"
 						>
 							{selectedSummary.flow}
 						</a>

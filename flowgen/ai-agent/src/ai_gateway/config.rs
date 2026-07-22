@@ -83,6 +83,9 @@ pub struct Processor {
     /// The unique name / identifier of the task. Used as the routing key
     /// inside the chosen protocol (e.g. the prefix of OpenAI's `model` field).
     pub name: String,
+    /// Models advertised on `GET <path>/models`, each exposed as `<name>/<model>`.
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
     #[serde(default)]
     pub protocol: Protocol,
@@ -206,6 +209,7 @@ mod tests {
     fn processor_roundtrip() {
         let cfg = Processor {
             name: "gw".to_string(),
+            models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
             protocol: Protocol::Openai,
             credentials_path: Some(PathBuf::from("/c.json")),
             auth: None,
