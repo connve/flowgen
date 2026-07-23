@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task;
-use tracing::{error, info};
+use tracing::{error, info, Instrument};
 use walkdir::WalkDir;
 
 /// Rewrites `/`, `:`, `@`, `?`, `=` in a repository URL to hyphens so
@@ -165,9 +165,9 @@ impl EventHandler {
             // Skip the file walk when HEAD matches the last successful
             // sync — file contents at the same commit are byte-identical.
             let cache = &self.task_context.cache;
-            let flow_name = self.task_context.flow.identity();
+            let flow_key = self.task_context.flow.id();
             let sanitized_url = sanitize_repo_url(&self.config.repository_url);
-            let cache_key = format!("flow.{flow_name}.git_head.{sanitized_url}");
+            let cache_key = format!("flow.{flow_key}.git_head.{sanitized_url}");
             let cached_commit = cache
                 .get(&cache_key)
                 .await
@@ -589,22 +589,25 @@ impl flowgen_core::task::runner::Runner for Processor {
                 Some(event) => {
                     let handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(async move {
-                        let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                            match handler.handle(event.clone()).await {
-                                Ok(()) => Ok(()),
-                                Err(e) => {
-                                    error!(error = %e, "Git sync failed");
-                                    Err(tokio_retry::RetryError::transient(e))
+                    let handle = tokio::spawn(
+                        async move {
+                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                match handler.handle(event.clone()).await {
+                                    Ok(()) => Ok(()),
+                                    Err(e) => {
+                                        error!(error = %e, "Git sync failed");
+                                        Err(tokio_retry::RetryError::transient(e))
+                                    }
                                 }
-                            }
-                        })
-                        .await;
+                            })
+                            .await;
 
-                        if let Err(e) = result {
-                            error!(error = %e, "Git sync exhausted all retry attempts");
+                            if let Err(e) = result {
+                                error!(error = %e, "Git sync exhausted all retry attempts");
+                            }
                         }
-                    });
+                        .instrument(tracing::Span::current()),
+                    );
                     handlers.push(handle);
                 }
                 None => {

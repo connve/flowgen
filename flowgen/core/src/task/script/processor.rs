@@ -153,13 +153,10 @@ impl EventHandler {
             // and persist metadata changes through the event chain.
             let mut ctx_map = rhai::Map::new();
 
-            // Add cache handle to enable distributed caching from scripts.
-            // Cache keys are namespaced by flow identity (`source_path` when
-            // set, otherwise `flow.name`) so two flows with the same name in
-            // different folders do not collide.
+            // Scripts get a cache handle namespaced by the key-safe flow id.
             let cache_handle = CacheHandle {
                 cache: Arc::clone(&self.task_context.cache),
-                flow_name: self.task_context.flow.identity().to_string(),
+                flow_name: self.task_context.flow.id(),
             };
             ctx_map.insert("cache".into(), Dynamic::from(cache_handle));
 

@@ -6,6 +6,7 @@
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
 	import { apiUrl, type ResourceSummary as Resource, type ResourceContent } from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
@@ -333,13 +334,13 @@
 				<span class="loading loading-spinner loading-lg text-primary"></span>
 			</div>
 		{:else if error}
-			<div class="alert alert-error" role="alert">
-				<span>Failed to load resources: {error}</span>
-			</div>
+			<StateMessage tone="oops" title="Failed to load resources" message={error} />
 		{:else if visibleResources.length === 0}
-			<div class="rounded-lg border border-base-300 bg-base-100 p-8 text-center text-sm opacity-70">
-				{searchActive ? `No matches for "${search}".` : 'No resources'}
-			</div>
+			<StateMessage
+				tone="notice"
+				title={searchActive ? 'No matches' : 'No resources'}
+				message={searchActive ? `Nothing matches "${search}".` : 'Nothing registered yet.'}
+			/>
 		{:else}
 			<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 				<table class="table table-sm w-full bg-base-100">
@@ -449,8 +450,8 @@
 						<span class="loading loading-spinner loading-md text-primary"></span>
 					</div>
 				{:else if selectedError}
-					<div class="alert alert-error m-4" role="alert">
-						<span>{selectedError}</span>
+					<div class="flex-1">
+						<StateMessage tone="oops" title="Failed to load resource" message={selectedError} />
 					</div>
 				{:else if selectedContent}
 					<div class="min-h-0 flex-1 overflow-auto">

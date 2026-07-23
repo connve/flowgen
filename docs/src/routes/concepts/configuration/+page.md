@@ -34,7 +34,7 @@ flows:
   path: /etc/flowgen/flows/
   cache:
     enabled: true
-    prefix: flowgen.flows
+    prefix: flows
     db_name: flowgen_system
 
 cache:
@@ -103,7 +103,7 @@ Flow discovery. Filesystem and distributed cache can be used independently or to
 | `path` | string | | Directory or glob pattern. Filesystem-mode loads every `.yaml`/`.yml`/`.json` file recursively. Omit to skip filesystem loading. |
 | `cache` | object | | Cache-mode flow loading. Loads flows from the metadata cache in addition to the filesystem. |
 | `cache.enabled` | bool | required | Enable cache-mode flow loading. |
-| `cache.prefix` | string | `flowgen.flows` | Cache key prefix for flow entries. |
+| `cache.prefix` | string | `flows` | Cache key prefix for flow entries. |
 | `cache.db_name` | string | `flowgen_system` | Cache bucket holding the flow definitions. |
 
 Both sources can be active at the same time. Use this for gradual migration: a small set of bootstrap flows mounted from disk (typically a sync flow that pulls user flows from Git into the cache), with the bulk of user flows loaded from the cache. On a name collision the filesystem entry wins, so a locally mounted bootstrap flow cannot be silently overridden by a stale cache entry.
@@ -135,7 +135,7 @@ External resource loading for SQL queries, prompts, scripts, schemas. See [Resou
 | `path` | string | | Filesystem base directory for resources. Resource keys resolve relative to this path. |
 | `cache` | object | | Cache-backed resources. When `cache.enabled` is true, resources load from the cache. |
 | `cache.enabled` | bool | required | Enable cache-backed resources. |
-| `cache.prefix` | string | `flowgen.resources` | Cache key prefix for resource entries. |
+| `cache.prefix` | string | `resources` | Cache key prefix for resource entries. |
 | `cache.db_name` | string | `flowgen_system` | Cache bucket holding resource entries. |
 
 When `resources` is omitted, only inline content is supported — any task that uses `{ resource: ... }` will fail at startup with a clear error.

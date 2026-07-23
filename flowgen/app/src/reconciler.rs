@@ -122,7 +122,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
         .cache
         .as_ref()
         .map(|c| c.prefix.as_str())
-        .unwrap_or("flowgen.flows");
+        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
 
     let keys = match ctx.cache.list_keys(prefix).await {
         Ok(k) => k,
@@ -449,7 +449,9 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     // the same pod-level holder identity, and the lease must stay claimed
     // continuously across the swap.
     if let Some(task_manager) = &old.task_manager {
-        task_manager.unregister(flow_name).await;
+        task_manager
+            .unregister(&flowgen_core::identity::FlowIdentity::new(flow_name))
+            .await;
     }
 
     // Deregister every webhook, MCP tool, and AI gateway entry owned by this
@@ -478,7 +480,7 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
         .cache
         .as_ref()
         .map(|c| c.prefix.as_str())
-        .unwrap_or("flowgen.flows");
+        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
 
     key.strip_prefix(&format!("{prefix}."))
         .map(str::to_string)
@@ -648,7 +650,7 @@ mod tests {
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         };
 
-        let name = derive_flow_name("flowgen.flows.default-test", &ctx);
+        let name = derive_flow_name("flows.default-test", &ctx);
         assert_eq!(name, Some("default-test".to_string()));
     }
 

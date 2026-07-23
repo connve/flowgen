@@ -206,11 +206,11 @@ impl ResourceLoader {
     /// Creates a new cache-backed `ResourceLoader`.
     ///
     /// Resources are loaded from the distributed cache using keys formed by
-    /// joining `prefix` with the resource key (e.g., `"flowgen.resources.query.sql"`).
+    /// joining `prefix` with the resource key (e.g., `"resources.query.sql"`).
     ///
     /// # Arguments
     /// * `cache` - Cache backend for loading resources.
-    /// * `prefix` - Cache key prefix for resources (e.g., "flowgen.resources").
+    /// * `prefix` - Cache key prefix for resources (e.g., "resources").
     pub fn from_cache(cache: Arc<dyn crate::cache::Cache>, prefix: String) -> Self {
         Self {
             base_path: None,

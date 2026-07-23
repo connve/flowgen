@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { marked } from 'marked';
 	import Prism from 'prismjs';
 	import 'prismjs/components/prism-sql';
@@ -92,6 +93,8 @@
 	let models = $state<ModelOption[]>([]);
 	let model = $state<string>('');
 	let modelsError = $state<string | null>(null);
+	let modelsEmpty = $state(false);
+	let modelsLoading = $state(true);
 
 	// A proxy is one gateway/agent flow. `display_name`/`description` are
 	// proxy-level labels the gateway copies onto every model entry, so they
@@ -306,10 +309,12 @@
 					description: m.description
 				}));
 			if (models.length > 0) model = models[0].id;
-			else modelsError = 'No models registered on the gateway.';
+			else modelsEmpty = true;
 		} catch (err) {
 			modelsError =
 				err instanceof Error ? err.message : 'Failed to load models from the AI gateway.';
+		} finally {
+			modelsLoading = false;
 		}
 	});
 
@@ -455,6 +460,12 @@
 		if (event.key === 'Enter' && !event.shiftKey) {
 			event.preventDefault();
 			send();
+		} else if (event.key === 'Escape' && !sending && input) {
+			// Esc clears a drafted message; while generating, the window-level
+			// handler uses Esc to stop instead.
+			event.preventDefault();
+			input = '';
+			if (textareaEl) textareaEl.style.height = 'auto';
 		}
 	}
 
@@ -771,11 +782,27 @@
 		</div>
 	{/snippet}
 
-	{#if modelsError}
-		<div class="p-6">
-			<div class="alert alert-warning" role="alert">
-				<span>{modelsError}</span>
-			</div>
+	{#if modelsLoading}
+		<!-- Hold the empty state until we know whether models exist, so the chat
+		     greeting doesn't flash before switching to "no models". -->
+		<div class="flex flex-1 items-center justify-center">
+			<span class="loading loading-spinner loading-lg text-primary"></span>
+		</div>
+	{:else if modelsError}
+		<div class="flex flex-1 items-center justify-center">
+			<StateMessage
+				tone="oops"
+				title="The AI gateway didn't respond"
+				message={modelsError}
+			/>
+		</div>
+	{:else if modelsEmpty}
+		<div class="flex flex-1 items-center justify-center">
+			<StateMessage
+				tone="notice"
+				title="No models yet"
+				message="No models are registered on the gateway. Add an llm_proxy flow with a models list to start a conversation."
+			/>
 		</div>
 	{:else if convoLoading && messages.length === 0}
 		<!-- Loading a conversation by id — spinner instead of a flashing empty state. -->

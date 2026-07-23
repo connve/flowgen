@@ -151,6 +151,8 @@ impl EventHandler {
 
         let cache = Arc::clone(&self.task_context.cache);
         let flow_name = self.task_context.flow.identity().to_string();
+        // `flow_key` keys the cache; `flow_name` stays human-readable for logs.
+        let flow_key = self.task_context.flow.id();
         let mut handles = Vec::new();
         let last_replay_id = events.last().map(|ce| ce.replay_id.clone());
 
@@ -270,7 +272,7 @@ impl EventHandler {
                     .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                 {
                     let sanitized_topic = sanitize_topic_name(topic_name);
-                    let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                    let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
                     if let Err(e) = cache.put(&cache_key, replay_id.into(), None).await {
                         error!(
                             "Failed to cache replay_id for flow {flow_name} topic {topic_name}: {e}"
@@ -293,6 +295,8 @@ impl EventHandler {
         // Get cache from task context.
         let cache = &self.task_context.cache;
         let flow_name = self.task_context.flow.identity();
+        // `flow_key` keys the cache; `flow_name` stays human-readable for logs.
+        let flow_key = self.task_context.flow.id();
         // Get topic metadata.
         let topic_info = self
             .pubsub
@@ -398,7 +402,7 @@ impl EventHandler {
         {
             // Try to load cached replay_id, or use configured preset.
             let sanitized_topic = sanitize_topic_name(topic_name);
-            let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+            let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
             let cached_replay_id = cache.get(&cache_key).await.ok();
 
             match cached_replay_id.flatten() {
@@ -463,7 +467,7 @@ impl EventHandler {
                         .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
                     {
                         let sanitized_topic = sanitize_topic_name(topic_name);
-                        let cache_key = format!("flow.{flow_name}.replay_id.{sanitized_topic}");
+                        let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
                         if let Err(e) = cache.delete(&cache_key).await {
                             error!(
                                 "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",

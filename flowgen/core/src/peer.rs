@@ -7,6 +7,7 @@
 //! attempt, giving the preferred pod a head start. If the preferred pod fails
 //! to acquire within the deferral window, all pods fall back to normal racing.
 
+use crate::identity::FlowIdentity;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -126,15 +127,21 @@ impl PeerRegistry {
 
     /// Returns `true` if this pod is the preferred owner for the given flow.
     ///
-    /// Uses consistent hashing: `sha256(flow_name)` mapped to a peer index
+    /// Uses consistent hashing: `sha256(flow key)` mapped to a peer index
     /// in the sorted peer list. When only one peer is registered, it always
     /// returns `true`.
-    pub async fn is_preferred_owner(&self, flow_name: &str) -> Result<bool, crate::cache::Error> {
+    ///
+    /// The hash input is the identity's key-safe form so it stays consistent
+    /// with the lease key derived from the same identity.
+    pub async fn is_preferred_owner(
+        &self,
+        flow_name: &FlowIdentity,
+    ) -> Result<bool, crate::cache::Error> {
         let peers = self.list_peers().await?;
         if peers.is_empty() || peers.len() == 1 {
             return Ok(true);
         }
-        let preferred = preferred_peer(flow_name, &peers);
+        let preferred = preferred_peer(&flow_name.as_key(), &peers);
         Ok(preferred == self.identity)
     }
 }
@@ -206,8 +213,14 @@ mod tests {
         let r = make_registry("only-pod");
         r.register().await.unwrap();
 
-        assert!(r.is_preferred_owner("any-flow").await.unwrap());
-        assert!(r.is_preferred_owner("another-flow").await.unwrap());
+        assert!(r
+            .is_preferred_owner(&FlowIdentity::new("any-flow"))
+            .await
+            .unwrap());
+        assert!(r
+            .is_preferred_owner(&FlowIdentity::new("another-flow"))
+            .await
+            .unwrap());
     }
 
     #[test]
@@ -246,11 +259,11 @@ mod tests {
         r2.register().await.unwrap();
         r3.register().await.unwrap();
 
-        let flow = "test-flow";
+        let flow = FlowIdentity::new("test-flow");
         let owners: Vec<bool> = futures_util::future::join_all(vec![
-            r1.is_preferred_owner(flow),
-            r2.is_preferred_owner(flow),
-            r3.is_preferred_owner(flow),
+            r1.is_preferred_owner(&flow),
+            r2.is_preferred_owner(&flow),
+            r3.is_preferred_owner(&flow),
         ])
         .await
         .into_iter()
@@ -267,6 +280,9 @@ mod tests {
     #[tokio::test]
     async fn test_empty_peers_returns_preferred() {
         let r = make_registry("pod-a");
-        assert!(r.is_preferred_owner("flow").await.unwrap());
+        assert!(r
+            .is_preferred_owner(&FlowIdentity::new("flow"))
+            .await
+            .unwrap());
     }
 }

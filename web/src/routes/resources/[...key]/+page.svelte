@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, type ResourceContent } from '$lib/api';
 
 	let content = $state<ResourceContent | null>(null);
@@ -51,9 +52,7 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if error}
-		<div class="alert alert-error" role="alert">
-			<span>Failed to load resource: {error}</span>
-		</div>
+		<StateMessage tone="oops" title="Failed to load resource" message={error} />
 	{:else if content}
 		<div
 			class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-200 bg-base-100"

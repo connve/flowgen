@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, type FlowDetail } from '$lib/api';
 	import { activitiesFor } from '$lib/activityStore.svelte';
 
@@ -57,9 +58,7 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if error}
-		<div class="alert alert-error" role="alert">
-			<span>Failed to load flow: {error}</span>
-		</div>
+		<StateMessage tone="oops" title="Failed to load flow" message={error} />
 	{:else if detail}
 		<div class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
 			<FlowInspector yaml={detail.yaml} {activities} />

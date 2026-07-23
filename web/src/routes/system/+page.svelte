@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, type ConfigInfo } from '$lib/api';
 
 	let yaml = $state('');
@@ -40,11 +41,7 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if error}
-		<div class="p-6">
-			<div class="alert alert-error" role="alert">
-				<span>Failed to load config: {error}</span>
-			</div>
-		</div>
+		<StateMessage tone="oops" title="Failed to load config" message={error} />
 	{:else}
 		<div class="flex min-h-0 flex-1 flex-col p-6">
 			<div

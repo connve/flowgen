@@ -28,7 +28,7 @@ The `ResourceLoader` has three backends, configured at the worker level under `r
 | Backend | When to use | Key resolution |
 |---|---|---|
 | **Filesystem** (default) | Local development, mounted ConfigMaps in Kubernetes, simple deployments. | `resources.path = "/etc/flowgen/resources"` → key `queries/orders.sql` resolves to `/etc/flowgen/resources/queries/orders.sql`. |
-| **Cache** | Hot-reload across replicas, git-synced flows, multi-tenant workers. | `resources.cache.prefix = "flowgen.resources"` → key `queries/orders.sql` resolves to cache key `flowgen.resources.queries/orders.sql`. |
+| **Cache** | Hot-reload across replicas, git-synced flows, multi-tenant workers. | `resources.cache.prefix = "resources"` → key `queries/orders.sql` resolves to cache key `resources.queries/orders.sql`. |
 | **Disabled** | Inline-only flows. | All `resource:` references fail with a clear error. Default when neither `path` nor `cache` is configured. |
 
 ## Filesystem backend
@@ -59,7 +59,7 @@ Files are read on each task invocation — there is no in-memory caching. Edit a
 resources:
   cache:
     enabled: true
-    prefix: flowgen.resources
+    prefix: resources
     db_name: flowgen_system
 ```
 
@@ -75,7 +75,7 @@ The cache backend reuses the same cache configuration as the rest of flowgen (se
 
 ### Populating the cache from a repository
 
-The cache backend assumes someone is writing to `flowgen.resources.*`. Canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree containing both `flows/` and `resources/`, and reconcile them into the cache (puts for new and changed entries, deletes for entries the source no longer contains). One release cadence covers both flow YAML and resource changes:
+The cache backend assumes someone is writing to `resources.*`. Canonical bootstrap flows do exactly that — they tick on an interval, fetch a directory tree containing both `flows/` and `resources/`, and reconcile them into the cache (puts for new and changed entries, deletes for entries the source no longer contains). One release cadence covers both flow YAML and resource changes:
 
 - [`examples/git/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/system_sync_workspace.yaml) — pulls from any HTTPS Git host.
 - [`examples/oci/system_sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/system_sync_workspace.yaml) — pulls from any OCI registry (GHCR, ECR, GAR, Artifactory, Harbor).

@@ -1,3 +1,4 @@
+use crate::identity::FlowIdentity;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,14 +26,13 @@ pub enum Error {
 
 /// Builds a lease cache key from a task identifier.
 ///
-/// The task identifier is preserved verbatim — `validate_name` already
-/// constrains `flow.name` (and hence `task_id`) to characters that are
-/// safe in both NATS KV keys and operator-facing log fields, so no
-/// further transformation happens here. Sanitising the key would break
-/// the one-to-one mapping between what the user wrote in YAML and what
-/// they see in `nats kv ls`.
-fn lease_key(task_id: &str) -> String {
-    format!("{}{}", crate::executor::LEASE_KEY_PREFIX, task_id)
+/// The key is derived from the identity's key-safe form — the base64url
+/// encoding of the flow identity — which is valid as a cache/lease key without
+/// any further transformation. Using the key-safe form keeps the lease key in
+/// step with the hash input for peer ownership, which derives from the same
+/// identity.
+fn lease_key(task_id: &FlowIdentity) -> String {
+    format!("{}{}", crate::executor::LEASE_KEY_PREFIX, task_id.as_key())
 }
 
 /// Spawns a task to continuously renew a lease with retry logic.
@@ -48,7 +48,7 @@ fn lease_key(task_id: &str) -> String {
 /// and leave the actual renewer running, which is exactly the orphan-renewer
 /// race the hot-reload path used to hit.
 fn spawn_renewal_task(
-    task_id: String,
+    task_id: FlowIdentity,
     lease_name: String,
     executor: Arc<crate::executor::Executor>,
     current_revision: Arc<Mutex<u64>>,
@@ -96,7 +96,7 @@ fn spawn_renewal_task(
                             active_leases.clone(),
                         );
                         active_leases.lock().await.insert(
-                            task_id.clone(),
+                            task_id.as_key(),
                             ActiveLease {
                                 handle: retry_handle,
                             },
@@ -123,7 +123,7 @@ fn spawn_renewal_task(
                             active_leases.clone(),
                         );
                         active_leases.lock().await.insert(
-                            task_id.clone(),
+                            task_id.as_key(),
                             ActiveLease {
                                 handle: retry_handle,
                             },
@@ -147,7 +147,7 @@ fn spawn_renewal_task(
 /// This prevents outages where all pods give up trying to acquire leases during high contention
 /// (e.g., rolling restarts with DELETE tombstone races).
 fn spawn_acquisition_retry_task(
-    task_id: String,
+    task_id: FlowIdentity,
     lease_name: String,
     executor: Arc<crate::executor::Executor>,
     current_revision: Arc<Mutex<u64>>,
@@ -193,7 +193,7 @@ fn spawn_acquisition_retry_task(
                             active_leases.clone(),
                         );
                         active_leases.lock().await.insert(
-                            task_id.clone(),
+                            task_id.as_key(),
                             ActiveLease {
                                 handle: renewal_handle,
                             },
@@ -252,7 +252,7 @@ pub enum LeaderElectionResult {
 /// Task registration event.
 pub struct TaskRegistration {
     /// Unique identifier for the task.
-    task_id: String,
+    task_id: FlowIdentity,
     /// Optional leader election configuration.
     leader_election_options: Option<LeaderElectionOptions>,
     /// Channel to send leader election result back to task.
@@ -335,8 +335,10 @@ impl TaskManager {
                         // The HashMap insert silently drops the old value but
                         // tokio keeps the spawned task alive without an
                         // explicit abort.
-                        if let Some(prev) =
-                            active_leases.lock().await.remove(&registration.task_id)
+                        if let Some(prev) = active_leases
+                            .lock()
+                            .await
+                            .remove(&registration.task_id.as_key())
                         {
                             prev.handle.abort();
                         }
@@ -357,7 +359,7 @@ impl TaskManager {
 
                                 // Store the renewal handle.
                                 active_leases.lock().await.insert(
-                                    registration.task_id.clone(),
+                                    registration.task_id.as_key(),
                                     ActiveLease {
                                         handle: renewal_handle,
                                     },
@@ -381,7 +383,7 @@ impl TaskManager {
 
                                 // Store the retry handle.
                                 active_leases.lock().await.insert(
-                                    registration.task_id.clone(),
+                                    registration.task_id.as_key(),
                                     ActiveLease {
                                         handle: retry_handle,
                                     },
@@ -421,7 +423,7 @@ impl TaskManager {
     #[tracing::instrument(skip(self), name = "task_manager.register", fields(task_id = %task_id))]
     pub async fn register(
         &self,
-        task_id: String,
+        task_id: FlowIdentity,
         leader_election_options: Option<LeaderElectionOptions>,
     ) -> Result<mpsc::UnboundedReceiver<LeaderElectionResult>, Error> {
         let (response_tx, response_rx) = mpsc::unbounded_channel();
@@ -451,8 +453,8 @@ impl TaskManager {
     /// new flow's renewal and delete a lease it now holds.
     ///
     /// No-op if no lease is tracked under `task_id`.
-    pub async fn unregister(&self, task_id: &str) {
-        if let Some(active) = self.active_leases.lock().await.remove(task_id) {
+    pub async fn unregister(&self, task_id: &FlowIdentity) {
+        if let Some(active) = self.active_leases.lock().await.remove(&task_id.as_key()) {
             debug!(task_id = %task_id, "Aborting lease background task on unregister");
             active.handle.abort();
         }
@@ -481,17 +483,20 @@ impl TaskManager {
     async fn shutdown_internal(&self) -> Result<(), Error> {
         let mut handles_lock = self.active_leases.lock().await;
 
-        for (task_id, active_lease) in handles_lock.iter() {
-            debug!("Aborting background task for: {}", task_id);
+        for (lease_key_suffix, active_lease) in handles_lock.iter() {
+            debug!("Aborting background task for: {}", lease_key_suffix);
             active_lease.handle.abort();
         }
 
-        let task_ids: Vec<String> = handles_lock.keys().cloned().collect();
+        // The map keys are already the identity's key-safe form, so the lease
+        // name is the prefix plus the key. Routing them back through
+        // `lease_key` would encode a second time and miss the real lease.
+        let lease_key_suffixes: Vec<String> = handles_lock.keys().cloned().collect();
         handles_lock.clear();
         drop(handles_lock);
 
-        for task_id in task_ids {
-            let lease_name = lease_key(&task_id);
+        for lease_key_suffix in lease_key_suffixes {
+            let lease_name = format!("{}{}", crate::executor::LEASE_KEY_PREFIX, lease_key_suffix);
 
             match self.executor.still_owns_lease(&lease_name).await {
                 Ok(Some(revision)) => {
@@ -620,7 +625,7 @@ mod tests {
         let stale_revision = Arc::new(Mutex::new(pod2_revision.saturating_sub(1)));
         let active_leases = Arc::new(Mutex::new(HashMap::new()));
         spawn_renewal_task(
-            "acct_nba".to_string(),
+            FlowIdentity::new("acct_nba"),
             "acct_nba".to_string(),
             exec1.clone(),
             stale_revision,
@@ -675,7 +680,10 @@ mod tests {
             .await;
 
         let mut rx = manager
-            .register("acct_nba".to_string(), Some(LeaderElectionOptions {}))
+            .register(
+                FlowIdentity::new("acct_nba"),
+                Some(LeaderElectionOptions {}),
+            )
             .await
             .unwrap();
 
@@ -685,7 +693,7 @@ mod tests {
             .expect("channel still open");
         assert_eq!(leader, LeaderElectionResult::Leader);
 
-        let lease_name = lease_key("acct_nba");
+        let lease_name = lease_key(&FlowIdentity::new("acct_nba"));
         tokio::time::sleep(Duration::from_millis(300)).await;
         let (_, rev_before) = cache
             .get_with_revision(&lease_name)
@@ -693,7 +701,7 @@ mod tests {
             .unwrap()
             .expect("lease must exist while leader");
 
-        manager.unregister("acct_nba").await;
+        manager.unregister(&FlowIdentity::new("acct_nba")).await;
 
         tokio::time::sleep(Duration::from_millis(800)).await;
 

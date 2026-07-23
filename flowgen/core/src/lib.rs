@@ -25,6 +25,8 @@ pub mod executor;
 pub mod health;
 /// Generic HTTP server with role-specific dispatchers (webhook / MCP / AI gateway).
 pub mod http_server;
+/// Flow identity and its human/key-safe projections.
+pub mod identity;
 /// Peer discovery and flow distribution via consistent hashing.
 pub mod peer;
 /// NsJail sandbox for secure script execution.

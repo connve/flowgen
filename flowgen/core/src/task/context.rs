@@ -29,12 +29,24 @@ pub struct FlowOptions {
 
 impl FlowOptions {
     /// Returns the flow identity: `source_path` when the loader assigned
-    /// one, otherwise the programmatic `name`.
+    /// one, otherwise the programmatic `name`. The human-facing form, with
+    /// folder slashes preserved — for logs, the UI, REST paths, and resource
+    /// URIs. It may contain characters that are invalid in a cache-backend
+    /// key; project to a safe token with [`FlowOptions::id`] for anything
+    /// used as a cache or lease key.
     pub fn identity(&self) -> &str {
         match self.source_path.as_deref() {
             Some(path) => path,
             None => &self.name,
         }
+    }
+
+    /// Returns the key-safe flow id — the base64url encoding of
+    /// [`identity`](Self::identity). Use for every value that becomes a cache
+    /// or lease key, or is hashed for peer ownership. Delegates to the single
+    /// core encoder so every key form agrees byte-for-byte.
+    pub fn id(&self) -> String {
+        crate::identity::encode_key(self.identity())
     }
 }
 
@@ -280,6 +292,17 @@ mod tests {
         let builder = TaskContextBuilder::new();
         assert!(builder.flow_name.is_none());
         assert!(builder.flow_labels.is_none());
+    }
+
+    #[test]
+    fn flow_options_id_encodes_the_identity() {
+        let options = FlowOptions {
+            name: "foo".to_string(),
+            source_path: Some("demo/foo".to_string()),
+            labels: None,
+        };
+        assert_eq!(options.identity(), "demo/foo");
+        assert_eq!(options.id(), crate::identity::encode_key("demo/foo"));
     }
 
     #[test]

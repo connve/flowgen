@@ -136,6 +136,12 @@ pub enum Error {
     /// Flow path is missing or invalid.
     #[error("Flow path is not configured or invalid. Please set 'flows.path' in your configuration (e.g., flows.path: \"/etc/app/flows/*.yaml\")")]
     InvalidFlowsPath,
+    /// Two flows resolved to the same identity, which must be unique.
+    #[error("Duplicate flow identity {identity:?}: two flows resolve to the same path. Flow identities must be unique.")]
+    DuplicateFlowIdentity {
+        /// The colliding identity shared by more than one flow.
+        identity: String,
+    },
     /// Flow build error.
     #[error("Flow build failed: {source}")]
     FlowBuild {
@@ -434,14 +440,14 @@ impl App {
 
         let flows_path_str = flows_path.to_str().ok_or(Error::InvalidFlowsPath)?;
 
-        // Root is the longest non-wildcard prefix — canonicalized once so we
-        // can compute a stable relative `source_path` per flow.
+        // Root is the longest non-wildcard prefix, used to derive each flow's
+        // identity from its path relative to the root.
         let root_str: String = flows_path_str
             .split('/')
             .take_while(|seg| !seg.contains('*'))
             .collect::<Vec<_>>()
             .join("/");
-        let source_root = std::fs::canonicalize(&root_str).ok();
+        let source_root = Some(std::path::PathBuf::from(&root_str));
 
         // Check if path contains wildcards (backward compatibility).
         let glob_patterns: Vec<String> = if flows_path_str.contains('*') {
@@ -461,6 +467,23 @@ impl App {
                 .map_err(|e| Error::Pattern { source: e })?
                 .filter_map(|path| match path {
                     Ok(path) => {
+                        // Skip entries with a hidden (dot-prefixed) path
+                        // segment. A ConfigMap mount exposes each file three
+                        // ways (clean name, `..data` symlink, timestamped
+                        // `..<ts>` dir) and a recursive glob matches all three;
+                        // only the clean name has no dot segment, which both
+                        // dedupes the entry and keeps identity stable across
+                        // reloads.
+                        if let Ok(rel) = path.strip_prefix(&root_str) {
+                            let hidden = rel.components().any(|c| {
+                                matches!(c, std::path::Component::Normal(seg)
+                                    if seg.to_string_lossy().starts_with('.'))
+                            });
+                            if hidden {
+                                return None;
+                            }
+                        }
+
                         let canonical_path = match std::fs::canonicalize(&path) {
                             Ok(p) => p,
                             Err(source) => {
@@ -514,7 +537,7 @@ impl App {
                         match config.try_deserialize::<FlowConfigRaw>() {
                             Ok(raw) => {
                                 let identity_path = match compute_source_path(
-                                    &canonical_path,
+                                    &path,
                                     source_root.as_deref(),
                                 ) {
                                     Some(p) => p,
@@ -617,6 +640,18 @@ impl App {
         };
 
         let mut flow_configs = filesystem_flows;
+        // Reject two filesystem flows resolving to the same identity before
+        // anything keys on it — an unusual mount layout can collapse two files
+        // onto one relative path, and a silent collision on the registry,
+        // cache, and lease keys downstream is worse than failing fast here.
+        let mut identities: HashSet<&str> = HashSet::new();
+        for config in &flow_configs {
+            if !identities.insert(config.identity()) {
+                return Err(Error::DuplicateFlowIdentity {
+                    identity: config.identity().to_string(),
+                });
+            }
+        }
         // Record filesystem flow identities (path-shaped) before merging so the
         // reconciler can enforce the invariant that cache reload events never
         // overwrite filesystem flows.
@@ -1233,25 +1268,38 @@ impl App {
     }
 }
 
-/// Computes the identity of a filesystem-loaded flow: path relative to
-/// `source_root`, extension stripped, slashes normalized to `/`. Returns
-/// `None` when the file lies outside `source_root` or when either input
-/// is missing — callers use the fallback identity in that case.
+/// Derives a flow's identity from its path relative to the flows root.
+///
+/// Both paths are compared as authored, not as resolved on disk: the caller
+/// passes the un-canonicalized path so a symlinked mount (for example a
+/// Kubernetes ConfigMap's `..data` indirection) does not leak into the
+/// identity. `.` and redundant separators are normalized purely, so a
+/// relative or `.`-laden root still strips cleanly. Returns `None` when the
+/// file lies outside the root or either input is missing.
 fn compute_source_path(
-    canonical_file: &std::path::Path,
+    file: &std::path::Path,
     source_root: Option<&std::path::Path>,
 ) -> Option<String> {
-    let root = source_root?;
-    let rel = canonical_file.strip_prefix(root).ok()?;
-    let mut s = rel.with_extension("").to_string_lossy().replace('\\', "/");
-    if s.is_empty() {
-        return None;
+    use std::path::Component;
+
+    // Normalize away `CurDir` (`.`) and separator noise without resolving
+    // symlinks or `..`, so stripping is stable regardless of how the caller
+    // spelled the path.
+    let normalize = |p: &std::path::Path| -> std::path::PathBuf {
+        p.components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect()
+    };
+
+    let root = normalize(source_root?);
+    let rel = normalize(file);
+    let rel = rel.strip_prefix(&root).ok()?;
+
+    let s = rel.with_extension("").to_string_lossy().replace('\\', "/");
+    match s.is_empty() {
+        true => None,
+        false => Some(s),
     }
-    // Trim any leading `./` the strip could leave behind.
-    if let Some(rest) = s.strip_prefix("./") {
-        s = rest.to_string();
-    }
-    Some(s)
 }
 
 #[cfg(test)]
@@ -1300,5 +1348,88 @@ mod tests {
             compute_source_path(&file, Some(&root)),
             Some("a/b/c/deep".to_string())
         );
+    }
+
+    #[test]
+    fn compute_source_path_normalizes_dot_segments_in_relative_root() {
+        let root = PathBuf::from("flows/./");
+        let file = PathBuf::from("flows/demo/reader.yaml");
+        assert_eq!(
+            compute_source_path(&file, Some(&root)),
+            Some("demo/reader".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_is_stable_across_configmap_reloads() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("flows");
+        std::fs::create_dir(&root).unwrap();
+
+        let data_a = root.join("..2026_07_23_09_00_00.111111111");
+        std::fs::create_dir(&data_a).unwrap();
+        std::fs::write(
+            data_a.join("system_sync_workspace.yaml"),
+            "flow:\n  tasks: []\n",
+        )
+        .unwrap();
+        symlink(&data_a, root.join("..data")).unwrap();
+        symlink(
+            "..data/system_sync_workspace.yaml",
+            root.join("system_sync_workspace.yaml"),
+        )
+        .unwrap();
+
+        let identity_before = derive_configmap_identity(&root);
+
+        let data_b = root.join("..2026_07_24_18_30_00.222222222");
+        std::fs::create_dir(&data_b).unwrap();
+        std::fs::write(
+            data_b.join("system_sync_workspace.yaml"),
+            "flow:\n  tasks: []\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("..data")).unwrap();
+        symlink(&data_b, root.join("..data")).unwrap();
+
+        let identity_after = derive_configmap_identity(&root);
+
+        assert_eq!(identity_before, vec!["system_sync_workspace".to_string()]);
+        assert_eq!(
+            identity_before, identity_after,
+            "identity must not change when the ConfigMap is reloaded"
+        );
+
+        let unfiltered: Vec<String> = glob::glob(&format!("{}/**/*.yaml", root.display()))
+            .unwrap()
+            .flatten()
+            .filter_map(|p| compute_source_path(&p, Some(&root)))
+            .collect();
+        assert!(
+            unfiltered
+                .iter()
+                .any(|id| id.contains("..2026_07_24_18_30_00.222222222")),
+            "without the hidden-segment filter the timestamped path leaks into identity"
+        );
+    }
+
+    fn derive_configmap_identity(root: &std::path::Path) -> Vec<String> {
+        let pattern = format!("{}/**/*.yaml", root.display());
+        let mut identities: Vec<String> = glob::glob(&pattern)
+            .unwrap()
+            .flatten()
+            .filter(|path| match path.strip_prefix(root) {
+                Ok(rel) => !rel.components().any(|c| {
+                    matches!(c, std::path::Component::Normal(seg)
+                            if seg.to_string_lossy().starts_with('.'))
+                }),
+                Err(_) => true,
+            })
+            .filter_map(|path| compute_source_path(&path, Some(root)))
+            .collect();
+        identities.sort();
+        identities
     }
 }

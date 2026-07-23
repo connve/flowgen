@@ -5,6 +5,7 @@
 	import { SvelteSet } from 'svelte/reactivity';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics } from '$lib/activityStore.svelte';
@@ -388,7 +389,7 @@
 									{/if}
 									<button
 										type="button"
-										class="relative flex flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
+										class="relative flex min-w-0 flex-1 items-center gap-1.5 h-10 rounded-md px-2 text-left transition-colors {isSelected
 											? 'bg-base-200 font-medium text-primary'
 											: 'hover:bg-base-200'}"
 										style="padding-left: {node.depth * 0.75 + 0.375}rem"
@@ -401,8 +402,10 @@
 											icon={isOpen && canExpand ? 'tabler:folder-open' : 'tabler:folder'}
 											class="h-5 w-5 shrink-0 opacity-70"
 										/>
-										<span class="truncate">{node.name}</span>
-										<span class="ml-auto text-xs opacity-50">{node.fileCount}</span>
+										<span
+											class="tooltip tooltip-right min-w-0 flex-1 truncate text-left before:max-w-xs before:whitespace-normal before:break-words"
+											data-tip={node.name}>{node.name}</span>
+										<span class="ml-2 shrink-0 text-xs opacity-50">{node.fileCount}</span>
 									</button>
 								</div>
 								{#if isOpen && canExpand && node.children}
@@ -482,7 +485,7 @@
 				aria-pressed={statusFilter.ok}
 				onclick={() => toggleStatus('ok')}
 			>
-				<span>OK</span>
+				<span>Ok</span>
 				<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
 			</button>
 			<button
@@ -611,13 +614,9 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if error}
-		<div class="alert alert-error" role="alert">
-			<span>Failed to load flows: {error}</span>
-		</div>
+		<StateMessage tone="oops" title="Failed to load flows" message={error} />
 	{:else if filtered.length === 0}
-		<div class="rounded-lg border border-base-300 bg-base-100 p-8 text-center text-sm opacity-70">
-			No flows found
-		</div>
+		<StateMessage tone="notice" title="No flows found" message="Nothing matches the current filters yet." />
 	{:else}
 		<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
@@ -725,7 +724,7 @@
 							</td>
 							<td>
 								{#if flow.status === 'ok'}
-									<Badge variant="success">OK</Badge>
+									<Badge variant="success">Ok</Badge>
 								{:else if flow.status === 'warn'}
 									<Badge variant="warning">Warn</Badge>
 								{:else if flow.status === 'error'}
@@ -807,8 +806,8 @@
 						<span class="loading loading-spinner loading-md text-primary"></span>
 					</div>
 				{:else if selectedError}
-					<div class="alert alert-error m-4" role="alert">
-						<span>{selectedError}</span>
+					<div class="flex-1">
+						<StateMessage tone="oops" title="Failed to load flow" message={selectedError} />
 					</div>
 				{:else if selectedDetail}
 					<FlowInspector yaml={selectedDetail.yaml} activities={modalActivities} />
