@@ -165,9 +165,9 @@ impl EventHandler {
             // Skip the file walk when HEAD matches the last successful
             // sync — file contents at the same commit are byte-identical.
             let cache = &self.task_context.cache;
-            let flow_name = self.task_context.flow.identity();
+            let flow_key = self.task_context.flow.id();
             let sanitized_url = sanitize_repo_url(&self.config.repository_url);
-            let cache_key = format!("flow.{flow_name}.git_head.{sanitized_url}");
+            let cache_key = format!("flow.{flow_key}.git_head.{sanitized_url}");
             let cached_commit = cache
                 .get(&cache_key)
                 .await

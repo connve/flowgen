@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.129.0
+
+### Fixes
+
+- **Flows in nested folders no longer fail on leader election and
+  stateful sources.** After 0.128 made the file path the flow identity,
+  that slash-bearing value flowed straight into cache and lease keys,
+  where a path separator is not a valid key character. Any flow in a
+  subfolder that used leader election, or a stateful source
+  (`salesforce_pubsubapi_subscriber` replay ids, `generate` last-run and
+  counter state, `git`/`oci` sync digests, or Rhai `ctx.cache`), errored
+  as soon as it tried to read or write its key. Identities are now
+  projected to a key-safe form (base64url) at every cache, lease, and
+  peer-ownership boundary, so nested-folder flows work regardless of
+  depth. Human-facing surfaces — the tracing `flow=` field, activity
+  keys, the admin API `path`, and resource URIs — keep the readable
+  slash form.
+
+- **A duplicate flow identity now fails fast at startup.** If two flows
+  resolve to the same path identity (for example under an unusual
+  symlinked config mount), the process exits with a clear error instead
+  of letting the two silently share a registry entry, cache namespace,
+  and lease key.
+
+- **Flow identity is stable across ConfigMap reloads.** Flows loaded from
+  a directory now ignore hidden (dot-prefixed) path segments during
+  discovery. A ConfigMap volume presents every file three ways — the
+  clean top-level name, a `..data` symlink, and a timestamped `..<ts>`
+  directory that is replaced on every reload — so the recursive scan
+  matched each flow three times and could derive its identity from the
+  timestamped path, minting a new identity (and a new lease and cache
+  namespace) on every reload and forcing a full re-sync and re-election.
+  Only the clean top-level entry is now considered, so identity stays
+  constant across reloads. This follows the POSIX hidden-file convention
+  and needs no knowledge of the mount's internal layout.
+
+### Internal
+
+- **`FlowIdentity` type carries both projections.** A single
+  `flowgen_core::identity::FlowIdentity` owns the identity: it `Display`s
+  as the human path (so log and lease-manager fields stay readable) and
+  projects to the key-safe id via `as_key()`. The task manager, lease
+  keys, and peer ownership take the typed identity rather than a bare
+  string, so the two forms cannot drift apart.
+
+- **`flow.name` no longer participates in identity.** Identity always
+  comes from the path; `flow.name` is a pure display-name override.
+  Configs that still declare `name` continue to parse — it is simply
+  ignored for identity.
+
 ## 0.128.0
 
 ### Breaking

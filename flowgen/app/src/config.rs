@@ -19,43 +19,14 @@ pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 /// Supported flow configuration file extensions for recursive discovery.
 pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
 
-/// Identity source of a flow.
-///
-/// A flow always has exactly one identity, established at construction:
-/// either the path relative to `flows.path` (filesystem-loaded or cache-
-/// key-derived), or the programmatic `name` from an API-constructed flow.
-/// Encoding it as an enum keeps the invariant in the type — there is no
-/// "neither is set" state to guard against at read time.
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub enum FlowIdentity {
-    /// Path relative to `flows.path` (filesystem load) or KV key suffix
-    /// after `flowgen.flows.` (cache load), extension stripped, slashes
-    /// preserved for folder grouping in the UI.
-    Path(String),
-    /// Programmatic name supplied when a flow is constructed via the
-    /// admin API rather than from a filesystem/cache path.
-    Name(String),
-}
-
-impl FlowIdentity {
-    /// Returns the identity string used as the registry key, cache
-    /// namespace, MCP URI, and tracing `flow=` field.
-    pub fn as_str(&self) -> &str {
-        match self {
-            FlowIdentity::Path(p) => p,
-            FlowIdentity::Name(n) => n,
-        }
-    }
-}
+pub use flowgen_core::identity::FlowIdentity;
 
 /// Deserialization surface for a flow YAML file.
 ///
 /// Public API is [`FlowConfig`] — `FlowConfigRaw` exists only because
-/// serde cannot construct a [`FlowIdentity`] without knowing whether the
-/// caller is loading from a filesystem path or the cache. The loader
-/// wraps this into a `FlowConfig` via [`FlowConfig::from_path`] or
-/// [`FlowConfig::from_name`], both of which enforce the identity
-/// invariant.
+/// serde deserializes the flow body without an identity, which the loader
+/// supplies from the path. The loader wraps this into a `FlowConfig` via
+/// [`FlowConfig::from_path`].
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct FlowConfigRaw {
     /// Flow definition (tasks and optional labels).
@@ -64,9 +35,8 @@ pub struct FlowConfigRaw {
 
 /// Top-level configuration for an individual flow.
 ///
-/// Construct via [`FlowConfig::from_path`] (filesystem/cache load) or
-/// [`FlowConfig::from_name`] (programmatic). Deserialize the YAML into
-/// [`FlowConfigRaw`] first, then wrap it with the appropriate factory.
+/// Construct via [`FlowConfig::from_path`]. Deserialize the YAML into
+/// [`FlowConfigRaw`] first, then wrap it with the identity from the path.
 #[derive(PartialEq, Clone, Debug, Serialize)]
 pub struct FlowConfig {
     /// Flow definition (tasks and optional labels).
@@ -83,10 +53,10 @@ pub struct FlowConfig {
 }
 
 impl FlowConfig {
-    /// Builds a `FlowConfig` for a flow loaded from a filesystem path or
-    /// cache key. `path` is the identity string (already relative to
-    /// `flows.path` with extension stripped, or the KV key suffix).
-    /// Validates task names.
+    /// Builds a `FlowConfig` from a path-shaped identity. `path` is the
+    /// identity string (relative to `flows.path` with extension stripped for
+    /// a filesystem load, or the KV key suffix for a cache load, or the
+    /// caller-supplied path for a programmatic flow). Validates task names.
     pub fn from_path(
         raw: FlowConfigRaw,
         path: String,
@@ -95,57 +65,36 @@ impl FlowConfig {
         let config = Self {
             flow: raw.flow,
             raw_source,
-            identity: FlowIdentity::Path(path),
+            identity: FlowIdentity::new(path),
         };
         config.validate_tasks()?;
         Ok(config)
     }
 
-    /// Builds a `FlowConfig` for a flow constructed programmatically
-    /// (e.g. via the admin API). `raw.flow.name` must be set.
-    pub fn from_name(
-        raw: FlowConfigRaw,
-        raw_source: Option<String>,
-    ) -> Result<Self, flowgen_core::validate::Error> {
-        use flowgen_core::validate::{validate_name, NameField};
-        let name = match &raw.flow.name {
-            Some(n) => n.clone(),
-            None => return Err(flowgen_core::validate::Error::MissingFlowIdentity),
-        };
-        validate_name(NameField::Flow, &name)?;
-        let config = Self {
-            flow: raw.flow,
-            raw_source,
-            identity: FlowIdentity::Name(name),
-        };
-        config.validate_tasks()?;
-        Ok(config)
-    }
-
-    /// Returns the flow identity: path when loaded from filesystem/cache,
-    /// programmatic name when API-constructed. Used as the registry key,
-    /// cache namespace, MCP URI, and tracing `flow=` field.
+    /// Returns the flow identity — the path-shaped source of truth. Used as
+    /// the registry key, the tracing `flow=` field, REST `path`, and resource
+    /// URIs. For cache and lease keys, project via [`FlowIdentity::as_key`].
     pub fn identity(&self) -> &str {
         self.identity.as_str()
     }
 
-    /// Returns the identity variant. Callers that need to distinguish
-    /// path-loaded flows from programmatic flows (e.g. UI badges) match
-    /// on this; the identity string alone is enough for keying.
-    pub fn identity_variant(&self) -> &FlowIdentity {
+    /// Returns the typed identity, exposing both the human string
+    /// ([`FlowIdentity::as_str`]) and the key-safe id
+    /// ([`FlowIdentity::as_key`]).
+    pub fn identity_ref(&self) -> &FlowIdentity {
         &self.identity
     }
 
     /// Returns the human-facing display name: `flow.name` when set,
-    /// otherwise the basename of the identity path. Used for UI lists
-    /// and log fields — never for keying.
+    /// otherwise the basename of the identity path. `name` no longer affects
+    /// identity — it is a pure display override. Used for UI lists and log
+    /// fields, never for keying.
     pub fn display_name(&self) -> &str {
-        match (self.flow.name.as_deref(), &self.identity) {
-            (Some(name), _) => name,
-            (None, FlowIdentity::Name(n)) => n,
-            (None, FlowIdentity::Path(p)) => match p.rsplit('/').next() {
+        match self.flow.name.as_deref() {
+            Some(name) => name,
+            None => match self.identity.as_str().rsplit('/').next() {
                 Some(basename) => basename,
-                None => p,
+                None => self.identity.as_str(),
             },
         }
     }
@@ -164,16 +113,15 @@ fn default_parallel_instances() -> usize {
     1
 }
 
-/// Flow definition with task list. Identity normally comes from the
-/// file path relative to `flows.path`; `name` is only meaningful when
-/// a flow is constructed programmatically (e.g. via the admin API)
-/// without a filesystem path to derive from.
+/// Flow definition with task list. Identity always comes from the flow's
+/// path (see [`FlowIdentity`]); `name` is a pure display override and does
+/// not affect identity.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct Flow {
-    /// Programmatic identity for flows constructed via the admin API
-    /// (no filesystem path to derive from). Also serves as the display
-    /// name for path-loaded flows when set (see [`FlowConfig::display_name`]);
-    /// it does not affect identity when the flow has a `source_path`.
+    /// Optional display-name override for the UI and log fields. Does not
+    /// affect identity — see [`FlowConfig::display_name`]. Accepted for
+    /// backward compatibility with configs that still declare it; a flow
+    /// with no `name` derives its display name from the path basename.
     #[serde(default)]
     pub name: Option<String>,
     /// Optional label for logging.
@@ -834,7 +782,8 @@ mod tests {
                 parallel_instances: 1,
             },
         };
-        let flow_config = FlowConfig::from_name(raw, None).expect("valid identity");
+        let flow_config =
+            FlowConfig::from_path(raw, "test_flow".to_string(), None).expect("valid identity");
 
         assert_eq!(flow_config.flow.name.as_deref(), Some("test_flow"));
         assert!(flow_config.flow.labels.is_none());
@@ -860,24 +809,6 @@ mod tests {
         let serialized = serde_json::to_string(&raw).unwrap();
         let deserialized: FlowConfigRaw = serde_json::from_str(&serialized).unwrap();
         assert_eq!(raw, deserialized);
-    }
-
-    #[test]
-    fn from_name_requires_flow_name() {
-        let raw = FlowConfigRaw {
-            flow: Flow {
-                name: None,
-                labels: None,
-                tasks: vec![],
-                require_leader_election: None,
-                parallel_instances: 1,
-            },
-        };
-        let err = FlowConfig::from_name(raw, None).unwrap_err();
-        assert!(matches!(
-            err,
-            flowgen_core::validate::Error::MissingFlowIdentity
-        ));
     }
 
     #[test]
@@ -1224,7 +1155,8 @@ mod tests {
                 parallel_instances: 1,
             },
         };
-        let flow_config = FlowConfig::from_name(raw, None).expect("valid identity");
+        let flow_config =
+            FlowConfig::from_path(raw, "complex_flow".to_string(), None).expect("valid identity");
 
         assert_eq!(flow_config.flow.name.as_deref(), Some("complex_flow"));
         assert_eq!(flow_config.flow.labels, Some(labels));

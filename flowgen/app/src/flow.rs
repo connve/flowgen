@@ -713,13 +713,9 @@ impl Flow {
         // Shared response registry for streaming progress between tasks in this flow.
         let response_registry = Arc::new(flowgen_core::registry::ResponseRegistry::new());
 
-        let source_path = match self.config.identity_variant() {
-            crate::config::FlowIdentity::Path(p) => Some(p.clone()),
-            crate::config::FlowIdentity::Name(_) => None,
-        };
         let mut task_context_builder = flowgen_core::task::context::TaskContextBuilder::new()
             .flow_name(self.identity().to_string())
-            .source_path(source_path)
+            .source_path(Some(self.identity().to_string()))
             .flow_labels(self.config.flow.labels.clone())
             .task_manager(task_manager)
             .cache(Arc::clone(&self.cache))
@@ -929,7 +925,10 @@ impl Flow {
             .as_ref()
             .ok_or_else(|| Error::TaskManagerNotInitialized)?
             .clone();
+        // `register` takes the typed identity: it Displays as the human path in
+        // logs and projects to the key-safe form for the lease and peer keys.
         let flow_id = self.identity().to_string();
+        let lease_id = self.config.identity_ref().clone();
 
         let leader_election_options = if is_leader_elected {
             Some(flowgen_core::task::manager::LeaderElectionOptions {})
@@ -938,7 +937,7 @@ impl Flow {
         };
 
         let mut leadership_rx = task_manager
-            .register(flow_id.clone(), leader_election_options)
+            .register(lease_id, leader_election_options)
             .await
             .map_err(|e| Error::LeaderElectionRegistrationFailed(e.to_string()))?;
 
@@ -2103,7 +2102,7 @@ mod tests {
     #[test]
     fn test_flow_builder_config() {
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2113,6 +2112,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2152,7 +2152,7 @@ mod tests {
     #[test]
     fn test_flow_builder_build_without_http_server() {
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2162,6 +2162,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2183,7 +2184,7 @@ mod tests {
     #[test]
     fn test_flow_builder_build_success() {
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("success_flow".to_string()),
@@ -2193,6 +2194,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "success_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2223,7 +2225,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2246,6 +2248,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2279,7 +2282,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2294,6 +2297,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2316,7 +2320,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2339,6 +2343,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2373,7 +2378,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw};
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2383,6 +2388,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2398,7 +2404,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
@@ -2421,6 +2427,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "test_flow".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2446,7 +2453,7 @@ mod tests {
         };
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("fan_out_fan_in".to_string()),
@@ -2465,6 +2472,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "fan_out_fan_in".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2508,7 +2516,7 @@ mod tests {
         };
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("fan_out".to_string()),
@@ -2522,6 +2530,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "fan_out".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2556,7 +2565,7 @@ mod tests {
         };
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("nested_diamonds".to_string()),
@@ -2574,6 +2583,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "nested_diamonds".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2616,7 +2626,7 @@ mod tests {
         };
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("mixed".to_string()),
@@ -2634,6 +2644,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "mixed".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2676,7 +2687,7 @@ mod tests {
         };
 
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("linear".to_string()),
@@ -2691,6 +2702,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "linear".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2728,7 +2740,7 @@ mod tests {
         // should register as independent sources, neither should inherit
         // the other as a parent.
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("registration_only".to_string()),
@@ -2738,6 +2750,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "registration_only".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),
@@ -2786,7 +2799,7 @@ mod tests {
         // back to the first script through the mcp_prompt, not treat the
         // prompt as its parent.
         let flow_config = Arc::new(
-            FlowConfig::from_name(
+            FlowConfig::from_path(
                 FlowConfigRaw {
                     flow: Flow {
                         name: Some("skip_registration".to_string()),
@@ -2796,6 +2809,7 @@ mod tests {
                         parallel_instances: 1,
                     },
                 },
+                "skip_registration".to_string(),
                 None,
             )
             .expect("test fixture must have valid identity"),

@@ -139,12 +139,12 @@ impl EventHandler {
 
         // Get cache from task context.
         let cache = &self.task_context.cache;
-        let flow_name = self.task_context.flow.identity();
+        let flow_key = self.task_context.flow.id();
         let task_name = &self.config.name;
 
         // Generate cache keys with flow-scoped namespace.
-        let cache_key = format!("flow.{flow_name}.last_run.{task_name}");
-        let counter_cache_key = format!("flow.{flow_name}.counter.{task_name}");
+        let cache_key = format!("flow.{flow_key}.last_run.{task_name}");
+        let counter_cache_key = format!("flow.{flow_key}.counter.{task_name}");
 
         // Restore counter from cache to resume after restart.
         // When allow_rerun is enabled, always start from zero.
@@ -669,11 +669,23 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Verify that cache key was created with flow-scoped format.
-        let result = cache.get("flow.test-flow.last_run.test").await.unwrap();
+        let result = cache
+            .get(&format!(
+                "flow.{}.last_run.test",
+                crate::identity::encode_key("test-flow")
+            ))
+            .await
+            .unwrap();
         assert!(result.is_some());
 
         // Verify that counter was persisted to cache.
-        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        let counter_result = cache
+            .get(&format!(
+                "flow.{}.counter.test",
+                crate::identity::encode_key("test-flow")
+            ))
+            .await
+            .unwrap();
         assert!(counter_result.is_some());
         let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
             .parse::<u64>()
@@ -698,7 +710,14 @@ mod tests {
 
         // Pre-populate counter in cache to simulate a prior run that completed 1 of 2.
         cache
-            .put("flow.test-flow.counter.test", "1".to_string().into(), None)
+            .put(
+                &format!(
+                    "flow.{}.counter.test",
+                    crate::identity::encode_key("test-flow")
+                ),
+                "1".to_string().into(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -751,7 +770,13 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // Counter should now be 2.
-        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        let counter_result = cache
+            .get(&format!(
+                "flow.{}.counter.test",
+                crate::identity::encode_key("test-flow")
+            ))
+            .await
+            .unwrap();
         let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
             .parse::<u64>()
             .unwrap();
@@ -823,7 +848,13 @@ mod tests {
             "generate with count=1 must not emit a second event"
         );
 
-        let counter_result = cache.get("flow.test-flow.counter.test").await.unwrap();
+        let counter_result = cache
+            .get(&format!(
+                "flow.{}.counter.test",
+                crate::identity::encode_key("test-flow")
+            ))
+            .await
+            .unwrap();
         let counter_val = String::from_utf8_lossy(&counter_result.unwrap())
             .parse::<u64>()
             .unwrap();
@@ -847,7 +878,14 @@ mod tests {
 
         // Pre-populate counter to match count — task already fully completed.
         cache
-            .put("flow.test-flow.counter.test", "3".to_string().into(), None)
+            .put(
+                &format!(
+                    "flow.{}.counter.test",
+                    crate::identity::encode_key("test-flow")
+                ),
+                "3".to_string().into(),
+                None,
+            )
             .await
             .unwrap();
 

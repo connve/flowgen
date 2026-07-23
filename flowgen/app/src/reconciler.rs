@@ -449,7 +449,9 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     // the same pod-level holder identity, and the lease must stay claimed
     // continuously across the swap.
     if let Some(task_manager) = &old.task_manager {
-        task_manager.unregister(flow_name).await;
+        task_manager
+            .unregister(&flowgen_core::identity::FlowIdentity::new(flow_name))
+            .await;
     }
 
     // Deregister every webhook, MCP tool, and AI gateway entry owned by this
