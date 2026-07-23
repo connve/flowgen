@@ -25,6 +25,18 @@
 
 	let nextId = 0;
 
+	// Records arrive out of chronological order: the snapshot flattens
+	// per-flow ring buffers in hash-map order, and the live tail interleaves
+	// retries from many flows. Sort newest-first (id breaks ties and orders
+	// records with no timestamp by arrival) so the freshest record is always
+	// at the top; the `limit` trim then evicts the oldest from the tail.
+	function rowOrder(a: LogRow, b: LogRow): number {
+		const ta = timestampMs(a.record);
+		const tb = timestampMs(b.record);
+		if (ta !== null && tb !== null && ta !== tb) return tb - ta;
+		return b.id - a.id;
+	}
+
 	function encodePath(path: string): string {
 		return path.split('/').map(encodeURIComponent).join('/');
 	}
@@ -42,7 +54,7 @@
 	});
 	let search = $state('');
 	let live = $state(true);
-	let atBottom = $state(true);
+	let atTop = $state(true);
 	let selected = $state<LogRecord | null>(null);
 	let scrollPane: HTMLDivElement | null = $state(null);
 	let source: EventSource | null = null;
@@ -111,9 +123,9 @@
 			const res = await fetch(apiUrl(`api/logs?limit=${limit}`));
 			if (!res.ok) return;
 			const body = (await res.json()) as LogRecord[];
-			rows = body.map((record) => ({ id: nextId++, record }));
+			rows = body.map((record) => ({ id: nextId++, record })).sort(rowOrder);
 			await tick();
-			scrollToBottom();
+			scrollToTop();
 		} catch {
 			// history fetch is best-effort; the SSE stream backfills.
 		}
@@ -126,7 +138,7 @@
 		const clamped = Math.min(Math.max(1, Math.floor(next)), LIMIT_MAX);
 		if (clamped === limit) return;
 		limit = clamped;
-		if (rows.length > limit) rows.splice(0, rows.length - limit);
+		if (rows.length > limit) rows.length = limit;
 		void loadHistory();
 	}
 
@@ -137,11 +149,13 @@
 		for (const record of batch) {
 			rows.push({ id: nextId++, record });
 		}
+		rows.sort(rowOrder);
+		// Oldest rows are now at the tail; trim from there.
 		if (rows.length > limit) {
-			rows.splice(0, rows.length - limit);
+			rows.length = limit;
 		}
-		if (live && atBottom) {
-			void tick().then(scrollToBottom);
+		if (live && atTop) {
+			void tick().then(scrollToTop);
 		}
 	});
 
@@ -157,23 +171,22 @@
 		});
 	}
 
-	function scrollToBottom() {
+	function scrollToTop() {
 		if (!scrollPane) return;
-		scrollPane.scrollTop = scrollPane.scrollHeight;
-		scrollTop = scrollPane.scrollTop;
+		scrollPane.scrollTop = 0;
+		scrollTop = 0;
 	}
 
 	function onScroll() {
 		if (!scrollPane) return;
 		scrollTop = scrollPane.scrollTop;
-		const gap = scrollPane.scrollHeight - scrollPane.scrollTop - scrollPane.clientHeight;
-		atBottom = gap < 40;
+		atTop = scrollPane.scrollTop < 40;
 	}
 
 	function resume() {
 		live = true;
-		atBottom = true;
-		scrollToBottom();
+		atTop = true;
+		scrollToTop();
 	}
 
 	function clearView() {
@@ -330,7 +343,7 @@
 				/>
 			</label>
 
-			{#if !atBottom && live}
+			{#if !atTop && live}
 				<div class="tooltip tooltip-bottom" data-tip="Jump to latest">
 					<button
 						type="button"
@@ -338,7 +351,7 @@
 						aria-label="Jump to latest"
 						onclick={resume}
 					>
-						<Icon icon="tabler:arrow-down" class="h-5 w-5" />
+						<Icon icon="tabler:arrow-up" class="h-5 w-5" />
 					</button>
 				</div>
 			{/if}

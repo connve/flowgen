@@ -53,6 +53,17 @@ pub enum Protocol {
     Anthropic,
 }
 
+impl Protocol {
+    /// Stable lowercase wire name (`"openai"` / `"anthropic"`), matching the
+    /// `PROTOCOL_NAME` the adapters use for logs and the `/models` entry.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Protocol::Openai => "openai",
+            Protocol::Anthropic => "anthropic",
+        }
+    }
+}
+
 /// LLM proxy task configuration.
 ///
 /// Registers a flow as a backend on the shared AI gateway server (configured
@@ -84,8 +95,22 @@ pub struct Processor {
     /// inside the chosen protocol (e.g. the prefix of OpenAI's `model` field).
     pub name: String,
     /// Models advertised on `GET <path>/models`, each exposed as `<name>/<model>`.
+    /// This is a discovery menu, not a whitelist: an unlisted `<model>` is still
+    /// forwarded (the routing script / provider decides what to do with it).
+    /// When non-empty, clients must pick a model — a bare proxy id is rejected.
+    /// When empty, the proxy is advertised by its bare `<name>` and accepts a
+    /// bare id, leaving the model choice to the routing script.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Clients that should see this proxy in their model list. This is a
+    /// visibility hint only, not access control — a request identifies its
+    /// client with the `X-Flowgen-Client` header, and `GET <path>/models`
+    /// returns a proxy when its `clients` list contains that client or is
+    /// empty. An empty list means "visible to every client" (the default, so
+    /// existing proxies are unchanged). Access is still enforced separately by
+    /// `credentials_path` and `auth`.
+    #[serde(default)]
+    pub clients: Vec<String>,
     /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
     #[serde(default)]
     pub protocol: Protocol,
@@ -131,7 +156,11 @@ pub struct EventPayload<'a> {
     pub prompt: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<&'a str>,
-    pub model: &'a str,
+    /// Downstream model the client picked, or `None` for a bare proxy id —
+    /// the routing script then chooses. Absent from `event.data` when `None`,
+    /// so scripts branch on presence rather than a sentinel value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,6 +239,7 @@ mod tests {
         let cfg = Processor {
             name: "gw".to_string(),
             models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
+            clients: Vec::new(),
             protocol: Protocol::Openai,
             credentials_path: Some(PathBuf::from("/c.json")),
             auth: None,

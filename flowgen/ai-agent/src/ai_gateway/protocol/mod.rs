@@ -97,6 +97,12 @@ pub trait StreamWriter: Send {
     /// event. Emit any tool-related SSE frames before `close`.
     fn tool_calls(&mut self, calls: Vec<crate::ai_gateway::config::ToolCall>) -> Vec<String>;
 
+    /// An informational tool step (the server already ran the tool). Unlike
+    /// `tool_calls`, does not terminate the turn as "tool_calls". Default no-op.
+    fn tool_step(&mut self, _name: String, _arguments: serde_json::Value) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Close the stream. `include_usage` is honoured by adapters that
     /// gate the usage frame behind a client opt-in flag (OpenAI's
     /// `stream_options.include_usage`); adapters that always emit

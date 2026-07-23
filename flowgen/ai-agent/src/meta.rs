@@ -73,8 +73,9 @@ pub struct GatewayContext {
     /// Model the client asked for — the `<model>` portion of the
     /// `<name>/<model>` routing key. Note this is the *alias* the
     /// client typed and may be rewritten by an intermediate Rhai
-    /// script before hitting the completion leaf.
-    pub requested_model: String,
+    /// script before hitting the completion leaf. `None` when the client sent
+    /// a bare proxy id (no `<model>`) and left the choice to the routing script.
+    pub requested_model: Option<String>,
     /// Whether the client asked for streaming.
     pub stream: bool,
     /// Authenticated user id, `None` when auth is off.
@@ -86,10 +87,11 @@ impl GatewayContext {
     pub fn insert_into(&self, meta: &mut Map<String, Value>) {
         meta.insert(PROTOCOL.into(), Value::String(self.protocol.into()));
         meta.insert(PROXY_NAME.into(), Value::String(self.proxy_name.clone()));
-        meta.insert(
-            REQUESTED_MODEL.into(),
-            Value::String(self.requested_model.clone()),
-        );
+        // Omitted (not null) for a bare proxy id, so auto-routed requests are
+        // filtered by the field's absence rather than a sentinel value.
+        if let Some(model) = &self.requested_model {
+            meta.insert(REQUESTED_MODEL.into(), Value::String(model.clone()));
+        }
         meta.insert(STREAM.into(), Value::Bool(self.stream));
         if let Some(id) = &self.user_id {
             meta.insert(USER_ID.into(), Value::String(id.clone()));
@@ -148,7 +150,7 @@ mod tests {
         let ctx = GatewayContext {
             protocol: "anthropic",
             proxy_name: "flowgen_anthropic".into(),
-            requested_model: "kimi".into(),
+            requested_model: Some("kimi".into()),
             stream: true,
             user_id: Some("user_42".into()),
         };
@@ -172,13 +174,29 @@ mod tests {
         let ctx = GatewayContext {
             protocol: "openai",
             proxy_name: "flowgen_openai".into(),
-            requested_model: "gpt-4".into(),
+            requested_model: Some("gpt-4".into()),
             stream: false,
             user_id: None,
         };
         let mut meta = Map::new();
         ctx.insert_into(&mut meta);
         assert!(!meta.contains_key(USER_ID));
+    }
+
+    #[test]
+    fn gateway_context_skips_missing_requested_model() {
+        let ctx = GatewayContext {
+            protocol: "openai",
+            proxy_name: "flowgen_openai".into(),
+            requested_model: None,
+            stream: false,
+            user_id: None,
+        };
+        let mut meta = Map::new();
+        ctx.insert_into(&mut meta);
+        // Bare proxy id: the field is absent, not null, so logs filter
+        // auto-routed requests by its absence.
+        assert!(!meta.contains_key(REQUESTED_MODEL));
     }
 
     #[test]

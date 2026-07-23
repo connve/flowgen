@@ -95,6 +95,7 @@ fn register_fake_proxy_with_protocol<F>(
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models: Vec::new(),
+        clients: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -105,6 +106,8 @@ fn register_fake_proxy_with_protocol<F>(
 
     let registration = LlmProxyRegistration {
         flow_name: "test_flow".to_string(),
+        display_name: None,
+        description: None,
         protocol,
         config,
         credentials: None,
@@ -123,6 +126,100 @@ fn register_fake_proxy_with_protocol<F>(
             let payload = respond(&event);
             if let Some(completion_tx) = event.completion_tx.as_ref() {
                 completion_tx.signal_completion(Some(payload));
+            }
+        }
+    });
+}
+
+/// Variant of `register_fake_proxy` that advertises a `models` menu, so tests
+/// can exercise the "listed models require the client to pick one" contract.
+fn register_fake_proxy_with_models<F>(
+    server: &AiGatewayServer,
+    name: &str,
+    models: Vec<String>,
+    mut respond: F,
+) where
+    F: FnMut(&Event) -> Value + Send + 'static,
+{
+    let (tx, mut rx) = mpsc::channel::<Event>(4);
+
+    let config = Arc::new(GatewayConfig {
+        name: name.to_string(),
+        models,
+        clients: Vec::new(),
+        protocol: Protocol::Openai,
+        credentials_path: None,
+        auth: None,
+        ack_timeout: Some(Duration::from_secs(5)),
+        depends_on: None,
+        retry: None,
+    });
+
+    let registration = LlmProxyRegistration {
+        flow_name: "test_flow".to_string(),
+        display_name: None,
+        description: None,
+        protocol: Protocol::Openai,
+        config,
+        credentials: None,
+        auth_provider: None,
+        tx,
+        task_id: 0,
+        task_type: "llm_proxy",
+        response_registry: Arc::new(ResponseRegistry::new()),
+        leaf_count: 1,
+        cancellation_token: CancellationToken::new(),
+    };
+    server.register(name.to_string(), registration);
+
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let payload = respond(&event);
+            if let Some(completion_tx) = event.completion_tx.as_ref() {
+                completion_tx.signal_completion(Some(payload));
+            }
+        }
+    });
+}
+
+/// Registers a proxy scoped to a `clients` list, so tests can exercise the
+/// exclusivity filter on `GET /models`.
+fn register_fake_proxy_with_clients(server: &AiGatewayServer, name: &str, clients: Vec<String>) {
+    let (tx, mut rx) = mpsc::channel::<Event>(4);
+
+    let config = Arc::new(GatewayConfig {
+        name: name.to_string(),
+        models: Vec::new(),
+        clients,
+        protocol: Protocol::Openai,
+        credentials_path: None,
+        auth: None,
+        ack_timeout: Some(Duration::from_secs(5)),
+        depends_on: None,
+        retry: None,
+    });
+
+    let registration = LlmProxyRegistration {
+        flow_name: "test_flow".to_string(),
+        display_name: None,
+        description: None,
+        protocol: Protocol::Openai,
+        config,
+        credentials: None,
+        auth_provider: None,
+        tx,
+        task_id: 0,
+        task_type: "llm_proxy",
+        response_registry: Arc::new(ResponseRegistry::new()),
+        leaf_count: 1,
+        cancellation_token: CancellationToken::new(),
+    };
+    server.register(name.to_string(), registration);
+
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Some(completion_tx) = event.completion_tx.as_ref() {
+                completion_tx.signal_completion(Some(json!({"text": "unused"})));
             }
         }
     });
@@ -662,11 +759,77 @@ async fn list_models_returns_registered_proxies_in_openai_shape() {
         .collect();
     assert!(ids.contains(&"openai_gw"));
     assert!(ids.contains(&"anthropic_gw"));
-    // Each entry follows OpenAI's `object: "model"` shape.
+    // Each entry follows OpenAI's `object: "model"` shape and carries its
+    // wire protocol so clients can hide proxies they can't drive.
     for entry in body["data"].as_array().unwrap() {
         assert_eq!(entry["object"], "model");
         assert_eq!(entry["owned_by"], "flowgen");
     }
+    let proto_of = |id: &str| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .and_then(|m| m["protocol"].as_str())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(proto_of("openai_gw"), "openai");
+    assert_eq!(proto_of("anthropic_gw"), "anthropic");
+}
+
+#[tokio::test]
+async fn list_models_clients_filter_is_exclusive() {
+    // `public` (empty clients) is API surface; `scoped` is dedicated to the
+    // `flowgen-ui` client. A named client sees ONLY its scoped proxies; an
+    // anonymous request sees ONLY the public ones.
+    let (server, chat_url, _handle) = boot_server().await;
+    register_fake_proxy_with_clients(&server, "public", Vec::new());
+    register_fake_proxy_with_clients(&server, "scoped", vec!["flowgen-ui".into()]);
+    let models_url = chat_url.replace("/chat/completions", "/models");
+
+    let ids_for = |client: Option<&'static str>| {
+        let url = models_url.clone();
+        async move {
+            let mut req = reqwest::Client::new().get(&url);
+            if let Some(c) = client {
+                req = req.header("X-Flowgen-Client", c);
+            }
+            let body: Value = req
+                .send()
+                .await
+                .expect("GET /models")
+                .json()
+                .await
+                .expect("json");
+            body["data"]
+                .as_array()
+                .expect("data array")
+                .iter()
+                .map(|m| m["id"].as_str().expect("id").to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // Named client: only its scoped proxy, not the public one.
+    let ui = ids_for(Some("flowgen-ui")).await;
+    assert!(
+        ui.contains(&"scoped".to_string()),
+        "flowgen-ui must see scoped"
+    );
+    assert!(
+        !ui.contains(&"public".to_string()),
+        "flowgen-ui must NOT see public (exclusivity), got {ui:?}"
+    );
+
+    // Anonymous: only the public proxy, not the scoped one.
+    let anon = ids_for(None).await;
+    assert!(anon.contains(&"public".to_string()), "anon must see public");
+    assert!(
+        !anon.contains(&"scoped".to_string()),
+        "anon must NOT see scoped, got {anon:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -705,14 +868,72 @@ async fn missing_model_field_returns_400() {
 }
 
 #[tokio::test]
-async fn model_without_proxy_prefix_returns_400() {
+async fn bare_proxy_id_routes_when_proxy_advertises_no_models() {
+    // A proxy with no `models` menu accepts a bare id (no `<model>`): the
+    // client left the choice to the routing script, so this is a 200, and the
+    // event the leaf sees carries no `model` field.
+    let (server, url, _handle) = boot_server().await;
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_w = Arc::clone(&seen);
+    register_fake_proxy(&server, "gw", move |event| {
+        let data = event.data_as_json().expect("event data as json");
+        *seen_w.lock().unwrap() = Some(data.get("model").cloned());
+        json!({"text": "ok"})
+    });
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({
+            "model": "gw",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), 200);
+    // Bare id => `event.data.model` absent, so the script branches on its
+    // absence rather than a sentinel value.
+    let model_field = seen.lock().unwrap().clone().expect("leaf saw an event");
+    assert!(
+        model_field.is_none() || model_field == Some(Value::Null),
+        "bare id must not set event.data.model, got {model_field:?}"
+    );
+}
+
+#[tokio::test]
+async fn bare_proxy_id_rejected_when_proxy_advertises_models() {
+    // A proxy that advertises a `models` menu requires the client to pick one;
+    // a bare id is wrong intent and rejected with 400.
+    let (server, url, _handle) = boot_server().await;
+    register_fake_proxy_with_models(
+        &server,
+        "gw",
+        vec!["glm-4.6".into()],
+        |_event| json!({"text": "unused"}),
+    );
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({
+            "model": "gw",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn malformed_model_suffix_returns_400() {
+    // A trailing slash is a malformed suffix, not a bare id.
     let (server, url, _handle) = boot_server().await;
     register_fake_proxy(&server, "gw", |_event| json!({"text": "unused"}));
 
     let resp = reqwest::Client::new()
         .post(&url)
         .json(&json!({
-            "model": "no-slash-here",
+            "model": "gw/",
             "messages": [{"role": "user", "content": "hi"}]
         }))
         .send()
@@ -739,6 +960,7 @@ fn register_proxy_with_bearer_token(
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models: Vec::new(),
+        clients: Vec::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -749,6 +971,8 @@ fn register_proxy_with_bearer_token(
 
     let registration = LlmProxyRegistration {
         flow_name: "test_flow".to_string(),
+        display_name: None,
+        description: None,
         protocol,
         config,
         credentials: Some(HttpCredentials {

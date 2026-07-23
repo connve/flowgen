@@ -102,7 +102,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:sitemap', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
+				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"

@@ -85,9 +85,10 @@ pub struct Processor {
     /// Can be inline strings or external files via resource loader.
     #[serde(default)]
     pub static_context: Option<Vec<Source>>,
-    /// Optional maximum number of recursive agent turns (prevents infinite loops in multi-turn conversations).
-    /// Default is unlimited. Set to prevent excessive API calls in agentic workflows.
-    pub max_turns: Option<usize>,
+    /// Maximum agent turns (one model call each). Must be non-zero for tool
+    /// use: an agent needs a turn to call the tool and another to answer.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: usize,
     /// Enable streaming mode (sends chunks as separate events).
     #[serde(default)]
     pub stream: bool,
@@ -147,6 +148,11 @@ pub struct ThinkingConfig {
 
 fn default_include_trace() -> bool {
     true
+}
+
+/// Non-zero default so tool-using agents work out of the box (rig defaults to 0).
+fn default_max_turns() -> usize {
+    10
 }
 
 /// Reasoning intensity levels.
@@ -351,7 +357,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             static_context: None,
-            max_turns: None,
+            max_turns: 10,
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
@@ -371,7 +377,7 @@ mod tests {
         assert_eq!(processor.temperature, None);
         assert_eq!(processor.max_tokens, None);
         assert_eq!(processor.static_context, None);
-        assert_eq!(processor.max_turns, None);
+        assert_eq!(processor.max_turns, default_max_turns());
         assert!(!processor.stream);
         assert_eq!(processor.retry, None);
     }
@@ -392,7 +398,7 @@ mod tests {
                 Source::Inline("Context doc 1".to_string()),
                 Source::Inline("Context doc 2".to_string()),
             ]),
-            max_turns: Some(5),
+            max_turns: 5,
             stream: true,
             tool_passthrough: false,
             mcp_servers: vec![],
@@ -439,7 +445,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             static_context: None,
-            max_turns: None,
+            max_turns: 10,
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
@@ -464,7 +470,7 @@ mod tests {
             temperature: Some(0.8),
             max_tokens: Some(2000),
             static_context: None,
-            max_turns: None,
+            max_turns: 10,
             stream: true,
             tool_passthrough: false,
             mcp_servers: vec![],
@@ -496,7 +502,7 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: Some(1500),
             static_context: None,
-            max_turns: None,
+            max_turns: 10,
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],
@@ -532,7 +538,7 @@ mod tests {
                 },
                 Source::Inline("Support: support@example.com".to_string()),
             ]),
-            max_turns: Some(3),
+            max_turns: 3,
             stream: false,
             tool_passthrough: false,
             mcp_servers: vec![],

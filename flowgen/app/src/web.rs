@@ -543,6 +543,13 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
     Json(api::ConfigInfo { yaml })
 }
 
+/// Header and value identifying the built-in Agents chat to the AI gateway.
+/// The gateway uses it to scope which proxies appear in the model list (a
+/// proxy's `clients` list), so agent flows meant for our UI can be hidden from
+/// other clients like opencode. Visibility only — not access control.
+const GATEWAY_CLIENT_HEADER: &str = "X-Flowgen-Client";
+const GATEWAY_CLIENT_VALUE: &str = "flowgen-ui";
+
 /// Resolves the base URL the built-in Agents chat proxies to. Prefers the
 /// explicit `web.ai_gateway_url`; otherwise targets the same-process AI
 /// gateway on loopback. Returns `None` when no gateway is configured.
@@ -578,6 +585,7 @@ async fn proxy_chat(
     let upstream = reqwest::Client::new()
         .post(format!("{base}/chat/completions"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(GATEWAY_CLIENT_HEADER, GATEWAY_CLIENT_VALUE)
         .body(body)
         .send()
         .await;
@@ -622,6 +630,7 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
     };
     match reqwest::Client::new()
         .get(format!("{base}/models"))
+        .header(GATEWAY_CLIENT_HEADER, GATEWAY_CLIENT_VALUE)
         .send()
         .await
     {

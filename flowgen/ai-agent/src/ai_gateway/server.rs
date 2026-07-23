@@ -69,6 +69,12 @@ pub type AiGatewayServer = HttpServer<AiGatewayDispatcher>;
 pub struct LlmProxyRegistration {
     /// Name of the flow that registered this proxy.
     pub flow_name: String,
+    /// Human-readable name from the flow's `labels.display_name`, shown in the
+    /// model list instead of the bare proxy id. `None` when unset.
+    pub display_name: Option<String>,
+    /// Short description from the flow's `labels.description`, surfaced
+    /// alongside the model list entry. `None` when unset.
+    pub description: Option<String>,
     /// Wire protocol exposed for this proxy. Determines which URL handler
     /// is allowed to dispatch to it.
     pub protocol: Protocol,
@@ -162,30 +168,77 @@ struct ModelEntry {
     object: &'static str,
     created: i64,
     owned_by: &'static str,
+    /// Wire protocol the proxy speaks (`"openai"` / `"anthropic"`). Non-standard
+    /// OpenAI field; lets a client hide proxies it can't drive (the built-in
+    /// chat speaks OpenAI, so it skips Anthropic proxies).
+    protocol: &'static str,
+    /// Friendly name from the proxy flow's `labels.display_name`, when set.
+    /// Non-standard OpenAI field; clients that don't know it ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    /// Short description from the proxy flow's `labels.description`, when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
+
+/// HTTP header a client sends to identify itself for model-list visibility.
+/// A proxy's `clients` list is matched against this value; see [`list_models`].
+const CLIENT_HEADER: &str = "X-Flowgen-Client";
 
 /// Lists advertised models in the OpenAI schema. Each proxy contributes one
 /// `<proxy>/<model>` id per declared model; a proxy with no `models` falls
 /// back to its bare name so it still appears.
+///
+/// Visibility is filtered by the `X-Flowgen-Client` header: a proxy is listed
+/// when its `clients` list is empty (visible to everyone) or contains the
+/// requesting client. A request with no client header is treated as an
+/// anonymous client and only sees proxies with an empty `clients` list. This
+/// is a visibility hint, not access control — calling a proxy is still gated
+/// by its credentials and auth.
 async fn list_models(
     State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
+    headers: HeaderMap,
 ) -> Response {
-    let created = chrono::Utc::now().timestamp();
-    let entry = |id: String| ModelEntry {
-        id,
-        object: "model",
-        created,
-        owned_by: "flowgen",
+    let client = headers
+        .get(CLIENT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Exclusivity filter. A named client (e.g. the built-in chat sending
+    // `flowgen-ui`) sees ONLY proxies that list it in `clients` — a proxy with
+    // an empty `clients` is public API surface, not part of any named client's
+    // menu, so it is hidden from that client. An anonymous request (no header)
+    // sees the public proxies (empty `clients`) and nothing that is scoped.
+    let visible = |clients: &[String]| match &client {
+        Some(c) => clients.iter().any(|allowed| allowed == c),
+        None => clients.is_empty(),
     };
+
+    let created = chrono::Utc::now().timestamp();
     let data = state
         .table
         .iter()
+        .filter(|e| visible(&e.value().config.clients))
         .flat_map(|e| {
             let proxy = e.key().clone();
-            let models = &e.value().config.models;
-            match models.is_empty() {
+            let reg = e.value();
+            let display_name = reg.display_name.clone();
+            let description = reg.description.clone();
+            let protocol = reg.protocol.as_str();
+            let entry = |id: String| ModelEntry {
+                id,
+                object: "model",
+                created,
+                owned_by: "flowgen",
+                protocol,
+                display_name: display_name.clone(),
+                description: description.clone(),
+            };
+            match reg.config.models.is_empty() {
                 true => vec![entry(proxy)],
-                false => models
+                false => reg
+                    .config
+                    .models
                     .iter()
                     .map(|m| entry(format!("{proxy}/{m}")))
                     .collect(),
@@ -207,22 +260,19 @@ async fn dispatch_chat_completions(
     headers: HeaderMap,
     axum::Json(request): axum::Json<ChatCompletionRequest>,
 ) -> Response {
-    let model = match request.model.as_deref() {
-        Some(m) if !m.is_empty() => m.to_string(),
-        _ => return DispatchError::MissingModelField.into_response(),
-    };
-
-    let (proxy_name, downstream_model) = match model.split_once('/') {
-        Some((name, rest)) if !name.is_empty() && !rest.is_empty() => {
-            (name.to_string(), rest.to_string())
-        }
-        _ => return DispatchError::MissingProxyPrefix.into_response(),
+    let (proxy_name, downstream_model) = match split_model(request.model.as_deref().unwrap_or("")) {
+        Ok(parts) => parts,
+        Err(e) => return e.into_response(),
     };
 
     let ctx = match resolve_registration(&state, Protocol::Openai, proxy_name, &headers).await {
         Ok(c) => c,
         Err(resp) => return resp,
     };
+
+    if let Some(resp) = require_model_choice(&ctx.registration, &downstream_model) {
+        return resp;
+    }
 
     let system_prompt = request
         .messages
@@ -249,7 +299,7 @@ async fn dispatch_chat_completions(
     let payload = EventPayload {
         prompt: &prompt,
         system_prompt: system_prompt.as_deref(),
-        model: &downstream_model,
+        model: downstream_model.as_deref(),
         temperature: request.temperature,
         max_tokens: request.max_tokens,
         stream: request.stream,
@@ -273,8 +323,7 @@ async fn dispatch_chat_completions(
         .map(|o| o.include_usage)
         .unwrap_or(false);
 
-    let model = downstream_model.clone();
-    dispatch::<OpenAiAdapter>(ctx, &payload, model, request.stream, include_usage).await
+    dispatch::<OpenAiAdapter>(ctx, &payload, request.stream, include_usage).await
 }
 
 /// Handler for `POST <path>/messages`. Parses the Anthropic Messages
@@ -299,12 +348,9 @@ async fn dispatch_messages(
         }
     }
 
-    let model = request.model.clone();
-    let (proxy_name, downstream_model) = match model.split_once('/') {
-        Some((name, rest)) if !name.is_empty() && !rest.is_empty() => {
-            (name.to_string(), rest.to_string())
-        }
-        _ => return DispatchError::MissingProxyPrefix.into_response(),
+    let (proxy_name, downstream_model) = match split_model(&request.model) {
+        Ok(parts) => parts,
+        Err(e) => return e.into_response(),
     };
 
     let ctx = match resolve_registration(&state, Protocol::Anthropic, proxy_name, &headers).await {
@@ -312,12 +358,16 @@ async fn dispatch_messages(
         Err(resp) => return resp,
     };
 
+    if let Some(resp) = require_model_choice(&ctx.registration, &downstream_model) {
+        return resp;
+    }
+
     let translated = anthropic_msg::translate_request(&request);
 
     let payload = EventPayload {
         prompt: &translated.prompt,
         system_prompt: translated.system_prompt.as_deref(),
-        model: &downstream_model,
+        model: downstream_model.as_deref(),
         temperature: request.temperature,
         max_tokens: Some(request.max_tokens),
         stream: request.stream,
@@ -326,11 +376,10 @@ async fn dispatch_messages(
         tool_choice: translated.tool_choice.as_ref(),
     };
 
-    let model = downstream_model.clone();
     // Anthropic has no `stream_options.include_usage` opt-in — usage
     // always rides `message_delta`. Pass `true` so the adapter's
     // writer sees it (the writer ignores the flag).
-    dispatch::<MessagesAdapter>(ctx, &payload, model, request.stream, true).await
+    dispatch::<MessagesAdapter>(ctx, &payload, request.stream, true).await
 }
 
 // ---------------------------------------------------------------------------
@@ -397,16 +446,60 @@ async fn resolve_registration(
     })
 }
 
+/// Split a request `model` field into `(proxy_name, downstream_model)`.
+///
+/// `proxy/model` yields the proxy and `Some(model)`. A bare `proxy` (no `/`)
+/// yields the proxy and `None` — the client did not pick a model and is
+/// leaving it to the proxy's routing script. Whether a bare id is allowed
+/// depends on the resolved proxy (see [`require_model_choice`]); the split
+/// itself only rejects an empty field or a malformed suffix.
+fn split_model(model: &str) -> Result<(String, Option<String>), DispatchError> {
+    if model.is_empty() {
+        return Err(DispatchError::MissingModelField);
+    }
+    match model.split_once('/') {
+        // Trailing slash / empty model portion is a malformed suffix, not a
+        // bare id — reject rather than silently treating it as "no model".
+        Some((name, rest)) if !name.is_empty() && !rest.is_empty() => {
+            Ok((name.to_string(), Some(rest.to_string())))
+        }
+        Some(_) => Err(DispatchError::MissingProxyPrefix),
+        None => Ok((model.to_string(), None)),
+    }
+}
+
+/// Enforce the bare-id contract once the proxy is known: a proxy that
+/// advertises a `models` menu requires the client to pick one, so a bare id
+/// is wrong intent and rejected. A proxy with no `models` accepts a bare id
+/// and lets its routing script choose the downstream model. Returns the error
+/// response to short-circuit with, or `None` when the request is allowed.
+fn require_model_choice(
+    registration: &LlmProxyRegistration,
+    downstream_model: &Option<String>,
+) -> Option<Response> {
+    if downstream_model.is_none() && !registration.config.models.is_empty() {
+        return Some(
+            DispatchError::ModelChoiceRequired {
+                name: registration.config.name.clone(),
+            }
+            .into_response(),
+        );
+    }
+    None
+}
+
 /// Generic dispatch entry point. Serialises the `EventPayload` into
 /// the pipeline event and forwards to blocking / streaming based on
 /// the client's `stream` flag.
 async fn dispatch<A: ProtocolAdapter>(
     ctx: DispatchContext,
     payload: &EventPayload<'_>,
-    downstream_model: String,
     is_stream: bool,
     include_usage: bool,
 ) -> Response {
+    // The model the client picked (`None` for a bare proxy id) — owned here for
+    // the observability meta and the response echo.
+    let downstream_model = payload.model.map(str::to_string);
     let data = match serde_json::to_value(payload) {
         Ok(v) => v,
         Err(e) => {
@@ -434,10 +527,14 @@ async fn dispatch<A: ProtocolAdapter>(
     };
     gateway_ctx.insert_into(&mut meta);
 
+    // Echo the client's model back in the response. For a bare proxy id the
+    // client picked none, so fall back to the proxy name until the response
+    // reflects the script-resolved model (tracked separately).
+    let response_model = downstream_model.unwrap_or_else(|| ctx.registration.config.name.clone());
     let request = DispatchRequest {
         data,
         meta,
-        model: downstream_model,
+        model: response_model,
         request_id: format!("{}-{}", A::REQUEST_ID_PREFIX, uuid::Uuid::now_v7()),
         created: chrono::Utc::now().timestamp(),
         include_usage,
@@ -586,8 +683,11 @@ async fn dispatch_blocking<A: ProtocolAdapter>(
         .send_with_logging(Some(&registration.tx))
         .context(meta::PROTOCOL, request.gateway_ctx.protocol)
         .context(meta::PROXY_NAME, &request.gateway_ctx.proxy_name)
-        .context(meta::REQUESTED_MODEL, &request.gateway_ctx.requested_model)
         .context(meta::STREAM, request.gateway_ctx.stream);
+    let logger = match &request.gateway_ctx.requested_model {
+        Some(m) => logger.context(meta::REQUESTED_MODEL, m),
+        None => logger,
+    };
     let logger = match &request.gateway_ctx.user_id {
         Some(id) => logger.context(meta::USER_ID, id),
         None => logger,
@@ -726,8 +826,11 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         .send_with_logging(Some(&registration.tx))
         .context(meta::PROTOCOL, gateway_ctx.protocol)
         .context(meta::PROXY_NAME, &gateway_ctx.proxy_name)
-        .context(meta::REQUESTED_MODEL, &gateway_ctx.requested_model)
         .context(meta::STREAM, gateway_ctx.stream);
+    let logger = match &gateway_ctx.requested_model {
+        Some(m) => logger.context(meta::REQUESTED_MODEL, m),
+        None => logger,
+    };
     let logger = match &gateway_ctx.user_id {
         Some(id) => logger.context(meta::USER_ID, id),
         None => logger,
@@ -769,8 +872,17 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                 progress = progress_rx.recv() => {
                     match progress {
                         Some(evt) => {
-                            streamed_progress = true;
-                            for frame in writer.text_delta(evt.status.clone()) {
+                            // A tool step isn't text, so it must not suppress the
+                            // final text emission (which is gated on
+                            // `streamed_progress`).
+                            let frames = match evt.tool {
+                                Some(step) => writer.tool_step(step.name, step.arguments),
+                                None => {
+                                    streamed_progress = true;
+                                    writer.text_delta(evt.status.clone())
+                                }
+                            };
+                            for frame in frames {
                                 if sse_tx.send(Ok(frame)).await.is_err() {
                                     registry.remove(&cid).await;
                                     return;
@@ -794,8 +906,14 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                     registry.remove(&cid).await;
 
                     while let Ok(evt) = progress_rx.try_recv() {
-                        streamed_progress = true;
-                        for frame in writer.text_delta(evt.status.clone()) {
+                        let frames = match evt.tool {
+                            Some(step) => writer.tool_step(step.name, step.arguments),
+                            None => {
+                                streamed_progress = true;
+                                writer.text_delta(evt.status.clone())
+                            }
+                        };
+                        for frame in frames {
                             let _ = sse_tx.send(Ok(frame)).await;
                         }
                     }
@@ -908,6 +1026,8 @@ enum DispatchError {
     MissingModelField,
     #[error("Request 'model' field must be of the form '<proxy-name>/<downstream-model>'")]
     MissingProxyPrefix,
+    #[error("LLM proxy '{name}' advertises models; the request must pick one as '{name}/<model>'")]
+    ModelChoiceRequired { name: String },
     #[error("Unknown LLM proxy '{name}'")]
     UnknownProxy { name: String },
     #[error("LLM proxy '{name}' does not speak the protocol expected at this URL")]
@@ -964,9 +1084,9 @@ impl DispatchError {
     /// Returns the OpenAI error type string for this error variant.
     fn error_type(&self) -> &'static str {
         match self {
-            DispatchError::MissingModelField | DispatchError::MissingProxyPrefix => {
-                "invalid_request_error"
-            }
+            DispatchError::MissingModelField
+            | DispatchError::MissingProxyPrefix
+            | DispatchError::ModelChoiceRequired { .. } => "invalid_request_error",
             DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
                 "not_found_error"
             }
@@ -987,9 +1107,9 @@ impl DispatchError {
 impl IntoResponse for DispatchError {
     fn into_response(self) -> Response {
         let status = match &self {
-            DispatchError::MissingModelField | DispatchError::MissingProxyPrefix => {
-                StatusCode::BAD_REQUEST
-            }
+            DispatchError::MissingModelField
+            | DispatchError::MissingProxyPrefix
+            | DispatchError::ModelChoiceRequired { .. } => StatusCode::BAD_REQUEST,
             DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
                 StatusCode::NOT_FOUND
             }
@@ -1058,5 +1178,45 @@ mod tests {
             DispatchError::FlowCompletionFailed.into_response().status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+        assert_eq!(
+            DispatchError::ModelChoiceRequired {
+                name: "x".to_string()
+            }
+            .into_response()
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn split_model_parses_suffix_bare_and_rejects_malformed() {
+        // `proxy/model` -> proxy + explicit model.
+        assert_eq!(
+            split_model("flowgen_openai/glm-4.6").unwrap(),
+            ("flowgen_openai".to_string(), Some("glm-4.6".to_string()))
+        );
+        // Nested model path is kept whole after the first `/`.
+        assert_eq!(
+            split_model("proxy/vendor/model").unwrap(),
+            ("proxy".to_string(), Some("vendor/model".to_string()))
+        );
+        // Bare proxy id -> no model, script decides.
+        assert_eq!(
+            split_model("flowgen_openai").unwrap(),
+            ("flowgen_openai".to_string(), None)
+        );
+        // Empty field, empty proxy, and trailing-slash suffix are rejected.
+        assert!(matches!(
+            split_model(""),
+            Err(DispatchError::MissingModelField)
+        ));
+        assert!(matches!(
+            split_model("/glm-4.6"),
+            Err(DispatchError::MissingProxyPrefix)
+        ));
+        assert!(matches!(
+            split_model("flowgen_openai/"),
+            Err(DispatchError::MissingProxyPrefix)
+        ));
     }
 }

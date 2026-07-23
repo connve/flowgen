@@ -204,6 +204,79 @@ pub struct Credentials {
     pub region: Option<String>,
 }
 
+/// Tool server handle plus the `RunningService` connections backing it. The
+/// services must stay alive as long as tools are used — dropping a service
+/// closes its connection.
+struct McpTools {
+    handle: ToolServerHandle,
+    _services: Vec<rmcp::service::RunningService<rmcp::service::RoleClient, McpClientHandler>>,
+}
+
+/// Connects to the configured MCP servers and discovers their tools. `None`
+/// when none are configured.
+async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<McpTools>, Error> {
+    if config.mcp_servers.is_empty() {
+        return Ok(None);
+    }
+
+    let handle = ToolServer::new().run();
+    let client_info = rmcp::model::ClientInfo::new(
+        rmcp::model::ClientCapabilities::default(),
+        rmcp::model::Implementation::from_build_env(),
+    );
+
+    let mut services = Vec::with_capacity(config.mcp_servers.len());
+    for mcp_config in &config.mcp_servers {
+        let handler = McpClientHandler::new(client_info.clone(), handle.clone());
+        let mut transport_config =
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                mcp_config.url.as_str(),
+            );
+
+        if let Some(ref creds_path) = mcp_config.credentials_path {
+            let creds = flowgen_core::credentials::load_http_credentials(creds_path)
+                .await
+                .map_err(|source| Error::McpCredentials {
+                    url: mcp_config.url.clone(),
+                    source,
+                })?;
+            // Route through custom_headers rather than auth_header: rmcp's
+            // auth_header wraps its value in `Bearer <...>`, which would
+            // double-prefix Basic credentials.
+            if let Some(header_value) = creds.authorization_header() {
+                let value = http::HeaderValue::from_str(&header_value).map_err(|source| {
+                    Error::McpAuthHeader {
+                        url: mcp_config.url.clone(),
+                        source,
+                    }
+                })?;
+                let mut headers = std::collections::HashMap::new();
+                headers.insert(http::header::AUTHORIZATION, value);
+                transport_config = transport_config.custom_headers(headers);
+            }
+        }
+
+        let transport =
+            rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
+
+        let service = handler
+            .connect(transport)
+            .await
+            .map_err(|e| Error::McpConnection {
+                url: mcp_config.url.clone(),
+                reason: e.to_string(),
+            })?;
+        services.push(service);
+
+        info!(url = %mcp_config.url, "Connected to MCP server and discovered tools");
+    }
+
+    Ok(Some(McpTools {
+        handle,
+        _services: services,
+    }))
+}
+
 /// Builds an `AgentClient` from a rendered config.
 ///
 /// Loads credentials, applies optional provider tuning (temperature, max
@@ -265,9 +338,8 @@ async fn build_agent_client(
         }
     }
 
-    if let Some(max_turns) = config.max_turns {
-        builder = builder.max_turns(max_turns);
-    }
+    // Always set: rig defaults max_turns to 0, which breaks tool use.
+    builder = builder.max_turns(config.max_turns);
 
     if let Some(handle) = tool_server_handle {
         builder = builder.tool_server_handle(handle);
@@ -322,9 +394,9 @@ pub struct EventHandler {
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
-    /// Shared MCP tool server, built once at init and cloned into each
-    /// per-key agent client. `None` when no MCP servers are configured.
-    tool_server_handle: Option<ToolServerHandle>,
+    /// MCP connections, held open for the handler's lifetime. `None` when no
+    /// MCP servers are configured.
+    mcp_tools: Option<Arc<McpTools>>,
 }
 
 impl EventHandler {
@@ -344,11 +416,23 @@ impl EventHandler {
     /// Resolves the agent client for this event.
     ///
     /// Renders the config against the event so per-event templated fields
+    /// (`endpoint`, `model`, `credentials_path`) become concrete values.
+    ///
+    /// When the flow uses MCP tools, a **fresh** client is built for every
+    /// event, each with its own short-lived MCP connection (see
+    /// [`connect_mcp_tools`]) — the connection can't be cached/reused because
+    /// rmcp's long-lived transport dies between calls. Otherwise the client is
+    /// cached in the worker-wide registry keyed by
+    /// `(provider, model, endpoint, credentials_path)`, so high-throughput
+    /// tool-less flows pay the build/credential cost only once.
+    /// Resolves the agent client for this event.
+    ///
+    /// Renders the config against the event so per-event templated fields
     /// (`endpoint`, `model`, `credentials_path`) become concrete values, then
     /// looks the resulting `(provider, model, endpoint, credentials_path)` up
     /// in the worker-wide client registry. The first event for a given key
-    /// pays the credential-load and client-build cost; subsequent events
-    /// reuse the cached `AgentClient`.
+    /// pays the credential-load and client-build cost; subsequent events reuse
+    /// the cached `AgentClient`.
     async fn resolve_client(&self, event: &Event) -> Result<Arc<crate::agent::AgentClient>, Error> {
         let event_value = serde_json::value::Value::try_from(event)
             .map_err(|source| Error::EventBuilder { source })?;
@@ -364,7 +448,7 @@ impl EventHandler {
             rendered.credentials_path.clone(),
         ));
 
-        let tool_server_handle = self.tool_server_handle.clone();
+        let tool_server_handle = self.mcp_tools.as_ref().map(|t| t.handle.clone());
         let task_context = Arc::clone(&self.task_context);
         let static_context = self.config.static_context.clone();
 
@@ -750,6 +834,7 @@ impl EventHandler {
                                     flowgen_core::registry::ProgressEvent {
                                         task: self.config.name.clone(),
                                         status: text.clone(),
+                                        tool: None,
                                     },
                                 )
                                 .await;
@@ -808,6 +893,27 @@ impl EventHandler {
                             .await
                             .map_err(|source| Error::SendMessage { source })?;
                         index += 1;
+                    }
+                    AgentChunk::ToolCall { name, arguments } => {
+                        // Surface as a progress step on the same channel as text
+                        // deltas so it stays ordered relative to them.
+                        if let (Some(cid), Some(registry)) =
+                            (&correlation_id, &self.task_context.response_registry)
+                        {
+                            registry
+                                .send_progress(
+                                    cid,
+                                    flowgen_core::registry::ProgressEvent {
+                                        task: self.config.name.clone(),
+                                        status: String::new(),
+                                        tool: Some(flowgen_core::registry::ToolStep {
+                                            name,
+                                            arguments,
+                                        }),
+                                    },
+                                )
+                                .await;
+                        }
                     }
                     AgentChunk::Final { text, usage } => {
                         accumulated_text = text;
@@ -1011,67 +1117,11 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor.
-    ///
-    /// Only sets up things that are independent of any individual event: the
-    /// shared MCP tool server (connected to configured MCP servers). Provider
-    /// credentials, endpoint, and model resolution are deferred to
-    /// [`EventHandler::resolve_client`] so per-event templating on those
-    /// fields works for routing-style flows.
+    /// Initializes the processor. Connects to MCP servers once; credentials,
+    /// endpoint, and model resolution are deferred to `resolve_client` for
+    /// per-event templating.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
-        let tool_server_handle = if self.config.mcp_servers.is_empty() {
-            None
-        } else {
-            let handle = ToolServer::new().run();
-            let client_info = rmcp::model::ClientInfo::new(
-                rmcp::model::ClientCapabilities::default(),
-                rmcp::model::Implementation::from_build_env(),
-            );
-
-            for mcp_config in &self.config.mcp_servers {
-                let handler = McpClientHandler::new(client_info.clone(), handle.clone());
-                let mut transport_config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(mcp_config.url.as_str());
-
-                if let Some(ref creds_path) = mcp_config.credentials_path {
-                    let creds = flowgen_core::credentials::load_http_credentials(creds_path)
-                        .await
-                        .map_err(|source| Error::McpCredentials {
-                            url: mcp_config.url.clone(),
-                            source,
-                        })?;
-                    // Route through custom_headers rather than auth_header:
-                    // rmcp's auth_header wraps its value in `Bearer <...>`,
-                    // which would double-prefix Basic credentials.
-                    if let Some(header_value) = creds.authorization_header() {
-                        let value =
-                            http::HeaderValue::from_str(&header_value).map_err(|source| {
-                                Error::McpAuthHeader {
-                                    url: mcp_config.url.clone(),
-                                    source,
-                                }
-                            })?;
-                        let mut headers = std::collections::HashMap::new();
-                        headers.insert(http::header::AUTHORIZATION, value);
-                        transport_config = transport_config.custom_headers(headers);
-                    }
-                }
-
-                let transport =
-                    rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
-
-                handler
-                    .connect(transport)
-                    .await
-                    .map_err(|e| Error::McpConnection {
-                        url: mcp_config.url.clone(),
-                        reason: e.to_string(),
-                    })?;
-
-                info!(url = %mcp_config.url, "Connected to MCP server and discovered tools");
-            }
-
-            Some(handle)
-        };
+        let mcp_tools = connect_mcp_tools(&self.config).await?.map(Arc::new);
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),
@@ -1079,7 +1129,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-            tool_server_handle,
+            mcp_tools,
         })
     }
 

@@ -7,11 +7,14 @@
 // that reject empty content (e.g. Moonshot 400 "text content is
 // empty") don't fail when the client omits `system`.
 //
-// Models: glm-4.6, kimi-k2.7-code. Unknown models fall back to
-// kimi-k2.7-code and record `routing_fallback` so the miss is visible
-// in logs.
+// Models: glm-4.6, kimi-k2.7-code. A client that sends a bare proxy id
+// leaves `event.data.model` unset — this script picks the default. An
+// unknown model falls back to kimi-k2.7-code and records
+// `routing_fallback` so the miss is visible in logs.
 
-let model = event.data.model;
+// Unset when the client sent a bare proxy id (no `<model>`); default to
+// glm-4.6 so a bare id and an explicit "glm-4.6" route the same way.
+let model = if type_of(event.data.model) == "string" { event.data.model } else { "glm-4.6" };
 
 if model == "glm-4.6" {
     event.data.endpoint = "https://api.z.ai/api/paas/v4";

@@ -33,9 +33,70 @@
   `<proxy>/<model>` ids, so clients (including the built-in chat) can
   populate a model selector without knowing the routing prefix. Routing
   itself still lives in the proxy's script — declaring a model does not
-  decide where it goes.
+  decide where it goes. `models` is a discovery menu, not a whitelist:
+  an unlisted model is still forwarded for the script/provider to handle.
+
+- **Proxies can hide the model and auto-route.** A proxy that declares no
+  `models` is advertised by its bare name and accepts a bare id (no
+  `<model>`): the client picks nothing and the routing script chooses the
+  downstream model. A proxy that *does* list models requires the client
+  to pick one — a bare id to it is rejected. Auto-routed requests carry
+  no `requested_model` in `event.meta` (absent, not a sentinel), so they
+  are filtered by that field's absence.
+
+- **Agents chat shows the tools an agent ran.** When a server-side agent
+  (`ai_completion` with `tool_passthrough: false`) invokes a tool mid-turn,
+  the gateway now streams it as a standard OpenAI `delta.tool_calls` frame
+  (informational — no `tool_calls` finish reason, so tool-loop clients
+  ignore it). The built-in chat renders these as a collapsible "tool calls"
+  section in the reply, separated from the text, each row expandable to its
+  arguments. This also fixes reply text that used to run together across a
+  tool call (the pre-tool and post-tool text segments are now distinct).
 
 ### Fixes
+
+- **Tool-using agents no longer fail every tool call.** `ai_completion`'s
+  `max_turns` is now a required setting with a non-zero default (10) instead
+  of an `Option` that left rig's turn budget at 0. With a 0 budget the agent
+  could make one model call but had no turn to act on a tool result, so any
+  tool invocation died with `MaxTurnError` and tore down the in-flight MCP
+  connection as "Transport closed" — the marketing-assistant demo agent
+  could never actually run its BigQuery tool.
+
+- **Agents chat: stop button and a live status line.** A generation can be
+  stopped mid-stream with the composer's Stop button or Esc (aborts the
+  streaming request, keeps what arrived). While a turn is in progress the
+  reply shows a shimmering brand-gradient status line (`✱ Working…` /
+  `✱ <tool>…`) instead of a text cursor; tool calls render as expandable
+  status rows (arguments shown only when expanded).
+
+- **Agents chat model selector no longer collapses a proxy's models into
+  identical rows.** `display_name`/`description` are proxy-level labels the
+  gateway copies onto every model entry, so a proxy exposing two models
+  rendered two indistinguishable rows and the model names were lost. The
+  selector now groups models by proxy — the name and description (wrapped
+  to two lines) show once, with the proxy's models listed beneath as
+  pickable rows — and falls back to the bare proxy name when no
+  `display_name` label is set. It also hides proxies whose `protocol` the
+  built-in chat can't drive (it speaks OpenAI; Anthropic proxies are
+  skipped), and `/models` entries now carry a `protocol` field.
+
+- **`clients` visibility filter is exclusive.** A proxy's `clients` list
+  now scopes it: a named client (the built-in chat sends
+  `X-Flowgen-Client: flowgen-ui`) sees only proxies that list it, and an
+  anonymous request sees only proxies with an empty `clients`. Previously
+  an empty `clients` meant "visible to everyone", so every public proxy
+  leaked into the built-in chat. A proxy must now list `flowgen-ui` in
+  `clients` to appear in the chat.
+
+- **Log viewer sorts newest-first and trims correctly.** Records arrive
+  out of order — the snapshot flattens per-flow ring buffers in hash-map
+  order and the live tail interleaves retries from many flows — so rows
+  displayed in arrival order jumped around by timestamp and new records
+  could land buried mid-list. The `/logs` viewer now sorts the buffer by
+  timestamp (newest at the top, live tail pinned there), and the line
+  limit evicts the genuinely oldest records instead of dropping by insert
+  order.
 
 - **Gateway no longer duplicated streamed replies.** When a downstream
   provider streamed token deltas, the final completion event re-emitted

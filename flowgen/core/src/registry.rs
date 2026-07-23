@@ -34,12 +34,32 @@ pub enum Content {
 }
 
 /// Progress event streamed to the client during pipeline execution.
+///
+/// Carries either a text delta (`status`, the default) or a tool step
+/// (`tool`, when the agent invoked a tool mid-turn). They ride one channel so
+/// tool steps stay ordered relative to the surrounding text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressEvent {
     /// Task name producing the progress update.
     pub task: String,
-    /// Current status of the task.
+    /// Current status of the task. The streamed text delta; empty for a
+    /// tool-step event.
     pub status: String,
+    /// A tool the agent invoked, when this event marks a tool call rather than
+    /// a text delta. `None` for ordinary text progress (the common case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolStep>,
+}
+
+/// A tool invocation surfaced as a progress step: the tool's name and the
+/// arguments it was called with. The result/status is not included — the agent
+/// loop runs the tool internally and does not stream its outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolStep {
+    /// Tool name (e.g. `bigquery_query`).
+    pub name: String,
+    /// Arguments the tool was called with.
+    pub arguments: serde_json::Value,
 }
 
 /// Channels for delivering results back to a waiting response stream.
@@ -157,6 +177,7 @@ mod tests {
                 ProgressEvent {
                     task: "test_task".to_string(),
                     status: "running".to_string(),
+                    tool: None,
                 },
             )
             .await;
@@ -176,6 +197,7 @@ mod tests {
                 ProgressEvent {
                     task: "test".to_string(),
                     status: "running".to_string(),
+                    tool: None,
                 },
             )
             .await;

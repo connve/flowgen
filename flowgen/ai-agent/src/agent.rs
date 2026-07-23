@@ -60,6 +60,12 @@ pub enum CompletionChunk {
     /// Final response with the complete text and provider-reported
     /// token usage. `Usage` is zero-filled when the provider omits it.
     Final { text: String, usage: Usage },
+    /// A tool the agent invoked mid-turn (name + arguments). rig runs the tool
+    /// internally and doesn't stream its result, so this marks the call only.
+    ToolCall {
+        name: String,
+        arguments: serde_json::Value,
+    },
     /// Error during streaming.
     Error(String),
 }
@@ -830,8 +836,13 @@ impl AgentEnum {
                                     usage: resp.usage(),
                                 })
                             }
+                            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                StreamedAssistantContent::ToolCall { tool_call, .. },
+                            )) => Some(CompletionChunk::ToolCall {
+                                name: tool_call.function.name.clone(),
+                                arguments: tool_call.function.arguments.clone(),
+                            }),
                             Err(e) => Some(CompletionChunk::Error(e.to_string())),
-                            // Tool calls are rig-internal on this path.
                             _ => None,
                         })
                         .filter_map(|item| async move { item }),

@@ -104,8 +104,22 @@ impl flowgen_core::task::runner::Runner for Processor {
             .clone()
             .ok_or_else(|| Error::MissingBuilderAttribute("sender".to_string()))?;
 
+        // Pull the display name and description from the flow's labels so the
+        // model list can show a friendly name instead of the bare proxy id.
+        let label_str = |key: &str| {
+            self.task_context
+                .flow
+                .labels
+                .as_ref()
+                .and_then(|m| m.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+
         let registration = super::server::LlmProxyRegistration {
             flow_name: self.task_context.flow.identity().to_string(),
+            display_name: label_str("display_name"),
+            description: label_str("description"),
             protocol: self.config.protocol,
             config: Arc::clone(&self.config),
             credentials,
@@ -203,6 +217,7 @@ mod tests {
         Arc::new(config::Processor {
             name: "test_proxy".to_string(),
             models: Vec::new(),
+            clients: Vec::new(),
             protocol: config::Protocol::Openai,
             credentials_path: None,
             auth: None,

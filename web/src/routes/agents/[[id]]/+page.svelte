@@ -25,10 +25,19 @@
 		type ConversationSummary
 	} from '$lib/conversations';
 
+	// A tool the agent invoked mid-turn, shown in the message's steps section.
+	// Arguments arrive as a JSON string in the OpenAI tool-call delta.
+	interface ToolStep {
+		name: string;
+		arguments: string;
+	}
+
 	interface ChatMessage {
 		role: 'user' | 'assistant';
 		content: string;
 		at: number;
+		// Tool calls the agent ran while producing this message, in order.
+		steps?: ToolStep[];
 	}
 
 	function formatTimestamp(ms: number): string {
@@ -61,16 +70,72 @@
 		return marked.parse(text, { async: false }) as string;
 	}
 
-	let models = $state<string[]>([]);
+	// Pretty-print a tool step's arguments (a JSON string) for display, falling
+	// back to the raw string if it's incomplete/unparseable (mid-stream).
+	function formatStepArgs(args: string): string {
+		try {
+			return JSON.stringify(JSON.parse(args), null, 2);
+		} catch {
+			return args;
+		}
+	}
+
+	// A gateway model entry: the id the gateway routes on, plus optional
+	// display metadata the proxy's flow labels provide (agent flows carry a
+	// friendly name/description; raw proxies don't).
+	interface ModelOption {
+		id: string;
+		display_name?: string;
+		description?: string;
+	}
+
+	let models = $state<ModelOption[]>([]);
 	let model = $state<string>('');
 	let modelsError = $state<string | null>(null);
 
-	// Models arrive as `<proxy>/<model>`. The proxy prefix is an implementation
-	// detail, so hide it — unless more than one proxy is present, where it
-	// disambiguates. The `<select>` value stays the full id the gateway needs.
-	let multiProxy = $derived(new Set(models.map((m) => m.split('/')[0])).size > 1);
+	// A proxy is one gateway/agent flow. `display_name`/`description` are
+	// proxy-level labels the gateway copies onto every model entry, so they
+	// name the group, not the model — a proxy with two models must not render
+	// two identical rows. Group models by proxy prefix (`<proxy>/<model>`, or a
+	// bare `<proxy>` for a flow that declares no model) so each proxy shows its
+	// name + description once, with its models listed beneath.
+	interface ProxyGroup {
+		proxy: string;
+		display_name: string;
+		description?: string;
+		// The `<model>` tail of each id, or null for a bare-proxy entry the user
+		// selects directly. `id` is the full value the gateway routes on.
+		models: Array<{ id: string; name: string | null }>;
+	}
+	let proxyGroups = $derived.by(() => {
+		const groups = new Map<string, ProxyGroup>();
+		for (const m of models) {
+			const [proxy, ...rest] = m.id.split('/');
+			const name = rest.length > 0 ? rest.join('/') : null;
+			let group = groups.get(proxy);
+			if (!group) {
+				group = {
+					proxy,
+					display_name: m.display_name || proxy,
+					description: m.description,
+					models: [],
+				};
+				groups.set(proxy, group);
+			}
+			group.models.push({ id: m.id, name });
+		}
+		return [...groups.values()];
+	});
+
 	function modelLabel(id: string): string {
-		return multiProxy ? id : (id.split('/').slice(1).join('/') || id);
+		const opt = models.find((m) => m.id === id);
+		const proxyKey = id.split('/')[0];
+		const name = id.includes('/') ? id.split('/').slice(1).join('/') : null;
+		const proxy = opt?.display_name || proxyKey;
+		// Append the model only when the proxy exposes more than one, so a
+		// single-model agent reads as just its name, not "Agent · model".
+		const multiModel = models.filter((m) => m.id.split('/')[0] === proxyKey).length > 1;
+		return name && multiModel ? `${proxy} · ${name}` : proxy;
 	}
 
 	let messages = $state<ChatMessage[]>([]);
@@ -78,6 +143,9 @@
 	let sending = $state(false);
 	let error = $state<string | null>(null);
 	let scroller = $state<HTMLDivElement | null>(null);
+	// Aborts the in-flight streaming request (Esc / Stop button). Non-reactive:
+	// it's plumbing, not rendered state.
+	let abort: AbortController | null = null;
 
 	// Conversation history, served from flowgen's system cache. Summaries only
 	// (no message bodies); the active one is fetched in full on demand. The URL
@@ -228,8 +296,16 @@
 			const res = await fetch(apiUrl('api/agents/models'));
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = await res.json();
-			models = (body.data ?? []).map((m: { id: string }) => m.id);
-			if (models.length > 0) model = models[0];
+			models = (body.data ?? [])
+				// The built-in chat speaks OpenAI (`/chat/completions`); skip proxies
+				// that speak another protocol so they can't be picked and then fail.
+				.filter((m: { protocol?: string }) => (m.protocol ?? 'openai') === 'openai')
+				.map((m: { id: string; display_name?: string; description?: string }) => ({
+					id: m.id,
+					display_name: m.display_name,
+					description: m.description
+				}));
+			if (models.length > 0) model = models[0].id;
 			else modelsError = 'No models registered on the gateway.';
 		} catch (err) {
 			modelsError =
@@ -266,10 +342,12 @@
 		const idx = messages.push({ role: 'assistant', content: '', at: Date.now() }) - 1;
 		await scrollToBottom();
 
+		abort = new AbortController();
 		try {
 			const res = await fetch(apiUrl('api/agents/chat'), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				signal: abort.signal,
 				body: JSON.stringify({
 					model,
 					stream: true,
@@ -302,9 +380,36 @@
 					if (payload === '[DONE]') continue;
 					try {
 						const chunk = JSON.parse(payload);
-						const delta = chunk.choices?.[0]?.delta?.content;
+						const choiceDelta = chunk.choices?.[0]?.delta;
+						const delta = choiceDelta?.content;
 						if (delta) {
 							messages[idx].content += delta;
+							await scrollToBottom();
+						}
+						// Server-side tool calls arrive as standard OpenAI
+						// `delta.tool_calls` frames: an open frame (index + name)
+						// then an arguments fragment, correlated by index. Fold
+						// them into the message's steps section.
+						const toolDeltas = choiceDelta?.tool_calls;
+						if (Array.isArray(toolDeltas)) {
+							// Mutate through the indexed path (messages[idx].steps[i])
+							// so Svelte tracks it; a captured outer ref would not
+							// trigger the UI to update.
+							const steps = messages[idx].steps ?? [];
+							for (const td of toolDeltas) {
+								const i: number = td.index ?? 0;
+								if (!steps[i]) steps[i] = { name: '', arguments: '' };
+								// A new tool call (open frame) ends a text run; break the
+								// paragraph so the post-tool text isn't glued to the pre-tool
+								// text ("data.You have…").
+								if (td.function?.name) {
+									steps[i].name = td.function.name;
+									const c = messages[idx].content;
+									if (c.length > 0 && !c.endsWith('\n')) messages[idx].content = c + '\n\n';
+								}
+								if (td.function?.arguments) steps[i].arguments += td.function.arguments;
+							}
+							messages[idx].steps = steps;
 							await scrollToBottom();
 						}
 					} catch {
@@ -320,19 +425,44 @@
 			// Save the completed turn so it survives a reload.
 			await persistConversation();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Chat request failed.';
-			// Drop the empty assistant bubble on failure.
-			if (messages[idx]?.content.length === 0) messages.splice(idx, 1);
+			// Esc / Stop aborts the fetch; keep whatever streamed so far and
+			// don't surface it as an error.
+			if (err instanceof DOMException && err.name === 'AbortError') {
+				if (messages[idx]) {
+					if (messages[idx].content.length === 0) messages[idx].content = '(stopped)';
+					messages[idx].at = Date.now();
+					await persistConversation();
+				}
+			} else {
+				error = err instanceof Error ? err.message : 'Chat request failed.';
+				// Drop the empty assistant bubble on failure.
+				if (messages[idx]?.content.length === 0) messages.splice(idx, 1);
+			}
 		} finally {
+			abort = null;
 			sending = false;
 			await scrollToBottom();
 		}
+	}
+
+	// Aborts the in-flight streaming request (Esc or the Stop button). The
+	// fetch rejects with an AbortError, handled in `send`'s catch.
+	function stopGenerating() {
+		abort?.abort();
 	}
 
 	function onKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter' && !event.shiftKey) {
 			event.preventDefault();
 			send();
+		}
+	}
+
+	// Esc stops an in-flight generation, from anywhere on the page.
+	function onWindowKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape' && sending) {
+			event.preventDefault();
+			stopGenerating();
 		}
 	}
 
@@ -356,6 +486,8 @@
 <svelte:head>
 	<title>Agents | Flowgen</title>
 </svelte:head>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <section class="flex h-[calc(100vh-4rem)] min-w-0 overflow-hidden">
 	<!-- History pane, mirroring the folders pane in Resources 1:1. -->
@@ -505,21 +637,60 @@
 				</button>
 				<div
 					tabindex="-1"
-					class="dropdown-content z-10 mt-1 max-h-72 w-56 overflow-auto rounded-md border border-base-200 bg-base-100 p-1 shadow-lg"
+					class="dropdown-content z-10 mt-1 max-h-80 w-72 overflow-auto rounded-md border border-base-200 bg-base-100 p-1 shadow-lg"
 				>
-					{#each models as m (m)}
-						<button
-							type="button"
-							class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-base-200"
-							onclick={() => (model = m)}
-						>
-							<span class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
-								{#if model === m}
-									<Icon icon="tabler:check" class="h-3.5 w-3.5" />
+					{#each proxyGroups as group (group.proxy)}
+						{@const single = group.models.length === 1}
+						{#if single}
+							<!-- One model: the header is itself the selectable row; the model
+							     name (if any) rides along as a subtle suffix. -->
+							{@const only = group.models[0]}
+							<button
+								type="button"
+								class="flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-base-200"
+								onclick={() => (model = only.id)}
+							>
+								<span class="mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
+									{#if model === only.id}
+										<Icon icon="tabler:check" class="h-3.5 w-3.5" />
+									{/if}
+								</span>
+								<span class="min-w-0 flex-1">
+									<span class="flex items-baseline gap-1.5">
+										<span class="truncate font-medium">{group.display_name}</span>
+										{#if only.name}
+											<span class="shrink-0 font-mono text-xs opacity-40">{only.name}</span>
+										{/if}
+									</span>
+									{#if group.description}
+										<span class="line-clamp-2 block text-xs opacity-50">{group.description}</span>
+									{/if}
+								</span>
+							</button>
+						{:else}
+							<!-- Proxy with named models: header names the proxy once, models
+							     below are the selectable rows. -->
+							<div class="min-w-0 px-2 pb-0.5 pt-1.5">
+								<div class="truncate text-sm font-medium">{group.display_name}</div>
+								{#if group.description}
+									<span class="line-clamp-2 block text-xs opacity-50">{group.description}</span>
 								{/if}
-							</span>
-							<span class="truncate">{modelLabel(m)}</span>
-						</button>
+							</div>
+							{#each group.models as m (m.id)}
+								<button
+									type="button"
+									class="flex w-full items-center gap-2 rounded py-1 pl-4 pr-2 text-left text-sm hover:bg-base-200"
+									onclick={() => (model = m.id)}
+								>
+									<span class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
+										{#if model === m.id}
+											<Icon icon="tabler:check" class="h-3.5 w-3.5" />
+										{/if}
+									</span>
+									<span class="min-w-0 flex-1 truncate font-mono text-xs">{m.name}</span>
+								</button>
+							{/each}
+						{/if}
 					{/each}
 				</div>
 			</div>
@@ -572,17 +743,31 @@
 				oninput={onInput}
 				disabled={sending || !model}
 			></textarea>
-			<div class="tooltip tooltip-top shrink-0" data-tip="Send">
-				<button
-					type="button"
-					class="btn btn-primary btn-circle btn-sm flex h-8 min-h-8 w-8 items-center justify-center"
-					onclick={send}
-					disabled={sending || !model || input.trim().length === 0}
-					aria-label="Send"
-				>
-					<Icon icon="tabler:arrow-up" class="h-5 w-5" />
-				</button>
-			</div>
+			{#if sending}
+				<!-- While a turn streams, the send button becomes Stop (also Esc). -->
+				<div class="tooltip tooltip-top shrink-0" data-tip="Stop (Esc)">
+					<button
+						type="button"
+						class="btn btn-circle btn-sm flex h-8 min-h-8 w-8 items-center justify-center"
+						onclick={stopGenerating}
+						aria-label="Stop generating"
+					>
+						<Icon icon="tabler:player-stop-filled" class="h-4 w-4" />
+					</button>
+				</div>
+			{:else}
+				<div class="tooltip tooltip-top shrink-0" data-tip="Send">
+					<button
+						type="button"
+						class="btn btn-primary btn-circle btn-sm flex h-8 min-h-8 w-8 items-center justify-center"
+						onclick={send}
+						disabled={!model || input.trim().length === 0}
+						aria-label="Send"
+					>
+						<Icon icon="tabler:arrow-up" class="h-5 w-5" />
+					</button>
+				</div>
+			{/if}
 		</div>
 	{/snippet}
 
@@ -616,22 +801,21 @@
 	{:else}
 		<!-- Conversation: scrolling messages, composer pinned to the bottom. -->
 		<div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
-			<div class="mx-auto flex max-w-3xl flex-col gap-5">
+			<div class="mx-auto flex max-w-4xl flex-col gap-5">
 				{#each messages as m, i (i)}
 					{@const streaming = sending && m.role === 'assistant' && i === messages.length - 1}
-					{@const typing = streaming && m.content.length === 0}
+					{@const steps = m.steps ?? []}
+					{@const hasBody = m.content.length > 0 || steps.length > 0}
+					{@const bareStatus = m.role === 'assistant' && streaming && !hasBody}
 					<div class="group flex flex-col gap-1 {m.role === 'user' ? 'items-end' : 'items-start'}">
-						{#if typing}
-							<span class="flex gap-1 px-1 py-2" aria-label="Assistant is typing">
-								<span class="typing-dot h-1.5 w-1.5 rounded-full bg-base-content/50"></span>
-								<span
-									class="typing-dot h-1.5 w-1.5 rounded-full bg-base-content/50"
-									style="animation-delay: 0.15s"
-								></span>
-								<span
-									class="typing-dot h-1.5 w-1.5 rounded-full bg-base-content/50"
-									style="animation-delay: 0.3s"
-								></span>
+						{#if bareStatus}
+							<!-- Streaming, nothing arrived yet: the shimmering status line
+							     alone stands in for a bubble. -->
+							<span
+								class="chat-status chat-status-live flex items-center gap-1.5 px-1 py-2 text-sm font-medium"
+							>
+								<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-4 w-4" />
+								Working…
 							</span>
 						{:else if m.role === 'user'}
 							<div
@@ -641,15 +825,58 @@
 							</div>
 						{:else}
 							<div
-								class="chat-markdown prose prose-sm max-w-[85%] min-w-0 rounded-2xl border border-base-200 bg-base-100/60 px-4 py-2.5 text-sm text-base-content shadow-sm {streaming
-									? 'chat-streaming'
-									: ''}"
+								class="chat-markdown prose prose-sm max-w-[85%] min-w-0 rounded-2xl border border-base-200 bg-base-100/60 px-4 py-2.5 text-sm text-base-content shadow-sm"
 							>
 								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 								{@html renderMarkdown(m.content)}
+								{#if steps.length > 0}
+									<!-- Tool calls as status lines: `✱ <name>`, expandable to
+									     its arguments. The last one shimmers while streaming. -->
+									<div class="chat-tools mt-3 space-y-0.5 border-t border-base-200 pt-2 text-xs">
+										{#each steps as step, si (step)}
+											{@const live = streaming && si === steps.length - 1}
+											<details class="chat-step">
+												<summary
+													class="chat-status flex cursor-pointer list-none items-center gap-1.5 font-mono {live
+														? 'chat-status-live'
+														: 'text-base-content/50 hover:text-base-content/80'}"
+												>
+													<Icon
+														icon="tabler:tool"
+														mode="mask"
+														class="h-3 w-3 shrink-0 {live ? 'chat-status-pulse' : 'opacity-60'}"
+													/>
+													<span class="truncate">{step.name || 'tool'}{live ? '…' : ''}</span>
+													{#if step.arguments}
+														<Icon
+															icon="tabler:chevron-right"
+															class="chat-step-chevron h-3 w-3 shrink-0 opacity-40"
+														/>
+													{/if}
+												</summary>
+												{#if step.arguments}
+													<pre
+														class="mt-0.5 ml-4 overflow-x-auto whitespace-pre-wrap break-words rounded bg-base-200/50 px-2 py-1 text-[11px] leading-snug text-base-content/60">{formatStepArgs(
+															step.arguments
+														)}</pre>
+												{/if}
+											</details>
+										{/each}
+									</div>
+								{/if}
+								{#if streaming && (steps.length === 0 || m.content.length > 0)}
+									<!-- Text is streaming (no fresh tool call to shimmer): a
+									     working status line marks progress instead of a cursor. -->
+									<span
+										class="chat-status chat-status-live mt-2 flex items-center gap-1.5 text-xs font-medium"
+									>
+										<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-3.5 w-3.5" />
+										Working…
+									</span>
+								{/if}
 							</div>
 						{/if}
-						{#if !typing && !streaming}
+						{#if !streaming && !bareStatus}
 							<div
 								class="flex items-center gap-1 px-1 opacity-0 transition-opacity group-hover:opacity-100 {m.role ===
 								'user'
@@ -668,7 +895,7 @@
 		</div>
 
 		{#if error}
-			<div class="mx-auto w-full max-w-3xl px-6">
+			<div class="mx-auto w-full max-w-4xl px-6">
 				<div class="alert alert-error alert-sm mb-2" role="alert">
 					<span>{error}</span>
 				</div>
@@ -676,7 +903,7 @@
 		{/if}
 
 		<div class="shrink-0 px-6 pb-6 pt-2">
-			<div class="mx-auto max-w-3xl">
+			<div class="mx-auto max-w-4xl">
 				{@render composer()}
 			</div>
 		</div>
@@ -791,26 +1018,47 @@
 		}
 	}
 
-	/* Blinking cursor appended after the last content element while streaming,
-	   so it reads as the last character rather than a stray bar below. */
-	.chat-streaming :global(> :last-child)::after {
-		content: '';
-		display: inline-block;
-		width: 0.4rem;
-		height: 1em;
-		margin-left: 0.15rem;
-		vertical-align: text-bottom;
-		background: var(--color-base-content);
-		opacity: 0.6;
-		animation: chat-cursor-blink 1s step-end infinite;
+	/* Live status label: brand-green gradient text, shimmering while a turn is
+	   in progress. Reuses the shared `edge-shimmer` keyframes. */
+	.chat-status-live {
+		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background-size: 200% 200%;
+		-webkit-background-clip: text;
+		background-clip: text;
+		-webkit-text-fill-color: transparent;
+		color: transparent;
+		animation: edge-shimmer 2.5s ease-in-out infinite;
 	}
-	@keyframes chat-cursor-blink {
+	/* The working icon renders in iconify `mode="mask"` (a <span> with a
+	   mask), so the same animated gradient shows through the icon shape — it
+	   shimmers in lockstep with the text. Also gently pulses. Targeted via
+	   :global because it lands on the iconify element. */
+	:global(.chat-status-pulse) {
+		background: linear-gradient(120deg, #006b55 0%, #00b4a6 50%, #00e168 100%);
+		background-size: 200% 200%;
+		animation:
+			edge-shimmer 2.5s ease-in-out infinite,
+			chat-pulse 1.6s ease-in-out infinite;
+	}
+	@keyframes chat-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
 		50% {
-			opacity: 0;
+			opacity: 0.45;
 		}
 	}
+	/* Disclosure chevron rotates when its step is expanded. */
+	.chat-step[open] :global(.chat-step-chevron) {
+		transform: rotate(90deg);
+	}
+	.chat-step :global(.chat-step-chevron) {
+		transition: transform 0.15s ease;
+	}
 	@media (prefers-reduced-motion: reduce) {
-		.chat-streaming :global(> :last-child)::after {
+		.chat-status-live,
+		:global(.chat-status-pulse) {
 			animation: none;
 		}
 	}
@@ -854,5 +1102,36 @@
 	}
 	.chat-markdown :global(p:last-child) {
 		margin-bottom: 0;
+	}
+	/* Tables: scroll horizontally inside the bubble rather than overflowing it,
+	   with light rules so columns read cleanly. */
+	.chat-markdown :global(table) {
+		display: block;
+		width: 100%;
+		max-width: 100%;
+		overflow-x: auto;
+		border-collapse: collapse;
+		font-size: 0.8125rem;
+		margin: 0.5rem 0;
+	}
+	.chat-markdown :global(th),
+	.chat-markdown :global(td) {
+		border: 1px solid var(--color-base-200);
+		padding: 0.3rem 0.55rem;
+		text-align: left;
+		white-space: nowrap;
+		vertical-align: top;
+	}
+	.chat-markdown :global(th) {
+		background: color-mix(in oklab, var(--color-base-200) 45%, transparent);
+		font-weight: 600;
+	}
+	/* Tool step args: reset the prose <pre> treatment so they stay compact. */
+	.chat-tools :global(pre) {
+		margin: 0.125rem 0 0;
+		padding: 0.25rem 0.5rem;
+		border-radius: 0.3rem;
+		background: color-mix(in oklab, var(--color-base-200) 50%, transparent);
+		line-height: 1.4;
 	}
 </style>
