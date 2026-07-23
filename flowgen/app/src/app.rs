@@ -467,17 +467,13 @@ impl App {
                 .map_err(|e| Error::Pattern { source: e })?
                 .filter_map(|path| match path {
                     Ok(path) => {
-                        // Skip entries whose relative path has a hidden
-                        // (dot-prefixed) segment. A ConfigMap volume presents
-                        // each file three ways — the clean top-level name, a
-                        // `..data` symlink, and a timestamped `..<ts>` directory
-                        // that is replaced on every reload — and a recursive
-                        // glob matches all three. Only the clean top-level name
-                        // has no dot-prefixed segment, so this both deduplicates
-                        // the entry and keeps identity stable across reloads.
-                        // The rule is the POSIX hidden-file convention, not a
-                        // Kubernetes-specific one, so it needs no knowledge of
-                        // the `..data` layout.
+                        // Skip entries with a hidden (dot-prefixed) path
+                        // segment. A ConfigMap mount exposes each file three
+                        // ways (clean name, `..data` symlink, timestamped
+                        // `..<ts>` dir) and a recursive glob matches all three;
+                        // only the clean name has no dot segment, which both
+                        // dedupes the entry and keeps identity stable across
+                        // reloads.
                         if let Ok(rel) = path.strip_prefix(&root_str) {
                             let hidden = rel.components().any(|c| {
                                 matches!(c, std::path::Component::Normal(seg)
@@ -644,12 +640,10 @@ impl App {
         };
 
         let mut flow_configs = filesystem_flows;
-        // Reject two filesystem flows that resolve to the same identity before
-        // anything keys on it. Distinct files normally yield distinct paths,
-        // but an unusual mount layout (for example a symlinked config volume)
-        // can canonicalize two files onto the same relative path; failing fast
-        // here beats a silent collision on the registry, cache namespace, and
-        // lease key downstream.
+        // Reject two filesystem flows resolving to the same identity before
+        // anything keys on it — an unusual mount layout can collapse two files
+        // onto one relative path, and a silent collision on the registry,
+        // cache, and lease keys downstream is worse than failing fast here.
         let mut identities: HashSet<&str> = HashSet::new();
         for config in &flow_configs {
             if !identities.insert(config.identity()) {
@@ -1266,19 +1260,14 @@ impl App {
     }
 }
 
-/// Computes the identity of a filesystem-loaded flow: path relative to
-/// `source_root`, extension stripped, slashes normalized to `/`. Returns
-/// `None` when the file lies outside `source_root` or when either input
-/// is missing — callers use the fallback identity in that case.
 /// Derives a flow's identity from its path relative to the flows root.
 ///
 /// Both paths are compared as authored, not as resolved on disk: the caller
 /// passes the un-canonicalized path so a symlinked mount (for example a
 /// Kubernetes ConfigMap's `..data` indirection) does not leak into the
-/// identity. `.` and redundant separators are normalized purely, without
-/// touching the filesystem, so a relative or `.`-laden root still strips
-/// cleanly. `..` segments are not expected here (flow paths live under the
-/// root) and are left untouched rather than resolved.
+/// identity. `.` and redundant separators are normalized purely, so a
+/// relative or `.`-laden root still strips cleanly. Returns `None` when the
+/// file lies outside the root or either input is missing.
 fn compute_source_path(
     file: &std::path::Path,
     source_root: Option<&std::path::Path>,
@@ -1355,8 +1344,6 @@ mod tests {
 
     #[test]
     fn compute_source_path_normalizes_dot_segments_in_relative_root() {
-        // A relative or `.`-laden root must still strip cleanly without
-        // resolving the filesystem, so identity stays stable off-canonical.
         let root = PathBuf::from("flows/./");
         let file = PathBuf::from("flows/demo/reader.yaml");
         assert_eq!(
@@ -1365,13 +1352,6 @@ mod tests {
         );
     }
 
-    // Reproduces the Kubernetes ConfigMap mount layout: `flows.path` is the
-    // mount point, and each entry is a symlink chain
-    // `foo.yaml -> ..data/foo.yaml -> ..<timestamp>/foo.yaml`. The timestamped
-    // directory is replaced on every ConfigMap update. Deriving identity from
-    // the canonicalized file path folds that timestamp into the identity, so a
-    // reload mints a new identity (and a new lease and cache namespace) for the
-    // same flow — the load path must derive identity from the un-resolved path.
     #[test]
     fn identity_is_stable_across_configmap_reloads() {
         use std::os::unix::fs::symlink;
@@ -1380,7 +1360,6 @@ mod tests {
         let root = dir.path().join("flows");
         std::fs::create_dir(&root).unwrap();
 
-        // `..2026_..._A/system_sync_workspace.yaml` — the first mount.
         let data_a = root.join("..2026_07_23_09_00_00.111111111");
         std::fs::create_dir(&data_a).unwrap();
         std::fs::write(
@@ -1397,8 +1376,6 @@ mod tests {
 
         let identity_before = derive_configmap_identity(&root);
 
-        // Simulate a ConfigMap reload: a new timestamped directory, `..data`
-        // atomically re-pointed at it, the entry symlink unchanged.
         let data_b = root.join("..2026_07_24_18_30_00.222222222");
         std::fs::create_dir(&data_b).unwrap();
         std::fs::write(
@@ -1411,17 +1388,12 @@ mod tests {
 
         let identity_after = derive_configmap_identity(&root);
 
-        // Exactly one identity survives the hidden-segment filter — the clean
-        // top-level name — even though the glob matched the file three ways.
         assert_eq!(identity_before, vec!["system_sync_workspace".to_string()]);
         assert_eq!(
             identity_before, identity_after,
             "identity must not change when the ConfigMap is reloaded"
         );
 
-        // Prove the filter is load-bearing: without it, the glob yields the
-        // two hidden variants as well, and the timestamped one changes across
-        // the reload — exactly the instability the filter removes.
         let unfiltered: Vec<String> = glob::glob(&format!("{}/**/*.yaml", root.display()))
             .unwrap()
             .flatten()
@@ -1435,27 +1407,17 @@ mod tests {
         );
     }
 
-    // Reproduces the loader's discovery for one directory: recursively glob
-    // every `*.yaml`, apply the same hidden-segment filter the loader applies,
-    // and derive identity from the surviving path. This exercises the actual
-    // fix — a helper that only inspected a hand-picked clean path would pass
-    // trivially even if the filter were removed.
-    #[cfg(test)]
     fn derive_configmap_identity(root: &std::path::Path) -> Vec<String> {
         let pattern = format!("{}/**/*.yaml", root.display());
         let mut identities: Vec<String> = glob::glob(&pattern)
             .unwrap()
             .flatten()
-            .filter(|path| {
-                // Same rule as the loader: drop any entry with a hidden
-                // (dot-prefixed) segment in its path relative to the root.
-                match path.strip_prefix(root) {
-                    Ok(rel) => !rel.components().any(|c| {
-                        matches!(c, std::path::Component::Normal(seg)
+            .filter(|path| match path.strip_prefix(root) {
+                Ok(rel) => !rel.components().any(|c| {
+                    matches!(c, std::path::Component::Normal(seg)
                             if seg.to_string_lossy().starts_with('.'))
-                    }),
-                    Err(_) => true,
-                }
+                }),
+                Err(_) => true,
             })
             .filter_map(|path| compute_source_path(&path, Some(root)))
             .collect();

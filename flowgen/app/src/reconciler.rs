@@ -122,7 +122,7 @@ async fn cleanup_stale_cache_entries(ctx: &ReconcilerContext) {
         .cache
         .as_ref()
         .map(|c| c.prefix.as_str())
-        .unwrap_or("flowgen.flows");
+        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
 
     let keys = match ctx.cache.list_keys(prefix).await {
         Ok(k) => k,
@@ -480,7 +480,7 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
         .cache
         .as_ref()
         .map(|c| c.prefix.as_str())
-        .unwrap_or("flowgen.flows");
+        .unwrap_or(crate::config::DEFAULT_FLOWS_CACHE_PREFIX);
 
     key.strip_prefix(&format!("{prefix}."))
         .map(str::to_string)
@@ -650,7 +650,7 @@ mod tests {
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
         };
 
-        let name = derive_flow_name("flowgen.flows.default-test", &ctx);
+        let name = derive_flow_name("flows.default-test", &ctx);
         assert_eq!(name, Some("default-test".to_string()));
     }
 

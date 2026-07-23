@@ -2,6 +2,19 @@
 
 ## 0.129.0
 
+### Breaking
+
+- **Default cache key prefixes dropped the `flowgen.` segment.** The
+  default flow and resource cache prefixes changed from `flowgen.flows`
+  and `flowgen.resources` to `flows` and `resources` — the bucket
+  (`flowgen_system`) already namespaces by `flowgen`, so the prefix no
+  longer repeats it. Deployments that relied on the defaults will find
+  their existing `flowgen.flows.*` / `flowgen.resources.*` cache keys
+  orphaned after upgrade: re-run the workspace sync (or re-push the
+  artifact) so the bootstrap flow rewrites the keys under the new prefix
+  and deletes the stale ones. Deployments that set `flows.cache.prefix`
+  and `resources.cache.prefix` explicitly are unaffected.
+
 ### Fixes
 
 - **Flows in nested folders no longer fail on leader election and
@@ -23,6 +36,14 @@
   symlinked config mount), the process exits with a clear error instead
   of letting the two silently share a registry entry, cache namespace,
   and lease key.
+
+- **`oci_sync` and `git_sync` tasks now report activity.** Both process
+  each event in a spawned task that did not carry the tracing span, so
+  their events — including the "digest unchanged, skipping" log — were
+  emitted without a `flow` or `task` field. The admin UI therefore showed
+  no activity on these nodes and the logs were unattributed. The spawned
+  task now inherits the task span, so both surface per-event activity like
+  every other task.
 
 - **Flow identity is stable across ConfigMap reloads.** Flows loaded from
   a directory now ignore hidden (dot-prefixed) path segments during

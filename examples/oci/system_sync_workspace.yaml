@@ -1,11 +1,14 @@
 # Bootstrap flow: reconciles a full flowgen workspace (flows + resources)
 # from a single OCI artifact into the system NATS KV cache. Each tick
 # pulls the artifact, routes each layer by its top-level directory —
-# `flows/` layers are keyed by `flow.name` under `flowgen.flows.`,
-# `resources/` layers are keyed by their path (with the `resources/`
-# prefix stripped) under `flowgen.resources.`. Any other files in the
-# artifact are ignored. Cache entries no longer present in the artifact
-# are deleted.
+# `flows/` layers are keyed by their path under `flows.` (the
+# `flows/` prefix and file extension stripped, so `flows/demo/foo.yaml`
+# becomes `flows.demo/foo`), `resources/` layers are keyed by
+# their path under `resources.`. Keying by path preserves the
+# folder structure as the flow's identity, so the admin UI groups flows
+# into the same folders they occupy in the artifact. Any other files in
+# the artifact are ignored. Cache entries no longer present in the
+# artifact are deleted.
 #
 # Flows and resources ship together in one release cadence — one image,
 # one digest, one `docker push` per change.
@@ -64,7 +67,7 @@ flow:
         url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: list
-        key_prefix: "flowgen.flows."
+        key_prefix: "flows."
         # Include current values so compute_diff can skip put actions
         # when the YAML in cache already matches — every put bumps the
         # KV revision and fires a watcher hot-reload on every pod,
@@ -84,7 +87,7 @@ flow:
         url: "{{env.NATS_URL}}"
         bucket: flowgen_system
         operation: list
-        key_prefix: "flowgen.resources."
+        key_prefix: "resources."
         include_values: true
 
     # Short-circuit only when nothing has drifted: the artifact digest
@@ -112,9 +115,9 @@ flow:
           }
 
     # Route each layer by its top-level directory:
-    #   flows/foo.yaml     → flowgen.flows.<parsed flow.name>
-    #   resources/bar.sql  → flowgen.resources.bar.sql
-    #   anything else      → dropped (README.md, etc.)
+    #   flows/demo/foo.yaml → flows.demo/foo   (path is identity)
+    #   resources/bar.sql   → resources.bar.sql
+    #   anything else       → dropped (README.md, etc.)
     # Then diff against both cache prefixes: layers become puts, cache
     # keys with no matching layer become deletes.
     - script:
@@ -129,10 +132,10 @@ flow:
           let actions = [];
           for layer in layers {
               let key = if layer.path.starts_with("flows/") {
-                  let parsed = parse_yaml(layer.content);
-                  "flowgen.flows." + parsed.flow.name
+                  let rel = layer.path.sub_string(6);
+                  "flows." + regex_replace(rel, "\\.(yaml|yml|json)$", "")
               } else if layer.path.starts_with("resources/") {
-                  "flowgen.resources." + layer.path.sub_string(10)
+                  "resources." + layer.path.sub_string(10)
               } else {
                   continue;
               };
@@ -140,7 +143,7 @@ flow:
               // Skip puts when the cache already holds the same content
               // — every revision bump triggers a watcher hot-reload on
               // every pod, which races leader-election leases.
-              let cached = if key.starts_with("flowgen.flows.") {
+              let cached = if key.starts_with("flows.") {
                   current_flows[key]
               } else {
                   current_resources[key]

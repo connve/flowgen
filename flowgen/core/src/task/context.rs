@@ -41,7 +41,7 @@ impl FlowOptions {
         }
     }
 
-    /// Returns the hard, key-safe flow id — the base64url encoding of
+    /// Returns the key-safe flow id — the base64url encoding of
     /// [`identity`](Self::identity). Use for every value that becomes a cache
     /// or lease key, or is hashed for peer ownership. Delegates to the single
     /// core encoder so every key form agrees byte-for-byte.

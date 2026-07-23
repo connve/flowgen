@@ -31,11 +31,8 @@ impl FlowIdentity {
         &self.0
     }
 
-    /// Returns the key-safe id — the base64url encoding of the identity,
-    /// restricted to `[A-Za-z0-9_-]`. Use for every value that becomes a
-    /// cache or lease key, or is hashed for peer ownership. The encoding is
-    /// bijective, so distinct identities never collide, and it decodes back
-    /// to the identity for operator debugging.
+    /// Returns the key-safe id — see [`encode_key`]. Use for any cache or
+    /// lease key, or as a peer-ownership hash input.
     pub fn as_key(&self) -> String {
         encode_key(&self.0)
     }

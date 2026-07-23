@@ -16,6 +16,14 @@ fn default_nats_url() -> String {
 /// Default cache database name.
 pub const DEFAULT_CACHE_DB_NAME: &str = "flowgen_cache";
 
+/// Default cache key prefix for flows. The bucket already namespaces by
+/// `flowgen`, so the prefix does not repeat it.
+pub const DEFAULT_FLOWS_CACHE_PREFIX: &str = "flows";
+
+/// Default cache key prefix for resources. The bucket already namespaces by
+/// `flowgen`, so the prefix does not repeat it.
+pub const DEFAULT_RESOURCES_CACHE_PREFIX: &str = "resources";
+
 /// Supported flow configuration file extensions for recursive discovery.
 pub const FLOW_CONFIG_EXTENSIONS: &[&str] = &["yaml", "yml", "json"];
 
@@ -455,7 +463,7 @@ pub struct FlowOptions {
 
 /// Default cache key prefix for flows.
 fn default_flows_cache_prefix() -> String {
-    "flowgen.flows".to_string()
+    DEFAULT_FLOWS_CACHE_PREFIX.to_string()
 }
 
 /// Default metadata bucket name for flow/resource loading.
@@ -468,7 +476,7 @@ fn default_system_db_name() -> String {
 pub struct FlowCacheOptions {
     /// Whether to load flows from the cache instead of the filesystem.
     pub enabled: bool,
-    /// Optional cache key prefix (defaults to "flowgen.flows").
+    /// Optional cache key prefix (defaults to "flows").
     #[serde(default = "default_flows_cache_prefix")]
     pub prefix: String,
     /// Metadata store bucket name (defaults to "flowgen_system").
@@ -500,7 +508,7 @@ pub struct ResourceOptions {
 
 /// Default cache key prefix for resources.
 fn default_resources_cache_prefix() -> String {
-    "flowgen.resources".to_string()
+    DEFAULT_RESOURCES_CACHE_PREFIX.to_string()
 }
 
 /// Cache-based resource loading options.
@@ -508,7 +516,7 @@ fn default_resources_cache_prefix() -> String {
 pub struct ResourceCacheOptions {
     /// Whether to load resources from the cache instead of the filesystem.
     pub enabled: bool,
-    /// Optional cache key prefix (defaults to "flowgen.resources").
+    /// Optional cache key prefix (defaults to "resources").
     #[serde(default = "default_resources_cache_prefix")]
     pub prefix: String,
     /// Metadata store bucket name (defaults to "flowgen_system").

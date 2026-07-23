@@ -14,7 +14,7 @@ use oci_client::{Client, Reference};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info};
+use tracing::{error, info, Instrument};
 
 /// Rewrites `/`, `:`, `@` in an OCI reference to hyphens so it fits
 /// the cache key alphabet.
@@ -806,41 +806,44 @@ impl flowgen_core::task::runner::Runner for Processor {
                     let handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     let event_clone = event.clone();
-                    let handle = tokio::spawn(async move {
-                        let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                            match handler.handle(event_clone.clone()).await {
-                                Ok(()) => Ok(()),
-                                Err(e) => {
-                                    let is_permanent = matches!(
-                                        &e,
-                                        Error::InvalidReference { .. }
-                                            | Error::ParseCredentials { .. }
-                                            | Error::InvalidLayerEncoding { .. }
-                                            | Error::FileTooLarge { .. }
-                                            | Error::ArtifactTooLarge { .. }
-                                    );
-                                    error!(error = %e, "OCI sync failed");
-                                    if is_permanent {
-                                        Err(tokio_retry::RetryError::permanent(e))
-                                    } else {
-                                        Err(tokio_retry::RetryError::transient(e))
+                    let handle = tokio::spawn(
+                        async move {
+                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
+                                match handler.handle(event_clone.clone()).await {
+                                    Ok(()) => Ok(()),
+                                    Err(e) => {
+                                        let is_permanent = matches!(
+                                            &e,
+                                            Error::InvalidReference { .. }
+                                                | Error::ParseCredentials { .. }
+                                                | Error::InvalidLayerEncoding { .. }
+                                                | Error::FileTooLarge { .. }
+                                                | Error::ArtifactTooLarge { .. }
+                                        );
+                                        error!(error = %e, "OCI sync failed");
+                                        if is_permanent {
+                                            Err(tokio_retry::RetryError::permanent(e))
+                                        } else {
+                                            Err(tokio_retry::RetryError::transient(e))
+                                        }
                                     }
                                 }
-                            }
-                        })
-                        .await;
+                            })
+                            .await;
 
-                        if let Err(err) = result {
-                            error!(error = %err, "OCI sync exhausted all retry attempts");
-                            let mut error_event = event_clone.clone();
-                            error_event.error = Some(err.to_string());
-                            if let Some(ref tx) = handler.tx {
-                                tx.send(error_event).await.ok();
-                            } else if let Some(arc) = event_clone.completion_tx.as_ref() {
-                                arc.signal_completion_with_error(err.to_string());
+                            if let Err(err) = result {
+                                error!(error = %err, "OCI sync exhausted all retry attempts");
+                                let mut error_event = event_clone.clone();
+                                error_event.error = Some(err.to_string());
+                                if let Some(ref tx) = handler.tx {
+                                    tx.send(error_event).await.ok();
+                                } else if let Some(arc) = event_clone.completion_tx.as_ref() {
+                                    arc.signal_completion_with_error(err.to_string());
+                                }
                             }
                         }
-                    });
+                        .instrument(tracing::Span::current()),
+                    );
                     handlers.push(handle);
                 }
                 None => {
