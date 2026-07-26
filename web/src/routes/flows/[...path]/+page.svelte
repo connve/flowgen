@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, type FlowDetail } from '$lib/api';
-	import { activitiesFor } from '$lib/activityStore.svelte';
+	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 
 	let detail = $state<FlowDetail | null>(null);
 	let loading = $state(true);
@@ -34,6 +34,10 @@
 			.finally(() => {
 				loading = false;
 			});
+	});
+
+	onDestroy(() => {
+		releaseFlowSubscription();
 	});
 </script>
 

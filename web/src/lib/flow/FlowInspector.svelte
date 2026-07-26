@@ -8,12 +8,13 @@
 	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl } from '$lib/api';
+	import type { ActivityLevel } from '$lib/logRecord';
 
 	interface Activity {
 		flow: string;
 		task: string | null;
 		task_type: string | null;
-		level: 'info' | 'warning' | 'error';
+		level: ActivityLevel;
 		ts_ms: number;
 		message: string;
 		duration_ms?: number;
@@ -50,6 +51,10 @@
 
 	// Latest-per-task snapshot: level for the status pill, duration for the
 	// inline badge. Both feed the DAG so the user sees "just processed, took Xms".
+	// The badge is an operational health signal, not a log viewer, so it
+	// only ever reflects info/warning/error — a debug/trace event landing
+	// after a task's last info!() must not blank out that "just succeeded"
+	// signal, so those levels are skipped entirely when picking "latest".
 	interface NodeState {
 		level: 'info' | 'warning' | 'error';
 		ts_ms: number;
@@ -59,6 +64,7 @@
 		const map = new Map<string, NodeState>();
 		for (const a of activities) {
 			if (!a.task) continue;
+			if (a.level !== 'info' && a.level !== 'warning' && a.level !== 'error') continue;
 			const prev = map.get(a.task);
 			if (!prev || a.ts_ms >= prev.ts_ms) {
 				map.set(a.task, { level: a.level, ts_ms: a.ts_ms, duration_ms: a.duration_ms });

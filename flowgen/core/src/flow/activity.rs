@@ -1,28 +1,44 @@
-//! Per-flow activity tracking sourced from the standard `tracing` events.
+//! Per-flow metrics (counters, last-seen timestamps, derived status)
+//! sourced from the standard `tracing` events.
+//!
+//! Counters/status are a separate domain from log/event history — that
+//! lives behind [`crate::telemetry::query::LogsStore`]. This module owns
+//! the [`MetricsStore`] trait so the admin API and the tracing layer stay
+//! backend-agnostic: [`OtlpMetricsStore`] is today's only implementation,
+//! and whether its numbers live purely in the local atomic counters or
+//! also get pushed to a vendor is OTLP-export config on that one impl,
+//! not a second Rust type — the OTel spec standardizes metrics push, so
+//! one implementation covers every vendor.
 //!
 //! A custom [`tracing_subscriber::Layer`] (`flow_activity_layer`) captures
 //! every `info!` / `warn!` / `error!` emitted inside a `task.handle` span,
 //! walks the parent scope to recover the owning flow/task names, and:
 //!
-//! 1. Bumps atomic counters + last-seen timestamps on a [`FlowRegistry`]
-//!    shared with the admin API.
+//! 1. Bumps atomic counters + last-seen timestamps on the shared
+//!    [`MetricsStore`] behind the admin API.
 //! 2. Records the same signal into OpenTelemetry counters so downstream
 //!    dashboards see identical numbers.
 //!
 //! Log body + attributes for the admin UI come from the native
 //! `tracing_subscriber::fmt::json()` writer through
-//! `flowgen_core::telemetry::query::MemoryLogsWriter` — no re-emit here.
+//! `flowgen_core::telemetry::query::MemoryLogsStoreWriter` — no re-emit here.
 //!
 //! The layer lives in `activity_layer.rs`; this module owns the plain-data
 //! primitives so it can be depended on without pulling the tracing layer
 //! in.
 
+use async_trait::async_trait;
+use futures_util::stream::BoxStream;
+use futures_util::StreamExt;
 use opentelemetry::metrics::Counter;
 use opentelemetry::KeyValue;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 
 /// Reason a flow's last activity happened. Mirrors tracing levels the
 /// runtime uses so callers can render icons/badges without ad-hoc mapping.
@@ -203,32 +219,85 @@ pub struct RecordedEvent {
     pub event_id: Option<String>,
 }
 
-/// Shared handle carried around by app and telemetry: aggregates
-/// per-flow metrics and re-emits each classified event through the
-/// tracing subscriber so the OTel logs bridge can forward it to
-/// whichever telemetry backend is configured. SSE subscribers on any
-/// replica then read the same records back through `LogsQuery`.
-#[derive(Debug)]
-pub struct FlowRegistry {
-    inner: RwLock<HashMap<String, Arc<FlowMetrics>>>,
-    counters: OnceLock<Counters>,
+/// Errors returned by [`MetricsStore`] implementations.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum MetricsStoreError {
+    #[error("Metrics store backend error: {source}")]
+    Backend {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
-/// Builder for [`FlowRegistry`]. Follows the same shape as
+/// Type alias for metrics store errors.
+pub type Error = MetricsStoreError;
+
+/// Backend-agnostic per-flow metrics facade: counters, last-seen
+/// timestamps, and derived status. Separate domain from log/event
+/// history ([`crate::telemetry::query::LogsStore`]) — a flow's activity
+/// panel reads its event list from `LogsStore` and its metrics/status
+/// from this trait.
+#[async_trait]
+pub trait MetricsStore: Debug + Send + Sync {
+    /// Records one classified event for `flow`, bumping its counters
+    /// and last-seen timestamp for the event's level. Synchronous:
+    /// called from the tracing `Layer::on_event` hot path, which must
+    /// not block or touch the async runtime.
+    fn record(&self, flow: &str, event: RecordedEvent);
+
+    /// Snapshot every flow's current counters.
+    async fn snapshot_all(&self) -> Result<Vec<FlowMetricsSnapshot>, Error>;
+
+    /// Snapshot a single flow's counters, or `None` when no event has
+    /// ever been recorded for it.
+    async fn snapshot(&self, flow: &str) -> Result<Option<FlowMetricsSnapshot>, Error>;
+
+    /// Subscribes to a flow's updated snapshot every time `record` bumps
+    /// its counters. Mirrors `LogsStore::tail`'s push-on-write shape so
+    /// SSE consumers don't need to poll.
+    async fn watch_all(&self) -> Result<BoxStream<'static, FlowMetricsSnapshot>, Error>;
+}
+
+/// The one [`MetricsStore`] implementation: local atomic counters plus
+/// OpenTelemetry counter emission (`flowgen.flow.events/warnings/errors`).
+/// OTLP is a push standard, so this single implementation covers every
+/// vendor behind the configured OTel exporter — an in-memory-only setup
+/// and a vendor-backed one differ only in exporter config, not in Rust
+/// type. `snapshot`/`snapshot_all` read the local counters; a
+/// vendor-backed deployment that wants the admin UI's numbers to reflect
+/// the vendor's own view would read through the vendor's query API
+/// instead (not yet implemented — no second vendor read path exists).
+#[derive(Debug)]
+pub struct OtlpMetricsStore {
+    inner: RwLock<HashMap<String, Arc<FlowMetrics>>>,
+    counters: OnceLock<Counters>,
+    tx: broadcast::Sender<FlowMetricsSnapshot>,
+}
+
+/// Builder for [`OtlpMetricsStore`]. Follows the same shape as
 /// `flowgen_nats::cache::CacheBuilder` so consumers stay consistent
 /// across the workspace.
 #[derive(Default)]
-pub struct FlowRegistryBuilder {}
+pub struct OtlpMetricsStoreBuilder {}
 
-impl FlowRegistryBuilder {
+/// Broadcast channel capacity for `watch_all` subscribers. Small on
+/// purpose: subscribers care about the latest snapshot per flow, not a
+/// backlog — a slow subscriber sees dropped frames rather than the
+/// writer backing up.
+const WATCH_CHANNEL_CAPACITY: usize = 256;
+
+impl OtlpMetricsStoreBuilder {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn build(self) -> Arc<FlowRegistry> {
-        Arc::new(FlowRegistry {
+    pub fn build(self) -> Arc<OtlpMetricsStore> {
+        let (tx, _rx) = broadcast::channel(WATCH_CHANNEL_CAPACITY);
+        Arc::new(OtlpMetricsStore {
             inner: RwLock::new(HashMap::new()),
             counters: OnceLock::new(),
+            tx,
         })
     }
 }
@@ -240,19 +309,9 @@ struct Counters {
     errors: Counter<u64>,
 }
 
-impl FlowRegistry {
-    pub fn builder() -> FlowRegistryBuilder {
-        FlowRegistryBuilder::new()
-    }
-
-    /// Called by the tracing layer for every classified event. Bumps
-    /// local counters synchronously and updates the OTel metrics
-    /// counter. The tracing event itself already flows to stdout / the
-    /// memory logs writer through the `fmt::json` layer.
-    pub fn record(&self, flow: &str, event: RecordedEvent) {
-        let metrics = self.slot(flow);
-        metrics.record(event.level, event.ts_ms);
-        self.emit_otel(flow, event.task.as_deref(), event.level);
+impl OtlpMetricsStore {
+    pub fn builder() -> OtlpMetricsStoreBuilder {
+        OtlpMetricsStoreBuilder::new()
     }
 
     fn slot(&self, flow: &str) -> Arc<FlowMetrics> {
@@ -302,29 +361,58 @@ impl FlowRegistry {
             ActivityLevel::Error => counters.errors.add(1, &attrs),
         }
     }
+}
+
+#[async_trait]
+impl MetricsStore for OtlpMetricsStore {
+    /// Bumps local counters synchronously and updates the OTel metrics
+    /// counter. The tracing event itself already flows to stdout / the
+    /// memory logs writer through the `fmt::json` layer. Publishes the
+    /// flow's updated snapshot to `watch_all` subscribers.
+    fn record(&self, flow: &str, event: RecordedEvent) {
+        let metrics = self.slot(flow);
+        metrics.record(event.level, event.ts_ms);
+        self.emit_otel(flow, event.task.as_deref(), event.level);
+        // No subscribers is the common case (no SSE client connected) and
+        // not an error — nothing to do with the send result either way.
+        match self.tx.send(metrics.snapshot(flow.to_string())) {
+            Ok(_) | Err(broadcast::error::SendError(_)) => {}
+        }
+    }
 
     /// Snapshot every flow's current counters. Used by the REST API and
     /// as the initial payload SSE consumers receive on connect.
-    pub fn snapshot_all(&self) -> Vec<FlowMetricsSnapshot> {
+    async fn snapshot_all(&self) -> Result<Vec<FlowMetricsSnapshot>, Error> {
         let guard = match self.inner.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard
+        Ok(guard
             .iter()
             .map(|(flow, metrics)| metrics.snapshot(flow.clone()))
-            .collect()
+            .collect())
     }
 
     /// Snapshot a single flow, returning `None` when no event has ever
     /// been recorded for it (so the API can distinguish "unknown" from
     /// "known but idle").
-    pub fn snapshot(&self, flow: &str) -> Option<FlowMetricsSnapshot> {
+    async fn snapshot(&self, flow: &str) -> Result<Option<FlowMetricsSnapshot>, Error> {
         let guard = match self.inner.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.get(flow).map(|m| m.snapshot(flow.to_string()))
+        Ok(guard.get(flow).map(|m| m.snapshot(flow.to_string())))
+    }
+
+    /// Subscribes to the broadcast channel `record` publishes to. Lagged
+    /// subscribers (channel full) drop frames rather than block the
+    /// writer, same trade-off as `LogsStore::tail`.
+    async fn watch_all(&self) -> Result<BoxStream<'static, FlowMetricsSnapshot>, Error> {
+        let rx = self.tx.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .filter_map(|res| async move { res.ok() })
+            .boxed();
+        Ok(stream)
     }
 }
 
@@ -352,10 +440,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn record_updates_counters_across_levels() {
-        let reg = FlowRegistry::builder().build();
-        reg.record(
+    #[tokio::test]
+    async fn record_updates_counters_across_levels() {
+        let store = OtlpMetricsStore::builder().build();
+        store.record(
             "f",
             RecordedEvent {
                 task: Some("t".into()),
@@ -367,7 +455,7 @@ mod tests {
                 event_id: None,
             },
         );
-        reg.record(
+        store.record(
             "f",
             RecordedEvent {
                 task: Some("t".into()),
@@ -380,11 +468,39 @@ mod tests {
             },
         );
 
-        let snapshot = reg.snapshot("f").expect("flow must be registered");
+        let snapshot = store
+            .snapshot("f")
+            .await
+            .unwrap()
+            .expect("flow must be registered");
         assert_eq!(snapshot.events_total, 1);
         assert_eq!(snapshot.errors_total, 1);
         assert_eq!(snapshot.last_event_at_ms, Some(100));
         assert_eq!(snapshot.last_error_at_ms, Some(200));
         assert_eq!(snapshot.status, FlowStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn watch_all_pushes_updated_snapshot_on_record() {
+        let store = OtlpMetricsStore::builder().build();
+        let mut watch = store.watch_all().await.unwrap();
+
+        store.record(
+            "f",
+            RecordedEvent {
+                task: None,
+                task_type: None,
+                level: ActivityLevel::Info,
+                ts_ms: 100,
+                message: "handled".into(),
+                duration_ms: None,
+                event_id: None,
+            },
+        );
+
+        let pushed = watch.next().await.expect("watch_all must push a frame");
+        assert_eq!(pushed.flow, "f");
+        assert_eq!(pushed.events_total, 1);
+        assert_eq!(pushed.status, FlowStatus::Ok);
     }
 }

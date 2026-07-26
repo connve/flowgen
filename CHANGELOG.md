@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.131.0
+
+### Fixes
+
+- **Per-flow Activity panel showed "No events yet" even with real activity.**
+  The panel's event list now comes from the same `/api/logs` history +
+  `/api/logs/stream` live tail the global `/logs` viewer uses (scoped to the
+  flow), instead of a metrics-only SSE stream with no history replay. A flow
+  that already finished its startup burst now shows its history immediately
+  on open instead of staying empty until the next live event.
+- **Per-flow SSE connections could pile up and starve other requests.** Only
+  one per-flow event subscription is kept open at a time; switching flows,
+  closing the modal, or navigating away now closes the previous connection
+  instead of leaving it open for the rest of the session (browsers cap
+  concurrent connections per origin on HTTP/1.1).
+- **Flow graph nodes could overlap on a flow's second open.** The DAG
+  layout's re-layout guard didn't reset when node measurement restarted on
+  a subsequent open, so nodes could be left at their pre-layout stacked
+  positions instead of dagre's computed layout.
+- **DAG node status badge could overflow into neighboring nodes.** The
+  duration badge had no maximum width, so a wide duration string could push
+  past the node's reserved space. The node, its status column, and the
+  badge are now all fixed-width end to end.
+- Raising the `/logs` line limit while lowering the level filter to remove
+  a stale UI state where the trim used the previous limit instead of the
+  newly applied one.
+
+### Improvements
+
+- **Per-flow Activity panel gains a history limit control and Debug/Trace
+  chips**, matching the global `/logs` viewer. The limit is independent per
+  view (raising it in the panel doesn't affect `/logs`); Debug/Trace default
+  off everywhere, Info/Warning/Error default on in the panel (you're
+  inspecting one flow's behavior) versus Warning/Error only on `/logs`
+  (system-wide error scanning). Level colors and labels are now a single
+  shared implementation so the two views can't drift.
+- **Observability backend split into two traits**, mirroring the existing
+  cache trait pattern: `LogsStore` (event/log history and live tail) and
+  `MetricsStore` (per-flow counters and status, plus OTLP emission). The ad
+  hoc `FlowRegistry` type is gone; both traits have one in-memory
+  implementation today and are structured so a vendor-backed implementation
+  can be added later without touching the admin API or UI.
+
 ## 0.130.0
 
 ### Features

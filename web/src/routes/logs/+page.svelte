@@ -12,6 +12,10 @@
 		nonHoistedSpans,
 		timestampMs,
 	} from '$lib/logRecord';
+	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
+	import { getLogsLimit, setLogsLimit } from '$lib/logsPageState.svelte';
+
+	let logsLimit = $derived(getLogsLimit());
 
 	type Level = LogRecord['level'];
 
@@ -62,9 +66,9 @@
 	// Line limit, defaulting to the Grafana/Loki-standard 1000. The operator
 	// can change it in the toolbar; it caps both the initial snapshot fetch
 	// and the in-browser buffer the live tail trims to. Clamped to the
-	// backend ceiling (`LOGS_SNAPSHOT_MAX_LIMIT`, 10000).
-	const LIMIT_MAX = 10000;
-	let limit = $state(1000);
+	// backend ceiling (`LOGS_SNAPSHOT_MAX_LIMIT`, 10000). Lives in
+	// `logsPageState` (module-level), not local `$state`, so it survives
+	// switching to another tab and back — only a full reload resets it.
 
 	// Virtualized list: render only the rows in view plus a small overscan
 	// buffer, with top/bottom spacers standing in for the rest. Without this,
@@ -120,7 +124,7 @@
 
 	async function loadHistory() {
 		try {
-			const res = await fetch(apiUrl(`api/logs?limit=${limit}`));
+			const res = await fetch(apiUrl(`api/logs?limit=${logsLimit}`));
 			if (!res.ok) return;
 			const body = (await res.json()) as LogRecord[];
 			rows = body.map((record) => ({ id: nextId++, record })).sort(rowOrder);
@@ -135,10 +139,13 @@
 	// ceiling. Trims the in-browser buffer immediately so lowering the
 	// limit takes effect without waiting for the next tail append.
 	function applyLimit(next: number) {
-		const clamped = Math.min(Math.max(1, Math.floor(next)), LIMIT_MAX);
-		if (clamped === limit) return;
-		limit = clamped;
-		if (rows.length > limit) rows.length = limit;
+		const clamped = clampLogsLimit(next);
+		if (clamped === logsLimit) return;
+		setLogsLimit(clamped);
+		// Use `clamped`, not the `logsLimit` derived binding: Svelte doesn't
+		// re-run $derived synchronously within this same function call, so
+		// reading it here would still see the pre-update value.
+		if (rows.length > clamped) rows.length = clamped;
 		void loadHistory();
 	}
 
@@ -151,8 +158,8 @@
 		}
 		rows.sort(rowOrder);
 		// Oldest rows are now at the tail; trim from there.
-		if (rows.length > limit) {
-			rows.length = limit;
+		if (rows.length > logsLimit) {
+			rows.length = logsLimit;
 		}
 		if (live && atTop) {
 			void tick().then(scrollToTop);
@@ -327,16 +334,16 @@
 			</div>
 
 			<label
-				class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200 focus-within:border-primary"
+				class="input input-sm flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 			>
 				<Icon icon="tabler:stack-2" class="h-4 w-4 opacity-70" />
-				<span>Limit</span>
+				<span class="opacity-70">Limit</span>
 				<input
 					type="number"
 					min="1"
-					max={LIMIT_MAX}
+					max={LOGS_LIMIT_MAX}
 					step="1000"
-					value={limit}
+					value={logsLimit}
 					onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
 					class="no-spinner w-12 bg-transparent tabular-nums outline-none"
 					aria-label="Line limit"

@@ -20,8 +20,8 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing_subscriber::fmt::MakeWriter;
 
-/// Structured filter accepted by `LogsQuery::query` and
-/// `LogsQuery::tail`. Fields are AND-combined; `None` = "any".
+/// Structured filter accepted by `LogsStore::query` and
+/// `LogsStore::tail`. Fields are AND-combined; `None` = "any".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogFilter {
     /// Restrict to records whose `flow` attribute matches.
@@ -32,6 +32,8 @@ pub struct LogFilter {
     pub level: Option<String>,
     /// Restrict to records emitted at or after this UNIX epoch (ms).
     pub since_ms: Option<u64>,
+    /// Restrict to records emitted at or before this UNIX epoch (ms).
+    pub until_ms: Option<u64>,
 }
 
 impl LogFilter {
@@ -41,15 +43,18 @@ impl LogFilter {
             Some(expected) => expected.eq_ignore_ascii_case(&record.level),
             None => true,
         };
+        let ts_ms = record
+            .timestamp
+            .as_deref()
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.timestamp_millis() as u64);
         let since_ok = match self.since_ms {
             None => true,
-            Some(cutoff) => match record.timestamp.as_deref() {
-                None => false,
-                Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
-                    Ok(dt) => dt.timestamp_millis() as u64 >= cutoff,
-                    Err(_) => false,
-                },
-            },
+            Some(cutoff) => matches!(ts_ms, Some(t) if t >= cutoff),
+        };
+        let until_ok = match self.until_ms {
+            None => true,
+            Some(cutoff) => matches!(ts_ms, Some(t) if t <= cutoff),
         };
         let flow_ok = match (&self.flow, span_field(record, "flow")) {
             (None, _) => true,
@@ -61,7 +66,7 @@ impl LogFilter {
             (Some(expected), Some(v)) => expected == v,
             (Some(_), None) => false,
         };
-        flow_ok && task_ok && level_ok && since_ok
+        flow_ok && task_ok && level_ok && since_ok && until_ok
     }
 }
 
@@ -79,26 +84,26 @@ fn span_field<'a>(record: &'a StoredLog, key: &str) -> Option<&'a str> {
 
 /// Backend-agnostic log query facade.
 #[async_trait]
-pub trait LogsQuery: Send + Sync {
+pub trait LogsStore: Send + Sync {
     /// Returns retained records matching `filter`, oldest first, capped
     /// at `limit`.
     async fn query(
         &self,
         filter: LogFilter,
         limit: usize,
-    ) -> Result<Vec<StoredLog>, LogsQueryError>;
+    ) -> Result<Vec<StoredLog>, LogsStoreError>;
 
     /// Subscribes to records matching `filter` as they arrive.
     async fn tail(
         &self,
         filter: LogFilter,
-    ) -> Result<BoxStream<'static, StoredLog>, LogsQueryError>;
+    ) -> Result<BoxStream<'static, StoredLog>, LogsStoreError>;
 }
 
-/// Errors returned by [`LogsQuery`] implementations.
+/// Errors returned by [`LogsStore`] implementations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
-pub enum LogsQueryError {
+pub enum LogsStoreError {
     #[error("Log query backend error: {source}")]
     Backend {
         #[source]
@@ -114,17 +119,17 @@ pub enum LogsQueryError {
 /// query goes into the admin web state. Live-tail subscribers receive
 /// records through a broadcast channel of the same capacity; slow
 /// subscribers see dropped frames rather than backing up the writer.
-pub fn pair(capacity_per_flow: usize) -> (MemoryLogsWriter, MemoryLogsQuery) {
+pub fn pair(capacity_per_flow: usize) -> (MemoryLogsStoreWriter, MemoryLogsStore) {
     let inner = Arc::new(Inner {
         buffers: Mutex::new(HashMap::new()),
         capacity_per_flow,
     });
     let (tx, _rx) = broadcast::channel(capacity_per_flow.max(16));
-    let writer = MemoryLogsWriter {
+    let writer = MemoryLogsStoreWriter {
         inner: Arc::clone(&inner),
         tx: tx.clone(),
     };
-    let query = MemoryLogsQuery { inner, tx };
+    let query = MemoryLogsStore { inner, tx };
     (writer, query)
 }
 
@@ -136,12 +141,12 @@ struct Inner {
 
 /// `MakeWriter` half of the pair returned by [`pair`].
 #[derive(Debug, Clone)]
-pub struct MemoryLogsWriter {
+pub struct MemoryLogsStoreWriter {
     inner: Arc<Inner>,
     tx: broadcast::Sender<StoredLog>,
 }
 
-impl MemoryLogsWriter {
+impl MemoryLogsStoreWriter {
     fn ingest(&self, line: &[u8]) {
         let Ok(parsed) = serde_json::from_slice::<JsonLogLine>(line) else {
             return;
@@ -164,7 +169,7 @@ impl MemoryLogsWriter {
     }
 }
 
-impl<'a> MakeWriter<'a> for MemoryLogsWriter {
+impl<'a> MakeWriter<'a> for MemoryLogsStoreWriter {
     type Writer = LineBufferedWriter<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
@@ -175,11 +180,11 @@ impl<'a> MakeWriter<'a> for MemoryLogsWriter {
     }
 }
 
-/// `io::Write` returned by [`MemoryLogsWriter::make_writer`]. Buffers
+/// `io::Write` returned by [`MemoryLogsStoreWriter::make_writer`]. Buffers
 /// bytes until a newline arrives, then hands the full JSON line to the
 /// parent writer for parsing.
 pub struct LineBufferedWriter<'a> {
-    writer: &'a MemoryLogsWriter,
+    writer: &'a MemoryLogsStoreWriter,
     buffer: Vec<u8>,
 }
 
@@ -211,14 +216,14 @@ impl Drop for LineBufferedWriter<'_> {
     }
 }
 
-/// [`LogsQuery`] half of the pair returned by [`pair`].
+/// [`LogsStore`] half of the pair returned by [`pair`].
 #[derive(Debug, Clone)]
-pub struct MemoryLogsQuery {
+pub struct MemoryLogsStore {
     inner: Arc<Inner>,
     tx: broadcast::Sender<StoredLog>,
 }
 
-impl MemoryLogsQuery {
+impl MemoryLogsStore {
     /// Removes every retained record from the per-flow ring buffers.
     /// Does not affect live tail subscribers.
     pub fn clear(&self) {
@@ -230,12 +235,12 @@ impl MemoryLogsQuery {
 }
 
 #[async_trait]
-impl LogsQuery for MemoryLogsQuery {
+impl LogsStore for MemoryLogsStore {
     async fn query(
         &self,
         filter: LogFilter,
         limit: usize,
-    ) -> Result<Vec<StoredLog>, LogsQueryError> {
+    ) -> Result<Vec<StoredLog>, LogsStoreError> {
         let snapshot: Vec<StoredLog> = match self.inner.buffers.lock() {
             Ok(guard) => collect_from(&guard, &filter),
             Err(poisoned) => collect_from(&poisoned.into_inner(), &filter),
@@ -247,7 +252,7 @@ impl LogsQuery for MemoryLogsQuery {
     async fn tail(
         &self,
         filter: LogFilter,
-    ) -> Result<BoxStream<'static, StoredLog>, LogsQueryError> {
+    ) -> Result<BoxStream<'static, StoredLog>, LogsStoreError> {
         let rx = self.tx.subscribe();
         let stream = BroadcastStream::new(rx)
             .filter_map(move |res| {

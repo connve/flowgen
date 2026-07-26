@@ -5,7 +5,7 @@
 //! `Backend::Memory`. Logs go through `tracing_subscriber::fmt::json()`
 //! to stdout; a K8s log shipper collects it in production. The memory
 //! backend also feeds a copy of that JSON stream into a per-flow ring
-//! buffer exposed via [`query::LogsQuery`].
+//! buffer exposed via [`query::LogsStore`].
 
 pub mod query;
 
@@ -121,9 +121,9 @@ pub struct Telemetry {
     /// Owns the OTel providers; drop to shut them down.
     pub guard: TelemetryGuard,
     /// Backend log query handle for the admin UI.
-    pub logs_query: Option<Arc<dyn query::LogsQuery>>,
+    pub logs_store: Option<Arc<dyn query::LogsStore>>,
     /// Writer the tracing `fmt` layer feeds a copy of every JSON log line.
-    pub logs_writer: Option<query::MemoryLogsWriter>,
+    pub logs_writer: Option<query::MemoryLogsStoreWriter>,
 }
 
 /// Builds the telemetry providers for the selected backend and
@@ -184,7 +184,7 @@ fn build_remote(
             meter_provider: Some(meter_provider),
             tracer_provider: Some(tracer_provider),
         },
-        logs_query: None,
+        logs_store: None,
         logs_writer: None,
     })
 }
@@ -196,7 +196,7 @@ fn build_memory(logs_per_flow: usize, _metrics_per_flow: usize) -> Telemetry {
             meter_provider: None,
             tracer_provider: None,
         },
-        logs_query: Some(Arc::new(query_handle)),
+        logs_store: Some(Arc::new(query_handle)),
         logs_writer: Some(writer),
     }
 }

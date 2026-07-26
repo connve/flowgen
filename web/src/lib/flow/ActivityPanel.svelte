@@ -1,13 +1,17 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import { getFlowActivityLimit, setFlowActivityLimit } from '$lib/activityStore.svelte';
+	import { levelBadgeColor, levelChipClass, levelDotClass, levelLabel } from '$lib/logRecord';
+	import type { ActivityLevel } from '$lib/logRecord';
+	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
 	import { formatAbsolute, formatRelative } from '$lib/time';
 
 	interface Activity {
 		flow: string;
 		task: string | null;
 		task_type: string | null;
-		level: 'info' | 'warning' | 'error';
+		level: ActivityLevel;
 		ts_ms: number;
 		message: string;
 		duration_ms?: number;
@@ -51,13 +55,19 @@
 	let scrollTop = $state(0);
 	let viewportHeight = $state(256);
 	let selected = $state<Activity | null>(null);
+	let flowActivityLimit = $derived(getFlowActivityLimit());
 
-	// Filter state — level chips act as toggles (all-on by default), free-text
-	// runs against task + message + task_type, and a task lock pins to one node.
-	let levelFilter = $state<Record<Activity['level'], boolean>>({
+	// Filter state — level chips act as toggles. Info/Warn/Error default on
+	// (you're inspecting one flow's normal-vs-broken behavior); Debug/Trace
+	// default off everywhere, same as /logs — diagnostic noise, not
+	// something to review by default. Free-text runs against task + message
+	// + task_type, and a task lock pins to one node.
+	let levelFilter = $state<Record<ActivityLevel, boolean>>({
 		info: true,
 		warning: true,
 		error: true,
+		debug: false,
+		trace: false,
 	});
 	let search = $state('');
 	let taskFilter = $state<string | null>(null);
@@ -73,7 +83,13 @@
 	});
 
 	let counts = $derived.by(() => {
-		const c = { info: 0, warning: 0, error: 0 };
+		const c: Record<ActivityLevel, number> = {
+			info: 0,
+			warning: 0,
+			error: 0,
+			debug: 0,
+			trace: 0,
+		};
 		for (const a of activities) c[a.level] += 1;
 		return c;
 	});
@@ -84,6 +100,8 @@
 		!levelFilter.info ||
 			!levelFilter.warning ||
 			!levelFilter.error ||
+			levelFilter.debug ||
+			levelFilter.trace ||
 			searchDebounced.length > 0 ||
 			taskFilter !== null,
 	);
@@ -120,16 +138,20 @@
 		scrollTop = el.scrollTop;
 	}
 
-	function toggleLevel(level: Activity['level'], e: MouseEvent) {
+	function toggleLevel(level: ActivityLevel, e: MouseEvent) {
 		e.stopPropagation();
 		levelFilter = { ...levelFilter, [level]: !levelFilter[level] };
 	}
 
 	function clearFilters() {
-		levelFilter = { info: true, warning: true, error: true };
+		levelFilter = { info: true, warning: true, error: true, debug: false, trace: false };
 		search = '';
 		searchDebounced = '';
 		taskFilter = null;
+	}
+
+	function applyLimit(next: number) {
+		setFlowActivityLimit(clampLogsLimit(next));
 	}
 
 	// Serialize the selected activity to a JSON payload. Copies the full
@@ -226,52 +248,34 @@
 		     header and the column head so filters visually own the list below. -->
 		<div class="flex h-10 items-center gap-3 border-b border-base-200 bg-base-100 px-4">
 			<span class="flex items-center gap-1">
-				<button
-					type="button"
-					class="chip-sm {levelFilter.info ? 'chip-info' : 'chip-inactive'}"
-					aria-pressed={levelFilter.info}
-					onclick={(e) => toggleLevel('info', e)}
-				>
-					<span>Info</span>
-					<span class="tabular-nums opacity-60">{counts.info}</span>
-				</button>
-				<button
-					type="button"
-					class="chip-sm {levelFilter.warning ? 'chip-warn' : 'chip-inactive'}"
-					aria-pressed={levelFilter.warning}
-					onclick={(e) => toggleLevel('warning', e)}
-				>
-					<span>Warn</span>
-					<span class="tabular-nums opacity-60">{counts.warning}</span>
-				</button>
-				<button
-					type="button"
-					class="chip-sm {levelFilter.error ? 'chip-error' : 'chip-inactive'}"
-					aria-pressed={levelFilter.error}
-					onclick={(e) => toggleLevel('error', e)}
-				>
-					<span>Error</span>
-					<span class="tabular-nums opacity-60">{counts.error}</span>
-				</button>
+				{#each ['info', 'warning', 'error', 'debug', 'trace'] as const as level (level)}
+					<button
+						type="button"
+						class="chip-sm {levelChipClass(level, levelFilter[level])}"
+						aria-pressed={levelFilter[level]}
+						onclick={(e) => toggleLevel(level, e)}
+					>
+						<span>{levelLabel(level)}</span>
+						<span class="tabular-nums opacity-60">{counts[level]}</span>
+					</button>
+				{/each}
 			</span>
 
 			<label
-				class="input input-xs flex flex-1 items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				class="input input-xs flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 			>
-				<Icon icon="tabler:search" class="h-4 w-4 opacity-50" />
-				<input type="text" placeholder="Search task, processor, message..." bind:value={search} />
-				{#if search}
-					<div class="tooltip tooltip-left" data-tip="Clear search">
-						<button
-							type="button"
-							class="opacity-50 hover:opacity-100"
-							aria-label="Clear search"
-							onclick={() => (search = '')}
-						>
-							<Icon icon="tabler:x" class="h-5 w-5" />
-						</button>
-					</div>
-				{/if}
+				<Icon icon="tabler:stack-2" class="h-3.5 w-3.5 opacity-70" />
+				<span class="opacity-70">Limit</span>
+				<input
+					type="number"
+					min="1"
+					max={LOGS_LIMIT_MAX}
+					step="1000"
+					value={flowActivityLimit}
+					onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
+					class="no-spinner w-12 bg-transparent tabular-nums outline-none"
+					aria-label="Activity history limit"
+				/>
 			</label>
 
 			{#if taskFilter}
@@ -300,6 +304,27 @@
 					Clear
 				</button>
 			{/if}
+
+			<div class="flex-1"></div>
+
+			<label
+				class="input input-xs flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+			>
+				<Icon icon="tabler:search" class="h-4 w-4 opacity-50" />
+				<input type="text" placeholder="Search task, processor, message..." bind:value={search} />
+				{#if search}
+					<div class="tooltip tooltip-left" data-tip="Clear search">
+						<button
+							type="button"
+							class="opacity-50 hover:opacity-100"
+							aria-label="Clear search"
+							onclick={() => (search = '')}
+						>
+							<Icon icon="tabler:x" class="h-5 w-5" />
+						</button>
+					</div>
+				{/if}
+			</label>
 		</div>
 
 		{#if ordered.length === 0}
@@ -346,20 +371,19 @@
 					>
 						<span class="flex items-center gap-1.5">
 							<span
-								class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white"
-								class:bg-primary={event.level === 'info'}
-								class:bg-warning={event.level === 'warning'}
-								class:bg-error={event.level === 'error'}
+								class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white {levelDotClass(
+									event.level,
+								)}"
 							>
 								{#if event.level === 'info'}
 									<Icon icon="tabler:check" class="h-2.5 w-2.5" />
 								{:else if event.level === 'warning'}
 									<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-								{:else}
+								{:else if event.level === 'error'}
 									<Icon icon="tabler:x" class="h-2.5 w-2.5" />
 								{/if}
 							</span>
-							<span class="uppercase opacity-70">{event.level}</span>
+							<span class="uppercase opacity-70">{levelLabel(event.level)}</span>
 						</span>
 						<span class="whitespace-nowrap opacity-60" title={formatAbsolute(event.ts_ms)}>
 							{formatRelative(event.ts_ms)}
@@ -394,20 +418,19 @@
 		<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
 			<div class="flex items-center gap-2 text-xs">
 				<span
-					class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white"
-					class:bg-primary={selected.level === 'info'}
-					class:bg-warning={selected.level === 'warning'}
-					class:bg-error={selected.level === 'error'}
+					class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white {levelDotClass(
+						selected.level,
+					)}"
 				>
 					{#if selected.level === 'info'}
 						<Icon icon="tabler:check" class="h-2.5 w-2.5" />
 					{:else if selected.level === 'warning'}
 						<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-					{:else}
+					{:else if selected.level === 'error'}
 						<Icon icon="tabler:x" class="h-2.5 w-2.5" />
 					{/if}
 				</span>
-				<span class="uppercase opacity-70">{selected.level}</span>
+				<span class="uppercase opacity-70">{levelLabel(selected.level)}</span>
 				<span class="opacity-40">•</span>
 				<span class="font-mono opacity-70">{selected.task_type ?? '—'}</span>
 				<span class="opacity-40">•</span>

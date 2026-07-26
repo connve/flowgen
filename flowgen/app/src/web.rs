@@ -16,6 +16,7 @@ use flowgen_client::types as api;
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use rust_embed::RustEmbed;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -30,6 +31,12 @@ pub const DEFAULT_WEB_PATH: &str = "/";
 /// in `web/svelte.config.js`). `serve_embedded` rewrites this to
 /// whatever `web.path` was configured.
 const BUILT_BASE_PATH: &str = "/flowgen";
+
+/// SSE event name carrying `FlowMetricsSnapshot` payloads on `/api/flows/stream`.
+const SSE_EVENT_SNAPSHOT: &str = "snapshot";
+
+/// SSE event name carrying `LogRecord` payloads on `/api/logs/stream`.
+const SSE_EVENT_LOG: &str = "log";
 
 // Response types come from `flowgen_client::types` — see openapi.yaml.
 
@@ -67,12 +74,12 @@ pub struct WebState {
     /// Optional resource loader used by the admin resources endpoints to
     /// list and fetch templates, prompts, SQL files, etc.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    /// Shared activity registry populated by the tracing layer. Used by
+    /// Shared metrics store populated by the tracing layer. Used by
     /// the flow list, the flow detail, and the SSE stream.
-    pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
+    pub metrics_store: Arc<dyn flowgen_core::flow::activity::MetricsStore>,
     /// Backend-agnostic log query used by the SSE stream and the
     /// history endpoint.
-    pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
+    pub logs_store: Option<Arc<dyn flowgen_core::telemetry::query::LogsStore>>,
     /// Running application configuration, surfaced read-only by the admin
     /// config viewer. Secrets serialize as `"***"` (see `JwtConfig`).
     pub app_config: Arc<crate::config::AppConfig>,
@@ -162,10 +169,21 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
 
 /// Returns a list of currently loaded flows.
 async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    // Fetch all metrics up front (no lock held across the await), then do
+    // the usual synchronous pass over the flow registry using a lookup.
+    let metrics: HashMap<String, flowgen_core::flow::activity::FlowMetricsSnapshot> = state
+        .metrics_store
+        .snapshot_all()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.flow.clone(), s))
+        .collect();
+
     let flows = match state.flow_registry.read() {
         Ok(registry) => registry
             .values()
-            .map(|handle| build_summary(handle, &state.flow_activity))
+            .map(|handle| build_summary(handle, &metrics))
             .collect::<Vec<_>>(),
         Err(_) => {
             warn!("Flow registry is poisoned, returning empty flow list");
@@ -180,13 +198,13 @@ async fn list_flows(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 /// whatever live metrics the tracing layer has collected so far.
 fn build_summary(
     handle: &crate::app::FlowHandle,
-    activity: &flowgen_core::flow::activity::FlowRegistry,
+    metrics: &HashMap<String, flowgen_core::flow::activity::FlowMetricsSnapshot>,
 ) -> api::FlowSummary {
     let source = match handle.from_filesystem {
         true => api::FlowSummarySource::Filesystem,
         false => api::FlowSummarySource::Cache,
     };
-    let snapshot = activity.snapshot(handle.identity());
+    let snapshot = metrics.get(handle.identity());
     let (
         last_event_at,
         last_warning_at,
@@ -280,19 +298,23 @@ async fn get_flow(
     }
 }
 
-/// Streams flow activity to the admin UI over Server-Sent Events.
+/// Streams live per-flow metrics to the admin UI over Server-Sent Events.
 ///
-/// Emits a `snapshot` frame with the current per-flow metrics (kept in
-/// the in-process `FlowRegistry`), then streams `log` frames as new
-/// records arrive. The UI applies topological filtering (records
-/// scoped to a `task.run` / `task.handle` span) and identity hoisting
-/// client-side, using the same helper as `/logs`, so both views agree
-/// on which fields are identity vs metadata.
+/// Emits one `snapshot` frame with every flow's current metrics on
+/// connect, then a `snapshot` frame carrying a single-element array
+/// whenever any flow's counters change — the frontend already merges
+/// `snapshot` payloads by `flow`, so a partial array updates just that
+/// flow. Event/log history and live tail for a flow come from
+/// `/api/logs` and `/api/logs/stream` (with `flow` set) — the same
+/// source `/logs` uses — not from this endpoint.
 async fn stream_flows(
     State(state): State<Arc<WebState>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
-    let snapshot = state.flow_activity.snapshot_all();
-    let snapshot_frame = match SseEvent::default().event("snapshot").json_data(&snapshot) {
+    let initial = state.metrics_store.snapshot_all().await.unwrap_or_default();
+    let initial_frame = match SseEvent::default()
+        .event(SSE_EVENT_SNAPSHOT)
+        .json_data(&initial)
+    {
         Ok(ev) => ev,
         Err(source) => {
             warn!(error = %source, "Failed to encode SSE snapshot frame");
@@ -300,35 +322,28 @@ async fn stream_flows(
         }
     };
 
-    let live = match state.logs_query.as_ref() {
-        Some(query) => {
-            let filter = flowgen_core::telemetry::query::LogFilter::default();
-            let tail = match query.tail(filter).await {
-                Ok(stream) => stream,
-                Err(source) => {
-                    warn!(error = %source, "Log query tail subscription failed");
-                    futures_util::stream::empty().boxed()
-                }
-            };
-            tail.filter_map(|record| async move {
-                let wire = stored_to_wire(record);
-                match SseEvent::default().event("log").json_data(&wire) {
+    let live = match state.metrics_store.watch_all().await {
+        Ok(stream) => stream
+            .filter_map(|snapshot| async move {
+                match SseEvent::default()
+                    .event(SSE_EVENT_SNAPSHOT)
+                    .json_data(&[snapshot])
+                {
                     Ok(ev) => Some(Ok(ev)),
                     Err(source) => {
-                        warn!(error = %source, "Failed to encode SSE log frame");
+                        warn!(error = %source, "Failed to encode SSE snapshot frame");
                         None
                     }
                 }
             })
-            .boxed()
-        }
-        None => {
-            warn!("No logs query backend configured; live SSE frames disabled");
+            .boxed(),
+        Err(source) => {
+            warn!(error = %source, "Metrics store watch subscription failed");
             futures_util::stream::empty().boxed()
         }
     };
 
-    let stream = tokio_stream::once(Ok(snapshot_frame)).chain(live);
+    let stream = tokio_stream::once(Ok(initial_frame)).chain(live);
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
@@ -340,15 +355,15 @@ async fn stream_flows(
 const LOGS_SNAPSHOT_DEFAULT_LIMIT: usize = 500;
 const LOGS_SNAPSHOT_MAX_LIMIT: usize = 10_000;
 
-/// Returns every retained log record — framework, lifecycle, and
-/// per-task activity in one place. The admin UI's per-flow activity
-/// panel is a scoped subset of the same source; this endpoint returns
-/// the full set for the global log viewer.
+/// Returns retained log records — framework, lifecycle, and per-task
+/// activity in one place. The per-flow Activity panel calls this with
+/// `flow` set to backfill its history from the same source the global
+/// `/logs` viewer uses (unscoped).
 async fn list_logs(
     State(state): State<Arc<WebState>>,
     axum::extract::Query(params): axum::extract::Query<LogsQuery>,
 ) -> Json<Vec<api::LogRecord>> {
-    let query = match state.logs_query.as_ref() {
+    let query = match state.logs_store.as_ref() {
         Some(q) => q,
         None => return Json(Vec::new()),
     };
@@ -356,7 +371,10 @@ async fn list_logs(
         Some(n) => n.min(LOGS_SNAPSHOT_MAX_LIMIT),
         None => LOGS_SNAPSHOT_DEFAULT_LIMIT,
     };
-    let filter = flowgen_core::telemetry::query::LogFilter::default();
+    let filter = flowgen_core::telemetry::query::LogFilter {
+        flow: params.flow,
+        ..Default::default()
+    };
     let records = match query.query(filter, limit).await {
         Ok(r) => r,
         Err(source) => {
@@ -368,18 +386,23 @@ async fn list_logs(
     Json(wire)
 }
 
-/// Streams log records as they arrive. Same scope as `list_logs`: every
-/// captured record, no server-side topological filter — the UI groups
-/// and filters by level / task / flow / free text.
+/// Streams log records as they arrive. Same scope as `list_logs`:
+/// unscoped by default (the global `/logs` UI groups and filters by
+/// level / task / flow / free text client-side); the per-flow Activity
+/// panel passes `flow` so it only receives that flow's live records.
 async fn stream_logs(
     State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<LogsQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
     // Tail-only: `/api/logs` returns the initial snapshot, this endpoint
     // streams new records as they arrive. Sending history here too would
     // duplicate every retained record for a UI that already loaded them.
-    let live = match state.logs_query.as_ref() {
+    let live = match state.logs_store.as_ref() {
         Some(query) => {
-            let filter = flowgen_core::telemetry::query::LogFilter::default();
+            let filter = flowgen_core::telemetry::query::LogFilter {
+                flow: params.flow,
+                ..Default::default()
+            };
             let tail = match query.tail(filter).await {
                 Ok(stream) => stream,
                 Err(source) => {
@@ -389,7 +412,7 @@ async fn stream_logs(
             };
             tail.filter_map(|record| async move {
                 let wire = stored_to_wire(record);
-                match SseEvent::default().event("log").json_data(&wire) {
+                match SseEvent::default().event(SSE_EVENT_LOG).json_data(&wire) {
                     Ok(ev) => Some(Ok(ev)),
                     Err(source) => {
                         warn!(error = %source, "Failed to encode SSE log frame");
@@ -414,6 +437,9 @@ async fn stream_logs(
 #[derive(serde::Deserialize)]
 struct LogsQuery {
     limit: Option<usize>,
+    /// Restrict to one flow's records. Used by the per-flow Activity panel;
+    /// omitted by the global `/logs` viewer, which shows every flow.
+    flow: Option<String>,
 }
 
 /// Converts an internal `StoredLog` to the OpenAPI wire shape.
@@ -937,8 +963,8 @@ mod tests {
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             prefix: String::new(),
             resource_loader: None,
-            flow_activity: flowgen_core::flow::activity::FlowRegistry::builder().build(),
-            logs_query: None,
+            metrics_store: flowgen_core::flow::activity::OtlpMetricsStore::builder().build(),
+            logs_store: None,
             app_config,
             conversation_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
             system_bucket_present: false,

@@ -1,8 +1,8 @@
 //! End-to-end integration test for the memory logs pipeline.
 //!
 //! Runs the same wiring `flowgen::main` uses for the memory backend:
-//! `tracing_subscriber::fmt::json()` with a `MemoryLogsWriter` sink,
-//! then asserts that emitted events land in `MemoryLogsQuery` with
+//! `tracing_subscriber::fmt::json()` with a `MemoryLogsStoreWriter` sink,
+//! then asserts that emitted events land in `MemoryLogsStore` with
 //! flow/task/level attributes taken from the parent span hierarchy.
 
 use flowgen_core::telemetry::query::LogFilter;
@@ -28,7 +28,7 @@ fn memory_config() -> TelemetryConfig {
 async fn tracing_events_flow_through_json_writer_into_query_backend() {
     let telemetry = init_telemetry(memory_config()).expect("init_telemetry must succeed");
     let query = telemetry
-        .logs_query
+        .logs_store
         .as_ref()
         .cloned()
         .expect("memory backend always exposes a logs query");
@@ -93,7 +93,7 @@ async fn tracing_events_flow_through_json_writer_into_query_backend() {
 #[tokio::test(flavor = "multi_thread")]
 async fn filter_narrows_query_results_by_flow() {
     let telemetry = init_telemetry(memory_config()).expect("init_telemetry must succeed");
-    let query = telemetry.logs_query.as_ref().cloned().unwrap();
+    let query = telemetry.logs_store.as_ref().cloned().unwrap();
     let writer = telemetry.logs_writer.clone().unwrap();
     let layer = tracing_subscriber::fmt::layer().json().with_writer(writer);
     let subscriber = Registry::default().with(layer);
@@ -137,7 +137,7 @@ async fn filter_narrows_query_results_by_flow() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tail_delivers_only_records_matching_the_filter() {
     let telemetry = init_telemetry(memory_config()).expect("init_telemetry must succeed");
-    let query = telemetry.logs_query.as_ref().cloned().unwrap();
+    let query = telemetry.logs_store.as_ref().cloned().unwrap();
     let writer = telemetry.logs_writer.clone().unwrap();
     let layer = tracing_subscriber::fmt::layer().json().with_writer(writer);
     let subscriber = Registry::default().with(layer);
@@ -172,7 +172,7 @@ async fn tail_delivers_only_records_matching_the_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn remote_backend_exposes_no_logs_query_or_writer() {
+async fn remote_backend_exposes_no_logs_store_or_writer() {
     let telemetry = init_telemetry(TelemetryConfig {
         backend: Backend::Remote {
             endpoint: "http://127.0.0.1:14317".to_string(),
@@ -183,14 +183,14 @@ async fn remote_backend_exposes_no_logs_query_or_writer() {
     })
     .expect("init_telemetry must succeed for the remote backend");
 
-    assert!(telemetry.logs_query.is_none());
+    assert!(telemetry.logs_store.is_none());
     assert!(telemetry.logs_writer.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn non_string_fields_are_stringified_via_json_writer() {
     let telemetry = init_telemetry(memory_config()).expect("init_telemetry must succeed");
-    let query = telemetry.logs_query.as_ref().cloned().unwrap();
+    let query = telemetry.logs_store.as_ref().cloned().unwrap();
     let writer = telemetry.logs_writer.clone().unwrap();
     let layer = tracing_subscriber::fmt::layer().json().with_writer(writer);
     let subscriber = Registry::default().with(layer);
@@ -255,7 +255,7 @@ async fn per_flow_ring_buffer_evicts_oldest_when_full() {
         metrics_export_interval_secs: 60,
     })
     .expect("init_telemetry must succeed");
-    let query = telemetry.logs_query.as_ref().cloned().unwrap();
+    let query = telemetry.logs_store.as_ref().cloned().unwrap();
     let writer = telemetry.logs_writer.clone().unwrap();
     let layer = tracing_subscriber::fmt::layer().json().with_writer(writer);
     let subscriber = Registry::default().with(layer);

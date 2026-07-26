@@ -52,15 +52,14 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Live flow activity stream.
-         * @description Server-Sent Events with two named event types:
-         *     `snapshot` (an object keyed by flow identity containing the
-         *     current metrics for every known flow, sent once on connect) and
-         *     `log` (one `LogRecord` per frame — the same shape as
-         *     `/api/logs/stream`). The client filters the log stream down to
-         *     task-scoped records for its per-flow activity panels; the raw
-         *     stream is emitted so both `/logs` and per-flow views share the
-         *     same wire format.
+         * Live flow metrics stream.
+         * @description Server-Sent Events with a single named event type `snapshot` (an
+         *     object keyed by flow identity containing the current metrics for
+         *     every known flow), sent once on connect and again whenever any
+         *     flow's counters change. Event/log history and live tail for a
+         *     flow come from `/api/logs` and `/api/logs/stream` (with `flow`
+         *     set) — the same source the global `/logs` viewer uses — not from
+         *     this endpoint.
          */
         get: operations["streamFlows"];
         put?: never;
@@ -116,11 +115,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Global log record snapshot.
-         * @description Returns every log record retained by the telemetry backend,
-         *     including framework, lifecycle, and per-task activity records.
-         *     The per-flow activity feed (`/api/flows/stream`) is a scoped
-         *     subset of the same source; this endpoint returns the full set.
+         * Log record snapshot, optionally scoped to one flow.
+         * @description Returns log records retained by the telemetry backend, including
+         *     framework, lifecycle, and per-task activity records. The per-flow
+         *     Activity panel calls this with `flow` set to backfill its history
+         *     from the same source the global `/logs` viewer uses (unscoped).
          */
         get: operations["listLogs"];
         put?: never;
@@ -139,11 +138,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Live global log stream.
+         * Live log stream, optionally scoped to one flow.
          * @description Server-Sent Events with a single named event type `log` carrying
-         *     one `LogRecord` per frame. Emits every captured record; the
-         *     admin UI applies level, task, flow, and free-text filters
-         *     client-side.
+         *     one `LogRecord` per frame. Unscoped, this emits every captured
+         *     record and the admin UI applies level and free-text filters
+         *     client-side; the per-flow Activity panel passes `flow` so it only
+         *     receives that flow's live records.
          */
         get: operations["streamLogs"];
         put?: never;
@@ -680,6 +680,8 @@ export interface operations {
             query?: {
                 /** @description Maximum number of records to return (most recent first). */
                 limit?: number;
+                /** @description Restrict to one flow's records, by flow identity. */
+                flow?: string;
             };
             header?: never;
             path?: never;
@@ -700,7 +702,10 @@ export interface operations {
     };
     streamLogs: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Restrict to one flow's records, by flow identity. */
+                flow?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;

@@ -2,9 +2,9 @@ use clap::Parser;
 use config::Config;
 use flowgen::app::App;
 use flowgen::config::AppConfig;
-use flowgen_core::flow::activity::FlowRegistry;
+use flowgen_core::flow::activity::{MetricsStore, OtlpMetricsStore};
 use flowgen_core::flow::activity_layer::FlowActivityLayer;
-use flowgen_core::telemetry::query::MemoryLogsWriter;
+use flowgen_core::telemetry::query::MemoryLogsStoreWriter;
 use std::env;
 use std::process;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ fn determine_log_format() -> LogFormat {
     }
 }
 
-fn init_tracing(flow_registry: Arc<FlowRegistry>, logs_writer: Option<MemoryLogsWriter>) {
+fn init_tracing(metrics_store: Arc<dyn MetricsStore>, logs_writer: Option<MemoryLogsStoreWriter>) {
     let format = determine_log_format();
 
     let env_filter = match tracing_subscriber::EnvFilter::try_from_default_env() {
@@ -51,7 +51,7 @@ fn init_tracing(flow_registry: Arc<FlowRegistry>, logs_writer: Option<MemoryLogs
         }
     };
 
-    let activity_layer = FlowActivityLayer::new(flow_registry);
+    let activity_layer = FlowActivityLayer::new(metrics_store);
     // Memory backend gets its own JSON fmt layer feeding the in-process
     // ring buffer. Absent on remote backends.
     let memory_layer = logs_writer.map(|w| tracing_subscriber::fmt::layer().json().with_writer(w));
@@ -84,8 +84,8 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    // Config load runs before tracing is up: tracing needs FlowRegistry,
-    // FlowRegistry needs the cache, and the cache is defined in config.
+    // Config load runs before tracing is up: tracing needs the metrics
+    // store, which needs the cache, and the cache is defined in config.
     // Boot-time errors go straight to stderr — the canonical Rust CLI pattern.
     let config = match Config::builder()
         .add_source(config::File::with_name(&cli.config))
@@ -124,7 +124,7 @@ async fn main() {
         }
     };
 
-    let flow_registry = FlowRegistry::builder().build();
+    let metrics_store = OtlpMetricsStore::builder().build();
 
     let telemetry_config = match &app_config.telemetry {
         Some(t) if t.enabled => {
@@ -163,7 +163,10 @@ async fn main() {
         }
     };
 
-    init_tracing(Arc::clone(&flow_registry), telemetry.logs_writer.clone());
+    init_tracing(
+        Arc::clone(&metrics_store) as Arc<dyn MetricsStore>,
+        telemetry.logs_writer.clone(),
+    );
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -230,9 +233,9 @@ async fn main() {
 
     let app = App {
         config: app_config,
-        flow_activity: Arc::clone(&flow_registry),
+        metrics_store: Arc::clone(&metrics_store) as Arc<dyn MetricsStore>,
         cache: Arc::clone(&cache),
-        logs_query: telemetry.logs_query.clone(),
+        logs_store: telemetry.logs_store.clone(),
     };
     if let Err(e) = app.start(shutdown_rx).await {
         error!("Application failed to run: {}", e);

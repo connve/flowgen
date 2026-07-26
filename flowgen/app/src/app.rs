@@ -278,23 +278,23 @@ pub enum Error {
 pub struct App {
     /// Global application configuration.
     pub config: AppConfig,
-    /// Shared FlowRegistry populated by the tracing activity layer, read
+    /// Shared metrics store populated by the tracing activity layer, read
     /// by the admin web API for status and SSE.
-    pub flow_activity: Arc<flowgen_core::flow::activity::FlowRegistry>,
+    pub metrics_store: Arc<dyn flowgen_core::flow::activity::MetricsStore>,
     /// Cache backing flow/resource storage, activity publish, and runtime
-    /// state. Built in `main` before tracing so `FlowRegistry` can be
+    /// state. Built in `main` before tracing so the metrics store can be
     /// constructed with a real cache reference from the outset.
     pub cache: Arc<dyn flowgen_core::cache::Cache>,
     /// Backend-agnostic log query source used by the admin web API for
     /// history queries and SSE tail. `None` when the selected telemetry
     /// backend does not (yet) expose a query surface.
-    pub logs_query: Option<Arc<dyn flowgen_core::telemetry::query::LogsQuery>>,
+    pub logs_store: Option<Arc<dyn flowgen_core::telemetry::query::LogsStore>>,
 }
 
 impl App {
     /// Builds the runtime cache from config (NATS if enabled and reachable,
     /// otherwise in-memory). Callable before tracing is up so `main` can
-    /// hand a real cache to `FlowRegistry::builder().cache(...)`.
+    /// hand a real cache to the metrics store builder.
     pub async fn init_cache(
         app_config: &AppConfig,
         db_name: Option<&str>,
@@ -1148,8 +1148,8 @@ impl App {
                 flow_registry: Arc::clone(&flow_registry),
                 prefix: String::new(),
                 resource_loader: resource_loader.clone(),
-                flow_activity: Arc::clone(&self.flow_activity),
-                logs_query: self.logs_query.clone(),
+                metrics_store: Arc::clone(&self.metrics_store),
+                logs_store: self.logs_store.clone(),
                 app_config: Arc::clone(&app_config),
                 // System cache (out of user-script reach) so one tenant's flow
                 // script can't read another's chats via `ctx.cache`. Falls back

@@ -11,14 +11,21 @@
 	const nodesInitialized = useNodesInitialized();
 	const { getNodes, updateNode, fitView } = useSvelteFlow();
 
-	// Re-layout whenever the edge set changes (a different flow) or the nodes
-	// finish measuring. `laidOutKey` records which edge set is already placed so
-	// a stable flow is not repositioned on every measurement tick.
+	// Re-layout whenever the edge set changes or the nodes (re-)measure.
+	// `laidOutKey` must reset when `nodesInitialized` drops to `false` —
+	// SvelteFlow can reuse the pane across modal opens, so `nodesInitialized`
+	// cycles false→true again for the same edge key on a second open; without
+	// the reset, the stale key already matches and layout never reruns for
+	// the freshly re-stacked nodes.
 	let laidOutKey = $state('');
 
 	$effect(() => {
+		if (!nodesInitialized.current) {
+			laidOutKey = '';
+			return;
+		}
 		const key = edges.map((e) => e.id).join('|');
-		if (!nodesInitialized.current || laidOutKey === key) return;
+		if (laidOutKey === key) return;
 
 		const nodes = getNodes();
 		if (nodes.some((n) => !n.measured?.width || !n.measured?.height)) return;

@@ -11,7 +11,7 @@
 
 import type { LogRecord, LogSpan } from '$lib/api';
 
-export type ActivityLevel = 'info' | 'warning' | 'error';
+export type ActivityLevel = 'info' | 'warning' | 'error' | 'debug' | 'trace';
 
 export interface SpanSummary {
 	flow: string | null;
@@ -101,16 +101,83 @@ export function timestampMs(record: LogRecord): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-// Maps the tracing level string to the three-value activity level used
-// by the counters and status pills. Debug/trace levels are folded into
-// `info` because the activity panel only shows info/warning/error.
+// Maps the tracing level string to the five-value activity level used by
+// the counters and status pills. `warn` renames to `warning` for the
+// activity/status vocabulary; the rest pass through unchanged.
 export function activityLevel(record: LogRecord): ActivityLevel {
 	switch (record.level) {
 		case 'error':
 			return 'error';
 		case 'warn':
 			return 'warning';
+		case 'debug':
+			return 'debug';
+		case 'trace':
+			return 'trace';
 		default:
 			return 'info';
+	}
+}
+
+// Chip CSS classes for a level toggle button, shared by `/logs` and the
+// per-flow Activity panel so neither drifts on colors. `inactive` covers
+// both "toggled off" and hover states the caller doesn't otherwise style.
+export function levelChipClass(level: ActivityLevel, active: boolean): string {
+	if (!active) return 'chip-inactive';
+	switch (level) {
+		case 'error':
+			return 'chip-error';
+		case 'warning':
+			return 'chip-warn';
+		case 'info':
+			return 'chip-info';
+		default:
+			return 'chip-neutral';
+	}
+}
+
+// Text color for a level's icon/badge in the detail drawer and row markers.
+export function levelBadgeColor(level: ActivityLevel): string {
+	switch (level) {
+		case 'error':
+			return 'text-error';
+		case 'warning':
+			return 'text-warning';
+		case 'debug':
+		case 'trace':
+			return 'text-base-content/50';
+		default:
+			return 'text-primary';
+	}
+}
+
+// Background color for a level's status dot, shared by `/logs` rows and
+// the Activity panel's row markers and detail drawer.
+export function levelDotClass(level: ActivityLevel): string {
+	switch (level) {
+		case 'error':
+			return 'bg-error';
+		case 'warning':
+			return 'bg-warning';
+		case 'info':
+			return 'bg-primary';
+		default:
+			return 'bg-base-300';
+	}
+}
+
+// Display label for a level, capitalized for chip/header text.
+export function levelLabel(level: ActivityLevel): string {
+	switch (level) {
+		case 'warning':
+			return 'Warn';
+		case 'error':
+			return 'Error';
+		case 'debug':
+			return 'Debug';
+		case 'trace':
+			return 'Trace';
+		default:
+			return 'Info';
 	}
 }

@@ -3,7 +3,7 @@
 //! Attached to the global subscriber it does two things:
 //! - Walks parent spans of each event to find the owning `flow` (from
 //!   `flow.run`) and optional `task` (from `task.run`), then calls
-//!   `FlowRegistry::record` with the level derived from `tracing::Level`.
+//!   `MetricsStore::record` with the level derived from `tracing::Level`.
 //! - INFO events require a `task.handle` scope so ambient boot logs
 //!   don't inflate `events_total`; WARN/ERROR count wherever they land
 //!   inside a `flow.run` scope (init failures raise the flow status
@@ -21,21 +21,21 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use crate::flow::activity::{now_ms, ActivityLevel, FlowRegistry};
+use crate::flow::activity::{now_ms, ActivityLevel, MetricsStore};
 
 const TASK_HANDLE_SPAN: &str = "task.handle";
 const FLOW_RUN_SPAN: &str = "flow.run";
 const TASK_RUN_SPAN: &str = "task.run";
 
-/// Layer wrapping the shared registry. Cheap to clone via `Arc`.
+/// Layer wrapping the shared metrics store. Cheap to clone via `Arc`.
 pub struct FlowActivityLayer {
-    registry: Arc<FlowRegistry>,
+    metrics: Arc<dyn MetricsStore>,
 }
 
 impl FlowActivityLayer {
-    /// Wraps the registry so it can be added as a tracing subscriber layer.
-    pub fn new(registry: Arc<FlowRegistry>) -> Self {
-        Self { registry }
+    /// Wraps the metrics store so it can be added as a tracing subscriber layer.
+    pub fn new(metrics: Arc<dyn MetricsStore>) -> Self {
+        Self { metrics }
     }
 }
 
@@ -149,7 +149,7 @@ where
             return;
         }
         let event_id = msg.event_id.clone();
-        self.registry.record(
+        self.metrics.record(
             &flow,
             crate::flow::activity::RecordedEvent {
                 task,
@@ -303,21 +303,22 @@ fn strip_quotes(s: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flow::activity::OtlpMetricsStore;
     use tracing::{error, info, info_span, warn};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::Registry;
 
-    fn install(reg: Arc<FlowRegistry>) -> tracing::dispatcher::DefaultGuard {
+    fn install(metrics: Arc<dyn MetricsStore>) -> tracing::dispatcher::DefaultGuard {
         Registry::default()
-            .with(FlowActivityLayer::new(reg))
+            .with(FlowActivityLayer::new(metrics))
             .set_default()
     }
 
-    #[test]
-    fn captures_events_under_flow_and_task_handle_scopes() {
-        let reg = FlowRegistry::builder().build();
-        let _g = install(Arc::clone(&reg));
+    #[tokio::test]
+    async fn captures_events_under_flow_and_task_handle_scopes() {
+        let store = OtlpMetricsStore::builder().build();
+        let _g = install(store.clone());
 
         // Simulate the flow.run > task.run > task.handle > event stack.
         let flow_span = info_span!("flow.run", flow = "demo");
@@ -331,28 +332,28 @@ mod tests {
         warn!("stale cache");
         error!("timed out");
 
-        let snap = reg.snapshot("demo").expect("recorded");
+        let snap = store.snapshot("demo").await.unwrap().expect("recorded");
         assert_eq!(snap.events_total, 1);
         assert_eq!(snap.warnings_total, 1);
         assert_eq!(snap.errors_total, 1);
     }
 
-    #[test]
-    fn ignores_info_outside_task_handle_scope() {
-        let reg = FlowRegistry::builder().build();
-        let _g = install(Arc::clone(&reg));
+    #[tokio::test]
+    async fn ignores_info_outside_task_handle_scope() {
+        let store = OtlpMetricsStore::builder().build();
+        let _g = install(store.clone());
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
         let task_span = info_span!("task.run", task = "step");
         let _task = task_span.enter();
         info!("no handle in scope");
-        assert!(reg.snapshot("demo").is_none());
+        assert!(store.snapshot("demo").await.unwrap().is_none());
     }
 
-    #[test]
-    fn counts_info_with_event_subject_outside_task_handle() {
-        let reg = FlowRegistry::builder().build();
-        let _g = install(Arc::clone(&reg));
+    #[tokio::test]
+    async fn counts_info_with_event_subject_outside_task_handle() {
+        let store = OtlpMetricsStore::builder().build();
+        let _g = install(store.clone());
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
         // Source task (e.g. `generate`) emits inside task.run, no handle.
@@ -360,14 +361,14 @@ mod tests {
         let _task = task_span.enter();
         info!(event.subject = "trigger", event.id = "1");
 
-        let snap = reg.snapshot("demo").expect("recorded");
+        let snap = store.snapshot("demo").await.unwrap().expect("recorded");
         assert_eq!(snap.events_total, 1);
     }
 
-    #[test]
-    fn counts_init_errors_on_task_run_span() {
-        let reg = FlowRegistry::builder().build();
-        let _g = install(Arc::clone(&reg));
+    #[tokio::test]
+    async fn counts_init_errors_on_task_run_span() {
+        let store = OtlpMetricsStore::builder().build();
+        let _g = install(store.clone());
         let flow_span = info_span!("flow.run", flow = "demo");
         let _flow = flow_span.enter();
         let task_span = info_span!("task.run", task = "call_api");
@@ -375,18 +376,18 @@ mod tests {
         error!("Failed to initialize processor");
         warn!("degraded mode");
 
-        let snap = reg.snapshot("demo").expect("recorded");
+        let snap = store.snapshot("demo").await.unwrap().expect("recorded");
         assert_eq!(snap.errors_total, 1);
         assert_eq!(snap.warnings_total, 1);
         assert_eq!(snap.events_total, 0);
     }
 
-    #[test]
-    fn ignores_events_outside_any_flow_scope() {
-        let reg = FlowRegistry::builder().build();
-        let _g = install(Arc::clone(&reg));
+    #[tokio::test]
+    async fn ignores_events_outside_any_flow_scope() {
+        let store = OtlpMetricsStore::builder().build();
+        let _g = install(store.clone());
         // Ambient info!() outside flow.run should be silently dropped.
         info!("boot message");
-        assert!(reg.snapshot_all().is_empty());
+        assert!(store.snapshot_all().await.unwrap().is_empty());
     }
 }

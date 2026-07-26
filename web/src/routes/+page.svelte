@@ -8,29 +8,10 @@
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
-	import { activitiesFor, allMetrics } from '$lib/activityStore.svelte';
+	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import type { FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
-
-	interface FlowActivity {
-		flow: string;
-		task: string | null;
-		task_type: string | null;
-		level: 'info' | 'warning' | 'error';
-		ts_ms: number;
-		message: string;
-		metrics: {
-			flow: string;
-			events_total: number;
-			warnings_total: number;
-			errors_total: number;
-			last_event_at_ms: number | null;
-			last_warning_at_ms: number | null;
-			last_error_at_ms: number | null;
-			status: FlowStatus;
-		};
-	}
 
 	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;
@@ -166,6 +147,7 @@
 
 		return () => {
 			if (tickerId !== null) clearInterval(tickerId);
+			releaseFlowSubscription();
 		};
 	});
 
@@ -210,6 +192,7 @@
 		selected = null;
 		selectedDetail = null;
 		selectedError = null;
+		releaseFlowSubscription();
 	}
 
 	function onKeydown(event: KeyboardEvent) {
