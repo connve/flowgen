@@ -30,6 +30,15 @@ export interface FieldSummary {
 // re-shown in the raw spans list.
 const HOISTED_SPAN_FIELDS = new Set(['flow', 'task', 'task_type', 'task_id', 'duration_ms']);
 
+// Event-level field keys with special handling in `extractFieldSummary`,
+// matching the names `flowgen_core::event` writes server-side.
+const FIELD_EVENT_ID = 'event.id';
+const FIELD_EVENT_ID_LEGACY = 'event_id';
+const FIELD_EVENT_SUBJECT = 'event.subject';
+// Joined `send_with_logging().context(k, v)` calls — see the comment in
+// `extractFieldSummary` for why this needs unpacking.
+const FIELD_CONTEXT = 'context';
+
 // Extracts identity fields from the span chain, leaf-to-root (so an
 // inner span shadowing an outer span wins).
 export function extractSpanSummary(record: LogRecord): SpanSummary {
@@ -61,11 +70,29 @@ export function extractFieldSummary(record: LogRecord): FieldSummary {
 	let event_id: string | null = null;
 	const extra: Array<[string, string]> = [];
 	for (const f of record.fields) {
-		if (f.key === 'event.id' || f.key === 'event_id') {
+		if (f.key === FIELD_EVENT_ID || f.key === FIELD_EVENT_ID_LEGACY) {
 			event_id = f.value;
 			continue;
 		}
-		if (f.key === 'event.subject') continue;
+		if (f.key === FIELD_EVENT_SUBJECT) continue;
+		// `context` carries `send_with_logging().context(k, v)` calls, joined
+		// server-side into one JSON object because `tracing` fields must be
+		// static per callsite. Split it back into individual attributes here
+		// so e.g. token counts and latency show as their own rows, not one
+		// blob string.
+		if (f.key === FIELD_CONTEXT) {
+			try {
+				const parsed: unknown = JSON.parse(f.value);
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+						extra.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+					}
+					continue;
+				}
+			} catch {
+				// Not JSON — fall through and show it as a plain attribute.
+			}
+		}
 		extra.push([f.key, f.value]);
 	}
 	return { event_id, extra };

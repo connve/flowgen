@@ -78,6 +78,18 @@ pub enum Error {
     MissingCredentials,
     #[error("Custom provider requires endpoint configuration")]
     MissingEndpoint,
+    #[error("Invalid header name '{name}': {source}")]
+    InvalidHeaderName {
+        name: String,
+        #[source]
+        source: http::header::InvalidHeaderName,
+    },
+    #[error("Invalid value for header '{name}': {source}")]
+    InvalidHeaderValue {
+        name: String,
+        #[source]
+        source: http::header::InvalidHeaderValue,
+    },
     #[error("OpenAI client creation failed: {source}")]
     OpenAIClient {
         #[source]
@@ -158,6 +170,10 @@ pub struct ClientBuilder {
     credentials: Option<Credentials>,
     /// Optional custom endpoint URL.
     endpoint: Option<String>,
+    /// Optional HTTP headers sent with every request (`provider: custom` /
+    /// Ollama only). Used, for example, to send `X-Flowgen-Client` when the
+    /// downstream endpoint is another flowgen `llm_proxy` scoped by `clients`.
+    headers: Option<std::collections::HashMap<String, String>>,
     /// Optional agent name (for logging and debugging).
     name: Option<String>,
     /// Optional agent description (useful for sub-agents and workflows).
@@ -190,6 +206,7 @@ impl ClientBuilder {
             model,
             credentials: None,
             endpoint: None,
+            headers: None,
             name: None,
             description: None,
             temperature: None,
@@ -213,6 +230,13 @@ impl ClientBuilder {
     /// Sets a custom endpoint URL (for Ollama, LM Studio, or other OpenAI-compatible servers).
     pub fn endpoint(mut self, endpoint: String) -> Self {
         self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// Sets extra HTTP headers sent with every request (`provider: custom` /
+    /// Ollama only).
+    pub fn headers(mut self, headers: std::collections::HashMap<String, String>) -> Self {
+        self.headers = Some(headers);
         self
     }
 
@@ -384,9 +408,29 @@ impl ClientBuilder {
         // Credentials are optional for local providers without auth.
         let api_key = self.credentials.map(|c| c.api_key).unwrap_or_default();
 
-        let client = rig::providers::openai::Client::builder()
+        let mut header_map = http::HeaderMap::new();
+        for (name, value) in self.headers.iter().flatten() {
+            let header_name = http::HeaderName::try_from(name.as_str()).map_err(|source| {
+                Error::InvalidHeaderName {
+                    name: name.clone(),
+                    source,
+                }
+            })?;
+            let header_value =
+                http::HeaderValue::from_str(value).map_err(|source| Error::InvalidHeaderValue {
+                    name: name.clone(),
+                    source,
+                })?;
+            header_map.insert(header_name, header_value);
+        }
+
+        let mut builder = rig::providers::openai::Client::builder()
             .api_key(&api_key)
-            .base_url(&endpoint)
+            .base_url(&endpoint);
+        if !header_map.is_empty() {
+            builder = builder.http_headers(header_map);
+        }
+        let client = builder
             .build()
             .map_err(|source| Error::OpenAIClient { source })?
             .completions_api();

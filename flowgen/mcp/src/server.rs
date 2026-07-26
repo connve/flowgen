@@ -143,6 +143,9 @@ pub struct ToolRegistration {
     /// the per-request completion channel so the response is delivered only
     /// after every leaf has signalled.
     pub leaf_count: usize,
+    /// Headers a caller must present, with matching values, for this tool
+    /// to be listed or called. Empty means every caller can reach it.
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 impl HasFlowName for ToolRegistration {
@@ -836,6 +839,7 @@ fn handle_tools_list(
     let entries: Vec<_> = state
         .table
         .iter()
+        .filter(|entry| flowgen_core::http_server::headers_satisfy(headers, &entry.value().headers))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1364,6 +1368,7 @@ async fn execute_tool_call(
     let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = state
         .table
         .get(&params.name)
+        .filter(|entry| flowgen_core::http_server::headers_satisfy(headers, &entry.headers))
         .map(|entry| {
             (
                 entry.tx.clone(),
@@ -1791,6 +1796,7 @@ mod tests {
             ack_timeout: None,
             auth_required: false,
             leaf_count: 1,
+            headers: std::collections::HashMap::new(),
         }
     }
 

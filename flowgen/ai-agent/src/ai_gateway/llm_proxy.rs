@@ -217,7 +217,7 @@ mod tests {
         Arc::new(config::Processor {
             name: "test_proxy".to_string(),
             models: Vec::new(),
-            clients: Vec::new(),
+            headers: std::collections::HashMap::new(),
             protocol: config::Protocol::Openai,
             credentials_path: None,
             auth: None,

@@ -403,6 +403,7 @@ async fn mcp_tool_call_routes_through_downstream_and_returns_result() {
             "required":["msg"]
         }),
         credentials_path: None,
+        headers: std::collections::HashMap::new(),
         ack_timeout: Some(Duration::from_secs(5)),
         auth: None,
         depends_on: None,

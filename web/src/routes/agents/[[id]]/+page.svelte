@@ -659,7 +659,10 @@
 							<button
 								type="button"
 								class="flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-base-200"
-								onclick={() => (model = only.id)}
+								onclick={(e) => {
+									model = only.id;
+									e.currentTarget.blur();
+								}}
 							>
 								<span class="mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
 									{#if model === only.id}
@@ -691,7 +694,10 @@
 								<button
 									type="button"
 									class="flex w-full items-center gap-2 rounded py-1 pl-4 pr-2 text-left text-sm hover:bg-base-200"
-									onclick={() => (model = m.id)}
+									onclick={(e) => {
+										model = m.id;
+										e.currentTarget.blur();
+									}}
 								>
 									<span class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
 										{#if model === m.id}

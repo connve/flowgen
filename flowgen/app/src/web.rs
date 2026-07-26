@@ -570,12 +570,6 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
 }
 
 /// Header and value identifying the built-in Agents chat to the AI gateway.
-/// The gateway uses it to scope which proxies appear in the model list (a
-/// proxy's `clients` list), so agent flows meant for our UI can be hidden from
-/// other clients like opencode. Visibility only — not access control.
-const GATEWAY_CLIENT_HEADER: &str = "X-Flowgen-Client";
-const GATEWAY_CLIENT_VALUE: &str = "flowgen-ui";
-
 /// Resolves the base URL the built-in Agents chat proxies to. Prefers the
 /// explicit `web.ai_gateway_url`; otherwise targets the same-process AI
 /// gateway on loopback. Returns `None` when no gateway is configured.
@@ -591,6 +585,27 @@ fn gateway_base_url(state: &WebState) -> Option<String> {
     let gateway = state.app_config.ai_gateway.as_ref()?;
     let path = gateway.path.trim_end_matches('/');
     Some(format!("http://127.0.0.1:{}{path}", gateway.port))
+}
+
+/// Builds the outbound headers sent with every proxied request to the AI
+/// gateway, from `web.headers`. Used to identify this admin server to
+/// `llm_proxy`/`mcp_tool` `headers` scoping (e.g. `X-Flowgen-Client:
+/// flowgen-ui`). Entries that aren't valid header names/values are skipped.
+fn outbound_gateway_headers(state: &WebState) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let Some(web) = state.app_config.web.as_ref() else {
+        return headers;
+    };
+    for (name, value) in &web.headers {
+        let Ok(header_name) = reqwest::header::HeaderName::try_from(name.as_str()) else {
+            continue;
+        };
+        let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) else {
+            continue;
+        };
+        headers.insert(header_name, header_value);
+    }
+    headers
 }
 
 /// Proxies a chat-completion request to the AI gateway, streaming the
@@ -611,7 +626,7 @@ async fn proxy_chat(
     let upstream = reqwest::Client::new()
         .post(format!("{base}/chat/completions"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .header(GATEWAY_CLIENT_HEADER, GATEWAY_CLIENT_VALUE)
+        .headers(outbound_gateway_headers(&state))
         .body(body)
         .send()
         .await;
@@ -656,7 +671,7 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
     };
     match reqwest::Client::new()
         .get(format!("{base}/models"))
-        .header(GATEWAY_CLIENT_HEADER, GATEWAY_CLIENT_VALUE)
+        .headers(outbound_gateway_headers(&state))
         .send()
         .await
     {

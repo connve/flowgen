@@ -137,6 +137,11 @@ http_server:
 #     # persist indefinitely. Long-term history belongs in a database via a
 #     # persistence flow, not this cache.
 #     conversation_history_ttl: 30d
+#   # HTTP headers sent with every outbound request the admin server makes
+#   # (currently the Agents chat proxy to the AI gateway). Identifies this
+#   # admin server to llm_proxy/mcp_tool `headers` scoping.
+#   headers:
+#     X-Flowgen-Client: flowgen-ui
 
 # Kubernetes liveness/readiness listener. Independent from the API
 # listeners so probes keep working regardless of which surfaces are

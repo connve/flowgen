@@ -17,6 +17,7 @@
 //! Runs in `cargo test` without `#[ignore]` because no external daemon
 //! is required.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,7 +96,7 @@ fn register_fake_proxy_with_protocol<F>(
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models: Vec::new(),
-        clients: Vec::new(),
+        headers: HashMap::new(),
         protocol,
         credentials_path: None,
         auth: None,
@@ -146,7 +147,7 @@ fn register_fake_proxy_with_models<F>(
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models,
-        clients: Vec::new(),
+        headers: HashMap::new(),
         protocol: Protocol::Openai,
         credentials_path: None,
         auth: None,
@@ -182,15 +183,19 @@ fn register_fake_proxy_with_models<F>(
     });
 }
 
-/// Registers a proxy scoped to a `clients` list, so tests can exercise the
-/// exclusivity filter on `GET /models`.
-fn register_fake_proxy_with_clients(server: &AiGatewayServer, name: &str, clients: Vec<String>) {
+/// Registers a proxy scoped to a `headers` requirement, so tests can
+/// exercise the exclusivity filter on `GET /models` and dispatch.
+fn register_fake_proxy_with_headers(
+    server: &AiGatewayServer,
+    name: &str,
+    headers: HashMap<String, String>,
+) {
     let (tx, mut rx) = mpsc::channel::<Event>(4);
 
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models: Vec::new(),
-        clients,
+        headers,
         protocol: Protocol::Openai,
         credentials_path: None,
         auth: None,
@@ -780,13 +785,17 @@ async fn list_models_returns_registered_proxies_in_openai_shape() {
 }
 
 #[tokio::test]
-async fn list_models_clients_filter_is_exclusive() {
-    // `public` (empty clients) is API surface; `scoped` is dedicated to the
-    // `flowgen-ui` client. A named client sees ONLY its scoped proxies; an
-    // anonymous request sees ONLY the public ones.
+async fn list_models_headers_filter_scopes_by_matching_header() {
+    // `public` (empty headers) is reachable by everyone; `scoped` requires
+    // `X-Flowgen-Client: flowgen-ui`. Everyone sees `public`; only a request
+    // carrying the matching header also sees `scoped`.
     let (server, chat_url, _handle) = boot_server().await;
-    register_fake_proxy_with_clients(&server, "public", Vec::new());
-    register_fake_proxy_with_clients(&server, "scoped", vec!["flowgen-ui".into()]);
+    register_fake_proxy_with_headers(&server, "public", HashMap::new());
+    register_fake_proxy_with_headers(
+        &server,
+        "scoped",
+        HashMap::from([("X-Flowgen-Client".to_string(), "flowgen-ui".to_string())]),
+    );
     let models_url = chat_url.replace("/chat/completions", "/models");
 
     let ids_for = |client: Option<&'static str>| {
@@ -812,23 +821,41 @@ async fn list_models_clients_filter_is_exclusive() {
         }
     };
 
-    // Named client: only its scoped proxy, not the public one.
+    // Named client: sees both — public is visible to everyone, and its
+    // header satisfies the scoped proxy's requirement.
     let ui = ids_for(Some("flowgen-ui")).await;
     assert!(
         ui.contains(&"scoped".to_string()),
         "flowgen-ui must see scoped"
     );
     assert!(
-        !ui.contains(&"public".to_string()),
-        "flowgen-ui must NOT see public (exclusivity), got {ui:?}"
+        ui.contains(&"public".to_string()),
+        "flowgen-ui must see public too"
     );
 
-    // Anonymous: only the public proxy, not the scoped one.
+    // Anonymous: only the public proxy — scoped requires the header.
     let anon = ids_for(None).await;
     assert!(anon.contains(&"public".to_string()), "anon must see public");
     assert!(
         !anon.contains(&"scoped".to_string()),
         "anon must NOT see scoped, got {anon:?}"
+    );
+
+    // Dispatch is blocked, not just hidden from listing: an anonymous
+    // request to the scoped proxy gets the same 404 as an unknown proxy.
+    let resp = reqwest::Client::new()
+        .post(&chat_url)
+        .json(&json!({
+            "model": "scoped/gpt-4",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        resp.status(),
+        404,
+        "anon must not be able to dispatch to scoped"
     );
 }
 
@@ -960,7 +987,7 @@ fn register_proxy_with_bearer_token(
     let config = Arc::new(GatewayConfig {
         name: name.to_string(),
         models: Vec::new(),
-        clients: Vec::new(),
+        headers: HashMap::new(),
         protocol,
         credentials_path: None,
         auth: None,

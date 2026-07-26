@@ -170,6 +170,7 @@ impl Runner for Processor {
                     .map(|a| a.required)
                     .unwrap_or(false),
                 leaf_count: self.task_context.leaf_count,
+                headers: event_handler.config.headers.clone(),
             },
         )
         .map_err(|source| Error::ToolRegistration { source })?;

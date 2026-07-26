@@ -102,15 +102,13 @@ pub struct Processor {
     /// bare id, leaving the model choice to the routing script.
     #[serde(default)]
     pub models: Vec<String>,
-    /// Clients that should see this proxy in their model list. This is a
-    /// visibility hint only, not access control — a request identifies its
-    /// client with the `X-Flowgen-Client` header, and `GET <path>/models`
-    /// returns a proxy when its `clients` list contains that client or is
-    /// empty. An empty list means "visible to every client" (the default, so
-    /// existing proxies are unchanged). Access is still enforced separately by
-    /// `credentials_path` and `auth`.
+    /// HTTP headers a request must carry, with matching values, for this
+    /// proxy to be visible on `GET <path>/models` and reachable at all.
+    /// All declared headers must match (AND). An empty map (the default)
+    /// means every caller can reach it. A caller missing a required header
+    /// gets the same 404 as an unknown proxy name.
     #[serde(default)]
-    pub clients: Vec<String>,
+    pub headers: std::collections::HashMap<String, String>,
     /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
     #[serde(default)]
     pub protocol: Protocol,
@@ -239,7 +237,7 @@ mod tests {
         let cfg = Processor {
             name: "gw".to_string(),
             models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
-            clients: Vec::new(),
+            headers: std::collections::HashMap::new(),
             protocol: Protocol::Openai,
             credentials_path: Some(PathBuf::from("/c.json")),
             auth: None,

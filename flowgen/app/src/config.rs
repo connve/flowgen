@@ -655,6 +655,12 @@ pub struct WebOptions {
     /// Settings for the built-in Agents chat (conversation history, etc.).
     #[serde(default)]
     pub agents: AgentsOptions,
+    /// HTTP headers sent with every outbound request the admin server
+    /// makes (currently the Agents chat proxy to the AI gateway). Used to
+    /// identify this admin server to `llm_proxy`/`mcp_tool` scoping, e.g.
+    /// `X-Flowgen-Client: flowgen-ui` matching a proxy's `headers` field.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 /// Settings for the built-in Agents chat surface.

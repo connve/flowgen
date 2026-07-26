@@ -73,6 +73,12 @@ pub struct Processor {
     /// Optional custom endpoint URL (for custom or self-hosted providers).
     /// Example: "http://localhost:11434/v1" for Ollama, "http://localhost:1234/v1" for LM Studio.
     pub endpoint: Option<String>,
+    /// Optional HTTP headers sent with every request (`provider: custom` /
+    /// Ollama only), same shape as `http_endpoint.headers`. Used, for
+    /// example, to send `X-Flowgen-Client` when the downstream endpoint is
+    /// another flowgen `llm_proxy` scoped by `headers`.
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
     /// Optional system prompt to set context for the AI (supports resource loading).
     /// Can be inline string or external file (e.g., .md, .txt) via resource loader.
     pub system_prompt: Option<Source>,
@@ -267,6 +273,11 @@ pub struct McpServerConfig {
     /// Uses the same format as http_request credentials (JSON file with
     /// `bearer_auth` and/or `basic_auth` fields).
     pub credentials_path: Option<std::path::PathBuf>,
+    /// Optional HTTP headers sent with every request to this MCP server,
+    /// same shape as `http_endpoint.headers`. Used, for example, to send
+    /// `X-Flowgen-Client` so the server can scope which tools this agent
+    /// can see and call via the tool's `headers` field.
+    pub headers: Option<std::collections::HashMap<String, String>>,
 }
 
 impl ConfigExt for Processor {}
@@ -353,6 +364,7 @@ mod tests {
             prompt: Source::Inline("Test prompt".to_string()),
             credentials_path: None,
             endpoint: None,
+            headers: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -391,6 +403,7 @@ mod tests {
             prompt: Source::Inline("Test prompt: {{event.data}}".to_string()),
             credentials_path: Some(PathBuf::from("/secrets/anthropic.json")),
             endpoint: None,
+            headers: None,
             system_prompt: Some(Source::Inline("You are a helpful assistant.".to_string())),
             temperature: Some(0.7),
             max_tokens: Some(1000),
@@ -441,6 +454,7 @@ mod tests {
             prompt: Source::Inline("Test".to_string()),
             credentials_path: None,
             endpoint: None,
+            headers: None,
             system_prompt: None,
             temperature: None,
             max_tokens: None,
@@ -466,6 +480,7 @@ mod tests {
             prompt: Source::Inline("Process: {{event.data}}".to_string()),
             credentials_path: None, // Local providers may not need credentials.
             endpoint: Some("http://localhost:11434/v1".to_string()),
+            headers: None,
             system_prompt: None,
             temperature: Some(0.8),
             max_tokens: Some(2000),
@@ -496,6 +511,7 @@ mod tests {
             },
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
+            headers: None,
             system_prompt: Some(Source::Resource {
                 resource: "prompts/system.md".to_string(),
             }),
@@ -526,6 +542,7 @@ mod tests {
             prompt: Source::Inline("Question: {{event.data.question}}".to_string()),
             credentials_path: Some(PathBuf::from("/secrets/openai.json")),
             endpoint: None,
+            headers: None,
             system_prompt: Some(Source::Inline("Answer based on context".to_string())),
             temperature: Some(0.3),
             max_tokens: Some(500),

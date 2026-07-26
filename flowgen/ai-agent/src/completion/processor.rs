@@ -87,6 +87,20 @@ pub enum Error {
         #[source]
         source: http::header::InvalidHeaderValue,
     },
+    #[error("Invalid header name '{name}' for MCP server at {url}: {source}")]
+    McpHeaderName {
+        url: String,
+        name: String,
+        #[source]
+        source: http::header::InvalidHeaderName,
+    },
+    #[error("Invalid value for header '{name}' for MCP server at {url}: {source}")]
+    McpHeaderValue {
+        url: String,
+        name: String,
+        #[source]
+        source: http::header::InvalidHeaderValue,
+    },
     #[error(
         "Client registry type mismatch — same provider/model/credentials key used with incompatible client types"
     )]
@@ -233,6 +247,8 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
                 mcp_config.url.as_str(),
             );
 
+        let mut headers = std::collections::HashMap::new();
+
         if let Some(ref creds_path) = mcp_config.credentials_path {
             let creds = flowgen_core::credentials::load_http_credentials(creds_path)
                 .await
@@ -250,10 +266,29 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
                         source,
                     }
                 })?;
-                let mut headers = std::collections::HashMap::new();
                 headers.insert(http::header::AUTHORIZATION, value);
-                transport_config = transport_config.custom_headers(headers);
             }
+        }
+
+        for (name, value) in mcp_config.headers.iter().flatten() {
+            let header_name = http::HeaderName::try_from(name.as_str()).map_err(|source| {
+                Error::McpHeaderName {
+                    url: mcp_config.url.clone(),
+                    name: name.clone(),
+                    source,
+                }
+            })?;
+            let header_value =
+                http::HeaderValue::from_str(value).map_err(|source| Error::McpHeaderValue {
+                    url: mcp_config.url.clone(),
+                    name: name.clone(),
+                    source,
+                })?;
+            headers.insert(header_name, header_value);
+        }
+
+        if !headers.is_empty() {
+            transport_config = transport_config.custom_headers(headers);
         }
 
         let transport =
@@ -316,6 +351,9 @@ async fn build_agent_client(
     }
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint(endpoint.clone());
+    }
+    if let Some(headers) = &config.headers {
+        builder = builder.headers(headers.clone());
     }
     if let Some(temp) = config.temperature {
         builder = builder.temperature(temp);

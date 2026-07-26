@@ -34,7 +34,9 @@ use base64::Engine;
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
-use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
+use flowgen_core::http_server::{
+    headers_satisfy, DispatchState, Dispatcher, HasFlowName, HttpServer,
+};
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use serde::Serialize;
 use std::sync::Arc;
@@ -181,44 +183,20 @@ struct ModelEntry {
     description: Option<String>,
 }
 
-/// HTTP header a client sends to identify itself for model-list visibility.
-/// A proxy's `clients` list is matched against this value; see [`list_models`].
-const CLIENT_HEADER: &str = "X-Flowgen-Client";
-
 /// Lists advertised models in the OpenAI schema. Each proxy contributes one
 /// `<proxy>/<model>` id per declared model; a proxy with no `models` falls
-/// back to its bare name so it still appears.
-///
-/// Visibility is filtered by the `X-Flowgen-Client` header: a proxy is listed
-/// when its `clients` list is empty (visible to everyone) or contains the
-/// requesting client. A request with no client header is treated as an
-/// anonymous client and only sees proxies with an empty `clients` list. This
-/// is a visibility hint, not access control — calling a proxy is still gated
-/// by its credentials and auth.
+/// back to its bare name so it still appears. Uses the same `headers` check
+/// as [`resolve_registration`] so a proxy is never listed without also
+/// being reachable.
 async fn list_models(
     State(state): State<DispatchState<LlmProxyRegistration, AiGatewayExtras>>,
     headers: HeaderMap,
 ) -> Response {
-    let client = headers
-        .get(CLIENT_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    // Exclusivity filter. A named client (e.g. the built-in chat sending
-    // `flowgen-ui`) sees ONLY proxies that list it in `clients` — a proxy with
-    // an empty `clients` is public API surface, not part of any named client's
-    // menu, so it is hidden from that client. An anonymous request (no header)
-    // sees the public proxies (empty `clients`) and nothing that is scoped.
-    let visible = |clients: &[String]| match &client {
-        Some(c) => clients.iter().any(|allowed| allowed == c),
-        None => clients.is_empty(),
-    };
-
     let created = chrono::Utc::now().timestamp();
     let data = state
         .table
         .iter()
-        .filter(|e| visible(&e.value().config.clients))
+        .filter(|e| headers_satisfy(&headers, &e.value().config.headers))
         .flat_map(|e| {
             let proxy = e.key().clone();
             let reg = e.value();
@@ -422,6 +400,10 @@ async fn resolve_registration(
         Some(entry) => entry.clone(),
         None => return Err(DispatchError::UnknownProxy { name: proxy_name }.into_response()),
     };
+
+    if !headers_satisfy(headers, &registration.config.headers) {
+        return Err(DispatchError::ProxyNotVisible { name: proxy_name }.into_response());
+    }
 
     if registration.protocol != expected_protocol {
         return Err(DispatchError::WrongProtocolForUrl { name: proxy_name }.into_response());
@@ -1030,6 +1012,11 @@ enum DispatchError {
     ModelChoiceRequired { name: String },
     #[error("Unknown LLM proxy '{name}'")]
     UnknownProxy { name: String },
+    /// A request missing one of a proxy's required `headers` gets the same
+    /// 404 as `UnknownProxy` — the proxy must not be distinguishable from
+    /// one that does not exist.
+    #[error("Unknown LLM proxy '{name}'")]
+    ProxyNotVisible { name: String },
     #[error("LLM proxy '{name}' does not speak the protocol expected at this URL")]
     WrongProtocolForUrl { name: String },
     #[error("No authorization header provided")]
@@ -1087,9 +1074,9 @@ impl DispatchError {
             DispatchError::MissingModelField
             | DispatchError::MissingProxyPrefix
             | DispatchError::ModelChoiceRequired { .. } => "invalid_request_error",
-            DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
-                "not_found_error"
-            }
+            DispatchError::UnknownProxy { .. }
+            | DispatchError::ProxyNotVisible { .. }
+            | DispatchError::WrongProtocolForUrl { .. } => "not_found_error",
             DispatchError::NoCredentials
             | DispatchError::InvalidCredentials
             | DispatchError::MalformedCredentials
@@ -1110,9 +1097,9 @@ impl IntoResponse for DispatchError {
             DispatchError::MissingModelField
             | DispatchError::MissingProxyPrefix
             | DispatchError::ModelChoiceRequired { .. } => StatusCode::BAD_REQUEST,
-            DispatchError::UnknownProxy { .. } | DispatchError::WrongProtocolForUrl { .. } => {
-                StatusCode::NOT_FOUND
-            }
+            DispatchError::UnknownProxy { .. }
+            | DispatchError::ProxyNotVisible { .. }
+            | DispatchError::WrongProtocolForUrl { .. } => StatusCode::NOT_FOUND,
             DispatchError::NoCredentials
             | DispatchError::InvalidCredentials
             | DispatchError::MalformedCredentials

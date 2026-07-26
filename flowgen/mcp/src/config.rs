@@ -37,6 +37,13 @@ pub struct Processor {
     /// Optional path to credentials file for this specific tool.
     /// Overrides the global `worker.mcp_server.credentials_path` if set.
     pub credentials_path: Option<PathBuf>,
+    /// HTTP headers a request must carry, with matching values, for this
+    /// tool to be visible on `tools/list` and callable at all. All declared
+    /// headers must match (AND). An empty map (the default) means every
+    /// caller can see and call it. A caller missing a required header gets
+    /// the same "unknown tool" error as a nonexistent tool name.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
     /// Timeout for waiting on flow completion before responding to the MCP client.
     /// If not specified, waits indefinitely for flow completion.
     /// Accepts human-readable durations (e.g., "30s", "5m", "1h").
@@ -95,6 +102,7 @@ mod tests {
                 "required": ["user_id"]
             }),
             credentials_path: Some(std::path::PathBuf::from("/etc/mcp/keys.json")),
+            headers: std::collections::HashMap::new(),
             ack_timeout: None,
             auth: None,
             depends_on: None,

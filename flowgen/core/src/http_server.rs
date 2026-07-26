@@ -58,6 +58,22 @@ pub trait HasFlowName {
     fn flow_name(&self) -> &str;
 }
 
+/// Checks a registration's required `headers` (empty = reachable by
+/// everyone) against the actual request headers. All entries must match.
+/// Shared by every role that scopes callers this way (AI gateway proxies,
+/// MCP tools), so the semantics can't drift between them.
+pub fn headers_satisfy(
+    headers: &axum::http::HeaderMap,
+    required: &std::collections::HashMap<String, String>,
+) -> bool {
+    required.iter().all(|(name, expected)| {
+        headers
+            .get(name.as_str())
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|actual| actual == expected)
+    })
+}
+
 /// Common axum state shared with every dispatcher.
 ///
 /// Holds a clone of the dispatch table, the server's auth provider /
