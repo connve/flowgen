@@ -60,6 +60,7 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
 | `input_schema` | object | | JSON Schema for the tool's input parameters. |
 | `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
+| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this tool to be listed on `tools/list` and callable at all. All declared headers must match. Empty (the default) means every caller can see and call it. A caller missing a required header gets the same "unknown tool" error as a nonexistent tool name — use this to give an agent only the specific tools it needs, e.g. a marketing agent that should see a BigQuery tool but not a Salesforce tool. |
 | `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before returning a timeout error to the client. |
 | `auth` | object | | Per-tool authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider; the resolved user context is injected into `event.meta.auth`. |
 | `depends_on` | list | | Upstream task names. |

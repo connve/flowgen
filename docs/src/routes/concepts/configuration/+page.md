@@ -74,6 +74,8 @@ web:
   enabled: true
   port: 8080
   path: /flowgen
+  headers:
+    X-Flowgen-Client: flowgen-ui
 
 health:
   enabled: true
@@ -186,6 +188,7 @@ Embedded admin dashboard and read-only JSON API.
 | `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
+| `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the admin server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the admin server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
 
 The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.yaml`.
 
@@ -193,10 +196,15 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 |---|---|
 | `GET <path>/api/flows` | List loaded flows with live counters. |
 | `GET <path>/api/flows/{name}` | Full YAML source of one flow. |
-| `GET <path>/api/flows/stream` | Server-Sent Events with `snapshot` and `activity` frames. |
+| `GET <path>/api/flows/stream` | Server-Sent Events of live per-flow metrics: one `snapshot` frame with every flow's counters on connect, then a `snapshot` frame per change. Event/log history and live tail come from `/api/logs` and `/api/logs/stream` instead. |
+| `GET <path>/api/logs` | Retained log records — framework, lifecycle, and per-task activity. Accepts `?limit=` (default 500, max 10000) and `?flow=` to scope to one flow's records. |
+| `GET <path>/api/logs/stream` | Server-Sent Events live tail of log records as they arrive, same `?flow=` scoping as `/api/logs`. |
 | `GET <path>/api/resources` | List discoverable resources. |
 | `GET <path>/api/resources/{key}` | Fetch one resource's content. |
 | `GET <path>/api/version` | Running build version. |
+| `GET <path>/api/config` | Non-secret config info shown in the admin UI (e.g. whether the Agents chat is configured). |
+| `POST <path>/api/agents/chat` | Proxies a chat-completion request to the AI gateway for the built-in Agents chat. Streams the response back; same-origin, so no gateway-side CORS is required. |
+| `GET <path>/api/agents/models` | Proxies `GET /models` on the AI gateway for the built-in Agents chat's model picker. |
 | `GET <path>/api/openapi.yaml` | The spec itself. |
 
 ## `health`

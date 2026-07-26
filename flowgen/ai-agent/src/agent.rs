@@ -172,7 +172,7 @@ pub struct ClientBuilder {
     endpoint: Option<String>,
     /// Optional HTTP headers sent with every request (`provider: custom` /
     /// Ollama only). Used, for example, to send `X-Flowgen-Client` when the
-    /// downstream endpoint is another flowgen `llm_proxy` scoped by `clients`.
+    /// downstream endpoint is another flowgen `llm_proxy` scoped by `headers`.
     headers: Option<std::collections::HashMap<String, String>>,
     /// Optional agent name (for logging and debugging).
     name: Option<String>,

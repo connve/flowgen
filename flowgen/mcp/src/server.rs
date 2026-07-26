@@ -16,7 +16,9 @@ use axum::{
     routing::post,
     Router,
 };
-use flowgen_core::http_server::{DispatchState, Dispatcher, HasFlowName, HttpServer};
+use flowgen_core::http_server::{
+    headers_satisfy, DispatchState, Dispatcher, HasFlowName, HttpServer,
+};
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -839,7 +841,7 @@ fn handle_tools_list(
     let entries: Vec<_> = state
         .table
         .iter()
-        .filter(|entry| flowgen_core::http_server::headers_satisfy(headers, &entry.value().headers))
+        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1368,7 +1370,7 @@ async fn execute_tool_call(
     let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = state
         .table
         .get(&params.name)
-        .filter(|entry| flowgen_core::http_server::headers_satisfy(headers, &entry.headers))
+        .filter(|entry| headers_satisfy(headers, &entry.headers))
         .map(|entry| {
             (
                 entry.tx.clone(),

@@ -47,6 +47,8 @@ Registers a flow as a backend on the shared AI gateway server. Inbound chat comp
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Proxy name. Combined with the downstream model as `<name>/<downstream-model>` in the client's `model` field. |
+| `models` | list of string | `[]` | Models advertised on `GET <path>/models` as `<name>/<model>`. A discovery menu, not a whitelist — an unlisted model is still forwarded to the routing script/provider. When non-empty, clients must pick a model (a bare proxy id is rejected). When empty, the proxy is advertised by its bare name and accepts a bare id, leaving the model choice to the routing script. |
+| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this proxy to be visible on `GET <path>/models` and reachable at all. All declared headers must match. Empty (the default) means every caller can reach it. A caller missing a required header gets the same 404 as an unknown proxy name — use this to scope an agent to only the proxies it should see, e.g. so a marketing agent's built-in chat request only surfaces its own proxy. |
 | `protocol` | string | `openai` | Wire protocol exposed for this proxy. One of `openai` or `anthropic`. |
 | `credentials_path` | string | | Overrides `ai_gateway.credentials_path` for this proxy. |
 | `auth` | object | | Per-proxy authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider. |

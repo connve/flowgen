@@ -23,6 +23,7 @@ Run LLM completions from multiple providers within a flow. Supports custom OpenA
 | `prompt` | string/resource | required | User prompt template. Supports handlebars templating and resource files. |
 | `credentials_path` | string | | Path to provider credentials JSON. Required for hosted providers, optional for `custom`/`ollama` (local providers without auth). |
 | `endpoint` | string | | Base URL of a custom OpenAI-compatible endpoint. Required when `provider: custom` or `provider: ollama`. Example: `https://llm-gateway.internal.example.com/v1`. |
+| `headers` | map of string to string | | HTTP headers sent with every request (`provider: custom`/`ollama` only). Use this to identify the agent to a downstream `llm_proxy` scoped by its own `headers` field — see [AI Gateway](/docs/flowgen/ai/gateway#llm_proxy). |
 | `system_prompt` | string/resource | | System prompt. |
 | `max_tokens` | int | | Maximum tokens in response. |
 | `temperature` | float | | Sampling temperature (0.0–1.0). |
@@ -137,6 +138,15 @@ Optional per-server auth uses the same credentials JSON format as `http_request`
     mcp_servers:
       - url: "https://tools.example.com/mcp"
         credentials_path: /etc/flowgen/credentials/mcp_tools.json
+```
+
+Each entry also accepts `headers`, sent with every request to that MCP server. Use it to identify this agent to an `mcp_tool` scoped by its own `headers` field, so the agent only sees and can call the tools meant for it:
+
+```yaml
+    mcp_servers:
+      - url: "http://localhost:3001/mcp"
+        headers:
+          X-Flowgen-Client: marketing_agent
 ```
 
 ## Tool-use passthrough
