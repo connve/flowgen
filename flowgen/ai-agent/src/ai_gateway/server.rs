@@ -35,7 +35,8 @@ use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
 use flowgen_core::http_server::{
-    headers_satisfy, DispatchState, Dispatcher, HasFlowName, HttpServer,
+    headers_satisfy, record_headers_rejected_activity, DispatchState, Dispatcher, HasFlowName,
+    HttpServer,
 };
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
 use serde::Serialize;
@@ -402,6 +403,12 @@ async fn resolve_registration(
     };
 
     if !headers_satisfy(headers, &registration.config.headers) {
+        record_headers_rejected_activity(
+            &registration.flow_name,
+            &registration.config.name,
+            registration.task_id,
+            registration.task_type,
+        );
         return Err(DispatchError::ProxyNotVisible { name: proxy_name }.into_response());
     }
 

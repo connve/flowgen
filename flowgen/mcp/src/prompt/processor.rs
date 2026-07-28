@@ -151,6 +151,7 @@ impl Runner for Processor {
             arguments,
             messages,
             resource_loader: self.task_context.resource_loader.clone(),
+            headers: cfg.headers.clone(),
         };
 
         super::super::server::register_prompt(

@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.131.0
+  version: 0.132.0
   license:
     name: MPL-2.0
 servers:

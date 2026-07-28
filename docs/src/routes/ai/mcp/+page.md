@@ -135,6 +135,7 @@ Client calls `resources/read({uri: "flowgen://account/001Qy0abc"})`; the server 
 | `mime_type` | string | `text/plain` | Standard MIME type. |
 | `content` | string/resource | required | Inline string or `resource:` reference. For templates, rendered as a Handlebars template against `{placeholder}` bindings on each read. |
 | `parameters` | list | | URI-template parameter descriptors. Only valid when `uri_template` is set. Each entry may attach a `completion` source served by `completion/complete`. |
+| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this resource to be listed and readable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -213,6 +214,7 @@ arguments:
 | `arguments` | list | | Argument definitions (see above). |
 | `template` | string/resource | | Single-message shorthand. Mutually exclusive with `messages`. |
 | `messages` | list | | Multi-message form. Each entry is `{role, content}` where `role` is `user` or `assistant` and `content` is a string or `resource:` reference rendered as a Handlebars template. Mutually exclusive with `template`. |
+| `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this prompt to be listed and usable at all. Same semantics as `mcp_tool`'s `headers` (see above). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

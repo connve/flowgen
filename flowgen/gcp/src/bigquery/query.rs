@@ -115,6 +115,30 @@ pub enum Error {
     ClientRegistryMismatch,
 }
 
+impl Error {
+    /// True for errors that retrying will not fix: bad SQL, a missing
+    /// table, or a permission error all come back as a BigQuery REST 4xx
+    /// (429 excluded — that is rate limiting, which is transient).
+    fn is_permanent(&self) -> bool {
+        match self {
+            Error::QueryExecution { source } => is_permanent_http_error(source),
+            Error::StorageQueryExecution {
+                source: google_cloud_bigquery::client::QueryError::JobHttp(source),
+            } => is_permanent_http_error(source),
+            _ => false,
+        }
+    }
+}
+
+fn is_permanent_http_error(source: &google_cloud_bigquery::http::error::Error) -> bool {
+    match source {
+        google_cloud_bigquery::http::error::Error::Response(response) => {
+            (400..500).contains(&response.code) && response.code != 429
+        }
+        _ => false,
+    }
+}
+
 /// Event handler for processing individual query events.
 pub struct EventHandler {
     client: Arc<Client>,
@@ -327,6 +351,10 @@ impl flowgen_core::task::runner::Runner for Processor {
                             let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                 match event_handler.handle(event.clone()).await {
                                     Ok(result) => Ok(result),
+                                    Err(e) if e.is_permanent() => {
+                                        error!(error = %e, "Query failed with a permanent error, skipping retries");
+                                        Err(tokio_retry::RetryError::permanent(e))
+                                    }
                                     Err(e) => {
                                         error!(error = %e, "Failed to execute query");
                                         Err(tokio_retry::RetryError::transient(e))
@@ -1612,5 +1640,57 @@ mod tests {
         let result = response_to_record_batch(None, vec![]).unwrap();
         assert_eq!(result.num_rows(), 0);
         assert_eq!(result.num_columns(), 0);
+    }
+
+    fn http_error_response(code: u16) -> google_cloud_bigquery::http::error::Error {
+        google_cloud_bigquery::http::error::Error::Response(
+            google_cloud_bigquery::http::error::ErrorResponse {
+                code,
+                errors: None,
+                message: "test".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_client_error_is_permanent() {
+        let e = Error::QueryExecution {
+            source: http_error_response(400),
+        };
+        assert!(e.is_permanent(), "bad SQL / bad request must not retry");
+
+        let e = Error::QueryExecution {
+            source: http_error_response(404),
+        };
+        assert!(e.is_permanent(), "missing table must not retry");
+
+        let e = Error::QueryExecution {
+            source: http_error_response(403),
+        };
+        assert!(e.is_permanent(), "permission denied must not retry");
+    }
+
+    #[test]
+    fn test_rate_limit_is_not_permanent() {
+        let e = Error::QueryExecution {
+            source: http_error_response(429),
+        };
+        assert!(!e.is_permanent(), "429 is rate limiting, must retry");
+    }
+
+    #[test]
+    fn test_server_error_is_not_permanent() {
+        let e = Error::QueryExecution {
+            source: http_error_response(500),
+        };
+        assert!(!e.is_permanent(), "5xx must still retry");
+    }
+
+    #[test]
+    fn test_storage_query_client_error_is_permanent() {
+        let e = Error::StorageQueryExecution {
+            source: google_cloud_bigquery::client::QueryError::JobHttp(http_error_response(400)),
+        };
+        assert!(e.is_permanent());
     }
 }

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.132.0
+
+### Fixes
+
+- **`bigquery_query` now fails fast on permanent errors** (bad SQL, missing
+  table, permission denied) instead of retrying 10 times over ~15 minutes.
+  5xx and rate-limit (429) responses still retry as before.
+
+### Improvements
+
+- **`mcp_resource` and `mcp_prompt` can scope which callers can see and use
+  them**, the same way `mcp_tool` already could. Both gained a `headers`
+  field: a map of HTTP headers a request must carry, with matching values,
+  to be listed or read/fetched at all. An unauthorized caller gets the same
+  "unknown resource"/"unknown prompt" error as a nonexistent one.
+- **Calls rejected by `headers` scoping now show up in that flow's Activity
+  panel** (`mcp_tool`, `mcp_resource`, `mcp_prompt`, `llm_proxy`), not just
+  the global log.
+
 ## 0.131.0
 
 ### Fixes

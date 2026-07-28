@@ -164,6 +164,7 @@ impl Runner for Processor {
             body,
             parameters,
             resource_loader: self.task_context.resource_loader.clone(),
+            headers: cfg.headers.clone(),
         };
 
         match cfg.is_template() {

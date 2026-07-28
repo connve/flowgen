@@ -1370,15 +1370,11 @@ mod tests {
 
         let data_a = root.join("..2026_07_23_09_00_00.111111111");
         std::fs::create_dir(&data_a).unwrap();
-        std::fs::write(
-            data_a.join("system_sync_workspace.yaml"),
-            "flow:\n  tasks: []\n",
-        )
-        .unwrap();
+        std::fs::write(data_a.join("sync_workspace.yaml"), "flow:\n  tasks: []\n").unwrap();
         symlink(&data_a, root.join("..data")).unwrap();
         symlink(
-            "..data/system_sync_workspace.yaml",
-            root.join("system_sync_workspace.yaml"),
+            "..data/sync_workspace.yaml",
+            root.join("sync_workspace.yaml"),
         )
         .unwrap();
 
@@ -1386,17 +1382,13 @@ mod tests {
 
         let data_b = root.join("..2026_07_24_18_30_00.222222222");
         std::fs::create_dir(&data_b).unwrap();
-        std::fs::write(
-            data_b.join("system_sync_workspace.yaml"),
-            "flow:\n  tasks: []\n",
-        )
-        .unwrap();
+        std::fs::write(data_b.join("sync_workspace.yaml"), "flow:\n  tasks: []\n").unwrap();
         std::fs::remove_file(root.join("..data")).unwrap();
         symlink(&data_b, root.join("..data")).unwrap();
 
         let identity_after = derive_configmap_identity(&root);
 
-        assert_eq!(identity_before, vec!["system_sync_workspace".to_string()]);
+        assert_eq!(identity_before, vec!["sync_workspace".to_string()]);
         assert_eq!(
             identity_before, identity_after,
             "identity must not change when the ConfigMap is reloaded"

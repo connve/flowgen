@@ -17,7 +17,8 @@ use axum::{
     Router,
 };
 use flowgen_core::http_server::{
-    headers_satisfy, DispatchState, Dispatcher, HasFlowName, HttpServer,
+    headers_satisfy, record_headers_rejected_activity, DispatchState, Dispatcher, HasFlowName,
+    HttpServer,
 };
 use flowgen_core::registry::{Content, ProgressEvent, ResponseRegistry, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -189,6 +190,9 @@ pub struct ResourceRegistration {
     /// Loader used to resolve template `Source::Resource` content at read
     /// time. Concrete resources ignore this; templates need it.
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    /// Headers a caller must present, with matching values, for this
+    /// resource to be listed or read. Empty means every caller can reach it.
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 impl HasFlowName for ResourceRegistration {
@@ -241,6 +245,7 @@ pub struct PromptRegistration {
     pub arguments: Vec<PromptArgument>,
     pub messages: Vec<PromptMessage>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 impl HasFlowName for PromptRegistration {
@@ -881,6 +886,7 @@ fn handle_resources_list(
         .extras
         .resources
         .iter()
+        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -916,6 +922,7 @@ fn handle_resource_templates_list(
         .extras
         .resource_templates
         .iter()
+        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -962,6 +969,17 @@ async fn handle_resources_read(
 
     // Fast path: exact URI match against the concrete-resource table.
     if let Some(entry) = state.extras.resources.get(&params.uri) {
+        if !headers_satisfy(headers, &entry.headers) {
+            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
+            return json_rpc_error_response(
+                request.id,
+                -32602,
+                Error::UnknownResourceUri {
+                    uri: params.uri.clone(),
+                }
+                .to_string(),
+            );
+        }
         let reg = entry.value();
         let text = match &reg.body {
             ResourceBody::Concrete(content) => content.clone(),
@@ -979,10 +997,29 @@ async fn handle_resources_read(
     }
 
     // Slow path: match against every resource-template pattern.
-    let matched = state.extras.resource_templates.iter().find_map(|entry| {
-        match_uri_template(entry.key(), &params.uri)
-            .map(|bindings| (entry.value().clone(), bindings))
-    });
+    let matched = state
+        .extras
+        .resource_templates
+        .iter()
+        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
+        .find_map(|entry| {
+            match_uri_template(entry.key(), &params.uri)
+                .map(|bindings| (entry.value().clone(), bindings))
+        });
+
+    // Headers filtered out every template match for this URI: log against
+    // the first URI-matching (but header-rejected) template so the
+    // rejection shows up in that flow's Activity panel too.
+    if matched.is_none() {
+        if let Some(entry) = state
+            .extras
+            .resource_templates
+            .iter()
+            .find(|entry| match_uri_template(entry.key(), &params.uri).is_some())
+        {
+            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
+        }
+    }
 
     let (reg, bindings) = match matched {
         Some(pair) => pair,
@@ -1066,6 +1103,7 @@ fn handle_prompts_list(
         .extras
         .prompts
         .iter()
+        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
         .map(|entry| {
             let reg = entry.value();
             (
@@ -1111,6 +1149,14 @@ async fn handle_prompts_get(
     };
 
     let reg = match state.extras.prompts.get(&params.name) {
+        Some(entry) if !headers_satisfy(headers, &entry.headers) => {
+            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_prompt");
+            return json_rpc_error_response(
+                request.id,
+                -32602,
+                Error::UnknownPrompt { name: params.name }.to_string(),
+            );
+        }
         Some(entry) => entry.value().clone(),
         None => {
             return json_rpc_error_response(
@@ -1367,22 +1413,27 @@ async fn execute_tool_call(
 
     validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
-    let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = state
-        .table
-        .get(&params.name)
-        .filter(|entry| headers_satisfy(headers, &entry.headers))
-        .map(|entry| {
-            (
-                entry.tx.clone(),
-                entry.ack_timeout,
-                entry.auth_required,
-                entry.leaf_count,
-                entry.flow_name.clone(),
-            )
-        })
-        .ok_or_else(|| Error::UnknownTool {
+    let entry = match state.table.get(&params.name) {
+        Some(entry) => entry.clone(),
+        None => {
+            return Err(Error::UnknownTool {
+                name: params.name.clone(),
+            })
+        }
+    };
+    if !headers_satisfy(headers, &entry.headers) {
+        record_headers_rejected_activity(&entry.flow_name, &params.name, 0, "mcp_tool");
+        return Err(Error::UnknownTool {
             name: params.name.clone(),
-        })?;
+        });
+    }
+    let (tool_tx, ack_timeout, auth_required, leaf_count, flow_name) = (
+        entry.tx.clone(),
+        entry.ack_timeout,
+        entry.auth_required,
+        entry.leaf_count,
+        entry.flow_name.clone(),
+    );
 
     let user_context = validate_user_auth(state, headers, auth_required)
         .await
@@ -2123,6 +2174,7 @@ mod tests {
                 content: flowgen_core::resource::Source::Inline("hi".to_string()),
             }],
             resource_loader: None,
+            headers: std::collections::HashMap::new(),
         }
     }
 

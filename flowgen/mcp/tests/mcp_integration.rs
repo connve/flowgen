@@ -87,13 +87,23 @@ fn task_context(flow_name: &str) -> Arc<TaskContext> {
 }
 
 async fn post(client: &reqwest::Client, url: &str, body: Value) -> Value {
-    let resp = client
+    post_with_header(client, url, body, None).await
+}
+
+async fn post_with_header(
+    client: &reqwest::Client,
+    url: &str,
+    body: Value,
+    header: Option<(&str, &str)>,
+) -> Value {
+    let mut req = client
         .post(url)
         .header("Accept", "application/json, text/event-stream")
-        .json(&body)
-        .send()
-        .await
-        .expect("post to MCP server");
+        .json(&body);
+    if let Some((name, value)) = header {
+        req = req.header(name, value);
+    }
+    let resp = req.send().await.expect("post to MCP server");
     let text = resp.text().await.expect("read response body");
     // tools/call returns SSE (`data: <json>\n\n`) even for the terminal
     // event; strip the SSE prefix so callers can parse JSON directly.
@@ -157,6 +167,7 @@ async fn mcp_prompt_registers_lists_and_renders_via_handlebars() {
             "Hello {{arguments.who}}, {{arguments.tone}} greetings.".to_string(),
         )),
         messages: None,
+        headers: std::collections::HashMap::new(),
         depends_on: None,
         retry: None,
     });
@@ -264,6 +275,7 @@ async fn mcp_resource_registers_concrete_and_templated_variants() {
         mime_type: "text/markdown".to_string(),
         content: Source::Inline("# Terms\n- ABM: Account-Based".to_string()),
         parameters: Vec::new(),
+        headers: std::collections::HashMap::new(),
         depends_on: None,
         retry: None,
     });
@@ -280,6 +292,7 @@ async fn mcp_resource_registers_concrete_and_templated_variants() {
                 values: vec!["001".to_string(), "002".to_string()],
             }),
         }],
+        headers: std::collections::HashMap::new(),
         depends_on: None,
         retry: None,
     });
@@ -388,6 +401,156 @@ async fn mcp_resource_registers_concrete_and_templated_variants() {
         .as_array()
         .expect("values array");
     assert_eq!(values.len(), 2, "empty prefix returns all candidates");
+}
+
+#[tokio::test]
+async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
+    let (server, url, _handle) = boot_server().await;
+
+    let scoped_header = std::collections::HashMap::from([(
+        "X-Flowgen-Client".to_string(),
+        "marketing_agent".to_string(),
+    )]);
+
+    let resource_cfg = Arc::new(ResourceConfig {
+        name: "scoped_doc".to_string(),
+        uri: None,
+        uri_template: None,
+        description: "Scoped resource".to_string(),
+        mime_type: "text/plain".to_string(),
+        content: Source::Inline("secret".to_string()),
+        parameters: Vec::new(),
+        headers: scoped_header.clone(),
+        depends_on: None,
+        retry: None,
+    });
+    let resource_processor = ResourceProcessorBuilder::new()
+        .config(resource_cfg)
+        .task_id(0)
+        .task_type("mcp_resource")
+        .task_context(task_context("scoped_flow"))
+        .mcp_server(Arc::clone(&server))
+        .build()
+        .await
+        .expect("build resource processor");
+    flowgen_core::task::runner::Runner::run(resource_processor)
+        .await
+        .expect("register resource");
+
+    let prompt_cfg = Arc::new(PromptConfig {
+        name: "scoped_prompt".to_string(),
+        description: "Scoped prompt".to_string(),
+        arguments: Vec::new(),
+        template: Some(Source::Inline("hi".to_string())),
+        messages: None,
+        headers: scoped_header,
+        depends_on: None,
+        retry: None,
+    });
+    let prompt_processor = PromptProcessorBuilder::new()
+        .config(prompt_cfg)
+        .task_id(0)
+        .task_type("mcp_prompt")
+        .task_context(task_context("scoped_flow"))
+        .mcp_server(Arc::clone(&server))
+        .build()
+        .await
+        .expect("build prompt processor");
+    flowgen_core::task::runner::Runner::run(prompt_processor)
+        .await
+        .expect("register prompt");
+
+    let client = reqwest::Client::new();
+    let auth_header = Some(("X-Flowgen-Client", "marketing_agent"));
+
+    // Unauthorized caller: neither listing shows the scoped entries.
+    let resources = post(
+        &client,
+        &url,
+        json!({"jsonrpc":"2.0","id":1,"method":"resources/list"}),
+    )
+    .await;
+    assert_eq!(
+        resources["result"]["resources"]
+            .as_array()
+            .expect("resources array")
+            .len(),
+        0,
+        "unauthorized caller must not see the scoped resource"
+    );
+    let prompts = post(
+        &client,
+        &url,
+        json!({"jsonrpc":"2.0","id":2,"method":"prompts/list"}),
+    )
+    .await;
+    assert_eq!(
+        prompts["result"]["prompts"]
+            .as_array()
+            .expect("prompts array")
+            .len(),
+        0,
+        "unauthorized caller must not see the scoped prompt"
+    );
+
+    // Unauthorized caller: read/get is blocked, not just hidden from listing.
+    let read = post(
+        &client,
+        &url,
+        json!({
+            "jsonrpc":"2.0","id":3,
+            "method":"resources/read",
+            "params":{"uri":"flowgen://scoped_flow/scoped_doc"}
+        }),
+    )
+    .await;
+    assert!(
+        read["error"].is_object(),
+        "unauthorized read must fail, got {read:?}"
+    );
+    let get = post(
+        &client,
+        &url,
+        json!({
+            "jsonrpc":"2.0","id":4,
+            "method":"prompts/get",
+            "params":{"name":"scoped_prompt","arguments":{}}
+        }),
+    )
+    .await;
+    assert!(
+        get["error"].is_object(),
+        "unauthorized get must fail, got {get:?}"
+    );
+
+    // Authorized caller: sees and can use both.
+    let resources = post_with_header(
+        &client,
+        &url,
+        json!({"jsonrpc":"2.0","id":5,"method":"resources/list"}),
+        auth_header,
+    )
+    .await;
+    assert_eq!(
+        resources["result"]["resources"]
+            .as_array()
+            .expect("resources array")
+            .len(),
+        1,
+        "authorized caller must see the scoped resource"
+    );
+    let read = post_with_header(
+        &client,
+        &url,
+        json!({
+            "jsonrpc":"2.0","id":6,
+            "method":"resources/read",
+            "params":{"uri":"flowgen://scoped_flow/scoped_doc"}
+        }),
+        auth_header,
+    )
+    .await;
+    assert_eq!(read["result"]["contents"][0]["text"], "secret");
 }
 
 #[tokio::test]
@@ -502,6 +665,7 @@ async fn deregister_flow_emits_list_changed_on_open_sse_session() {
         arguments: Vec::new(),
         template: Some(Source::Inline("hi".to_string())),
         messages: None,
+        headers: std::collections::HashMap::new(),
         depends_on: None,
         retry: None,
     });

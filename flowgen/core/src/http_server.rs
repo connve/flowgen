@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::auth::AuthProvider;
 
@@ -46,6 +46,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    /// A caller's request headers did not satisfy a registration's
+    /// required `headers`. Not returned to the caller directly — roles map
+    /// this to whatever wire error keeps a scoped registration
+    /// indistinguishable from one that does not exist.
+    #[error("Call to '{task}' rejected: caller headers did not satisfy the required headers")]
+    HeadersRejected { task: String },
 }
 
 /// Marker trait for registrations that know which flow they belong to.
@@ -72,6 +78,30 @@ pub fn headers_satisfy(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|actual| actual == expected)
     })
+}
+
+/// Emits a `task.run`/`task.handle` error so a call rejected by `headers`
+/// scoping shows up in that flow's Activity panel instead of only the
+/// role's own request log. Shared by every role that scopes callers via
+/// `headers_satisfy` (AI gateway proxies, MCP tools/resources/prompts).
+pub fn record_headers_rejected_activity(
+    flow_name: &str,
+    task_name: &str,
+    task_id: usize,
+    task_type: &str,
+) {
+    let run_span = tracing::info_span!(
+        "task.run",
+        flow = %flow_name,
+        task = %task_name,
+        task_id = task_id,
+        task_type = %task_type,
+    );
+    let e = Error::HeadersRejected {
+        task: task_name.to_string(),
+    };
+    tracing::info_span!(parent: &run_span, "task.handle", duration_ms = tracing::field::Empty)
+        .in_scope(|| error!(error = %e, event.subject = %task_name));
 }
 
 /// Common axum state shared with every dispatcher.
