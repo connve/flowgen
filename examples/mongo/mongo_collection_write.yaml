@@ -1,0 +1,36 @@
+# Subscribe to a NATS stream and insert each incoming event's JSON payload
+# as a document into a MongoDB collection.
+#
+# Required:
+#   - /etc/nats/credentials.json
+#   - /etc/mongo/credentials.json
+flow:
+  labels:
+    display_name: "Mongo Collection Write"
+    description: "Writes events consumed from a NATS stream as documents into a MongoDB collection."
+    tags: ["mongo", "write", "example"]
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: consume_events
+        credentials_path: /etc/nats/credentials.json
+        url: "127.0.0.1:4222"
+        subject: pubsub.data.mongo
+        stream:
+          create_or_update: true
+          name: mongo
+          description: "Mongo document write events."
+          subjects: ["pubsub.data.mongo"]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old
+        durable_name: mongo_writer
+        max_messages: 100
+        delay: 1s
+
+    - mongo_collection:
+        name: write_customer
+        operation: write
+        credentials_path: /etc/mongo/credentials.json
+        db_name: sales
+        collection_name: customers

@@ -151,3 +151,5 @@ walkdir = { version = "2.5" }
 testcontainers = { version = "0.27" }
 rust-embed = { version = "8.7" }
 mime_guess = { version = "2.0" }
+bson = { version = "2.15" }
+mongodb = { version = "3.8" }

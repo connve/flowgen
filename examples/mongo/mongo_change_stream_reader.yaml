@@ -1,0 +1,29 @@
+# Watch a MongoDB database for real-time document changes and publish
+# each change as a NATS event.
+#
+# Required:
+#   - /etc/mongo/credentials.json
+flow:
+  labels:
+    display_name: "Mongo Change Stream"
+    description: "Watches the sales database for document changes and publishes each as a NATS event."
+    tags: ["mongo", "change-stream", "cdc", "example"]
+  tasks:
+
+    - mongo_change_stream:
+        name: watch_sales
+        credentials_path: /etc/mongo/credentials.json
+        db_name: sales
+
+    - nats_jetstream_publisher:
+        name: publish_events
+        credentials_path: /etc/nats/credentials.json
+        subject: pubsub.data.mongocdc
+        stream:
+          create_or_update: true
+          name: mongocdc
+          description: "Mongo CDC events."
+          subjects: ["pubsub.data.mongocdc"]
+          max_age_secs: 86400
+          retention: limits
+          discard_policy: old

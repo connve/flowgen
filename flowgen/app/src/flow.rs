@@ -184,6 +184,12 @@ pub enum Error {
     /// Error in Braze export user IDs task.
     #[error(transparent)]
     BrazeExportUsersIds(#[from] flowgen_braze::export::users::processor::Error),
+    /// Error in Mongo collection task.
+    #[error(transparent)]
+    MongoCollection(#[from] flowgen_mongo::collection::Error),
+    /// Error in Mongo change stream task.
+    #[error(transparent)]
+    MongoChangeStream(#[from] flowgen_mongo::change_stream::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1930,6 +1936,48 @@ async fn spawn_task(
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
+        TaskType::mongo_collection(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_mongo::collection::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
+        TaskType::mongo_change_stream(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder =
+                        flowgen_mongo::change_stream::ChangeStreamReaderBuilder::new()
+                            .config(config)
+                            .task_id(task_id)
+                            .task_type(task_type_str)
+                            .task_context(task_context);
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }

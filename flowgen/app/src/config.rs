@@ -225,6 +225,10 @@ pub enum TaskType {
     oci_sync(flowgen_oci::sync::config::Processor),
     /// Braze export user IDs task.
     braze_export_users_ids(flowgen_braze::export::users::config::Processor),
+    /// Mongo collection read/write task.
+    mongo_collection(flowgen_mongo::config::Collection),
+    /// Mongo change stream reader task.
+    mongo_change_stream(flowgen_mongo::config::ChangeStream),
 }
 
 impl TaskType {
@@ -265,6 +269,8 @@ impl TaskType {
             TaskType::git_sync(_) => "git_sync",
             TaskType::oci_sync(_) => "oci_sync",
             TaskType::braze_export_users_ids(_) => "braze_export_users_ids",
+            TaskType::mongo_collection(_) => "mongo_collection",
+            TaskType::mongo_change_stream(_) => "mongo_change_stream",
         }
     }
 
@@ -305,6 +311,8 @@ impl TaskType {
             TaskType::git_sync(c) => &c.name,
             TaskType::oci_sync(c) => &c.name,
             TaskType::braze_export_users_ids(c) => &c.name,
+            TaskType::mongo_collection(c) => &c.name,
+            TaskType::mongo_change_stream(c) => &c.name,
         }
     }
 
@@ -357,6 +365,8 @@ impl TaskType {
             TaskType::git_sync(c) => c.depends_on.as_ref(),
             TaskType::oci_sync(c) => c.depends_on.as_ref(),
             TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
+            TaskType::mongo_collection(c) => c.depends_on.as_ref(),
+            TaskType::mongo_change_stream(c) => c.depends_on.as_ref(),
         }
     }
 }

@@ -2,6 +2,13 @@
 
 ## 0.132.0
 
+### Features
+
+- **MongoDB support.** `mongo_collection` reads or writes documents in a
+  collection (`operation: read` with a filter, or `operation: write` of
+  the incoming event); `mongo_change_stream` watches a database for
+  real-time document changes.
+
 ### Fixes
 
 - **`bigquery_query` now fails fast on permanent errors** (bad SQL, missing
