@@ -4,10 +4,12 @@
 
 ### Features
 
-- **MongoDB support.** `mongo_collection` reads or writes documents in a
+- **MongoDB support.** `mongodb_collection` reads or writes documents in a
   collection (`operation: read` with a filter, or `operation: write` of
-  the incoming event); `mongo_change_stream` watches a database for
-  real-time document changes.
+  the incoming event); `mongodb_change_stream` watches a database for
+  real-time document changes. Credentials' `host` field accepts either a
+  single host or an array, for connecting to a self-hosted replica set
+  without a DNS seedlist.
 
 ### Fixes
 

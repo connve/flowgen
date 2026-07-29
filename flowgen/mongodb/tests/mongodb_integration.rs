@@ -1,4 +1,4 @@
-//! Integration tests for the `mongo_collection` and `mongo_change_stream`
+//! Integration tests for the `mongodb_collection` and `mongodb_change_stream`
 //! processors against a real MongoDB server in a Docker container.
 //!
 //! Exercises `read`, `write`, and change-stream watching with the same
@@ -11,9 +11,9 @@
 //! `cargo test` skips it; CI runs the ignored set explicitly.
 
 use flowgen_core::event::{Event, EventBuilder, EventData};
-use flowgen_mongo::change_stream::ChangeStreamReaderBuilder;
-use flowgen_mongo::collection::ProcessorBuilder;
-use flowgen_mongo::config::{ChangeStream as ChangeStreamConfig, Collection, Operation};
+use flowgen_mongodb::change_stream::ChangeStreamReaderBuilder;
+use flowgen_mongodb::collection::ProcessorBuilder;
+use flowgen_mongodb::config::{ChangeStream as ChangeStreamConfig, Collection, Operation};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -129,7 +129,7 @@ async fn spawn_collection_processor(
         .receiver(in_rx)
         .sender(out_tx)
         .task_id(0)
-        .task_type("mongo_collection")
+        .task_type("mongodb_collection")
         .task_context(test_task_context())
         .build()
         .expect("build processor");
@@ -331,7 +331,7 @@ async fn change_stream_emits_event_on_insert() {
         }))
         .sender(change_tx)
         .task_id(0)
-        .task_type("mongo_change_stream")
+        .task_type("mongodb_change_stream")
         .task_context(test_task_context())
         .build()
         .await

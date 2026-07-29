@@ -127,9 +127,9 @@ export const navigation: NavSection[] = [
 		title: 'MongoDB',
 		icon: '/icons/mongodb.svg',
 		items: [
-			{ title: 'Overview', href: '/mongo' },
-			{ title: 'Collection', href: '/mongo/collection' },
-			{ title: 'Change Stream', href: '/mongo/change_stream' }
+			{ title: 'Overview', href: '/mongodb' },
+			{ title: 'Collection', href: '/mongodb/collection' },
+			{ title: 'Change Stream', href: '/mongodb/change_stream' }
 		]
 	},
 	{

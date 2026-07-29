@@ -23,6 +23,7 @@ const CONNECTORS: Record<string, Connector> = {
 	gcp: { module: 'gcp', iconPath: icon('gcp.svg'), label: 'Google Cloud' },
 	git: { module: 'git', iconPath: icon('git.svg'), label: 'Git' },
 	http: { module: 'http', iconPath: icon('http.svg'), label: 'HTTP' },
+	mongodb: { module: 'mongodb', iconPath: icon('mongodb.svg'), label: 'MongoDB' },
 	mssql: { module: 'mssql', iconPath: icon('mssql.svg'), label: 'MSSQL' },
 	nats: { module: 'nats', iconPath: icon('nats.svg'), label: 'NATS' },
 	'object-store': {
@@ -61,6 +62,9 @@ const TASK_TO_MODULE: Record<string, string> = {
 	http_request: 'http',
 	http_endpoint: 'http',
 	html_scrape: 'http',
+	// mongodb
+	mongodb_collection: 'mongodb',
+	mongodb_change_stream: 'mongodb',
 	// mssql
 	mssql_query: 'mssql',
 	// nats

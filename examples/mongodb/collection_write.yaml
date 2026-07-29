@@ -1,12 +1,10 @@
 # Subscribe to a NATS stream and insert each incoming event's JSON payload
 # as a document into a MongoDB collection.
-#
-# Required:
-#   - /etc/nats/credentials.json
-#   - /etc/mongo/credentials.json
+# credentials_path is optional on both tasks; omit to connect
+# unauthenticated to localhost.
 flow:
   labels:
-    display_name: "Mongo Collection Write"
+    display_name: "MongoDB Collection Write"
     description: "Writes events consumed from a NATS stream as documents into a MongoDB collection."
     tags: ["mongo", "write", "example"]
   tasks:
@@ -19,7 +17,7 @@ flow:
         stream:
           create_or_update: true
           name: mongo
-          description: "Mongo document write events."
+          description: "MongoDB document write events."
           subjects: ["pubsub.data.mongo"]
           max_age_secs: 86400
           retention: limits
@@ -28,9 +26,9 @@ flow:
         max_messages: 100
         delay: 1s
 
-    - mongo_collection:
+    - mongodb_collection:
         name: write_customer
         operation: write
-        credentials_path: /etc/mongo/credentials.json
+        credentials_path: /etc/mongodb/credentials.json
         db_name: sales
         collection_name: customers

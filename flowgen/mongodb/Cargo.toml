@@ -1,5 +1,5 @@
 [package]
-name = "flowgen_mongo"
+name = "flowgen_mongodb"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "flowgen_mongo"
+name = "flowgen_mongodb"
 path = "src/lib.rs"
 
 [dependencies]

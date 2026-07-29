@@ -44,7 +44,7 @@ pub enum Error {
     },
     #[error("Unsupported event data")]
     UnsupportedEventData,
-    #[error("Invalid Mongo document")]
+    #[error("Invalid MongoDB document")]
     InvalidDocument,
     #[error("Event's `_id` must be an ObjectId (`{{\"$oid\": \"...\"}}`) or omitted")]
     UnsupportedIdShape,
@@ -63,9 +63,14 @@ pub enum Error {
         #[source]
         source: mongodb::error::Error,
     },
+    #[error("JSON to BSON conversion error: {source}")]
+    Bson {
+        #[source]
+        source: mongodb::bson::extjson::de::Error,
+    },
 }
 
-/// Event handler for processing individual events against a Mongo collection.
+/// Event handler for processing individual events against a MongoDB collection.
 pub struct EventHandler {
     client: mongodb::Client,
     config: Arc<super::config::Collection>,
@@ -75,7 +80,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    #[tracing::instrument(skip(self, event), name = "task.handle")]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         match self.config.operation {
             Operation::Read => self.read(event).await,
@@ -167,7 +172,7 @@ impl EventHandler {
             },
         };
 
-        let mut bson_doc = match json_to_bson(&json) {
+        let mut bson_doc = match Bson::try_from(json).map_err(|source| Error::Bson { source })? {
             Bson::Document(d) => d,
             _ => return Err(Error::InvalidDocument),
         };
@@ -332,31 +337,6 @@ fn build_filter_doc(filter: &std::collections::HashMap<String, String>) -> BsonD
     d
 }
 
-fn json_to_bson(value: &Value) -> Bson {
-    match value {
-        Value::Null => Bson::Null,
-        Value::Bool(b) => Bson::Boolean(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Bson::Int64(i)
-            } else if let Some(f) = n.as_f64() {
-                Bson::Double(f)
-            } else {
-                Bson::Null
-            }
-        }
-        Value::String(s) => Bson::String(s.clone()),
-        Value::Array(arr) => Bson::Array(arr.iter().map(json_to_bson).collect()),
-        Value::Object(map) => {
-            let d: BsonDocument = map
-                .iter()
-                .map(|(k, v)| (k.clone(), json_to_bson(v)))
-                .collect();
-            Bson::Document(d)
-        }
-    }
-}
-
 /// Builder for constructing `Processor` instances.
 #[derive(Default)]
 pub struct ProcessorBuilder {
@@ -439,7 +419,7 @@ mod tests {
 
     fn mock_config(operation: Operation) -> super::super::config::Collection {
         super::super::config::Collection {
-            name: "test_mongo_collection".to_string(),
+            name: "test_mongodb_collection".to_string(),
             operation,
             db_name: "test_database".to_string(),
             collection_name: "test_collection".to_string(),
@@ -483,25 +463,33 @@ mod tests {
     }
 
     #[test]
-    fn test_json_to_bson_primitives() {
-        assert_eq!(json_to_bson(&json!(null)), Bson::Null);
-        assert_eq!(json_to_bson(&json!(true)), Bson::Boolean(true));
-        assert_eq!(json_to_bson(&json!(42)), Bson::Int64(42));
+    fn test_bson_try_from_primitives() {
+        assert_eq!(Bson::try_from(json!(null)).unwrap(), Bson::Null);
+        assert_eq!(Bson::try_from(json!(true)).unwrap(), Bson::Boolean(true));
+        assert_eq!(Bson::try_from(json!(42)).unwrap(), Bson::Int32(42));
         assert_eq!(
-            json_to_bson(&json!("flowgen")),
+            Bson::try_from(json!("flowgen")).unwrap(),
             Bson::String("flowgen".to_string())
         );
     }
 
     #[test]
-    fn test_json_to_bson_float() {
-        assert_eq!(json_to_bson(&json!(-0.5)), Bson::Double(-0.5));
+    fn test_bson_try_from_large_integer_uses_int64() {
+        assert_eq!(
+            Bson::try_from(json!(i64::from(i32::MAX) + 1)).unwrap(),
+            Bson::Int64(i64::from(i32::MAX) + 1)
+        );
     }
 
     #[test]
-    fn test_json_to_bson_complex_structures() {
+    fn test_bson_try_from_float() {
+        assert_eq!(Bson::try_from(json!(-0.5)).unwrap(), Bson::Double(-0.5));
+    }
+
+    #[test]
+    fn test_bson_try_from_complex_structures() {
         let data = json!({"tags": ["a", "b"], "nested": {"active": true}});
-        let Bson::Document(doc) = json_to_bson(&data) else {
+        let Bson::Document(doc) = Bson::try_from(data).unwrap() else {
             panic!("expected document");
         };
         assert_eq!(doc.get_array("tags").unwrap().len(), 2);
@@ -649,12 +637,12 @@ mod tests {
             .sender(tx)
             .task_id(5)
             .task_context(mock_task_context())
-            .task_type("mongo_collection")
+            .task_type("mongodb_collection")
             .build()
             .expect("builder should succeed");
 
         assert_eq!(processor.task_id, 5);
-        assert_eq!(processor.task_type, "mongo_collection");
+        assert_eq!(processor.task_type, "mongodb_collection");
         assert!(processor.tx.is_some());
     }
 
@@ -667,7 +655,7 @@ mod tests {
             .config(config)
             .receiver(rx)
             .task_context(mock_task_context())
-            .task_type("mongo_collection")
+            .task_type("mongodb_collection")
             .build()
             .expect("builder should succeed");
 
@@ -696,7 +684,7 @@ mod tests {
     async fn test_init_credentials_parse_failure() {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "flowgen_test_mongo_collection_parse_fail_{}.json",
+            "flowgen_test_mongodb_collection_parse_fail_{}.json",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -730,7 +718,7 @@ mod tests {
         assert_eq!(err.to_string(), "Unsupported event data");
 
         let err = Error::InvalidDocument;
-        assert_eq!(err.to_string(), "Invalid Mongo document");
+        assert_eq!(err.to_string(), "Invalid MongoDB document");
 
         let err = Error::UnsupportedIdShape;
         assert!(err.to_string().contains("must be an ObjectId"));

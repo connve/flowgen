@@ -1,11 +1,10 @@
 # Read documents from a MongoDB collection on a timer, filtered by field,
 # then publish each as a NATS event for downstream consumers.
-#
-# Required:
-#   - /etc/mongo/credentials.json
+# credentials_path is optional on both tasks; omit to connect
+# unauthenticated to localhost.
 flow:
   labels:
-    display_name: "Mongo Collection Read"
+    display_name: "MongoDB Collection Read"
     description: "Reads active customers from MongoDB every 30 seconds and publishes each as a NATS event."
     tags: ["mongo", "read", "example"]
   tasks:
@@ -15,10 +14,10 @@ flow:
         interval: 30s
         count: 3
 
-    - mongo_collection:
+    - mongodb_collection:
         name: read_customers
         operation: read
-        credentials_path: /etc/mongo/credentials.json
+        credentials_path: /etc/mongodb/credentials.json
         db_name: sales
         collection_name: customers
         filter:
@@ -31,7 +30,7 @@ flow:
         stream:
           create_or_update: true
           name: mongo
-          description: "Mongo document read events."
+          description: "MongoDB document read events."
           subjects: ["pubsub.data.mongo"]
           max_age_secs: 86400
           retention: limits

@@ -1,7 +1,7 @@
 use flowgen_core::event::{EventBuilder, EventData};
 use mongodb::bson::Document;
 
-/// Errors that can occur during message conversion between flowgen and Mongo formats.
+/// Errors that can occur during message conversion between flowgen and MongoDB formats.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -22,10 +22,10 @@ pub enum Error {
     NoFullDocument(),
 }
 
-/// Trait for converting Mongo change stream messages to flowgen events.
+/// Trait for converting MongoDB change stream messages to flowgen events.
 pub trait MongoEventsExt {
     type Error;
-    /// Convert a Mongo change stream message to a flowgen event.
+    /// Convert a MongoDB change stream message to a flowgen event.
     fn to_event(
         &self,
         task_type: &'static str,

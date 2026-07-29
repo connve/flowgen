@@ -1933,7 +1933,7 @@ dependencies = [
  "flowgen_html",
  "flowgen_http",
  "flowgen_mcp",
- "flowgen_mongo",
+ "flowgen_mongodb",
  "flowgen_mssql",
  "flowgen_nats",
  "flowgen_object_store",
@@ -2199,7 +2199,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flowgen_mongo"
+name = "flowgen_mongodb"
 version = "0.132.0"
 dependencies = [
  "apache-avro",

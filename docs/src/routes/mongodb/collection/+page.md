@@ -5,10 +5,10 @@ Reads or writes documents in a MongoDB collection, depending on `operation`.
 ## Configuration
 
 ```yaml
-- mongo_collection:
+- mongodb_collection:
     name: read_customers
     operation: read
-    credentials_path: /etc/mongo/credentials.json
+    credentials_path: /etc/mongodb/credentials.json
     db_name: sales
     collection_name: customers
     filter:
@@ -21,7 +21,7 @@ Reads or writes documents in a MongoDB collection, depending on `operation`.
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `operation` | string | required | `read` or `write`. |
-| `credentials_path` | string | | Path to MongoDB credentials file. Omit to connect to `localhost:27017` without authentication. See [Credentials](/docs/flowgen/mongo#credentials). |
+| `credentials_path` | string | | Path to MongoDB credentials file. Omit to connect to `localhost:27017` without authentication. See [Credentials](/docs/flowgen/mongodb#credentials). |
 | `db_name` | string | required | Database name. |
 | `collection_name` | string | required | Collection name. |
 | `filter` | map | | Key-value pairs to filter documents. Only used by `operation: read`. |
@@ -33,10 +33,10 @@ Reads or writes documents in a MongoDB collection, depending on `operation`.
 **Read with a filter:**
 
 ```yaml
-- mongo_collection:
+- mongodb_collection:
     name: read_customers
     operation: read
-    credentials_path: /etc/mongo/credentials.json
+    credentials_path: /etc/mongodb/credentials.json
     db_name: sales
     collection_name: customers
     filter:
@@ -46,15 +46,15 @@ Reads or writes documents in a MongoDB collection, depending on `operation`.
 **Write the incoming event as a document:**
 
 ```yaml
-- mongo_collection:
+- mongodb_collection:
     name: write_customer
     operation: write
-    credentials_path: /etc/mongo/credentials.json
+    credentials_path: /etc/mongodb/credentials.json
     db_name: sales
     collection_name: customers
 ```
 
-See [Credentials](/docs/flowgen/mongo#credentials) for the credentials file format.
+See [Credentials](/docs/flowgen/mongodb#credentials) for the credentials file format.
 
 ## Output
 

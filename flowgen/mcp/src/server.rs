@@ -996,28 +996,30 @@ async fn handle_resources_read(
         return resource_read_response(request.id, &reg.uri, &reg.mime_type, text);
     }
 
-    // Slow path: match against every resource-template pattern.
-    let matched = state
-        .extras
-        .resource_templates
-        .iter()
-        .filter(|entry| headers_satisfy(headers, &entry.value().headers))
-        .find_map(|entry| {
-            match_uri_template(entry.key(), &params.uri)
-                .map(|bindings| (entry.value().clone(), bindings))
-        });
+    // Slow path: match against every resource-template pattern in one pass,
+    // remembering the first URI match whose headers rejected it so a
+    // headers-only miss can still be attributed to a flow below.
+    let mut matched = None;
+    let mut uri_matched_but_rejected = None;
+    for entry in state.extras.resource_templates.iter() {
+        let Some(bindings) = match_uri_template(entry.key(), &params.uri) else {
+            continue;
+        };
+        if headers_satisfy(headers, &entry.value().headers) {
+            matched = Some((entry.value().clone(), bindings));
+            break;
+        }
+        if uri_matched_but_rejected.is_none() {
+            uri_matched_but_rejected = Some((entry.flow_name.clone(), entry.name.clone()));
+        }
+    }
 
     // Headers filtered out every template match for this URI: log against
     // the first URI-matching (but header-rejected) template so the
     // rejection shows up in that flow's Activity panel too.
     if matched.is_none() {
-        if let Some(entry) = state
-            .extras
-            .resource_templates
-            .iter()
-            .find(|entry| match_uri_template(entry.key(), &params.uri).is_some())
-        {
-            record_headers_rejected_activity(&entry.flow_name, &entry.name, 0, "mcp_resource");
+        if let Some((flow_name, name)) = uri_matched_but_rejected {
+            record_headers_rejected_activity(&flow_name, &name, 0, "mcp_resource");
         }
     }
 

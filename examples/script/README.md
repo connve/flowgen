@@ -64,31 +64,31 @@ support, see the [Script task documentation](https://connve.com/docs/flowgen/cor
 
 ### Basic Examples
 
-#### `script_inline_basic.yaml`
+#### `inline_basic.yaml`
 Simple inline script demonstrating basic data transformation.
 
-#### `script_inline_multiline.yaml`
+#### `inline_multiline.yaml`
 Multi-line inline script with data enrichment and metadata.
 
-#### `script_resource_file.yaml`
+#### `resource_file.yaml`
 Loading scripts from external files for reusability and version control.
 
 ### Cache Examples
 
-#### `script_cache_deduplication.yaml`
+#### `cache_deduplication.yaml`
 **Use Case:** Prevent reprocessing duplicate events
 - Uses `ctx.cache` to track processed event IDs
 - Returns `null` to skip duplicates
 - Configurable TTL for cache expiration
 
-#### `script_incremental_processing.yaml`
+#### `incremental_processing.yaml`
 **Use Case:** Incremental file processing without moving/deleting files
 - Tracks processed files by name and hash
 - Enables repeated flow runs without reprocessing
 - Perfect for object store polling patterns
 - 7-day TTL ensures automatic cleanup
 
-#### `script_cache_and_metadata.yaml`
+#### `cache_and_metadata.yaml`
 **Use Case:** Comprehensive example with rate limiting and caching
 - Rate limiting using cache counters
 - Caching expensive computations (user profiles)
@@ -97,7 +97,7 @@ Loading scripts from external files for reusability and version control.
 
 ### Metadata Examples
 
-#### `script_metadata_tracking.yaml`
+#### `metadata_tracking.yaml`
 **Use Case:** Track data lineage through processing pipeline
 - Add metadata at each processing stage
 - Track timing and transformations
@@ -106,7 +106,7 @@ Loading scripts from external files for reusability and version control.
 
 ### Advanced Examples
 
-#### `script_advanced_external.yaml`
+#### `advanced_external.yaml`
 **Use Case:** Production-ready idempotent processing workflow
 - External script from `resources/scripts/cache_and_metadata_advanced.rhai`
 - Idempotency checks to prevent duplicate processing
@@ -114,7 +114,7 @@ Loading scripts from external files for reusability and version control.
 - User behavior tracking (frequency analysis)
 - Comprehensive metadata for observability
 
-#### `script_fan_in_join.yaml`
+#### `fan_in_join.yaml`
 **Use Case:** Joining two upstream batches in a fan-in DAG
 - Two `object_store_read` sources feed into a `buffer` (size: 2)
 - External script from `resources/scripts/orders_payment_label_join.rhai`
@@ -227,7 +227,7 @@ Test scripts locally before deploying:
 
 ```bash
 # Run flow with script examples
-flowgen run examples/script/script_cache_deduplication.yaml
+flowgen run examples/script/cache_deduplication.yaml
 ```
 
 Monitor cache operations:

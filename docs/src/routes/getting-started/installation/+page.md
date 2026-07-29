@@ -77,8 +77,8 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | macOS | `Apple Silicon` | `flowgen-darwin-arm64-VERSION.tar.gz` |
 
 ```bash
-# Example: Linux x86_64, replace version as needed
-VERSION=0.122.0
+# Example: Linux x86_64, adjust the archive name for your platform
+VERSION=$(curl -s https://api.github.com/repos/connve/flowgen/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
 curl -LO "https://github.com/connve/flowgen/releases/download/v${VERSION}/flowgen-linux-amd64-${VERSION}.tar.gz"
 tar -xzf "flowgen-linux-amd64-${VERSION}.tar.gz"
 sudo mv flowgen /usr/local/bin/

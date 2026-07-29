@@ -67,7 +67,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Watches the MongoDB change stream and emits change events downstream.
-    #[tracing::instrument(skip(self), name = "task.handle")]
+    #[tracing::instrument(skip(self), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self) -> Result<(), Error> {
         let db = self.client.database(&self.config.db_name);
 

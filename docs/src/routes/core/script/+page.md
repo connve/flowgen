@@ -75,7 +75,7 @@ Rhai files use the `.rhai` extension. The official [Rhai extension for Visual St
 
 ### Worked example
 
-The [`script_fan_in_join`](https://github.com/connve/flowgen/blob/main/examples/script/script_fan_in_join.yaml) flow shows the pattern end-to-end: two upstream sources fan into a buffer, and an [external Rhai file](https://github.com/connve/flowgen/blob/main/examples/resources/scripts/orders_payment_label_join.rhai) joins them. It runs against the dummy CSV data in the repository and needs no external services.
+The [`fan_in_join`](https://github.com/connve/flowgen/blob/main/examples/script/fan_in_join.yaml) flow shows the pattern end-to-end: two upstream sources fan into a buffer, and an [external Rhai file](https://github.com/connve/flowgen/blob/main/examples/resources/scripts/orders_payment_label_join.rhai) joins them. It runs against the dummy CSV data in the repository and needs no external services.
 
 ## What the script sees
 
@@ -267,7 +267,7 @@ event.data
       event.data
 ```
 
-**Fan-in join with an external script:** see [`script_fan_in_join.yaml`](https://github.com/connve/flowgen/blob/main/examples/script/script_fan_in_join.yaml) for a complete flow that fans two upstream sources into a buffer and joins them with an external Rhai file.
+**Fan-in join with an external script:** see [`fan_in_join.yaml`](https://github.com/connve/flowgen/blob/main/examples/script/fan_in_join.yaml) for a complete flow that fans two upstream sources into a buffer and joins them with an external Rhai file.
 
 ## Logging
 

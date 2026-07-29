@@ -1,4 +1,4 @@
-//! # Mongo Configuration
+//! # MongoDB Configuration
 //!
 //! This module provides the configuration structures necessary for interacting
 //! with MongoDB in two distinct modes:
@@ -22,7 +22,7 @@ pub enum Operation {
     Write,
 }
 
-/// Mongo collection task configuration: read or write documents.
+/// MongoDB collection task configuration: read or write documents.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collection {
@@ -30,13 +30,13 @@ pub struct Collection {
     pub name: String,
     /// Operation to perform against the collection.
     pub operation: Operation,
-    /// Path to credentials file containing Mongo authentication details.
+    /// Path to credentials file containing MongoDB authentication details.
     /// Omit to connect to `localhost:27017` without authentication.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
-    /// The Database Name from Mongo.
+    /// The Database Name from MongoDB.
     pub db_name: String,
-    /// The Collection Name from Mongo.
+    /// The Collection Name from MongoDB.
     pub collection_name: String,
     /// Key-value pairs to filter documents. Only used by `operation: read`.
     #[serde(default)]
@@ -48,19 +48,19 @@ pub struct Collection {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
-/// Mongo Change Data Capture reader configuration.
+/// MongoDB Change Data Capture reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeStream {
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
-    /// Path to credentials file containing Mongo authentication details.
+    /// Path to credentials file containing MongoDB authentication details.
     /// Omit to connect to `localhost:27017` without authentication.
     #[serde(default)]
     pub credentials_path: Option<PathBuf>,
     /// The unique name / identifier of the task.
     pub name: String,
-    /// The Database Name from Mongo.
+    /// The Database Name from MongoDB.
     pub db_name: String,
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,

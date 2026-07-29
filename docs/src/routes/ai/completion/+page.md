@@ -146,7 +146,7 @@ Each entry also accepts `headers`, sent with every request to that MCP server. U
     mcp_servers:
       - url: "http://localhost:3001/mcp"
         headers:
-          X-Flowgen-Client: marketing_agent
+          X-Flowgen-Client: your-agent-name
 ```
 
 ## Tool-use passthrough

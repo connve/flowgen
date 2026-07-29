@@ -22,17 +22,12 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Building connection URI failed with error: {source}")]
-    UriBuild {
-        #[source]
-        source: url::ParseError,
-    },
-    #[error("Mongo connection parsing failed with error: {source}")]
+    #[error("MongoDB connection parsing failed with error: {source}")]
     MongoConnectionParse {
         #[source]
         source: mongodb::error::Error,
     },
-    #[error("Mongo client creation failed with error: {source}")]
+    #[error("MongoDB client creation failed with error: {source}")]
     MongoClientCreate {
         #[source]
         source: mongodb::error::Error,
@@ -41,6 +36,33 @@ pub enum Error {
 
 /// Default connection string scheme.
 pub const DEFAULT_MONGO_SCHEME: &str = "mongodb";
+
+/// One MongoDB host, or a replica-set seed list.
+///
+/// Accepts either a single string or an array in YAML/JSON — a single host
+/// is just a seed list of one, matching how the MongoDB connection string
+/// itself represents both cases as one comma-joined authority.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum MongoHost {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl MongoHost {
+    fn as_slice(&self) -> &[String] {
+        match self {
+            MongoHost::One(host) => std::slice::from_ref(host),
+            MongoHost::Many(hosts) => hosts,
+        }
+    }
+}
+
+impl Default for MongoHost {
+    fn default() -> Self {
+        MongoHost::One(DEFAULT_MONGO_HOST.to_string())
+    }
+}
 
 /// MongoDB connection credentials.
 ///
@@ -71,6 +93,19 @@ pub const DEFAULT_MONGO_SCHEME: &str = "mongodb";
 ///   "password": "pass"
 /// }
 /// ```
+///
+/// A self-hosted replica set (no SRV record) needs an explicit seed list
+/// instead of a single host — `host` also accepts an array, with `port` as
+/// the fallback for any entry that omits its own:
+///
+/// ```json
+/// {
+///   "host": ["mongo-0:27017", "mongo-1:27017", "mongo-2:27017"],
+///   "username": "user",
+///   "password": "pass",
+///   "options": { "replicaSet": "rs0" }
+/// }
+/// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct MongoCredentials {
     /// Connection string scheme. Defaults to `mongodb`. Set to
@@ -78,11 +113,11 @@ pub struct MongoCredentials {
     /// `port` is ignored in that case.
     #[serde(default)]
     pub scheme: Option<String>,
-    /// MongoDB host. Defaults to `localhost`.
+    /// MongoDB host, or a replica-set seed list. Defaults to `localhost`.
     #[serde(default)]
-    pub host: Option<String>,
+    pub host: MongoHost,
     /// MongoDB port. Defaults to `27017`. Ignored when `scheme` is
-    /// `mongodb+srv`.
+    /// `mongodb+srv`, or for any `host` entry that carries its own port.
     #[serde(default)]
     pub port: Option<u16>,
     /// Username for authentication. Omit for unauthenticated connections.
@@ -108,6 +143,11 @@ impl MongoCredentials {
 
     /// Builds a connection string from the structured fields, with
     /// `options` appended as query parameters.
+    ///
+    /// A replica-set seed list does not fit `url::Url`, which only parses
+    /// a single authority — the authority is built as a plain string
+    /// instead, and only the query string goes through the `url` crate's
+    /// percent-encoding.
     pub fn build_connection_string(&self) -> Result<String, Error> {
         let scheme = match self.scheme.as_deref() {
             Some(scheme) => scheme,
@@ -117,30 +157,44 @@ impl MongoCredentials {
             (Some(username), Some(password)) => format!("{username}:{password}@"),
             _ => String::new(),
         };
-        let host = match self.host.as_deref() {
-            Some(host) => host,
-            None => DEFAULT_MONGO_HOST,
-        };
-        let port = match self.port {
-            Some(port) => port,
-            None => DEFAULT_MONGO_PORT,
-        };
-        let host = match scheme {
-            // SRV-style schemes encode the port in DNS; a port here would
-            // produce an invalid connection string.
-            DEFAULT_MONGO_SCHEME => format!("{host}:{port}"),
-            _ => host.to_string(),
-        };
+        let authority = self.build_authority(scheme);
 
-        let base = format!("{scheme}://{auth}{host}/");
-        let mut url = url::Url::parse(&base).map_err(|source| Error::UriBuild { source })?;
+        let mut uri = format!("{scheme}://{auth}{authority}/");
         if !self.options.is_empty() {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in &self.options {
-                pairs.append_pair(key, value);
-            }
+            let query: String = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&self.options)
+                .finish();
+            uri.push('?');
+            uri.push_str(&query);
         }
-        Ok(url.into())
+        Ok(uri)
+    }
+
+    /// Renders the host segment: one host, or a comma-joined seed list.
+    fn build_authority(&self, scheme: &str) -> String {
+        self.host
+            .as_slice()
+            .iter()
+            .map(|entry| self.qualify_host(entry, scheme))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Appends the default port to a bare host, unless it already has one
+    /// or the scheme is SRV-style (port comes from DNS).
+    ///
+    /// Bracketed hosts (`[::1]`) are checked for `]:` rather than a bare
+    /// colon count, since the address itself contains colons.
+    fn qualify_host(&self, host: &str, scheme: &str) -> String {
+        let has_port = match host.strip_prefix('[') {
+            Some(after_bracket) => after_bracket.contains("]:"),
+            None => host.matches(':').count() == 1,
+        };
+        if scheme != DEFAULT_MONGO_SCHEME || has_port {
+            return host.to_string();
+        }
+        let port = self.port.unwrap_or(DEFAULT_MONGO_PORT);
+        format!("{host}:{port}")
     }
 }
 
@@ -205,13 +259,37 @@ mod tests {
     #[test]
     fn test_build_connection_string_with_host_and_port() {
         let creds = MongoCredentials {
-            host: Some("mongo.example.com".to_string()),
+            host: MongoHost::One("mongo.example.com".to_string()),
             port: Some(27018),
             ..Default::default()
         };
         assert_eq!(
             creds.build_connection_string().unwrap(),
             "mongodb://mongo.example.com:27018/"
+        );
+    }
+
+    #[test]
+    fn test_build_connection_string_bracketed_ipv6_without_port_gets_default_port() {
+        let creds = MongoCredentials {
+            host: MongoHost::One("[::1]".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            creds.build_connection_string().unwrap(),
+            "mongodb://[::1]:27017/"
+        );
+    }
+
+    #[test]
+    fn test_build_connection_string_bracketed_ipv6_with_port_is_untouched() {
+        let creds = MongoCredentials {
+            host: MongoHost::One("[::1]:27018".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            creds.build_connection_string().unwrap(),
+            "mongodb://[::1]:27018/"
         );
     }
 
@@ -256,13 +334,54 @@ mod tests {
     fn test_build_connection_string_srv_scheme_omits_port() {
         let creds = MongoCredentials {
             scheme: Some("mongodb+srv".to_string()),
-            host: Some("cluster0.abcde.mongodb.net".to_string()),
+            host: MongoHost::One("cluster0.abcde.mongodb.net".to_string()),
             port: Some(27017),
             ..Default::default()
         };
         assert_eq!(
             creds.build_connection_string().unwrap(),
             "mongodb+srv://cluster0.abcde.mongodb.net/"
+        );
+    }
+
+    #[test]
+    fn test_build_connection_string_with_host_seed_list() {
+        let creds = MongoCredentials {
+            host: MongoHost::Many(vec![
+                "mongo-0:27017".to_string(),
+                "mongo-1:27017".to_string(),
+                "mongo-2:27017".to_string(),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            creds.build_connection_string().unwrap(),
+            "mongodb://mongo-0:27017,mongo-1:27017,mongo-2:27017/"
+        );
+    }
+
+    #[test]
+    fn test_build_connection_string_seed_list_falls_back_to_default_port() {
+        let creds = MongoCredentials {
+            host: MongoHost::Many(vec!["mongo-0".to_string(), "mongo-1".to_string()]),
+            port: Some(27018),
+            ..Default::default()
+        };
+        assert_eq!(
+            creds.build_connection_string().unwrap(),
+            "mongodb://mongo-0:27018,mongo-1:27018/"
+        );
+    }
+
+    #[test]
+    fn test_host_deserializes_from_string_or_array() {
+        let one: MongoHost = serde_json::from_str(r#""mongo.example.com""#).unwrap();
+        assert_eq!(one, MongoHost::One("mongo.example.com".to_string()));
+
+        let many: MongoHost = serde_json::from_str(r#"["mongo-0", "mongo-1"]"#).unwrap();
+        assert_eq!(
+            many,
+            MongoHost::Many(vec!["mongo-0".to_string(), "mongo-1".to_string()])
         );
     }
 
@@ -281,7 +400,7 @@ mod tests {
         let creds = MongoCredentials::from_file(&path).unwrap();
         std::fs::remove_file(&path).ok();
 
-        assert_eq!(creds.host.as_deref(), Some("example.com"));
+        assert_eq!(creds.host, MongoHost::One("example.com".to_string()));
         assert_eq!(creds.port, Some(27018));
     }
 
@@ -321,12 +440,12 @@ mod tests {
     #[test]
     fn test_builder_with_credentials_path() {
         let client = MongoClientBuilder::new()
-            .credentials_path(PathBuf::from("/etc/mongo/credentials.json"))
+            .credentials_path(PathBuf::from("/etc/mongodb/credentials.json"))
             .build()
             .unwrap();
         assert_eq!(
             client.credentials_path,
-            Some(PathBuf::from("/etc/mongo/credentials.json"))
+            Some(PathBuf::from("/etc/mongodb/credentials.json"))
         );
     }
 }
