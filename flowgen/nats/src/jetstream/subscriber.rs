@@ -97,6 +97,13 @@ pub enum Error {
 /// Event handler for processing NATS messages.
 pub struct EventHandler {
     consumer: jetstream::consumer::Consumer<jetstream::consumer::pull::Config>,
+    /// Checked via `connection_state()` to distinguish a dead connection
+    /// from a live consumer with nothing to deliver.
+    client: async_nats::Client,
+    /// Same key `init()` used to cache the NATS client, so `run()` can evict
+    /// the exact entry that may be stale rather than recomputing it (and
+    /// risking drift if `credentials_path`/`url` are templated).
+    client_key: flowgen_core::client_registry::ClientKey,
     tx: Option<Sender<Event>>,
     task_id: usize,
     config: Arc<super::config::Subscriber>,
@@ -193,7 +200,7 @@ impl EventHandler {
                     .map_err(|e| Error::ConsumerBatch { source: e })?,
             };
 
-            // Process all fetched messages with optional throttling.
+            let mut received = 0u32;
             match self.config.throttle {
                 Some(throttle_duration) => {
                     let throttled = messages.throttle(throttle_duration);
@@ -202,6 +209,7 @@ impl EventHandler {
                         if self.task_context.cancellation_token.is_cancelled() {
                             return Ok(());
                         }
+                        received += 1;
                         self.process_message(message_result).await?;
                     }
                 }
@@ -211,9 +219,16 @@ impl EventHandler {
                         if self.task_context.cancellation_token.is_cancelled() {
                             return Ok(());
                         }
+                        received += 1;
                         self.process_message(message_result).await?;
                     }
                 }
+            }
+
+            if received == 0
+                && self.client.connection_state() == async_nats::connection::State::Disconnected
+            {
+                return Err(Error::StreamEnded);
             }
         }
     }
@@ -258,7 +273,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         let jetstream_ctx = self
             .task_context
             .client_registry
-            .get_or_init(nats_key, || {
+            .get_or_init(nats_key.clone(), || {
                 let credentials_path = init_config.credentials_path.clone();
                 let url = init_config.url.clone();
                 async move {
@@ -365,6 +380,8 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             Ok(EventHandler {
+                client: jetstream_ctx.client(),
+                client_key: nats_key,
                 consumer,
                 tx: self.tx.clone(),
                 task_id: self.task_id,
@@ -382,10 +399,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
         let cancellation_token = self.task_context.cancellation_token.clone();
         let mut reconnect_backoff = retry_config.reconnect_strategy();
 
-        let nats_key = flowgen_core::client_registry::ClientKey::new(&(
-            &self.config.credentials_path,
-            &self.config.url,
-        ));
+        let mut lost_connectivity = false;
 
         // Infinite retry loop: subscribers must maintain connectivity indefinitely.
         loop {
@@ -419,6 +433,9 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 result = init_future => match result {
                     Ok(handler) => {
                         reconnect_backoff = retry_config.reconnect_strategy();
+                        if lost_connectivity {
+                            warn!("Subscriber reconnected successfully");
+                        }
                         handler
                     }
                     Err(e) => {
@@ -437,6 +454,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             // Run event loop until failure, then reinitialize.
+            let client_key = event_handler.client_key.clone();
             let handle_future = event_handler.handle();
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
@@ -445,16 +463,17 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
                 },
             }
+            lost_connectivity = true;
 
             // Evict the cached NATS client so the next init() creates a fresh connection
             // instead of reusing the dead one from the registry.
-            self.task_context.client_registry.remove(&nats_key).await;
+            self.task_context.client_registry.remove(&client_key).await;
 
             let delay = match reconnect_backoff.next() {
                 Some(d) => d,
                 None => retry_config.initial_backoff,
             };
-            tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
+            warn!(delay_ms = %delay.as_millis(), "Reconnect backoff");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = cancellation_token.cancelled() => return Ok(()),

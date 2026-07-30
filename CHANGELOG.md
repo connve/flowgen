@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.133.0
+
+### Fixes
+
+- **NATS JetStream subscriber could go silently stale after a pod
+  restart.** A dead connection can surface as a clean empty fetch batch
+  rather than an error, so the receive loop just kept polling forever
+  without ever re-entering the reconnect path — no error, no log, no
+  events. The subscriber now checks the underlying connection's live
+  state when a fetch comes back empty and forces a reconnect if it's
+  disconnected.
+- **Salesforce Pub/Sub subscriber could keep reusing a dead cached client
+  across reconnects.** The shared client is now evicted from the client
+  registry after a connection failure, so the next reconnect attempt
+  builds a fresh one instead of retrying against the same broken
+  connection — matching the NATS subscriber's existing behavior.
+- Reconnect-backoff logging for both subscribers is now visible at the
+  default production log level instead of `debug`, and a
+  "reconnected successfully" line is emitted once a prior failure
+  actually recovers.
+- **Leader-elected flows could all pile onto one pod instead of spreading
+  out.** Pods now hash-distribute flow ownership hints across themselves
+  before racing for a lease, so flows land roughly evenly instead of every
+  pod defaulting to whichever wins the race first. Falls back to normal
+  racing if the preferred pod doesn't show up.
+
+### Improvements
+
+- **MongoDB connections are now shared through the same client registry
+  NATS and Salesforce already use.** Tasks with identical credentials
+  reuse one client instead of each opening an independent connection
+  pool to the same deployment.
+- `mongodb_change_stream` and `mongodb_collection` config fields
+  (`credentials_path`, `db_name`, `collection_name`, `filter`) now
+  support template rendering, matching other task types.
+
 ## 0.132.0
 
 ### Features

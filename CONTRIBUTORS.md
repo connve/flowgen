@@ -57,6 +57,36 @@ it again whenever you're adding a new task type or touching error handling.
   the `match` style; `cargo clippy -- -D warnings` is the hard constraint,
   the style preference is soft.
 
+### Testing
+
+Two tiers, picked by what the code under test touches:
+
+- **Unit tests**: `#[cfg(test)] mod tests` inline in the file, using
+  in-memory fakes (`MemoryCache`, etc.). Default choice — covers logic
+  within or across a few modules of the same crate without needing a real
+  backend.
+- **Integration tests**: `<crate>/tests/<name>_integration.rs`, cargo's
+  built-in convention. Reach for this when the behavior only shows up
+  against something unit tests can't fake convincingly — a real network
+  listener, an external CLI, or a real backend's actual protocol quirks
+  (e.g. NATS per-message TTL support, which an in-memory cache can't
+  reproduce).
+  - If the test needs an external service, spin it up with
+    `testcontainers` and mark the test `#[ignore]` so default `cargo test`
+    stays fast; CI's `test-integration` job runs the ignored set
+    separately (`cargo test --workspace --tests -- --ignored`).
+  - If it doesn't (spawns an in-process server, shells out to a CLI
+    already in `PATH`), leave it un-ignored — it runs in the normal job
+    alongside unit tests.
+  - Every integration test file opens with a `//!` module doc stating what
+    it covers, what it depends on (Docker, git, nothing), and why it's
+    `#[ignore]`d or not.
+
+Reference implementations:
+- Real backend via testcontainers (`#[ignore]`d): `flowgen/app/tests/cache_integration.rs`
+- No external dependency (not `#[ignore]`d): `flowgen/app/tests/health_integration.rs`,
+  `flowgen/git/tests/sync_integration.rs`
+
 ### Dependencies
 
 Declare all package dependencies at the workspace root (`Cargo.toml`).

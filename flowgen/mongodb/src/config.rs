@@ -8,6 +8,7 @@
 //! 2. **Change Stream (`ChangeStream`):** Configuration for Change Data Capture (CDC)
 //!    to listen for real-time changes.
 
+use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,6 +49,8 @@ pub struct Collection {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
+impl ConfigExt for Collection {}
+
 /// MongoDB Change Data Capture reader configuration.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +68,8 @@ pub struct ChangeStream {
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
+
+impl ConfigExt for ChangeStream {}
 
 #[cfg(test)]
 mod tests {

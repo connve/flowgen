@@ -1,5 +1,6 @@
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{new_completion_channel, Event, EventExt};
 use futures_util::StreamExt;
 use std::sync::Arc;
@@ -46,6 +47,15 @@ pub enum Error {
     NoFullDocument(),
     #[error("Stream ended unexpectedly")]
     StreamEnded,
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
+    #[error("Config template rendering error: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
 }
 
 /// Event handler that watches a MongoDB change stream and forwards events downstream.
@@ -53,8 +63,10 @@ pub enum Error {
 pub struct EventHandler {
     /// Change stream configuration.
     config: Arc<super::config::ChangeStream>,
-    /// MongoDB client connection.
-    client: mongodb::Client,
+    client: Arc<mongodb::Client>,
+    /// Same key `init()` used to cache the MongoDB client, so `run()` can
+    /// evict it if the cached client turns out to be permanently broken.
+    client_key: flowgen_core::client_registry::ClientKey,
     /// Current task identifier.
     task_id: usize,
     /// Optional channel sender for downstream events.
@@ -128,20 +140,38 @@ impl flowgen_core::task::runner::Runner for ChangeStreamReader {
 
     /// Initializes the reader by establishing a MongoDB client connection.
     async fn init(&self) -> Result<EventHandler, Error> {
-        let mut builder = MongoClientBuilder::new();
-        if let Some(path) = &self.config.credentials_path {
-            builder = builder.credentials_path(path.clone());
-        }
-        let client = builder
-            .build()
-            .map_err(|e| Error::Auth { source: e })?
-            .connect()
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
+        let credentials_path = init_config.credentials_path.clone();
+        let client_key = flowgen_core::client_registry::ClientKey::new(&credentials_path);
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(client_key.clone(), || async {
+                let mut builder = MongoClientBuilder::new();
+                if let Some(path) = credentials_path {
+                    builder = builder.credentials_path(path);
+                }
+                builder
+                    .build()
+                    .map_err(|e| Error::Auth { source: e })?
+                    .connect()
+                    .await
+                    .map_err(|e| Error::Auth { source: e })
+            })
             .await
-            .map_err(|e| Error::Auth { source: e })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         Ok(EventHandler {
             client,
-            config: Arc::clone(&self.config),
+            client_key,
+            config: Arc::new(init_config),
             task_id: self.task_id,
             tx: self.tx.clone(),
             task_type: self.task_type,
@@ -209,6 +239,11 @@ impl flowgen_core::task::runner::Runner for ChangeStreamReader {
                     error!(error = %e, "Change stream error, reconnecting");
                 }
             }
+
+            self.task_context
+                .client_registry
+                .remove(&event_handler.client_key)
+                .await;
 
             let delay = match reconnect_backoff.next() {
                 Some(d) => d,
@@ -487,13 +522,16 @@ mod tests {
     #[tokio::test]
     async fn test_event_handler_struct_can_be_constructed() {
         let config = Arc::new(create_mock_config());
-        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-            .await
-            .expect("Should create client with URI");
+        let client = Arc::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .expect("Should create client with URI"),
+        );
         let (_tx, _rx) = mpsc::channel(10);
         let handler = EventHandler {
             config,
             client,
+            client_key: flowgen_core::client_registry::ClientKey::new(&"test"),
             task_id: 1,
             tx: Some(_tx),
             task_type: "test_handler",
@@ -544,12 +582,15 @@ mod tests {
     #[tokio::test]
     async fn test_handle_fails_without_connection() {
         let config = Arc::new(create_mock_config());
-        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-            .await
-            .expect("Should create client with URI");
+        let client = Arc::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .expect("Should create client with URI"),
+        );
         let handler = EventHandler {
             config,
             client,
+            client_key: flowgen_core::client_registry::ClientKey::new(&"test"),
             task_id: 1,
             tx: None,
             task_type: "handle_test",

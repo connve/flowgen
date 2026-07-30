@@ -904,6 +904,26 @@ impl App {
             .map(|(c, _)| Arc::clone(c))
             .unwrap_or_else(|| Arc::clone(&cache));
 
+        // Resolved once and shared via FlowBuilder so every flow's Executor
+        // and this pod's PeerRegistry agree on who "this pod" is.
+        let holder_identity = flowgen_core::executor::resolve_holder_identity();
+
+        // One instance per pod, not per flow: every flow's TaskManager
+        // consults the same registry so the peer list reflects actual pod
+        // count.
+        let peer_registry = Arc::new(flowgen_core::peer::PeerRegistry::new(
+            Arc::clone(&executor_cache),
+            holder_identity.clone(),
+        ));
+        if let Err(e) = peer_registry.register().await {
+            warn!("Failed to register peer: {}", e);
+        }
+        // Renewal is stopped by aborting this handle (below, alongside the
+        // other background handles) rather than its own cancellation token —
+        // one fewer token to keep in sync with the shutdown sequence.
+        let peer_renewal_handle =
+            peer_registry.spawn_renewal(tokio_util::sync::CancellationToken::new());
+
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
         for config in flow_configs {
@@ -913,7 +933,9 @@ impl App {
                 .config(Arc::new(config))
                 .cache(Arc::clone(&cache))
                 .system_cache(Arc::clone(&executor_cache))
-                .client_registry(Arc::clone(&client_registry));
+                .client_registry(Arc::clone(&client_registry))
+                .holder_identity(holder_identity.clone())
+                .peer_registry(Arc::clone(&peer_registry));
 
             if let Some(server) = http_server {
                 flow_builder = flow_builder.http_server(server);
@@ -991,6 +1013,7 @@ impl App {
         }
 
         let mut background_handles = Vec::new();
+        background_handles.push(peer_renewal_handle);
         if let Some(ref http_server) = http_server {
             let configured_port = app_config
                 .http_server
@@ -1216,6 +1239,8 @@ impl App {
                 filesystem_flow_paths: Arc::new(filesystem_flow_paths.clone()),
                 flow_registry: Arc::clone(&flow_registry),
                 client_registry: Arc::clone(&client_registry),
+                holder_identity: holder_identity.clone(),
+                peer_registry: Arc::clone(&peer_registry),
             };
             let reconciler_shutdown = watcher_shutdown.clone();
             let reconciler_handle = tokio::spawn(async move {
@@ -1261,6 +1286,12 @@ impl App {
             if let Err(e) = task_manager.shutdown().await {
                 warn!("Failed to shutdown task manager: {}", e);
             }
+        }
+
+        // Remove this pod from the peer list so remaining pods stop hashing
+        // flows onto it as a preferred owner.
+        if let Err(e) = peer_registry.deregister().await {
+            warn!("Failed to deregister peer: {}", e);
         }
 
         info!("Shutdown complete, all flows stopped and leases released");

@@ -583,6 +583,13 @@ pub struct Flow {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for deduplicating connections to external services.
     client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
+    /// This pod's holder identity, resolved once at the app level so every
+    /// flow's Executor agrees on it. `None` falls back to per-flow
+    /// resolution (tests).
+    holder_identity: Option<String>,
+    /// Optional shared peer registry for flow distribution via consistent
+    /// hashing, passed in from the main application. One instance per pod.
+    peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
     /// The task manager, responsible for leader election. Initialized by `init()`.
     task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
     /// Background task handles spawned by start_tasks for monitor_tasks to monitor.
@@ -689,14 +696,23 @@ impl Flow {
         // Create an Executor backed by the system cache. Lease keys must
         // stay isolated from user-script-accessible runtime cache to keep
         // coordination state outside any flow's reach.
-        let lease_config = flowgen_core::executor::LeaseConfig::default();
+        let lease_config = match &self.holder_identity {
+            Some(holder_identity) => flowgen_core::executor::LeaseConfig {
+                holder_identity: holder_identity.clone(),
+                ..Default::default()
+            },
+            None => flowgen_core::executor::LeaseConfig::default(),
+        };
         let executor =
             flowgen_core::executor::Executor::new(self.system_cache.clone(), lease_config)?;
         let executor = Arc::new(executor);
 
-        let task_manager = flowgen_core::task::manager::TaskManagerBuilder::new()
-            .executor(executor)
-            .build()?;
+        let mut task_manager_builder =
+            flowgen_core::task::manager::TaskManagerBuilder::new().executor(executor);
+        if let Some(registry) = &self.peer_registry {
+            task_manager_builder = task_manager_builder.peer_registry(Arc::clone(registry));
+        }
+        let task_manager = task_manager_builder.build()?;
         let task_manager = Arc::new(task_manager.start().await);
 
         self.task_manager = Some(task_manager);
@@ -2016,6 +2032,10 @@ pub struct FlowBuilder {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for connection pooling.
     client_registry: Option<Arc<flowgen_core::client_registry::ClientRegistry>>,
+    /// This pod's holder identity, shared across every flow's Executor.
+    holder_identity: Option<String>,
+    /// Shared peer registry for flow distribution via consistent hashing.
+    peer_registry: Option<Arc<flowgen_core::peer::PeerRegistry>>,
 }
 
 impl FlowBuilder {
@@ -2097,6 +2117,18 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets this pod's holder identity, shared across every flow's Executor.
+    pub fn holder_identity(mut self, holder_identity: String) -> Self {
+        self.holder_identity = Some(holder_identity);
+        self
+    }
+
+    /// Sets the shared peer registry for flow distribution via consistent hashing.
+    pub fn peer_registry(mut self, peer_registry: Arc<flowgen_core::peer::PeerRegistry>) -> Self {
+        self.peer_registry = Some(peer_registry);
+        self
+    }
+
     /// Builds a Flow instance from the configured options.
     ///
     /// # Errors
@@ -2122,6 +2154,8 @@ impl FlowBuilder {
                 Some(registry) => registry,
                 None => Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
             },
+            holder_identity: self.holder_identity,
+            peer_registry: self.peer_registry,
             task_manager: None,
             background_handles: Arc::new(std::sync::Mutex::new(None)),
             last_task_context: Arc::new(std::sync::Mutex::new(None)),

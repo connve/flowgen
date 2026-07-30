@@ -1,5 +1,6 @@
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
+use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventData, EventExt};
 use futures::TryStreamExt;
 use mongodb::bson::{oid::ObjectId, Bson, Document as BsonDocument};
@@ -68,11 +69,20 @@ pub enum Error {
         #[source]
         source: mongodb::bson::extjson::de::Error,
     },
+    #[error(
+        "Client registry type mismatch — same credentials used with incompatible client types"
+    )]
+    ClientRegistryMismatch,
+    #[error("Config template rendering error: {source}")]
+    ConfigRender {
+        #[source]
+        source: flowgen_core::config::Error,
+    },
 }
 
 /// Event handler for processing individual events against a MongoDB collection.
 pub struct EventHandler {
-    client: mongodb::Client,
+    client: Arc<mongodb::Client>,
     config: Arc<super::config::Collection>,
     task_id: usize,
     tx: Option<Sender<Event>>,
@@ -238,22 +248,39 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let mut builder = MongoClientBuilder::new();
-        if let Some(path) = &self.config.credentials_path {
-            builder = builder.credentials_path(path.clone());
-        }
-        let client = builder
-            .build()
-            .map_err(|source| Error::Auth { source })?
-            .connect()
+        let init_config = self
+            .config
+            .render(&serde_json::json!({}))
+            .map_err(|source| Error::ConfigRender { source })?;
+
+        let credentials_path = init_config.credentials_path.clone();
+        let client_key = flowgen_core::client_registry::ClientKey::new(&credentials_path);
+        let client = self
+            .task_context
+            .client_registry
+            .get_or_init(client_key, || async {
+                let mut builder = MongoClientBuilder::new();
+                if let Some(path) = credentials_path {
+                    builder = builder.credentials_path(path);
+                }
+                builder
+                    .build()
+                    .map_err(|source| Error::Auth { source })?
+                    .connect()
+                    .await
+                    .map_err(|source| Error::Auth { source })
+            })
             .await
-            .map_err(|source| Error::Auth { source })?;
+            .map_err(|e| match e {
+                flowgen_core::client_registry::Error::Init { source } => source,
+                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
+            })?;
 
         Ok(EventHandler {
             client,
             task_id: self.task_id,
             tx: self.tx.clone(),
-            config: Arc::clone(&self.config),
+            config: Arc::new(init_config),
             task_type: self.task_type,
         })
     }
@@ -502,9 +529,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_rejects_unsupported_event_data() {
-        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-            .await
-            .unwrap();
+        let client = Arc::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .unwrap(),
+        );
         let handler = EventHandler {
             client,
             config: Arc::new(mock_config(Operation::Write)),
@@ -529,9 +558,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_rejects_id_that_is_not_an_object_id() {
-        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-            .await
-            .unwrap();
+        let client = Arc::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .unwrap(),
+        );
         let handler = EventHandler {
             client,
             config: Arc::new(mock_config(Operation::Write)),
@@ -556,9 +587,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_rejects_malformed_oid_hex() {
-        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-            .await
-            .unwrap();
+        let client = Arc::new(
+            mongodb::Client::with_uri_str("mongodb://localhost:27017")
+                .await
+                .unwrap(),
+        );
         let handler = EventHandler {
             client,
             config: Arc::new(mock_config(Operation::Write)),

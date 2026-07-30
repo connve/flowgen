@@ -715,4 +715,188 @@ mod tests {
             "renewal task kept ticking after unregister"
         );
     }
+
+    /// Finds an identity whose preferred peer (per `peer::preferred_peer`)
+    /// is `pods[want_index]`. Sorts `pods` first so `want_index` indexes
+    /// the same order `PeerRegistry::list_peers()` produces at runtime —
+    /// `preferred_peer` is only meaningful against a sorted peer list.
+    fn flow_id_preferring(pods: &[String], want_index: usize) -> FlowIdentity {
+        let mut sorted_pods = pods.to_vec();
+        sorted_pods.sort();
+        for n in 0..1000 {
+            let candidate = FlowIdentity::new(format!("flow-{n}"));
+            if crate::peer::preferred_peer(&candidate.as_key(), &sorted_pods)
+                == sorted_pods[want_index]
+            {
+                return candidate;
+            }
+        }
+        panic!("no candidate flow name hashed to peer index {want_index} in 1000 tries");
+    }
+
+    /// The preferred pod (per consistent hashing) must acquire its lease
+    /// immediately, without waiting out the deferral window — otherwise
+    /// every leader-elected flow pays the deferral latency even when
+    /// placement already agrees with the race outcome.
+    #[tokio::test]
+    async fn preferred_pod_acquires_without_deferral() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+
+        let registry1 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[0].clone()).with_deferral_secs(5),
+        );
+        let registry2 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[1].clone()).with_deferral_secs(5),
+        );
+        registry1.register().await.unwrap();
+        registry2.register().await.unwrap();
+
+        let flow_id = flow_id_preferring(&pods, 0);
+
+        let executor1 = make_executor(&pods[0], cache.clone());
+        let manager1 = TaskManagerBuilder::new()
+            .executor(executor1)
+            .peer_registry(registry1)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+
+        let mut rx = manager1
+            .register(flow_id, Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+            .await
+            .expect("preferred pod must not wait out the deferral window")
+            .expect("channel still open");
+        assert_eq!(result, LeaderElectionResult::Leader);
+    }
+
+    /// A non-preferred pod defers, giving the preferred pod first crack at
+    /// the lease; when the preferred pod is racing concurrently it must win.
+    #[tokio::test]
+    async fn non_preferred_pod_defers_to_preferred_pod() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+
+        let registry1 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[0].clone()).with_deferral_secs(1),
+        );
+        let registry2 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[1].clone()).with_deferral_secs(1),
+        );
+        registry1.register().await.unwrap();
+        registry2.register().await.unwrap();
+
+        let flow_id_preferring_pod1 = flow_id_preferring(&pods, 0);
+
+        let executor1 = make_executor(&pods[0], cache.clone());
+        let manager_preferred = TaskManagerBuilder::new()
+            .executor(executor1)
+            .peer_registry(registry1)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let executor2 = make_executor(&pods[1], cache.clone());
+        let manager_deferring = TaskManagerBuilder::new()
+            .executor(executor2)
+            .peer_registry(registry2)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+
+        let mut rx_deferring = manager_deferring
+            .register(
+                flow_id_preferring_pod1.clone(),
+                Some(LeaderElectionOptions {}),
+            )
+            .await
+            .unwrap();
+        let mut rx_preferred = manager_preferred
+            .register(flow_id_preferring_pod1, Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+
+        let leader = tokio::time::timeout(Duration::from_millis(500), rx_preferred.recv())
+            .await
+            .expect("preferred pod must acquire within its head start")
+            .expect("channel still open");
+        assert_eq!(leader, LeaderElectionResult::Leader);
+
+        let deferred_outcome =
+            tokio::time::timeout(Duration::from_millis(1500), rx_deferring.recv()).await;
+        assert!(
+            deferred_outcome.is_err(),
+            "deferring pod must not win while the preferred pod holds the lease, got {deferred_outcome:?}"
+        );
+    }
+
+    /// If the preferred pod never shows up to race, a non-preferred pod
+    /// must still acquire the lease once its deferral window elapses —
+    /// the hint is a head start, not an exclusive right.
+    #[tokio::test]
+    async fn non_preferred_pod_acquires_after_deferral_if_uncontested() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+
+        let registry1 = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            pods[0].clone(),
+        ));
+        let registry2 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[1].clone()).with_deferral_secs(1),
+        );
+        registry1.register().await.unwrap();
+        registry2.register().await.unwrap();
+
+        let flow_id_preferring_absent_pod = flow_id_preferring(&pods, 0);
+
+        let executor2 = make_executor(&pods[1], cache.clone());
+        let manager2 = TaskManagerBuilder::new()
+            .executor(executor2)
+            .peer_registry(registry2)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+
+        let start = tokio::time::Instant::now();
+        let mut rx2 = manager2
+            .register(
+                flow_id_preferring_absent_pod,
+                Some(LeaderElectionOptions {}),
+            )
+            .await
+            .unwrap();
+
+        let leader2 = tokio::time::timeout(Duration::from_secs(3), rx2.recv())
+            .await
+            .expect("uncontested non-preferred pod must still acquire")
+            .expect("channel still open");
+        assert_eq!(leader2, LeaderElectionResult::Leader);
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "must have actually waited out the deferral window, not skipped it"
+        );
+    }
+
+    // A same-pod hot-reload swap (`reconciler.rs::reconcile_put`, where the
+    // old and new `Flow`'s `TaskManager`s share one `holder_identity`) is
+    // immune to peer-deferral timing by construction: `Executor::acquire_lease`'s
+    // same-identity check is pure string equality against cache state, so
+    // once the old flow's `stop_and_deregister` (which calls
+    // `TaskManager::unregister`) leaves the lease stamped with this pod's
+    // identity, the new flow's `acquire_lease` takes the self-renewal fast
+    // path regardless of whether a deferral ran first, how long it ran, or
+    // whether the deferral branch even exists — a test asserting only the
+    // eventual `Leader` outcome here would pass unconditionally. The
+    // dimension that genuinely depends on deferral timing — two *different*
+    // `holder_identity` values racing the same lease — is already covered
+    // above by `non_preferred_pod_defers_to_preferred_pod`
+    // and `non_preferred_pod_acquires_after_deferral_if_uncontested`.
 }

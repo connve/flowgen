@@ -95,6 +95,10 @@ pub enum Error {
 pub struct EventHandler {
     /// Salesforce Pub/Sub client context
     pubsub: Arc<Mutex<salesforce_core::pubsubapi::Client>>,
+    /// Same key `init()` used to cache the Salesforce client, so `run()` can
+    /// evict the exact entry that may be stale rather than recomputing it
+    /// (and risking drift if `credentials_path` is templated).
+    client_key: flowgen_core::client_registry::ClientKey,
     /// Subscriber configuration
     config: Arc<super::config::Subscriber>,
     /// Channel sender for processed events
@@ -567,22 +571,20 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Authenticate with Salesforce (shared via client registry).
         let credentials_path = init_config.credentials_path.clone();
+        let client_key = flowgen_core::client_registry::ClientKey::new(&credentials_path);
         let sfdc_client = self
             .task_context
             .client_registry
-            .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(&credentials_path),
-                || async {
-                    let client = salesforce_core::client::Builder::new()
-                        .credentials_path(credentials_path)
-                        .build()
-                        .map_err(|e| Error::Auth { source: e })?
-                        .connect()
-                        .await
-                        .map_err(|e| Error::Auth { source: e })?;
-                    Ok(tokio::sync::Mutex::new(client))
-                },
-            )
+            .get_or_init(client_key.clone(), || async {
+                let client = salesforce_core::client::Builder::new()
+                    .credentials_path(credentials_path)
+                    .build()
+                    .map_err(|e| Error::Auth { source: e })?
+                    .connect()
+                    .await
+                    .map_err(|e| Error::Auth { source: e })?;
+                Ok(tokio::sync::Mutex::new(client))
+            })
             .await
             .map_err(|e| match e {
                 flowgen_core::client_registry::Error::Init { source } => source,
@@ -599,6 +601,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Create event handler.
         Ok(EventHandler {
+            client_key,
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
@@ -614,6 +617,8 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
         let cancellation_token = self.task_context.cancellation_token.clone();
         let mut reconnect_backoff = retry_config.reconnect_strategy();
+
+        let mut lost_connectivity = false;
 
         // Infinite retry loop: subscribers must maintain connectivity indefinitely.
         loop {
@@ -640,6 +645,9 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 result = init_future => match result {
                     Ok(handler) => {
                         reconnect_backoff = retry_config.reconnect_strategy();
+                        if lost_connectivity {
+                            warn!("Subscriber reconnected successfully");
+                        }
                         handler
                     }
                     Err(e) => {
@@ -658,6 +666,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
             };
 
             // Run event loop until failure, then reinitialize.
+            let client_key = event_handler.client_key.clone();
             let handle_future = event_handler.handle();
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
@@ -666,12 +675,15 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                     Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
                 },
             }
+            lost_connectivity = true;
+
+            self.task_context.client_registry.remove(&client_key).await;
 
             let delay = match reconnect_backoff.next() {
                 Some(d) => d,
                 None => retry_config.initial_backoff,
             };
-            tracing::debug!(delay_ms = %delay.as_millis(), "Reconnect backoff");
+            warn!(delay_ms = %delay.as_millis(), "Reconnect backoff");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = cancellation_token.cancelled() => return Ok(()),

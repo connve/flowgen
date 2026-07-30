@@ -63,6 +63,15 @@ impl PeerRegistry {
         }
     }
 
+    /// Overrides the deferral window. Used by tests so the deferral-vs-race
+    /// behavior can be exercised without waiting out the production 5s
+    /// default.
+    #[cfg(test)]
+    pub(crate) fn with_deferral_secs(mut self, deferral_secs: u64) -> Self {
+        self.deferral_secs = deferral_secs;
+        self
+    }
+
     /// Returns the deferral duration non-preferred pods should wait before
     /// falling back to normal lease acquisition.
     pub fn deferral_duration(&self) -> std::time::Duration {

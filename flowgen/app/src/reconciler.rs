@@ -81,6 +81,12 @@ pub struct ReconcilerContext {
     pub filesystem_flow_paths: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
     pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
+    /// This pod's holder identity, shared across every flow's Executor.
+    pub holder_identity: String,
+    /// Shared peer registry for flow distribution via consistent hashing.
+    /// Same instance the app built at startup, so hot-reloaded flows see the
+    /// same peer list as flows started at boot.
+    pub peer_registry: Arc<flowgen_core::peer::PeerRegistry>,
 }
 
 /// Runs the reconciler loop until `shutdown` is cancelled.
@@ -539,9 +545,10 @@ fn test_context(prefix: &str) -> ReconcilerContext {
     };
 
     let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
+    let holder_identity = "test-pod".to_string();
     ReconcilerContext {
         cache: Arc::clone(&shared),
-        runtime_cache: shared,
+        runtime_cache: Arc::clone(&shared),
         app_config: Arc::new(app_config),
         resource_loader: None,
         http_server: None,
@@ -550,6 +557,11 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         filesystem_flow_paths: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
         client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+        peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
+            shared,
+            holder_identity.clone(),
+        )),
+        holder_identity,
     }
 }
 
@@ -563,7 +575,9 @@ fn build_flow(
         .config(Arc::new(flow_config))
         .cache(Arc::clone(&ctx.runtime_cache))
         .system_cache(Arc::clone(&ctx.cache))
-        .client_registry(Arc::clone(&ctx.client_registry));
+        .client_registry(Arc::clone(&ctx.client_registry))
+        .holder_identity(ctx.holder_identity.clone())
+        .peer_registry(Arc::clone(&ctx.peer_registry));
 
     if let Some(server) = &ctx.http_server {
         builder = builder.http_server(Arc::clone(server));
@@ -637,9 +651,10 @@ mod tests {
         };
 
         let shared: Arc<dyn Cache> = Arc::new(flowgen_core::cache::memory::MemoryCache::new());
+        let holder_identity = "test-pod".to_string();
         let ctx = ReconcilerContext {
             cache: Arc::clone(&shared),
-            runtime_cache: shared,
+            runtime_cache: Arc::clone(&shared),
             app_config: Arc::new(app_config),
             resource_loader: None,
             http_server: None,
@@ -648,6 +663,11 @@ mod tests {
             filesystem_flow_paths: Arc::new(HashSet::new()),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
+                shared,
+                holder_identity.clone(),
+            )),
+            holder_identity,
         };
 
         let name = derive_flow_name("flows.default-test", &ctx);
@@ -764,9 +784,10 @@ flow:
         };
 
         let shared: Arc<dyn Cache> = Arc::new(MemoryCache::new());
+        let holder_identity = "test-pod".to_string();
         ReconcilerContext {
             cache: Arc::clone(&shared),
-            runtime_cache: shared,
+            runtime_cache: Arc::clone(&shared),
             app_config: Arc::new(app_config),
             resource_loader: None,
             http_server: None,
@@ -775,6 +796,11 @@ flow:
             filesystem_flow_paths: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
+                shared,
+                holder_identity.clone(),
+            )),
+            holder_identity,
         }
     }
 

@@ -63,27 +63,34 @@ pub struct LeaseConfig {
     pub retry_config: crate::retry::RetryConfig,
 }
 
+/// Resolves this pod's holder identity from the environment.
+///
+/// Priority: `POD_NAME` > `HOSTNAME` > a generated ID (PID + timestamp).
+/// The generated fallback is only unique per call — callers that need one
+/// consistent identity across multiple `LeaseConfig`/`Executor` instances
+/// (e.g. one per flow) must resolve it once and share the value, rather
+/// than relying on `LeaseConfig::default()` to re-resolve it each time.
+pub fn resolve_holder_identity() -> String {
+    std::env::var("POD_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| {
+            // Generate a unique identifier using process ID and timestamp.
+            // This ensures uniqueness even without external dependencies.
+            let pid = std::process::id();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_nanos();
+            format!("executor-{pid}-{timestamp}")
+        })
+}
+
 impl Default for LeaseConfig {
     fn default() -> Self {
-        // Get holder identity from environment or generate a unique one.
-        // Priority: POD_NAME > HOSTNAME > unique generated ID with PID and timestamp
-        let holder_identity = std::env::var("POD_NAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| {
-                // Generate a unique identifier using process ID and timestamp.
-                // This ensures uniqueness even without external dependencies.
-                let pid = std::process::id();
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_nanos();
-                format!("executor-{pid}-{timestamp}")
-            });
-
         Self {
             lease_duration: Duration::from_secs(DEFAULT_LEASE_DURATION_SECS),
             renewal_interval: Duration::from_secs(DEFAULT_RENEWAL_INTERVAL_SECS),
-            holder_identity,
+            holder_identity: resolve_holder_identity(),
             retry_config: crate::retry::RetryConfig::default(),
         }
     }
