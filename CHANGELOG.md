@@ -25,6 +25,14 @@
   before racing for a lease, so flows land roughly evenly instead of every
   pod defaulting to whichever wins the race first. Falls back to normal
   racing if the preferred pod doesn't show up.
+- **`mongodb_collection` reads matching zero documents left the flow
+  hanging.** The source task waited indefinitely for a completion signal
+  that never came, since an empty result set emitted no event at all. A
+  read that matches nothing now emits one event and completes normally.
+- **Two task types with matching credentials could collide in the shared
+  client registry**, causing the second one to fail with a "client
+  registry type mismatch" error. Registry keys now include the task
+  type, so different task types never share an entry.
 
 ### Improvements
 
