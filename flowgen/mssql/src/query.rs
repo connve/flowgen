@@ -241,12 +241,12 @@ impl Runner for Processor {
             .task_context
             .client_registry
             .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(&(
-                    &credentials_path,
-                    init_config.max_connections,
-                    init_config.connection_timeout,
-                    init_config.query_timeout,
-                )),
+                flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
+                    .field("credentials_path", &credentials_path)
+                    .field("max_connections", &init_config.max_connections)
+                    .field("connection_timeout", &init_config.connection_timeout)
+                    .field("query_timeout", &init_config.query_timeout)
+                    .build(),
                 || async {
                     let connection_string = init_config
                         .build_connection_string()

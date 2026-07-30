@@ -199,10 +199,10 @@ impl flowgen_core::task::runner::Runner for Publisher {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let nats_key = flowgen_core::client_registry::ClientKey::new(&(
-            &init_config.credentials_path,
-            &init_config.url,
-        ));
+        let nats_key = flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
+            .field("credentials_path", &init_config.credentials_path)
+            .field("url", &init_config.url)
+            .build();
         let jetstream_ctx = self
             .task_context
             .client_registry

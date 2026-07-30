@@ -5,9 +5,9 @@
 //! same authenticated client, avoiding redundant login/auth calls that hammer
 //! external services (e.g. Salesforce OAuth rate limits).
 //!
-//! Each task hashes its credential fields into a `ClientKey`. The first
-//! task to request a client for a given key performs the actual authentication;
-//! all others wait on a per-key mutex and reuse the result.
+//! Each task hashes its task type plus credential fields into a `ClientKey`.
+//! The first task to request a client for a given key performs the actual
+//! authentication; all others wait on a per-key mutex and reuse the result.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -18,21 +18,82 @@ use tokio::sync::{Mutex, RwLock};
 
 /// Opaque key identifying a unique client configuration.
 ///
-/// Built by tasks from their credential fields (credentials path, endpoint
-/// URL, etc.). Two tasks with identical fields share the same client.
+/// Built from a task type plus credential fields (credentials path,
+/// endpoint URL, etc.). Two tasks of the same type with identical fields
+/// share the same client.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClientKey(u64);
 
 impl ClientKey {
-    /// Creates a new client key from any hashable identity.
+    /// Creates a new client key from a task type and a single hashable
+    /// identity value.
     ///
-    /// The identity should include every field that affects client construction:
-    /// credentials path, endpoint URL, pool size, etc. Two identical identities
-    /// produce the same key and share the same client.
-    pub fn new<H: Hash>(identity: &H) -> Self {
+    /// Use this for tasks whose connection identity is one field (usually
+    /// `credentials_path`). For tasks whose identity spans several fields
+    /// (a URL, pool settings, ...), use [`ClientKeyBuilder`] instead, so
+    /// each field is named rather than positional.
+    ///
+    /// `task_type` (e.g. `"mongodb_collection"`, `"gcp_bigquery_query"`) is
+    /// always part of the key, so two different task types whose credential
+    /// fields happen to hash the same (e.g. both unset, meaning "use
+    /// defaults/ADC") never collide on the same registry entry — without it,
+    /// `get_or_init` would return `Error::TypeMismatch` for the second task
+    /// type to request that key, since the registry stores one concrete
+    /// type per key.
+    pub fn new<H: Hash>(task_type: &'static str, identity: &H) -> Self {
+        ClientKeyBuilder::new(task_type)
+            .field("identity", identity)
+            .build()
+    }
+}
+
+/// Builder for a [`ClientKey`] spanning several identity fields.
+///
+/// Fields are sorted by name before the final hash, so the order `.field()`
+/// is called in doesn't affect the resulting key — unlike hashing a raw
+/// tuple, where inserting a field in the middle shifts every field after it
+/// and changes the key even though nothing meaningful changed.
+///
+/// `task_type` and field names are `&'static str` (every call site already
+/// passes a string literal or `self.task_type`), so building a key never
+/// allocates beyond the per-field hash — this runs on the event handling
+/// path for some task types (e.g. `ai_completion`), not just once at init.
+#[derive(Debug)]
+pub struct ClientKeyBuilder {
+    task_type: &'static str,
+    fields: Vec<(&'static str, u64)>,
+}
+
+impl ClientKeyBuilder {
+    /// Starts a new key for the given task type. `task_type` is always
+    /// part of the key — see [`ClientKey::new`]'s doc for why.
+    pub fn new(task_type: &'static str) -> Self {
+        Self {
+            task_type,
+            fields: Vec::new(),
+        }
+    }
+
+    /// Adds one named field to the identity. `name` must be unique within
+    /// a single key's fields so two fields with the same hash can't
+    /// collapse into one.
+    pub fn field<H: Hash>(mut self, name: &'static str, value: &H) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        identity.hash(&mut hasher);
-        Self(hasher.finish())
+        value.hash(&mut hasher);
+        self.fields.push((name, hasher.finish()));
+        self
+    }
+
+    pub fn build(mut self) -> ClientKey {
+        self.fields.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.task_type.hash(&mut hasher);
+        for (name, value_hash) in &self.fields {
+            name.hash(&mut hasher);
+            value_hash.hash(&mut hasher);
+        }
+        ClientKey(hasher.finish())
     }
 }
 
@@ -214,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn get_or_init_creates_client_on_first_call() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"creds-a");
+        let key = ClientKey::new("test", &"creds-a");
 
         let client: Arc<FakeClient> = registry
             .get_or_init(key, || async {
@@ -232,7 +293,7 @@ mod tests {
     #[tokio::test]
     async fn get_or_init_reuses_existing_client() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"creds-a");
+        let key = ClientKey::new("test", &"creds-a");
 
         let first: Arc<FakeClient> = registry
             .get_or_init(key.clone(), || async {
@@ -261,7 +322,7 @@ mod tests {
         let registry = ClientRegistry::new();
 
         let a: Arc<FakeClient> = registry
-            .get_or_init(ClientKey::new(&"creds-a"), || async {
+            .get_or_init(ClientKey::new("test", &"creds-a"), || async {
                 Ok::<_, TestError>(FakeClient {
                     value: "a".to_string(),
                 })
@@ -270,7 +331,7 @@ mod tests {
             .unwrap();
 
         let b: Arc<OtherClient> = registry
-            .get_or_init(ClientKey::new(&"creds-b"), || async {
+            .get_or_init(ClientKey::new("test", &"creds-b"), || async {
                 Ok::<_, TestError>(OtherClient { id: 99 })
             })
             .await
@@ -286,7 +347,7 @@ mod tests {
         let registry = ClientRegistry::new();
 
         let first: Arc<FakeClient> = registry
-            .get_or_init(ClientKey::new(&"/creds/shared.json"), || async {
+            .get_or_init(ClientKey::new("test", &"/creds/shared.json"), || async {
                 Ok::<_, TestError>(FakeClient {
                     value: "shared".to_string(),
                 })
@@ -295,7 +356,7 @@ mod tests {
             .unwrap();
 
         let second: Arc<FakeClient> = registry
-            .get_or_init(ClientKey::new(&"/creds/shared.json"), || async {
+            .get_or_init(ClientKey::new("test", &"/creds/shared.json"), || async {
                 Ok::<_, TestError>(FakeClient {
                     value: "should not be called".to_string(),
                 })
@@ -310,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn init_error_propagates() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"bad-creds");
+        let key = ClientKey::new("test", &"bad-creds");
 
         let result: Result<Arc<FakeClient>, _> =
             registry.get_or_init(key, || async { Err(TestError) }).await;
@@ -322,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn retry_succeeds_after_init_failure() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"flaky-creds");
+        let key = ClientKey::new("test", &"flaky-creds");
 
         let first: Result<Arc<FakeClient>, _> = registry
             .get_or_init(key.clone(), || async { Err(TestError) })
@@ -345,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn type_mismatch_returns_error() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"same-creds");
+        let key = ClientKey::new("test", &"same-creds");
 
         let _: Arc<FakeClient> = registry
             .get_or_init(key.clone(), || async {
@@ -374,7 +435,7 @@ mod tests {
             let count = Arc::clone(&call_count);
             handles.push(tokio::spawn(async move {
                 let _: Arc<FakeClient> = reg
-                    .get_or_init(ClientKey::new(&"shared"), || {
+                    .get_or_init(ClientKey::new("test", &"shared"), || {
                         let count = Arc::clone(&count);
                         async move {
                             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -397,18 +458,73 @@ mod tests {
 
     #[tokio::test]
     async fn composite_key_hashes_multiple_fields() {
-        let key_a = ClientKey::new(&("/creds/a.json", "https://api.sf.com"));
-        let key_b = ClientKey::new(&("/creds/a.json", "https://other.sf.com"));
-        let key_a2 = ClientKey::new(&("/creds/a.json", "https://api.sf.com"));
+        let key_a = ClientKeyBuilder::new("test")
+            .field("credentials_path", &"/creds/a.json")
+            .field("url", &"https://api.sf.com")
+            .build();
+        let key_b = ClientKeyBuilder::new("test")
+            .field("credentials_path", &"/creds/a.json")
+            .field("url", &"https://other.sf.com")
+            .build();
+        let key_a2 = ClientKeyBuilder::new("test")
+            .field("credentials_path", &"/creds/a.json")
+            .field("url", &"https://api.sf.com")
+            .build();
 
         assert_eq!(key_a, key_a2);
         assert_ne!(key_a, key_b);
     }
 
     #[tokio::test]
+    async fn builder_field_order_does_not_matter() {
+        let a = ClientKeyBuilder::new("test")
+            .field("x", &"1")
+            .field("y", &"2")
+            .build();
+        let b = ClientKeyBuilder::new("test")
+            .field("y", &"2")
+            .field("x", &"1")
+            .build();
+
+        assert_eq!(
+            a, b,
+            "fields are sorted by name before hashing, so call order shouldn't matter"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_task_types_share_identity_do_not_collide() {
+        let registry = ClientRegistry::new();
+
+        let mongo: Arc<FakeClient> = registry
+            .get_or_init(
+                ClientKey::new("mongodb_collection", &None::<String>),
+                || async {
+                    Ok::<_, TestError>(FakeClient {
+                        value: "mongo".to_string(),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+
+        let bigquery: Arc<OtherClient> = registry
+            .get_or_init(
+                ClientKey::new("gcp_bigquery_query", &None::<String>),
+                || async { Ok::<_, TestError>(OtherClient { id: 1 }) },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(mongo.value, "mongo");
+        assert_eq!(bigquery.id, 1);
+        assert_eq!(registry.len().await, 2);
+    }
+
+    #[tokio::test]
     async fn remove_forces_reinit() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"creds-a");
+        let key = ClientKey::new("test", &"creds-a");
 
         let first: Arc<FakeClient> = registry
             .get_or_init(key.clone(), || async {
@@ -438,13 +554,13 @@ mod tests {
     #[tokio::test]
     async fn remove_nonexistent_returns_false() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"nope");
+        let key = ClientKey::new("test", &"nope");
         assert!(!registry.remove(&key).await);
     }
 
     #[tokio::test]
     async fn display_shows_hex_hash() {
-        let key = ClientKey::new(&"my-creds");
+        let key = ClientKey::new("test", &"my-creds");
         let display = format!("{key}");
         assert_eq!(display.len(), 16);
         assert!(display.chars().all(|c| c.is_ascii_hexdigit()));
@@ -453,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn init_guard_cleaned_up_after_success() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"creds");
+        let key = ClientKey::new("test", &"creds");
 
         let _: Arc<FakeClient> = registry
             .get_or_init(key, || async {
@@ -471,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn init_guard_retained_after_failure() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"bad");
+        let key = ClientKey::new("test", &"bad");
 
         let _: Result<Arc<FakeClient>, _> =
             registry.get_or_init(key, || async { Err(TestError) }).await;
@@ -483,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn remove_cleans_init_guards() {
         let registry = ClientRegistry::new();
-        let key = ClientKey::new(&"fail-then-remove");
+        let key = ClientKey::new("test", &"fail-then-remove");
 
         let _: Result<Arc<FakeClient>, _> = registry
             .get_or_init(key.clone(), || async { Err(TestError) })
@@ -499,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn remove_then_reinit_works() {
         let registry = Arc::new(ClientRegistry::new());
-        let key = ClientKey::new(&"volatile");
+        let key = ClientKey::new("test", &"volatile");
 
         let first: Arc<FakeClient> = registry
             .get_or_init(key.clone(), || async {
@@ -531,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_remove_and_get_or_init() {
         let registry = Arc::new(ClientRegistry::new());
-        let key = ClientKey::new(&"race");
+        let key = ClientKey::new("test", &"race");
 
         let _: Arc<FakeClient> = registry
             .get_or_init(key.clone(), || async {
@@ -580,7 +696,9 @@ mod tests {
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
         let _: Result<Arc<FakeClient>, _> = registry
-            .get_or_init(ClientKey::new(&"flaky"), || async { Err(TestError) })
+            .get_or_init(ClientKey::new("test", &"flaky"), || async {
+                Err(TestError)
+            })
             .await;
 
         let mut handles = Vec::new();
@@ -589,7 +707,7 @@ mod tests {
             let count = Arc::clone(&call_count);
             handles.push(tokio::spawn(async move {
                 let _: Arc<FakeClient> = reg
-                    .get_or_init(ClientKey::new(&"flaky"), || {
+                    .get_or_init(ClientKey::new("test", &"flaky"), || {
                         let count = Arc::clone(&count);
                         async move {
                             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

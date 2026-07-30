@@ -163,7 +163,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             .task_context
             .client_registry
             .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(&credentials_path),
+                flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path),
                 || async {
                     let client = salesforce_core::client::Builder::new()
                         .credentials_path(credentials_path)

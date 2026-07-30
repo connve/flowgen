@@ -571,7 +571,8 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         // Authenticate with Salesforce (shared via client registry).
         let credentials_path = init_config.credentials_path.clone();
-        let client_key = flowgen_core::client_registry::ClientKey::new(&credentials_path);
+        let client_key =
+            flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path);
         let sfdc_client = self
             .task_context
             .client_registry

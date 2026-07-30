@@ -310,7 +310,10 @@ impl Runner for ListProcessor {
             .task_context
             .client_registry
             .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(&(&client_path, &credentials_path)),
+                flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
+                    .field("client_path", &client_path)
+                    .field("credentials_path", &credentials_path)
+                    .build(),
                 || async {
                     let mut client_builder = super::client::ClientBuilder::new().path(client_path);
                     if let Some(options) = client_options {

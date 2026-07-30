@@ -479,12 +479,12 @@ impl EventHandler {
             .render(&event_value)
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let key = flowgen_core::client_registry::ClientKey::new(&(
-            rendered.provider.as_str().to_string(),
-            rendered.model.clone(),
-            rendered.endpoint.clone(),
-            rendered.credentials_path.clone(),
-        ));
+        let key = flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
+            .field("provider", &rendered.provider.as_str())
+            .field("model", &rendered.model)
+            .field("endpoint", &rendered.endpoint)
+            .field("credentials_path", &rendered.credentials_path)
+            .build();
 
         let tool_server_handle = self.mcp_tools.as_ref().map(|t| t.handle.clone());
         let task_context = Arc::clone(&self.task_context);

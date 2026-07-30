@@ -124,6 +124,32 @@ impl EventHandler {
             .await
             .map_err(|source| Error::MongoDB { source })?;
 
+        if pending.is_none() {
+            let mut e = flowgen_core::event::EventBuilder::new()
+                .data(EventData::Json(serde_json::json!({ "matched": 0 })))
+                .task_id(self.task_id)
+                .task_type(self.task_type)
+                .build()
+                .map_err(|source| Error::EventBuilder { source })?;
+
+            match self.tx {
+                None => {
+                    if let Some(arc) = completion_tx_arc.as_ref() {
+                        arc.signal_completion(e.data_as_json().ok());
+                    }
+                }
+                Some(_) => {
+                    e.completion_tx = completion_tx_arc.clone();
+                }
+            }
+
+            e.send_with_logging(self.tx.as_ref())
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+
+            return Ok(());
+        }
+
         while let Some(document) = pending.take() {
             let next = cursor
                 .try_next()
@@ -254,7 +280,8 @@ impl flowgen_core::task::runner::Runner for Processor {
             .map_err(|source| Error::ConfigRender { source })?;
 
         let credentials_path = init_config.credentials_path.clone();
-        let client_key = flowgen_core::client_registry::ClientKey::new(&credentials_path);
+        let client_key =
+            flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path);
         let client = self
             .task_context
             .client_registry
