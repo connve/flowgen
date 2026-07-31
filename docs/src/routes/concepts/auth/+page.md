@@ -1,6 +1,6 @@
 # Authentication
 
-Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server). Auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
+Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server), and a separate interactive OIDC login for the admin web UI. Task-facing auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
 
 User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/flowgen/concepts/credentials) for the distinction.
 
@@ -144,3 +144,47 @@ The `Authorization` header in the incoming request carries the JWT. Service-to-s
 | 502 / 503 | Upstream JWKS endpoint or session validation service is unreachable. Retry by the caller. |
 
 Worker logs include the specific reason at `error` level so operators can diagnose without leaking the token to the caller.
+
+## Admin UI login
+
+The token-validation providers above cover HTTP-facing tasks. The admin web UI (`web.enabled: true`) uses a separate, interactive OIDC login instead, configured under `web.auth`:
+
+```yaml
+web:
+  enabled: true
+  port: 8080
+  path: "/flowgen"
+  auth:
+    issuer_url: "https://auth.example.com"
+    client_id: "flowgen-admin"
+    client_secret: "your-oidc-client-secret"
+    # Must exactly match a redirect URI registered with the IdP, and
+    # include `path` above.
+    redirect_uri: "https://example.com/flowgen/auth/callback"
+    # extra_scopes: ["groups"]
+  cookie_secret: "a long random string, at least 32 bytes"
+  # cookie_secure: false  # only for a plain-HTTP deployment; defaults to true
+```
+
+Works with any standard-compliant OIDC provider — Okta, Zitadel, Auth0, or one that itself federates to an upstream identity provider (SSO broker setups look identical to flowgen, since discovery and token validation don't change).
+
+`auth` is optional; if omitted, the admin UI is served unauthenticated.
+
+Login cookies carry the `Secure` attribute by default, which browsers require HTTPS to send — set `cookie_secure: false` for a plain-HTTP deployment (local testing, or a proxy that already terminates TLS).
+
+### No server-side session store
+
+Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted with `cookie_secret` so the browser can carry it but never read or forge it. Every request re-validates the token; near expiry, flowgen transparently refreshes it against the identity provider. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
+
+`cookie_secret` is required whenever `auth` is set — flowgen refuses to start the admin web server without it, rather than falling back to an unauthenticated UI.
+
+### Routes
+
+| Route | Purpose |
+|---|---|
+| `GET {path}/auth/login` | Redirects to the identity provider. 404 if `auth` isn't configured. |
+| `GET {path}/auth/callback` | Identity provider redirect target; exchanges the code and sets the session cookie. |
+| `POST {path}/auth/logout` | Clears the local session cookie. 404 if `auth` isn't configured. |
+| `GET {path}/auth/me` | The signed-in user, 401 if not signed in, or 404 if `auth` isn't configured. |
+
+`{path}` is `web.path` (defaults to `/`).

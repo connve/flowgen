@@ -1,8 +1,9 @@
 //! Embedded web admin interface for flowgen.
 //!
-//! Serves the static SvelteKit UI and a small read-only API that exposes the
-//! currently loaded flows. The static assets are compiled into the binary with
-//! `rust-embed`, so the single `flowgen` binary remains self-contained.
+//! Serves the static SvelteKit UI and its admin API (flows, logs, config,
+//! resources, and the built-in Agents chat). The static assets are compiled
+//! into the binary with `rust-embed`, so the single `flowgen` binary remains
+//! self-contained.
 
 use axum::{
     extract::{Path as AxumPath, State},
@@ -98,7 +99,41 @@ pub struct WebState {
     /// TTL applied to each conversation write, refreshed on every save. `None`
     /// persists indefinitely. From `web.agents.conversation_history_ttl`.
     pub conversation_history_ttl: Option<Duration>,
+    /// OIDC login client, built from `web.auth` at startup. `None` leaves
+    /// the admin UI unauthenticated.
+    pub login_client: Option<Arc<crate::login::LoginClient>>,
+    /// Key encrypting the browser session cookie — see `crate::login` for
+    /// why there's no server-side session store to protect instead.
+    /// `app.rs` refuses to start the admin server if `web.auth` is set
+    /// without `web.cookie_secret` to derive this from.
+    pub cookie_key: axum_extra::extract::cookie::Key,
+    /// Whether login cookies carry `Secure` (browsers require HTTPS to send
+    /// them). From `web.cookie_secure`, default `true`.
+    pub cookie_secure: bool,
 }
+
+/// Wraps `cookie::Key` so `FromRef<Arc<WebState>>` can be implemented here
+/// — the orphan rules block implementing a foreign trait for the foreign
+/// `Key` type directly against a foreign `Arc<WebState>`.
+#[derive(Clone)]
+struct CookieKey(axum_extra::extract::cookie::Key);
+
+impl From<CookieKey> for axum_extra::extract::cookie::Key {
+    fn from(k: CookieKey) -> Self {
+        k.0
+    }
+}
+
+impl axum::extract::FromRef<Arc<WebState>> for CookieKey {
+    fn from_ref(state: &Arc<WebState>) -> Self {
+        CookieKey(state.cookie_key.clone())
+    }
+}
+
+/// The state's private cookie jar type — used instead of the crate default
+/// `PrivateCookieJar<Key>` since `Key` itself can't satisfy `FromRef` here
+/// (see [`CookieKey`]).
+type AuthJar = axum_extra::extract::cookie::PrivateCookieJar<CookieKey>;
 
 /// Starts the admin web server on the given port.
 ///
@@ -120,7 +155,17 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
     // access matters.
     let system_bucket_present = state.system_bucket_present;
 
-    let app = Router::new()
+    let state = Arc::new(state);
+
+    let auth_prefix = format!("{prefix}/auth");
+    let auth_routes = Router::new()
+        .route(&format!("{auth_prefix}/login"), get(auth_login))
+        .route(&format!("{auth_prefix}/callback"), get(auth_callback))
+        .route(&format!("{auth_prefix}/logout"), post(auth_logout))
+        .route(&format!("{auth_prefix}/me"), get(auth_me))
+        .with_state(Arc::clone(&state));
+
+    let mut api = Router::new()
         .route(&format!("{api_prefix}/flows"), get(list_flows))
         .route(&format!("{api_prefix}/flows/stream"), get(stream_flows))
         .route(&format!("{api_prefix}/flows/{{*path}}"), get(get_flow))
@@ -146,8 +191,20 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
             &format!("{api_prefix}/resources/{{*key}}"),
             get(get_resource),
         )
+        .with_state(Arc::clone(&state));
+
+    if state.login_client.is_some() {
+        api = api.layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth_middleware,
+        ));
+    }
+
+    let app = Router::new()
+        .merge(auth_routes)
+        .merge(api)
         .fallback(serve_embedded)
-        .with_state(Arc::new(state));
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
@@ -165,6 +222,266 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
     axum::serve(listener, app)
         .await
         .map_err(|source| Error::ServeHttp { source })
+}
+
+// --- Admin UI OIDC login --------------------------------------------------
+//
+// No server-side session store (see `crate::login`): the browser's cookie
+// *is* the session, encrypted with `WebState::cookie_key` so it can't be
+// read or forged client-side. Two cookies, both `HttpOnly; Secure;
+// SameSite=Lax`:
+//   - `SSO_STATE_COOKIE`: the PKCE verifier/state/nonce, alive only for the
+//     few seconds between `/auth/login` and `/auth/callback`.
+//   - `SSO_SESSION_COOKIE`: the IdP's tokens, alive for the session.
+
+const SSO_STATE_COOKIE: &str = "flowgen_auth_state";
+const SSO_SESSION_COOKIE: &str = "flowgen_auth_session";
+
+/// What's encrypted into `SSO_SESSION_COOKIE`. Not a session record in any
+/// store — this struct only ever exists serialized inside the cookie.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AuthSession {
+    user: flowgen_core::auth::UserContext,
+    id_token: String,
+    refresh_token: Option<String>,
+    /// Unix seconds; re-validate/refresh once past this.
+    expires_at: Option<i64>,
+}
+
+/// Builds a login cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure`
+/// per `secure` (browsers require HTTPS to send a `Secure` cookie — see
+/// `web.cookie_secure`).
+fn auth_cookie(
+    name: &'static str,
+    value: String,
+    max_age: Option<time::Duration>,
+    secure: bool,
+) -> axum_extra::extract::cookie::Cookie<'static> {
+    use axum_extra::extract::cookie::{Cookie, SameSite};
+    let mut cookie = Cookie::new(name, value);
+    cookie.set_http_only(true);
+    cookie.set_secure(secure);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_path("/");
+    if let Some(max_age) = max_age {
+        cookie.set_max_age(max_age);
+    }
+    cookie
+}
+
+/// Builds a cookie that deletes `name` on the browser. Must carry the same
+/// `Path` as the cookie being deleted (`/`, matching `auth_cookie` above) —
+/// per RFC 6265, a removal `Set-Cookie` with no `Path` defaults to the
+/// *request's* directory, not `/`, so the browser treats it as a different
+/// cookie and the original is never actually cleared.
+fn removal_cookie(name: &'static str) -> axum_extra::extract::cookie::Cookie<'static> {
+    use axum_extra::extract::cookie::Cookie;
+    let mut cookie = Cookie::from(name);
+    cookie.set_path("/");
+    cookie
+}
+
+/// `GET /auth/login` — redirects the browser to the IdP.
+async fn auth_login(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoResponse {
+    let Some(login_client) = &state.login_client else {
+        return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
+    };
+    let (url, login_state) = login_client.authorize_url();
+    let Ok(encoded) = serde_json::to_string(&login_state) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to start login").into_response();
+    };
+    let jar = jar.add(auth_cookie(
+        SSO_STATE_COOKIE,
+        encoded,
+        Some(time::Duration::minutes(10)),
+        state.cookie_secure,
+    ));
+    (jar, Redirect::to(&url)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct AuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+/// `GET /auth/callback` — exchanges the code, verifies everything, and sets
+/// the session cookie.
+async fn auth_callback(
+    State(state): State<Arc<WebState>>,
+    jar: AuthJar,
+    axum::extract::Query(query): axum::extract::Query<AuthCallbackQuery>,
+) -> impl IntoResponse {
+    let Some(login_client) = &state.login_client else {
+        return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
+    };
+
+    if let Some(error) = query.error {
+        warn!(error = %error, "OIDC provider returned an error at callback");
+        return (
+            StatusCode::BAD_REQUEST,
+            "Login failed at the identity provider",
+        )
+            .into_response();
+    }
+    let (Some(code), Some(returned_state)) = (query.code, query.state) else {
+        return (StatusCode::BAD_REQUEST, "Missing code or state").into_response();
+    };
+
+    let Some(stashed_raw) = jar.get(SSO_STATE_COOKIE) else {
+        return (StatusCode::BAD_REQUEST, "Login session expired, try again").into_response();
+    };
+    let Ok(stashed) = serde_json::from_str::<crate::login::LoginState>(stashed_raw.value()) else {
+        return (StatusCode::BAD_REQUEST, "Corrupt login session, try again").into_response();
+    };
+
+    let result = match login_client
+        .exchange_code(code, &returned_state, &stashed)
+        .await
+    {
+        Ok(result) => result,
+        Err(source) => {
+            warn!(error = %source, "OIDC login failed");
+            return (StatusCode::UNAUTHORIZED, "Login failed").into_response();
+        }
+    };
+
+    let session = AuthSession {
+        user: result.user,
+        id_token: result.id_token,
+        refresh_token: result.refresh_token,
+        expires_at: result
+            .expires_in
+            .map(|secs| chrono::Utc::now().timestamp() + secs as i64),
+    };
+    let Ok(encoded) = serde_json::to_string(&session) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to complete login",
+        )
+            .into_response();
+    };
+
+    let jar = jar
+        .remove(removal_cookie(SSO_STATE_COOKIE))
+        .add(auth_cookie(
+            SSO_SESSION_COOKIE,
+            encoded,
+            None,
+            state.cookie_secure,
+        ));
+    let redirect_to = if state.prefix.is_empty() {
+        "/"
+    } else {
+        &state.prefix
+    };
+    (jar, Redirect::to(redirect_to)).into_response()
+}
+
+/// `POST /auth/logout` — clears the local cookie. Does not (yet) call the
+/// IdP's end-session endpoint.
+async fn auth_logout(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoResponse {
+    if state.login_client.is_none() {
+        return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
+    }
+    let jar = jar.remove(removal_cookie(SSO_SESSION_COOKIE));
+    (jar, StatusCode::NO_CONTENT).into_response()
+}
+
+/// `GET /auth/me` — the logged-in user, 401 if not logged in, or 404 if
+/// `web.auth` isn't configured (matching `auth_login`/`auth_callback`'s
+/// existing convention) — the frontend uses the 404 case to tell "no login
+/// offered" apart from "not logged in yet" before deciding whether a 401
+/// elsewhere means "go log in".
+async fn auth_me(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoResponse {
+    if state.login_client.is_none() {
+        return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
+    }
+    let Some(session) = read_session(&jar) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(api::UserContext {
+        user_id: session.user.user_id,
+        claims: session.user.claims.into_iter().collect(),
+    })
+    .into_response()
+}
+
+fn read_session(jar: &AuthJar) -> Option<AuthSession> {
+    let cookie = jar.get(SSO_SESSION_COOKIE)?;
+    serde_json::from_str(cookie.value()).ok()
+}
+
+/// Protects `/api/*` when `web.auth` is configured. Validates the session
+/// cookie's `id_token` (reusing the same JWKS/JWT path the other servers
+/// use); past its `exp`, tries a silent refresh against the IdP before
+/// giving up. Not layered at all when `web.auth` is unset.
+async fn auth_middleware(
+    State(state): State<Arc<WebState>>,
+    jar: AuthJar,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(login_client) = &state.login_client else {
+        return next.run(request).await;
+    };
+    let Some(session) = read_session(&jar) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    let still_valid = login_client
+        .validate_id_token(&session.id_token)
+        .await
+        .is_ok();
+    if still_valid {
+        return next.run(request).await;
+    }
+
+    let Some(refresh_token) = session.refresh_token.clone() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match login_client.refresh(&refresh_token).await {
+        Ok(refreshed) => {
+            let new_session = AuthSession {
+                user: refreshed.user,
+                id_token: refreshed.id_token,
+                refresh_token: refreshed.refresh_token.or(session.refresh_token),
+                expires_at: refreshed
+                    .expires_in
+                    .map(|secs| chrono::Utc::now().timestamp() + secs as i64),
+            };
+            let Ok(encoded) = serde_json::to_string(&new_session) else {
+                return StatusCode::UNAUTHORIZED.into_response();
+            };
+            let jar = jar.add(auth_cookie(
+                SSO_SESSION_COOKIE,
+                encoded,
+                None,
+                state.cookie_secure,
+            ));
+            let mut response = next.run(request).await;
+            for cookie in jar.iter() {
+                match axum::http::HeaderValue::from_str(&cookie.to_string()) {
+                    Ok(value) => {
+                        response
+                            .headers_mut()
+                            .append(axum::http::header::SET_COOKIE, value);
+                    }
+                    // Don't silently serve the request on a cookie the
+                    // browser will never receive.
+                    Err(source) => {
+                        warn!(error = %source, "Failed to encode refreshed session cookie")
+                    }
+                }
+            }
+            response
+        }
+        Err(source) => {
+            warn!(error = %source, "Session refresh failed");
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    }
 }
 
 /// Returns a list of currently loaded flows.
@@ -805,6 +1122,7 @@ async fn put_conversation(
         id: id.clone(),
         title: body.title,
         messages: body.messages,
+        model: body.model,
         updated_at: now_millis(),
     };
     let bytes = match serde_json::to_vec(&conversation) {
@@ -984,6 +1302,9 @@ mod tests {
             conversation_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
             system_bucket_present: false,
             conversation_history_ttl: None,
+            login_client: None,
+            cookie_key: axum_extra::extract::cookie::Key::generate(),
+            cookie_secure: true,
         };
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());

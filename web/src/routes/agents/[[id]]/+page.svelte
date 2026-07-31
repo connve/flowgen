@@ -23,22 +23,17 @@
 		putConversation,
 		deleteConversation,
 		deriveTitle,
-		type ConversationSummary
+		type ConversationSummary,
+		type ConversationMessage,
+		type ToolStep
 	} from '$lib/conversations';
 
-	// A tool the agent invoked mid-turn, shown in the message's steps section.
-	// Arguments arrive as a JSON string in the OpenAI tool-call delta.
-	interface ToolStep {
-		name: string;
-		arguments: string;
-	}
-
-	interface ChatMessage {
+	// `role` narrows to the two values the UI ever produces; the generated
+	// `ConversationMessage.role` is a bare `string` since the schema is shared
+	// with any future author, so this stays a local type rather than swapping
+	// in the generated one wholesale.
+	interface ChatMessage extends Omit<ConversationMessage, 'role'> {
 		role: 'user' | 'assistant';
-		content: string;
-		at: number;
-		// Tool calls the agent ran while producing this message, in order.
-		steps?: ToolStep[];
 	}
 
 	function formatTimestamp(ms: number): string {
@@ -218,6 +213,7 @@
 				// Guard against a race: the URL may have changed again mid-fetch.
 				if (activeId !== c.id) return;
 				messages = c.messages.map((m) => ({ ...m }) as ChatMessage);
+				if (c.model) model = c.model;
 				error = null;
 				resetComposer();
 				scrollToBottom();
@@ -276,7 +272,8 @@
 			await putConversation(
 				id,
 				title,
-				messages.map((m) => ({ role: m.role, content: m.content, at: m.at }))
+				messages.map((m) => ({ role: m.role, content: m.content, at: m.at, steps: m.steps })),
+				model || undefined
 			);
 			if (isNew) goto(`${base}/agents/${id}`);
 			await refreshConversations();
@@ -308,8 +305,13 @@
 					display_name: m.display_name,
 					description: m.description
 				}));
-			if (models.length > 0) model = models[0].id;
-			else modelsEmpty = true;
+			// The conversation-load effect may have already restored a saved
+			// model by the time this fetch resolves — don't clobber it.
+			if (models.length > 0) {
+				if (!model) model = models[0].id;
+			} else {
+				modelsEmpty = true;
+			}
 		} catch (err) {
 			modelsError =
 				err instanceof Error ? err.message : 'Failed to load models from the AI gateway.';

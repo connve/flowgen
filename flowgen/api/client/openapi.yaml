@@ -357,6 +357,81 @@ paths:
         "503":
           description: The conversation store is unavailable.
 
+  /auth/login:
+    get:
+      operationId: authLogin
+      summary: Starts admin UI login.
+      description: |
+        Redirects to the configured OIDC identity provider. 404 when
+        `web.auth` is not configured.
+      tags: [auth]
+      responses:
+        "302":
+          description: Redirect to the identity provider.
+        "404":
+          description: OIDC login is not configured.
+
+  /auth/callback:
+    get:
+      operationId: authCallback
+      summary: OIDC redirect target.
+      description: |
+        Exchanges the authorization code for tokens, verifies state/nonce,
+        and sets the session cookie. Not meant to be called directly —
+        the identity provider redirects here after `/auth/login`.
+      tags: [auth]
+      parameters:
+        - name: code
+          in: query
+          schema: { type: string }
+        - name: state
+          in: query
+          schema: { type: string }
+        - name: error
+          in: query
+          schema: { type: string }
+      responses:
+        "302":
+          description: Login succeeded; redirects back into the admin UI.
+        "400":
+          description: Missing/invalid code or state, or the provider reported an error.
+        "401":
+          description: Code exchange or ID token validation failed.
+        "404":
+          description: OIDC login is not configured.
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      summary: Clears the local session cookie.
+      tags: [auth]
+      responses:
+        "204":
+          description: Signed out.
+        "404":
+          description: OIDC login is not configured.
+
+  /auth/me:
+    get:
+      operationId: authMe
+      summary: The signed-in user.
+      description: |
+        404 when `web.auth` is not configured — distinct from 401 (not
+        signed in) so callers can tell "no login offered" apart from
+        "not logged in yet".
+      tags: [auth]
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserContext"
+        "401":
+          description: Not signed in.
+        "404":
+          description: OIDC login is not configured.
+
   /livez:
     get:
       operationId: livez
@@ -579,6 +654,31 @@ components:
             The running `AppConfig` serialized to YAML, with secrets
             redacted to `"***"`.
 
+    UserContext:
+      type: object
+      description: A resolved identity from the configured OIDC provider.
+      required: [user_id, claims]
+      properties:
+        user_id:
+          type: string
+          description: Extracted from the `sub` claim (or `web.auth`'s configured claim).
+        claims:
+          type: object
+          additionalProperties: true
+          description: All claims from the ID token.
+
+    ToolStep:
+      type: object
+      description: One tool call an agent made while producing a message.
+      required: [name, arguments]
+      properties:
+        name:
+          type: string
+          description: The tool's name.
+        arguments:
+          type: string
+          description: The tool call's arguments, as a JSON string.
+
     ConversationMessage:
       type: object
       description: One message in an Agents chat conversation.
@@ -594,6 +694,11 @@ components:
           type: integer
           format: int64
           description: When the message was sent, epoch milliseconds.
+        steps:
+          type: array
+          description: Tool calls the agent ran while producing this message, in order.
+          items:
+            $ref: "#/components/schemas/ToolStep"
 
     Conversation:
       type: object
@@ -610,6 +715,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ConversationMessage"
+        model:
+          type: string
+          description: The gateway model id last used for this conversation.
         updatedAt:
           type: integer
           format: int64
@@ -646,6 +754,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ConversationMessage"
+        model:
+          type: string
+          description: The gateway model id last used for this conversation.
 
     LogSpan:
       type: object

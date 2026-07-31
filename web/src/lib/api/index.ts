@@ -23,3 +23,4 @@ export type ConfigInfo = Schemas['ConfigInfo'];
 export type LogRecord = Schemas['LogRecord'];
 export type LogSpan = Schemas['LogSpan'];
 export type KeyValue = Schemas['KeyValue'];
+export type UserContext = Schemas['UserContext'];

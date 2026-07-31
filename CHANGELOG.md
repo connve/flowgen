@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.134.0
+
+### Features
+
+- **Optional admin UI login via OIDC.** The admin web UI can now be
+  gated behind sign-in through any standard-compliant identity provider
+  (Okta, Zitadel, Auth0, or one that itself federates to an upstream
+  IdP), configured under the new `web.auth`/`web.cookie_secret`/
+  `web.cookie_secure` options. There's no server-side session store —
+  the browser's cookie holds the encrypted identity-provider tokens
+  directly, so a restart never invalidates existing sessions. Omit
+  `web.auth` and the admin UI stays unauthenticated, as before.
+
+### Fixes
+
+- **The Agents chat's selected model reset every time you left and came
+  back to a conversation.** It's now saved per conversation and
+  restored on load.
+- **Tool calls a chat agent made mid-turn disappeared once you reloaded
+  the page**, even though they rendered fine while streaming. They're
+  now persisted alongside the message and survive a reload.
+
 ## 0.133.0
 
 ### Fixes

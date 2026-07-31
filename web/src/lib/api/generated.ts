@@ -297,6 +297,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Starts admin UI login.
+         * @description Redirects to the configured OIDC identity provider. 404 when
+         *     `web.auth` is not configured.
+         */
+        get: operations["authLogin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * OIDC redirect target.
+         * @description Exchanges the authorization code for tokens, verifies state/nonce,
+         *     and sets the session cookie. Not meant to be called directly —
+         *     the identity provider redirects here after `/auth/login`.
+         */
+        get: operations["authCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clears the local session cookie. */
+        post: operations["authLogout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The signed-in user.
+         * @description 404 when `web.auth` is not configured — distinct from 401 (not
+         *     signed in) so callers can tell "no login offered" apart from
+         *     "not logged in yet".
+         */
+        get: operations["authMe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/livez": {
         parameters: {
             query?: never;
@@ -458,6 +540,22 @@ export interface components {
              */
             yaml: string;
         };
+        /** @description A resolved identity from the configured OIDC provider. */
+        UserContext: {
+            /** @description Extracted from the `sub` claim (or `web.auth`'s configured claim). */
+            user_id: string;
+            /** @description All claims from the ID token. */
+            claims: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description One tool call an agent made while producing a message. */
+        ToolStep: {
+            /** @description The tool's name. */
+            name: string;
+            /** @description The tool call's arguments, as a JSON string. */
+            arguments: string;
+        };
         /** @description One message in an Agents chat conversation. */
         ConversationMessage: {
             /** @description Message author — `user` or `assistant`. */
@@ -469,6 +567,8 @@ export interface components {
              * @description When the message was sent, epoch milliseconds.
              */
             at: number;
+            /** @description Tool calls the agent ran while producing this message, in order. */
+            steps?: components["schemas"]["ToolStep"][];
         };
         /** @description A stored Agents chat conversation with its full history. */
         Conversation: {
@@ -477,6 +577,8 @@ export interface components {
             /** @description Human-readable conversation title. */
             title: string;
             messages: components["schemas"]["ConversationMessage"][];
+            /** @description The gateway model id last used for this conversation. */
+            model?: string;
             /**
              * Format: int64
              * @description Last write time, epoch milliseconds (server-stamped).
@@ -503,6 +605,8 @@ export interface components {
         ConversationUpsert: {
             title: string;
             messages: components["schemas"]["ConversationMessage"][];
+            /** @description The gateway model id last used for this conversation. */
+            model?: string;
         };
         /** @description One span in a log record's span chain, root-to-leaf. */
         LogSpan: {
@@ -982,6 +1086,133 @@ export interface operations {
             };
             /** @description The conversation store is unavailable. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the identity provider. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description OIDC login is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Login succeeded; redirects back into the admin UI. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing/invalid code or state, or the provider reported an error. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Code exchange or ID token validation failed. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description OIDC login is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authLogout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed out. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description OIDC login is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authMe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The signed-in user. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserContext"];
+                };
+            };
+            /** @description Not signed in. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description OIDC login is not configured. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

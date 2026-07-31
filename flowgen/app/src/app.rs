@@ -174,6 +174,18 @@ pub enum Error {
         #[source]
         source: flowgen_core::http_server::Error,
     },
+    /// Admin UI login is enabled but has no cookie-signing secret set.
+    #[error(
+        "Admin UI login is enabled (web.auth) but web.cookie_secret is missing. Set \
+         web.cookie_secret to a random string so logged-in sessions survive a restart."
+    )]
+    MissingCookieSecret,
+    /// Admin UI could not reach or was rejected by the configured identity provider.
+    #[error("Admin UI login could not start: {source}")]
+    LoginClientStart {
+        #[source]
+        source: crate::login::LoginError,
+    },
     /// MCP server startup error.
     #[error("Failed to start MCP server: {source}")]
     McpServerStart {
@@ -1167,28 +1179,60 @@ impl App {
         if let Some(web_config) = web_config.filter(|w| w.enabled) {
             let port = web_config.port;
             let path = web_config.path.clone();
-            let web_state = crate::web::WebState {
-                flow_registry: Arc::clone(&flow_registry),
-                prefix: String::new(),
-                resource_loader: resource_loader.clone(),
-                metrics_store: Arc::clone(&self.metrics_store),
-                logs_store: self.logs_store.clone(),
-                app_config: Arc::clone(&app_config),
-                // System cache (out of user-script reach) so one tenant's flow
-                // script can't read another's chats via `ctx.cache`. Falls back
-                // to the runtime cache when no system bucket is configured
-                // (single-binary/in-memory) — that mode has no tenant isolation
-                // to protect anyway.
-                conversation_cache: Arc::clone(&executor_cache),
-                system_bucket_present: system_cache.is_some(),
-                conversation_history_ttl: web_config.agents.conversation_history_ttl,
-            };
-            let web_handle = tokio::spawn(async move {
-                if let Err(source) = crate::web::start_web_server(port, &path, web_state).await {
-                    error!("{}", source);
-                }
-            });
-            background_handles.push(web_handle);
+
+            // A broken `web.auth` must not silently serve the admin UI
+            // unauthenticated, but it also shouldn't take down flow
+            // processing — so it skips starting the admin web server rather
+            // than the whole process.
+            let auth_setup: Option<(Option<Arc<crate::login::LoginClient>>, _)> =
+                match &web_config.auth {
+                    Some(login_config) => match &web_config.cookie_secret {
+                        None => {
+                            error!("{}", Error::MissingCookieSecret);
+                            None
+                        }
+                        Some(secret) => {
+                            match crate::login::LoginClient::new(login_config.clone()).await {
+                                Ok(client) => {
+                                    use secrecy::ExposeSecret;
+                                    let key = axum_extra::extract::cookie::Key::derive_from(
+                                        secret.expose_secret().as_bytes(),
+                                    );
+                                    Some((Some(Arc::new(client)), key))
+                                }
+                                Err(source) => {
+                                    error!("{}", Error::LoginClientStart { source });
+                                    None
+                                }
+                            }
+                        }
+                    },
+                    None => Some((None, axum_extra::extract::cookie::Key::generate())),
+                };
+
+            if let Some((login_client, cookie_key)) = auth_setup {
+                let web_state = crate::web::WebState {
+                    flow_registry: Arc::clone(&flow_registry),
+                    prefix: String::new(),
+                    resource_loader: resource_loader.clone(),
+                    metrics_store: Arc::clone(&self.metrics_store),
+                    logs_store: self.logs_store.clone(),
+                    app_config: Arc::clone(&app_config),
+                    conversation_cache: Arc::clone(&executor_cache),
+                    system_bucket_present: system_cache.is_some(),
+                    conversation_history_ttl: web_config.agents.conversation_history_ttl,
+                    login_client,
+                    cookie_key,
+                    cookie_secure: web_config.cookie_secure,
+                };
+                let web_handle = tokio::spawn(async move {
+                    if let Err(source) = crate::web::start_web_server(port, &path, web_state).await
+                    {
+                        error!("{}", source);
+                    }
+                });
+                background_handles.push(web_handle);
+            }
         }
 
         // Start the dedicated k8s health listener. Readiness reports true once

@@ -647,7 +647,7 @@ fn default_web_path() -> String {
 ///
 /// Serves a lightweight, read-only dashboard for inspecting loaded flows.
 /// The UI is built into the binary as static assets.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WebOptions {
     /// Whether the admin web UI is enabled.
     pub enabled: bool,
@@ -671,6 +671,58 @@ pub struct WebOptions {
     /// `X-Flowgen-Client: flowgen-ui` matching a proxy's `headers` field.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// OIDC login for the admin UI (Okta, Zitadel, Auth0, or any
+    /// standard-compliant IdP). Omit to leave the admin UI unauthenticated,
+    /// as today. When set, `cookie_secret` is required.
+    #[serde(default)]
+    pub auth: Option<crate::login::LoginConfig>,
+    /// Key used to encrypt the browser session cookie (holds the IdP's
+    /// tokens — flowgen keeps no server-side session store, see
+    /// `crate::login`). At least 64 bytes recommended; shorter values are
+    /// expanded via HKDF, but a short secret is still a short secret.
+    /// Required when `auth` is set.
+    #[serde(default, serialize_with = "serialize_redacted_cookie_secret")]
+    pub cookie_secret: Option<secrecy::SecretString>,
+    /// Whether the login cookies carry the `Secure` attribute, which browsers
+    /// require HTTPS to send. Defaults to `true`; set to `false` only for a
+    /// plain-HTTP deployment (local testing, or a proxy that terminates TLS
+    /// and forwards HTTP — in which case the proxy, not flowgen, should be
+    /// trusted to keep the connection private).
+    #[serde(default = "default_cookie_secure")]
+    pub cookie_secure: bool,
+}
+
+fn default_cookie_secure() -> bool {
+    true
+}
+
+impl PartialEq for WebOptions {
+    /// Compares `cookie_secret` by presence only, matching `JwtConfig`'s
+    /// convention — `SecretString` deliberately has no `PartialEq`.
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.port == other.port
+            && self.path == other.path
+            && self.ai_gateway_url == other.ai_gateway_url
+            && self.agents == other.agents
+            && self.headers == other.headers
+            && self.auth == other.auth
+            && self.cookie_secret.is_some() == other.cookie_secret.is_some()
+            && self.cookie_secure == other.cookie_secure
+    }
+}
+
+fn serialize_redacted_cookie_secret<S>(
+    secret: &Option<secrecy::SecretString>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match secret {
+        Some(_) => s.serialize_some("***"),
+        None => s.serialize_none(),
+    }
 }
 
 /// Settings for the built-in Agents chat surface.

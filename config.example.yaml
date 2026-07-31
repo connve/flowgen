@@ -142,6 +142,26 @@ http_server:
 #   # admin server to llm_proxy/mcp_tool `headers` scoping.
 #   headers:
 #     X-Flowgen-Client: flowgen-ui
+#
+#   # Optional OIDC login for the admin UI (Okta, Zitadel, Auth0, or any
+#   # standard-compliant provider — including one that itself federates to
+#   # an upstream customer IdP). Omit both fields to leave the admin UI
+#   # unauthenticated. flowgen keeps no server-side session store: the
+#   # browser's cookie holds the IdP's tokens, encrypted with cookie_secret,
+#   # so cookie_secret is required whenever auth is set.
+#   auth:
+#     issuer_url: "https://auth.example.com"
+#     client_id: "flowgen-admin"
+#     client_secret: "your-oidc-client-secret"
+#     # Must exactly match a redirect URI registered with the IdP, and
+#     # include the `path` prefix above (here, "/flowgen").
+#     redirect_uri: "https://example.com/flowgen/auth/callback"
+#     # extra_scopes: ["groups"]
+#   cookie_secret: "a long random string, at least 32 bytes"
+#   # Login cookies require HTTPS by default. Set to false only for a
+#   # plain-HTTP deployment (local testing, or a proxy that already
+#   # terminates TLS and is trusted to keep the connection private).
+#   # cookie_secure: false
 
 # Kubernetes liveness/readiness listener. Independent from the API
 # listeners so probes keep working regardless of which surfaces are

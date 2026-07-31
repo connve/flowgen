@@ -47,11 +47,15 @@ clap = { workspace = true }
 serde_yaml = { workspace = true }
 walkdir = { workspace = true }
 axum = { workspace = true }
+axum-extra = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
 rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+oauth2 = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
+time = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

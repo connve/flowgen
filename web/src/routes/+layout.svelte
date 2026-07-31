@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { env } from '$env/dynamic/public';
-	import { apiUrl } from '$lib/api';
+	import { apiUrl, type UserContext } from '$lib/api';
 	import Badge from '$lib/Badge.svelte';
 	import Icon from '@iconify/svelte';
 	import '../app.css';
@@ -14,6 +14,14 @@
 	let collapsed = $state(true);
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
+
+	// `null` covers both "not logged in" and "auth not configured" for
+	// display purposes (the generic icon covers both). `authEnabled` tracks
+	// the two cases separately — GET /auth/me 404s when web.auth isn't set,
+	// 401 when it is but the caller isn't logged in — since only the second
+	// case should send a stray 401 elsewhere on the page to /auth/login.
+	let user = $state<UserContext | null>(null);
+	let authEnabled = $state(false);
 
 	// User's explicit preference; `system` tracks the OS `prefers-color-scheme`.
 	let themePref = $state<ThemePref>('system');
@@ -31,6 +39,27 @@
 	$effect(() => {
 		document.documentElement.setAttribute('data-theme', dark ? 'mydark' : 'mytheme');
 	});
+
+	// When web.auth is configured, `auth_middleware` (flowgen/app/src/web.rs)
+	// 401s every `/api/*` call once the session cookie is missing/expired and
+	// unrefreshable. Patch `fetch` once, globally, so every existing and
+	// future `fetch(apiUrl(...))` call site picks up the redirect for free.
+	// Only armed after `/auth/me` confirms login is actually offered — a 401
+	// can otherwise come from an unrelated upstream (e.g. a bad AI-gateway
+	// provider key on /api/agents/chat), and redirecting to /auth/login when
+	// it 404s (auth not configured) would just strand the user on a 404.
+	const authPrefix = `${apiUrl('auth')}/`;
+	function installAuthRedirect() {
+		const realFetch = window.fetch.bind(window);
+		window.fetch = async (...args: Parameters<typeof fetch>) => {
+			const response = await realFetch(...args);
+			const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+			if (response.status === 401 && !url.startsWith(authPrefix)) {
+				window.location.href = apiUrl('auth/login');
+			}
+			return response;
+		};
+	}
 
 	onMount(async () => {
 		const navState = localStorage.getItem('flowgen-nav-collapsed');
@@ -56,7 +85,27 @@
 		} catch {
 			// version is optional
 		}
+
+		try {
+			// Deliberately bypasses the interceptor below (not yet installed)
+			// — this call is how we decide whether to install it at all.
+			const res = await fetch(apiUrl('auth/me'));
+			authEnabled = res.status !== 404;
+			if (res.ok) user = await res.json();
+		} catch {
+			// /auth/me unreachable — stay signed out, auth stays un-armed
+		}
+
+		if (authEnabled) installAuthRedirect();
 	});
+
+	async function logout() {
+		try {
+			await fetch(apiUrl('auth/logout'), { method: 'POST' });
+		} finally {
+			window.location.reload();
+		}
+	}
 
 	function setTheme(pref: ThemePref) {
 		themePref = pref;
@@ -204,13 +253,26 @@
 						{/each}
 					</div>
 
-					<div
-						class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-						data-tip="Signed in"
-						aria-label="User"
-					>
-						<Icon icon="tabler:user" class="h-6 w-6" />
-					</div>
+					{#if user}
+						<div class="tooltip tooltip-bottom" data-tip="Sign out ({user.user_id})">
+							<button
+								type="button"
+								class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
+								aria-label="Sign out ({user.user_id})"
+								onclick={logout}
+							>
+								<Icon icon="tabler:user-check" class="h-6 w-6" />
+							</button>
+						</div>
+					{:else}
+						<div
+							class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
+							data-tip="Signed in"
+							aria-label="User"
+						>
+							<Icon icon="tabler:user" class="h-6 w-6" />
+						</div>
+					{/if}
 				</header>
 			{/if}
 

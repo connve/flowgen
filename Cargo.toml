@@ -19,7 +19,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.133.0"
+version = "0.134.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -113,6 +113,8 @@ apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
 uuid = { version = "1", features = ["v7"] }
 axum = { version = "0.8" }
+axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "cookie-key-expansion"] }
+time = { version = "0.3" }
 base64 = { version = "0.22" }
 http = { version = "1.4" }
 bb8 = { version = "0.9" }

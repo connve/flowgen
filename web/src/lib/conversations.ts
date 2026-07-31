@@ -9,6 +9,7 @@ import type { components } from '$lib/api/generated';
 export type ConversationMessage = components['schemas']['ConversationMessage'];
 export type Conversation = components['schemas']['Conversation'];
 export type ConversationSummary = components['schemas']['ConversationSummary'];
+export type ToolStep = components['schemas']['ToolStep'];
 
 // Fetches conversation summaries (no message bodies), newest first.
 export async function listConversations(): Promise<ConversationSummary[]> {
@@ -30,12 +31,13 @@ export async function getConversation(id: string): Promise<Conversation> {
 export async function putConversation(
 	id: string,
 	title: string,
-	messages: ConversationMessage[]
+	messages: ConversationMessage[],
+	model?: string
 ): Promise<void> {
 	const res = await fetch(apiUrl(`api/agents/conversations/${encodeURIComponent(id)}`), {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ title, messages })
+		body: JSON.stringify({ title, messages, model })
 	});
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }

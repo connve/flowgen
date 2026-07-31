@@ -11,6 +11,8 @@ pub mod app;
 pub mod config;
 /// Flow execution and task management.
 pub mod flow;
+/// Browser-facing OIDC login for the admin web UI.
+pub mod login;
 /// Hot-reload reconciler for cache-sourced flows.
 pub mod reconciler;
 /// Hot-reload watcher for cache-sourced flows.
