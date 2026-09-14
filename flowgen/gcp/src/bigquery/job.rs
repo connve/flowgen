@@ -91,6 +91,11 @@ pub enum Error {
         #[source]
         source: gcloud_gax::conn::Error,
     },
+    #[error("BigQuery HTTP client build error: {source}")]
+    HttpClientBuild {
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("BigQuery job operation error: {source}")]
     JobOperation {
         #[source]
@@ -469,6 +474,8 @@ impl flowgen_core::task::runner::Runner for Processor {
                         ClientConfig::new_with_credentials(credentials)
                             .await
                             .map_err(|source| Error::ClientCreation { source })?;
+                    let client_config = crate::with_keep_alive(client_config)
+                        .map_err(|source| Error::HttpClientBuild { source })?;
                     Client::new(client_config)
                         .await
                         .map_err(|source| Error::ClientConnection { source })

@@ -9,6 +9,9 @@ default-members = ["flowgen/app"]
 resolver = "2"
 exclude = [".cargo"]
 
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.lints.clippy]
 # Ban `#[allow(clippy::...)]` and `#[allow(...)]` attributes outright.
 # Warnings flag real modelling problems; the rule across this codebase is
@@ -19,7 +22,7 @@ exclude = [".cargo"]
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.136.0"
+version = "0.137.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -74,6 +77,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
     "charset",
     "stream",
 ] }
+reqwest-middleware = { version = "0.5" }
 url = { version = "2.5" }
 # gitoxide — pure-Rust git implementation. HTTPS transport via reqwest with
 # rustls reuses the existing reqwest dep for a unified TLS stack. SSH

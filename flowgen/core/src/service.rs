@@ -14,6 +14,9 @@ pub const DEFAULT_KEEP_ALIVE_TIMEOUT_SECS: u64 = 10;
 /// Default connection timeout (30 seconds).
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 30;
 
+/// Default idle timeout for pooled HTTP connections (60 seconds).
+pub const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 60;
+
 /// Errors that can occur during service connection operations.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
