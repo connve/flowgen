@@ -16,26 +16,56 @@ use flowgen_mongodb::collection::ProcessorBuilder;
 use flowgen_mongodb::config::{ChangeStream as ChangeStreamConfig, Collection, Operation};
 use std::sync::Arc;
 use std::time::Duration;
+use testcontainers::core::client::ClientError;
+use testcontainers::core::error::TestcontainersError;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::mpsc;
 
-/// Serialises container startup across the tests in this file. Four of them
-/// call `start_mongo` at once, and concurrent starts of the same image race
-/// in the Docker daemon — surfacing as `PullImage("bytes remaining on
-/// stream")` or a truncated boot log that never matches `WaitFor`.
+/// Serialises container startup across the tests in this file, so only the
+/// first one pays for the image pull and the rest start against a warm cache.
 static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Starts the container, retrying a failed image pull.
+///
+/// A CI runner fetches the image over the network on every run, and that
+/// transfer occasionally dies mid-stream — surfacing as
+/// `PullImage("bytes remaining on stream")`. testcontainers treats it as
+/// terminal and does not retry, so one flaky download fails the test.
+async fn start_mongo_container() -> ContainerAsync<GenericImage> {
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+        }
+        let result = GenericImage::new("mongo", "7.0")
+            .with_exposed_port(27017.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Waiting for connections"))
+            .with_cmd(["--replSet", "rs0", "--bind_ip_all"])
+            .start()
+            .await;
+        match result {
+            Ok(container) => return container,
+            // A container that starts and then fails its `WaitFor` would fail
+            // the same way three times over, so only pulls are worth retrying.
+            Err(e) if !is_pull_failure(&e) => panic!("start mongo container: {e:?}"),
+            Err(e) => last_error = Some(e),
+        }
+    }
+    panic!("start mongo container: {last_error:?}");
+}
+
+fn is_pull_failure(error: &TestcontainersError) -> bool {
+    matches!(
+        error,
+        TestcontainersError::Client(ClientError::PullImage { .. })
+    )
+}
 
 async fn start_mongo() -> (ContainerAsync<GenericImage>, std::path::PathBuf) {
     let guard = START_LOCK.lock().await;
-    let container = GenericImage::new("mongo", "7.0")
-        .with_exposed_port(27017.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("Waiting for connections"))
-        .with_cmd(["--replSet", "rs0", "--bind_ip_all"])
-        .start()
-        .await
-        .expect("start mongo container");
+    let container = start_mongo_container().await;
     drop(guard);
     let port = container
         .get_host_port_ipv4(27017)
