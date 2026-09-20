@@ -116,6 +116,12 @@ tokio = { workspace = true, features = ["full"] }
   at the actual misconfiguration.
 - Any change to `AppConfig` needs a matching update in
   `config.example.yaml`, with a comment explaining the option.
+- Environment overrides layer over the config file with the `APP_` prefix
+  and `__` as the level separator, so `APP_WEB__AUTH__CLIENT_SECRET` sets
+  `web.auth.client_secret`. Single underscores are part of field names,
+  which is why the level separator is doubled. Keep the `config::Environment`
+  builder in one helper (e.g. `env_source()`) rather than duplicating the
+  separator convention.
 
 ### API responses
 
@@ -248,7 +254,7 @@ event.send_with_logging(Some(&tx))
 `tracing` requires field names to be static per callsite, so it can't emit
 one field per `.context()` call when the set of keys varies by task.
 Instead, all `.context()` fields for one event are serialized together into
-a single `context` JSON field on the log line. The admin UI unpacks that
+a single `context` JSON field on the log line. The web UI unpacks that
 JSON back into individual attribute rows client-side
 (`web/src/lib/logRecord.ts`), so from a user's perspective each context key
 still shows up as its own row — the joining is a `tracing` constraint, not
@@ -484,6 +490,12 @@ A few patterns come up often enough to call out explicitly:
    `source.render(self.task_context.resource_loader.as_ref(), &event_data).await?`,
    or resolve static content with
    `source.resolve(self.task_context.resource_loader.as_ref()).await?`.
+6. **Credentials files**: prefer a `credentials_path` field that points at a
+   JSON file over inline secrets. `flowgen_core::credentials` provides
+   loaders for HTTP credentials (`load_http_credentials`) and web UI OIDC
+   credentials (`load_web_credentials`); both share the same file-reading
+   path. Keep the loaded secret in a `secrecy::SecretString` and redact it on
+   serialization.
 
 Reference implementations:
 - `flowgen/ai-agent/src/completion/processor.rs` — resource loading, RAG,

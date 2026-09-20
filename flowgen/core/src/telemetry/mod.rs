@@ -120,7 +120,7 @@ impl Default for TelemetryConfig {
 pub struct Telemetry {
     /// Owns the OTel providers; drop to shut them down.
     pub guard: TelemetryGuard,
-    /// Backend log query handle for the admin UI.
+    /// Backend log query handle for the web UI.
     pub logs_store: Option<Arc<dyn query::LogsStore>>,
     /// Writer the tracing `fmt` layer feeds a copy of every JSON log line.
     pub logs_writer: Option<query::MemoryLogsStoreWriter>,

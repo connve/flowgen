@@ -223,7 +223,7 @@ impl<'a> std::future::IntoFuture for EventLogger<'a> {
                 );
             } else {
                 // Serialize context fields as a JSON object so downstream
-                // consumers (admin UI, log shipper) can split them back
+                // consumers (web UI, log shipper) can split them back
                 // into individual attributes instead of parsing a joined
                 // string.
                 let map: std::collections::BTreeMap<&str, &str> =

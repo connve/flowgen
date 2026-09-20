@@ -610,7 +610,7 @@ impl Flow {
 
     /// Returns the flow identity — used as the tracing `flow=` field, the
     /// registry key, and the cache namespace so activity keys line up with
-    /// the admin API.
+    /// the web API.
     pub fn identity(&self) -> &str {
         self.config.identity()
     }

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.138.0
+
+### Features
+
+- **The web UI's OIDC secrets load from a mounted file.**
+  `web.auth.credentials_path` takes a JSON file holding `client_secret` and
+  `cookie_secret`, the same convention the connectors use, so a Kubernetes
+  secret mounts straight in and the config carries no secrets.
+- **Any config key can be set from the environment.** `APP_` prefixes the key
+  and `__` separates each level, so `APP_WEB__AUTH__CLIENT_SECRET` sets
+  `web.auth.client_secret`.
+- **Single sign-out via the identity provider.** Setting
+  `web.auth.signout_redirect_url` to the provider's logout URL sends the browser
+  there on sign-out, with `id_token_hint` appended, so the provider's session
+  ends alongside flowgen's and the next sign-in asks for credentials. Unset
+  signs out of flowgen only.
+
+### Fixes
+
+- **Processors keep only the handles of work still in flight.** A task that
+  spawns per-event work releases each handle as that work completes.
+- **OIDC login completes.** The `id_token` is read from the token response's
+  extra fields.
+- **Signing out clears the session cookie**, including one the server can no
+  longer decrypt.
+
 ## 0.137.0
 
 ### Fixes

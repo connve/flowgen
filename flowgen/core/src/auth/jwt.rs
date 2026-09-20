@@ -19,7 +19,7 @@ use tracing::info;
 /// `Debug`, logs, or panics. Serialization always emits `"***"` in its
 /// place — nothing in the runtime round-trips config back from its
 /// serialized form, so the redacted value is only ever seen by the
-/// admin config viewer, never re-parsed.
+/// config viewer, never re-parsed.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JwtConfig {
     /// HMAC secret for HS256 validation (mutually exclusive with `jwks_url`).

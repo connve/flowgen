@@ -10,7 +10,7 @@ info:
     name: MPL-2.0
 servers:
   - url: http://localhost:8080
-    description: Local admin API (web listener)
+    description: Local web API (web listener)
   - url: http://localhost:8081
     description: Local health listener
 paths:
@@ -162,7 +162,7 @@ paths:
       description: |
         Server-Sent Events with a single named event type `log` carrying
         one `LogRecord` per frame. Unscoped, this emits every captured
-        record and the admin UI applies level and free-text filters
+        record and the web UI applies level and free-text filters
         client-side; the per-flow Activity panel passes `flow` so it only
         receives that flow's live records.
       tags: [logs]
@@ -220,7 +220,7 @@ paths:
         Forwards an OpenAI-compatible chat completion request to the
         configured AI gateway (`web.ai_gateway_url`, or the same-process
         gateway on loopback) and streams the response back. Same-origin
-        with the admin server, so the built-in Agents chat needs no
+        with the web server, so the built-in Agents chat needs no
         gateway-side CORS. The request and response bodies are the stock
         OpenAI chat-completions shape; route by `model`
         (`"<gateway-name>/<downstream-model>"`).
@@ -360,7 +360,7 @@ paths:
   /auth/login:
     get:
       operationId: authLogin
-      summary: Starts admin UI login.
+      summary: Starts web UI login.
       description: |
         Redirects to the configured OIDC identity provider. 404 when
         `web.auth` is not configured.
@@ -392,7 +392,7 @@ paths:
           schema: { type: string }
       responses:
         "302":
-          description: Login succeeded; redirects back into the admin UI.
+          description: Login succeeded; redirects back into the web UI.
         "400":
           description: Missing/invalid code or state, or the provider reported an error.
         "401":
@@ -401,13 +401,23 @@ paths:
           description: OIDC login is not configured.
 
   /auth/logout:
-    post:
+    get:
       operationId: authLogout
-      summary: Clears the local session cookie.
+      summary: Clears the local session cookie and redirects.
+      description: |
+        Navigated to, not fetched — the browser follows the redirect chain
+        itself. Redirects to `web.auth.signout_redirect_url` when set (with
+        `id_token_hint` appended), ending the identity provider's session as
+        well; otherwise back to the web UI, having cleared flowgen's session
+        only.
       tags: [auth]
       responses:
-        "204":
-          description: Signed out.
+        "303":
+          description: Signed out; continue to the provider or the web UI.
+          headers:
+            Location:
+              schema:
+                type: string
         "404":
           description: OIDC login is not configured.
 
@@ -416,6 +426,10 @@ paths:
       operationId: authMe
       summary: The signed-in user.
       description: |
+        Validates the session, silently refreshing it against the identity
+        provider once past `exp` — the same check `/api/*` applies, so a
+        caller that gets 200 here will not be rejected a moment later.
+
         404 when `web.auth` is not configured — distinct from 401 (not
         signed in) so callers can tell "no login offered" apart from
         "not logged in yet".

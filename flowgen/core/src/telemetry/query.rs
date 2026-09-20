@@ -116,7 +116,7 @@ pub enum LogsStoreError {
 ///
 /// The writer is meant to be handed to
 /// `tracing_subscriber::fmt::layer().json().with_writer(...)`; the
-/// query goes into the admin web state. Live-tail subscribers receive
+/// query goes into the web state. Live-tail subscribers receive
 /// records through a broadcast channel of the same capacity; slow
 /// subscribers see dropped frames rather than backing up the writer.
 pub fn pair(capacity_per_flow: usize) -> (MemoryLogsStoreWriter, MemoryLogsStore) {

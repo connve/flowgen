@@ -3,7 +3,7 @@
 //!
 //! Counters/status are a separate domain from log/event history — that
 //! lives behind [`crate::telemetry::query::LogsStore`]. This module owns
-//! the [`MetricsStore`] trait so the admin API and the tracing layer stay
+//! the [`MetricsStore`] trait so the web API and the tracing layer stay
 //! backend-agnostic: [`OtlpMetricsStore`] is today's only implementation,
 //! and whether its numbers live purely in the local atomic counters or
 //! also get pushed to a vendor is OTLP-export config on that one impl,
@@ -15,11 +15,11 @@
 //! walks the parent scope to recover the owning flow/task names, and:
 //!
 //! 1. Bumps atomic counters + last-seen timestamps on the shared
-//!    [`MetricsStore`] behind the admin API.
+//!    [`MetricsStore`] behind the web API.
 //! 2. Records the same signal into OpenTelemetry counters so downstream
 //!    dashboards see identical numbers.
 //!
-//! Log body + attributes for the admin UI come from the native
+//! Log body + attributes for the web UI come from the native
 //! `tracing_subscriber::fmt::json()` writer through
 //! `flowgen_core::telemetry::query::MemoryLogsStoreWriter` — no re-emit here.
 //!
@@ -64,7 +64,7 @@ impl ActivityLevel {
     }
 }
 
-/// Derived status shown per flow on the admin UI. Wins by recency: an
+/// Derived status shown per flow on the web UI. Wins by recency: an
 /// error after an info is Error until the next info, and so on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,7 +120,7 @@ impl FlowMetricsSnapshot {
 }
 
 /// Atomic counter block used per flow. Lives behind an Arc so the tracing
-/// layer, the SSE broadcaster and the admin API all point at the same
+/// layer, the SSE broadcaster and the web API all point at the same
 /// numbers without a global RwLock on every event.
 #[derive(Debug, Default)]
 pub struct FlowMetrics {
@@ -265,7 +265,7 @@ pub trait MetricsStore: Debug + Send + Sync {
 /// vendor behind the configured OTel exporter — an in-memory-only setup
 /// and a vendor-backed one differ only in exporter config, not in Rust
 /// type. `snapshot`/`snapshot_all` read the local counters; a
-/// vendor-backed deployment that wants the admin UI's numbers to reflect
+/// vendor-backed deployment that wants the web UI's numbers to reflect
 /// the vendor's own view would read through the vendor's query API
 /// instead (not yet implemented — no second vendor read path exists).
 #[derive(Debug)]

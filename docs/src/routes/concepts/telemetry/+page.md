@@ -7,8 +7,8 @@ Flowgen splits telemetry signals by transport:
 
 Two backends switch how signals are handled in-process:
 
-- `memory` — no network I/O. Metrics/traces are dropped; logs still go to stdout, and a copy is kept in a bounded per-flow ring buffer that the admin UI reads through the built-in `LogsQuery`. Intended for demo and single-node dev.
-- `remote` — metrics/traces push over OTLP/gRPC to `endpoint`; logs remain on stdout for the log shipper. The admin UI's live activity view depends on an out-of-process log query backend in this mode.
+- `memory` — no network I/O. Metrics/traces are dropped; logs still go to stdout, and a copy is kept in a bounded per-flow ring buffer that the web UI reads through the built-in `LogsQuery`. Intended for demo and single-node dev.
+- `remote` — metrics/traces push over OTLP/gRPC to `endpoint`; logs remain on stdout for the log shipper. The web UI's live activity view depends on an out-of-process log query backend in this mode.
 
 ## Configuration
 
@@ -75,7 +75,7 @@ All metrics carry the `service.name` resource attribute — filter on it to isol
 
 Logs are written as JSON to stdout by `tracing_subscriber::fmt::json()`. Each line carries the message body plus every structured field from the `tracing` macro and — critically — the full parent-span field hierarchy under `spans`. That means every event inside a `task.handle` scope inherits `flow`, `task`, `task_id`, and `task_type` without the caller having to spell them out.
 
-In production the K8s log shipper picks up stdout and forwards it to the configured log store. In `memory` mode the same JSON stream is parsed into an in-process per-flow ring buffer that the admin UI reads for its activity view.
+In production the K8s log shipper picks up stdout and forwards it to the configured log store. In `memory` mode the same JSON stream is parsed into an in-process per-flow ring buffer that the web UI reads for its activity view.
 
 ## Verifying the export
 

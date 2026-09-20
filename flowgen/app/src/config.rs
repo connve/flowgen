@@ -8,6 +8,17 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Environment overrides for any config key, layered over the config file.
+///
+/// `APP_` prefixes the key and `__` separates each level, so
+/// `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. The two
+/// separators differ because field names contain single underscores.
+pub fn env_source() -> config::Environment {
+    config::Environment::with_prefix("APP")
+        .prefix_separator("_")
+        .separator("__")
+}
+
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
     flowgen_nats::client::DEFAULT_NATS_URL.to_string()
@@ -50,7 +61,7 @@ pub struct FlowConfig {
     /// Flow definition (tasks and optional labels).
     pub flow: Flow,
     /// Verbatim YAML source the loader read this flow from. Kept for the
-    /// admin API so the UI can render the file as authored — round-tripping
+    /// web API so the UI can render the file as authored — round-tripping
     /// through `serde_yaml` introduces enum tags and `null` sentinels for
     /// `Option::None` fields, which is not what an operator wants to see.
     #[serde(skip)]
@@ -397,7 +408,7 @@ pub struct AppConfig {
     /// Runs on its own port so the surface can later migrate to gRPC or WebSocket
     /// independently of the webhook HTTP server.
     pub ai_gateway: Option<AiGatewayOptions>,
-    /// Optional admin web UI configuration for inspecting loaded flows.
+    /// Optional web UI configuration for inspecting loaded flows.
     pub web: Option<WebOptions>,
     /// Kubernetes-facing liveness/readiness listener. Independent of the
     /// API listeners so probes keep working regardless of which surfaces
@@ -419,12 +430,12 @@ pub struct AppConfig {
 #[non_exhaustive]
 pub enum ValidationError {
     #[error(
-        "`cache.db_name` was renamed to `cache.runtime.db_name` in 0.135. Rename it to keep \
-         using bucket {db_name:?} — leaving it in place would silently fall back to the \
-         default bucket and strand the existing data:\n\
+        "Move `cache.db_name` under `cache.runtime`:\n\
          \x20 cache:\n\
          \x20   runtime:\n\
-         \x20     db_name: {db_name:?}"
+         \x20     db_name: {db_name:?}\n\
+         Left in place it is ignored, and the cache reads bucket `flowgen_cache` \
+         while the existing data stays in {db_name:?}. No other cache key changes."
     )]
     RenamedCacheDbName { db_name: String },
 }
@@ -715,31 +726,31 @@ pub struct AiGatewayOptions {
     pub max_body_bytes: usize,
 }
 
-/// Default admin web UI port.
+/// Default web UI port.
 fn default_web_port() -> u16 {
     8080
 }
 
-/// Default admin web UI path prefix.
+/// Default web UI path prefix.
 fn default_web_path() -> String {
     "/".to_string()
 }
 
-/// Admin web UI configuration options.
+/// Web UI configuration options.
 ///
 /// Serves a lightweight, read-only dashboard for inspecting loaded flows.
 /// The UI is built into the binary as static assets.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WebOptions {
-    /// Whether the admin web UI is enabled.
+    /// Whether the web UI is enabled.
     pub enabled: bool,
-    /// Port for the admin web server. Defaults to 8080.
+    /// Port for the web server. Defaults to 8080.
     #[serde(default = "default_web_port")]
     pub port: u16,
-    /// Path prefix for the admin web UI. Defaults to "/".
+    /// Path prefix for the web UI. Defaults to "/".
     #[serde(default = "default_web_path")]
     pub path: String,
-    /// Base URL the admin server proxies the built-in Agents chat to, e.g.
+    /// Base URL the web server proxies the built-in Agents chat to, e.g.
     /// `http://127.0.0.1:3002/v1`. Omit to target the same-process AI gateway
     /// on loopback. Set when the gateway runs in a separate process or pod.
     #[serde(default)]
@@ -747,14 +758,14 @@ pub struct WebOptions {
     /// Settings for the built-in Agents chat (conversation history, etc.).
     #[serde(default)]
     pub agents: AgentsOptions,
-    /// HTTP headers sent with every outbound request the admin server
+    /// HTTP headers sent with every outbound request the web server
     /// makes (currently the Agents chat proxy to the AI gateway). Used to
-    /// identify this admin server to `llm_proxy`/`mcp_tool` scoping, e.g.
+    /// identify this web server to `llm_proxy`/`mcp_tool` scoping, e.g.
     /// `X-Flowgen-Client: flowgen-ui` matching a proxy's `headers` field.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    /// OIDC login for the admin UI (Okta, Zitadel, Auth0, or any
-    /// standard-compliant IdP). Omit to leave the admin UI unauthenticated,
+    /// OIDC login for the web UI (Okta, Zitadel, Auth0, or any
+    /// standard-compliant IdP). Omit to leave the web UI unauthenticated,
     /// as today. When set, `cookie_secret` is required.
     #[serde(default)]
     pub auth: Option<crate::login::LoginConfig>,
@@ -1270,6 +1281,67 @@ flows:
             "legacy_bucket"
         );
         config.validate().expect("new layout is accepted");
+    }
+
+    #[test]
+    fn env_overrides_a_nested_key_and_leaves_the_rest_of_the_file() {
+        unsafe {
+            std::env::set_var("APP_WEB__AUTH__CLIENT_SECRET", "from-env");
+            std::env::set_var("APP_WEB__PORT", "9999");
+        }
+        let built = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+web:
+  enabled: true
+  port: 8080
+  auth:
+    issuer_url: "https://auth.example.com"
+    client_id: "flowgen-web"
+    client_secret: "from-file"
+    redirect_uri: "https://example.com/flowgen/auth/callback"
+flows:
+  path: "/flows"
+"#,
+                config::FileFormat::Yaml,
+            ))
+            .add_source(env_source())
+            .build()
+            .expect("builds");
+        unsafe {
+            std::env::remove_var("APP_WEB__AUTH__CLIENT_SECRET");
+            std::env::remove_var("APP_WEB__PORT");
+        }
+
+        let config: AppConfig = built.try_deserialize().expect("deserializes");
+        let web = config.web.expect("web present");
+        let auth = web.auth.expect("auth present");
+        use secrecy::ExposeSecret;
+        assert_eq!(
+            auth.client_secret
+                .expect("client secret present")
+                .expose_secret(),
+            "from-env"
+        );
+        assert_eq!(web.port, 9999);
+        assert!(web.enabled);
+    }
+
+    #[test]
+    fn cache_omitting_both_buckets_uses_the_documented_defaults() {
+        let yaml = r#"
+cache:
+  enabled: true
+  type: nats
+  url: "localhost:4222"
+flows:
+  path: "/flows"
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).expect("parses");
+        let cache = config.cache.as_ref().expect("cache present");
+        assert_eq!(cache.runtime.db_name, "flowgen_cache");
+        assert_eq!(cache.system.db_name, "flowgen_system");
+        config.validate().expect("defaults are accepted");
     }
 
     #[test]

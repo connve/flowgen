@@ -1,5 +1,5 @@
 // Client for the built-in Agents chat conversation store. History lives in
-// flowgen's configured system cache and is served by the admin API
+// flowgen's configured system cache and is served by the web API
 // (`/api/agents/conversations`). Types come from the generated OpenAPI schema
 // so they stay in lockstep with the Rust handlers.
 

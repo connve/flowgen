@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.137.0"
+version = "0.138.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"

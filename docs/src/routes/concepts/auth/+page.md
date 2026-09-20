@@ -1,6 +1,6 @@
 # Authentication
 
-Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server), and a separate interactive OIDC login for the admin web UI. Task-facing auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
+Flowgen supports user-level authentication for HTTP-facing tasks (webhooks, AI gateway, MCP server), and a separate interactive OIDC login for the web UI. Task-facing auth is configured once on each server section and shared across every HTTP-facing task on that server. When enabled, the resolved user identity is injected into the event metadata as `event.meta.auth`, where downstream tasks can read it for routing or audit.
 
 User-level auth is **separate** from `credentials_path` — see [Credentials](/docs/flowgen/concepts/credentials) for the distinction.
 
@@ -30,7 +30,7 @@ http_server:
 
 Supply either `secret` (symmetric) or `jwks_url` (asymmetric), not both. With `jwks_url`, flowgen fetches the JWKS at startup and matches incoming tokens by their `kid` header.
 
-The `secret` is held as a redacted value: it never appears in logs or the admin System view (config renders it as `"***"`). Token validation uses the real value.
+The `secret` is held as a redacted value: it never appears in logs or the System view (config renders it as `"***"`). Token validation uses the real value.
 
 ## OIDC provider
 
@@ -145,9 +145,9 @@ The `Authorization` header in the incoming request carries the JWT. Service-to-s
 
 Worker logs include the specific reason at `error` level so operators can diagnose without leaking the token to the caller.
 
-## Admin UI login
+## Web UI login
 
-The token-validation providers above cover HTTP-facing tasks. The admin web UI (`web.enabled: true`) uses a separate, interactive OIDC login instead, configured under `web.auth`:
+The token-validation providers above cover HTTP-facing tasks. The web UI (`web.enabled: true`) uses a separate, interactive OIDC login instead, configured under `web.auth`:
 
 ```yaml
 web:
@@ -156,19 +156,23 @@ web:
   path: "/flowgen"
   auth:
     issuer_url: "https://auth.example.com"
-    client_id: "flowgen-admin"
+    client_id: "flowgen-web"
     client_secret: "your-oidc-client-secret"
     # Must exactly match a redirect URI registered with the IdP, and
     # include `path` above.
     redirect_uri: "https://example.com/flowgen/auth/callback"
     # extra_scopes: ["groups"]
+    # The provider's logout URL, ending its session too on sign-out.
+    # signout_redirect_url: "https://auth.example.com/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
+    # JSON file holding client_secret and cookie_secret.
+    # credentials_path: "/etc/flowgen/credentials/web.json"
   cookie_secret: "a long random string, at least 32 bytes"
   # cookie_secure: false  # only for a plain-HTTP deployment; defaults to true
 ```
 
 Works with any standard-compliant OIDC provider — Okta, Zitadel, Auth0, or one that itself federates to an upstream identity provider (SSO broker setups look identical to flowgen, since discovery and token validation don't change).
 
-`auth` is optional; if omitted, the admin UI is served unauthenticated.
+`auth` is optional; if omitted, the web UI is served unauthenticated.
 
 Login cookies carry the `Secure` attribute by default, which browsers require HTTPS to send — set `cookie_secure: false` for a plain-HTTP deployment (local testing, or a proxy that already terminates TLS).
 
@@ -176,7 +180,34 @@ Login cookies carry the `Secure` attribute by default, which browsers require HT
 
 Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted with `cookie_secret` so the browser can carry it but never read or forge it. Every request re-validates the token; near expiry, flowgen transparently refreshes it against the identity provider. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
 
-`cookie_secret` is required whenever `auth` is set — flowgen refuses to start the admin web server without it, rather than falling back to an unauthenticated UI.
+`cookie_secret` is required whenever `auth` is set — flowgen refuses to start the web server without it, rather than falling back to an unauthenticated UI.
+
+### Keeping the secrets out of the config
+
+`client_secret` and `cookie_secret` take three sources, in precedence order:
+
+1. `auth.credentials_path` — a JSON file holding either or both keys:
+
+   ```json
+   {
+     "client_secret": "the-oidc-client-secret",
+     "cookie_secret": "a long random string, at least 32 bytes"
+   }
+   ```
+
+   This is the same mounted-file convention the connectors use — see [Credentials](/docs/flowgen/concepts/credentials).
+
+2. `APP_WEB__AUTH__CLIENT_SECRET` and `APP_WEB__COOKIE_SECRET` in the environment. Every config key can be overridden this way: `APP_` prefixes the path and `__` separates each level.
+
+3. The inline values in the config file.
+
+### Signing out
+
+Sign-out always clears flowgen's session cookie. Set `signout_redirect_url` to the identity provider's logout URL to end the provider's session as well; flowgen appends `id_token_hint` so the provider knows which session to end.
+
+Give the URL in full, including whatever return parameter the provider expects (commonly `post_logout_redirect_uri`, URL-encoded) — providers differ here, and not all of them advertise a logout endpoint in their discovery document. Whatever return URL it carries must be registered with the provider.
+
+Without it, sign-out is local to flowgen: the provider still considers the browser signed in, so signing back in needs no credentials.
 
 ### Routes
 
@@ -184,7 +215,7 @@ Flowgen does not keep a session table. The browser's cookie *is* the session: af
 |---|---|
 | `GET {path}/auth/login` | Redirects to the identity provider. 404 if `auth` isn't configured. |
 | `GET {path}/auth/callback` | Identity provider redirect target; exchanges the code and sets the session cookie. |
-| `POST {path}/auth/logout` | Clears the local session cookie. 404 if `auth` isn't configured. |
+| `GET {path}/auth/logout` | Clears the session cookie, then redirects to `signout_redirect_url` or back to the UI. 404 if `auth` isn't configured. |
 | `GET {path}/auth/me` | The signed-in user, 401 if not signed in, or 404 if `auth` isn't configured. |
 
 `{path}` is `web.path` (defaults to `/`).

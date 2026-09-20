@@ -32,10 +32,10 @@ pub struct FlowHandle {
     /// Number of tasks in the flow.
     pub task_count: usize,
     /// Wall-clock time when the flow's supervisor was spawned. Surfaced on
-    /// the admin API as `last_run` until per-event tracking replaces it.
+    /// the web API as `last_run` until per-event tracking replaces it.
     pub started_at: std::time::SystemTime,
     /// YAML source of the flow config, serialized at registration time.
-    /// Surfaced on the admin API so operators can inspect the loaded flow
+    /// Surfaced on the web API so operators can inspect the loaded flow
     /// without shelling into the pod to `cat` the source file.
     pub flow_yaml: String,
     /// Token used to signal the flow's tasks to stop gracefully.
@@ -174,14 +174,14 @@ pub enum Error {
         #[source]
         source: flowgen_core::http_server::Error,
     },
-    /// Admin UI login is enabled but has no cookie-signing secret set.
+    /// Web UI login is enabled but has no cookie-signing secret set.
     #[error(
-        "Admin UI login is enabled (web.auth) but web.cookie_secret is missing. Set \
+        "Web UI login is enabled (web.auth) but web.cookie_secret is missing. Set \
          web.cookie_secret to a random string so logged-in sessions survive a restart."
     )]
     MissingCookieSecret,
-    /// Admin UI could not reach or was rejected by the configured identity provider.
-    #[error("Admin UI login could not start: {source}")]
+    /// Web UI could not reach or was rejected by the configured identity provider.
+    #[error("Web UI login could not start: {source}")]
     LoginClientStart {
         #[source]
         source: crate::login::LoginError,
@@ -291,13 +291,13 @@ pub struct App {
     /// Global application configuration.
     pub config: AppConfig,
     /// Shared metrics store populated by the tracing activity layer, read
-    /// by the admin web API for status and SSE.
+    /// by the web API for status and SSE.
     pub metrics_store: Arc<dyn flowgen_core::flow::activity::MetricsStore>,
     /// Cache backing flow/resource storage, activity publish, and runtime
     /// state. Built in `main` before tracing so the metrics store can be
     /// constructed with a real cache reference from the outset.
     pub cache: Arc<dyn flowgen_core::cache::Cache>,
-    /// Backend-agnostic log query source used by the admin web API for
+    /// Backend-agnostic log query source used by the web API for
     /// history queries and SSE tail. `None` when the selected telemetry
     /// backend does not (yet) expose a query surface.
     pub logs_store: Option<Arc<dyn flowgen_core::telemetry::query::LogsStore>>,
@@ -1179,7 +1179,7 @@ impl App {
                     Err(source) => {
                         warn!(
                             error = %source,
-                            "Failed to serialize flow config to YAML for admin API"
+                            "Failed to serialize flow config to YAML for web API"
                         );
                         String::new()
                     }
@@ -1215,41 +1215,18 @@ impl App {
             }
         }
 
-        // Start the admin web UI if enabled.
+        // Start the web UI if enabled.
         let web_config = app_config.web.as_ref();
         if let Some(web_config) = web_config.filter(|w| w.enabled) {
             let port = web_config.port;
             let path = web_config.path.clone();
 
-            // A broken `web.auth` must not silently serve the admin UI
-            // unauthenticated, but it also shouldn't take down flow
-            // processing — so it skips starting the admin web server rather
-            // than the whole process.
-            let auth_setup: Option<(Option<Arc<crate::login::LoginClient>>, _)> =
-                match &web_config.auth {
-                    Some(login_config) => match &web_config.cookie_secret {
-                        None => {
-                            error!("{}", Error::MissingCookieSecret);
-                            None
-                        }
-                        Some(secret) => {
-                            match crate::login::LoginClient::new(login_config.clone()).await {
-                                Ok(client) => {
-                                    use secrecy::ExposeSecret;
-                                    let key = axum_extra::extract::cookie::Key::derive_from(
-                                        secret.expose_secret().as_bytes(),
-                                    );
-                                    Some((Some(Arc::new(client)), key))
-                                }
-                                Err(source) => {
-                                    error!("{}", Error::LoginClientStart { source });
-                                    None
-                                }
-                            }
-                        }
-                    },
-                    None => Some((None, axum_extra::extract::cookie::Key::generate())),
-                };
+            let auth_setup = match &web_config.auth {
+                Some(login_config) => {
+                    setup_web_login(login_config, web_config.cookie_secret.as_ref()).await
+                }
+                None => Some((None, axum_extra::extract::cookie::Key::generate())),
+            };
 
             if let Some((login_client, cookie_key)) = auth_setup {
                 let web_state = crate::web::WebState {
@@ -1383,6 +1360,49 @@ impl App {
 
         info!("Shutdown complete, all flows stopped and leases released");
         Ok(())
+    }
+}
+
+/// Builds the web UI's login client and cookie key from `web.auth`.
+///
+/// `None` leaves the web server unstarted: a broken login config must not
+/// serve the UI unauthenticated, and must not stop flows running either.
+async fn setup_web_login(
+    login_config: &crate::login::LoginConfig,
+    cookie_secret: Option<&secrecy::SecretString>,
+) -> Option<(
+    Option<Arc<crate::login::LoginClient>>,
+    axum_extra::extract::cookie::Key,
+)> {
+    use secrecy::ExposeSecret;
+
+    let secrets = match login_config.resolve_secrets().await {
+        Ok(secrets) => secrets,
+        Err(source) => {
+            error!("{}", Error::LoginClientStart { source });
+            return None;
+        }
+    };
+
+    let cookie_secret = match secrets.cookie_secret.as_ref().or(cookie_secret) {
+        Some(secret) => secret,
+        None => {
+            error!("{}", Error::MissingCookieSecret);
+            return None;
+        }
+    };
+
+    match crate::login::LoginClient::new(login_config.clone(), &secrets.client_secret).await {
+        Ok(client) => {
+            let key = axum_extra::extract::cookie::Key::derive_from(
+                cookie_secret.expose_secret().as_bytes(),
+            );
+            Some((Some(Arc::new(client)), key))
+        }
+        Err(source) => {
+            error!("{}", Error::LoginClientStart { source });
+            None
+        }
     }
 }
 

@@ -479,6 +479,7 @@ impl Runner for MoveProcessor {
                         .instrument(tracing::Span::current()),
                     );
                     handlers.push(handle);
+                    handlers.retain(|h| !h.is_finished());
                 }
                 None => {
                     futures_util::future::join_all(handlers).await;

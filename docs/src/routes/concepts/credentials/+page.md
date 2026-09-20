@@ -15,6 +15,7 @@ Tasks that talk to external systems load credentials from a JSON file referenced
 | `mssql_query` | MSSQL credentials JSON | SQL Server connection. |
 | `object_store` | Cloud-specific credentials JSON | S3, GCS, or Azure. |
 | `git_sync` | Git credentials JSON (HTTPS token) | Git remote. |
+| `web.auth` | `client_secret`, `cookie_secret` | The web UI's OIDC login. |
 
 The format details live on each task's documentation page. This page covers what is shared.
 
@@ -27,6 +28,8 @@ Credentials live in JSON files for three reasons:
 - **No accidental logging.** Environment variables show up in process inspection, error reports, and log scrapes. File paths in config do not leak the secret content.
 
 If you need to inject secrets at deploy time without writing them to disk, use a secrets-management sidecar (External Secrets, Vault Agent, Sealed Secrets) to materialise the JSON file at the configured path.
+
+Any config key can also be set from the environment — `APP_` prefixes the path and `__` separates each level, so `APP_WEB__AUTH__CLIENT_SECRET` sets `web.auth.client_secret`. That covers the application's own config; task credentials stay in files, for the reasons above.
 
 ## HTTP credentials
 
@@ -111,6 +114,8 @@ Individual `http_endpoint` tasks override the shared default by setting their ow
 ## User-level authentication is separate
 
 `credentials_path` authenticates the task itself (e.g., the bearer token for incoming webhook requests). User-level authentication — JWT, OIDC, session tokens — happens via the server's `auth` configuration. See [Authentication](/docs/flowgen/concepts/auth).
+
+The web UI's own OIDC secrets follow this same file convention: `web.auth.credentials_path` takes a JSON file with `client_secret` and `cookie_secret`.
 
 The two compose: a webhook can require a shared secret (via `credentials_path`) **and** a user-level JWT (via `auth.required: true`). Both checks must pass.
 

@@ -12,6 +12,7 @@
 //!   against a token endpoint, caches the resulting access token, and
 //!   auto-refreshes when it expires.
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::sync::Mutex;
@@ -344,8 +345,35 @@ impl HttpCredentials {
     }
 }
 
+/// Secrets for the web UI's OIDC login, as stored on disk.
+///
+/// ```json
+/// {
+///   "client_secret": "the-oidc-client-secret",
+///   "cookie_secret": "a long random string, at least 32 bytes"
+/// }
+/// ```
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct WebCredentials {
+    /// OIDC client secret, for `web.auth.client_secret`.
+    #[serde(default)]
+    pub client_secret: Option<SecretString>,
+    /// Key encrypting the browser session cookie, for `web.cookie_secret`.
+    #[serde(default)]
+    pub cookie_secret: Option<SecretString>,
+}
+
+/// Loads and parses web UI credentials from a JSON file.
+pub async fn load_web_credentials(path: &Path) -> Result<WebCredentials, Error> {
+    load_credentials(path).await
+}
+
 /// Loads and parses HTTP credentials from a JSON file.
 pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error> {
+    load_credentials(path).await
+}
+
+async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Error> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|source| Error::ReadFile {

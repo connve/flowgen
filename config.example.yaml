@@ -128,7 +128,7 @@ http_server:
 #   path: "/v1"
 #   credentials_path: "/etc/flowgen/credentials/ai.json"
 
-# Admin web UI configuration for inspecting loaded flows (optional).
+# Web UI configuration for inspecting loaded flows (optional).
 # Serves a lightweight, read-only dashboard built into the flowgen binary.
 # Defaults to port 8080 and path "/".
 # web:
@@ -145,26 +145,37 @@ http_server:
 #     # persist indefinitely. Long-term history belongs in a database via a
 #     # persistence flow, not this cache.
 #     conversation_history_ttl: 30d
-#   # HTTP headers sent with every outbound request the admin server makes
+#   # HTTP headers sent with every outbound request the web server makes
 #   # (currently the Agents chat proxy to the AI gateway). Identifies this
-#   # admin server to llm_proxy/mcp_tool `headers` scoping.
+#   # web server to llm_proxy/mcp_tool `headers` scoping.
 #   headers:
 #     X-Flowgen-Client: flowgen-ui
 #
-#   # Optional OIDC login for the admin UI (Okta, Zitadel, Auth0, or any
+#   # Optional OIDC login for the web UI (Okta, Zitadel, Auth0, or any
 #   # standard-compliant provider — including one that itself federates to
-#   # an upstream customer IdP). Omit both fields to leave the admin UI
+#   # an upstream customer IdP). Omit both fields to leave the web UI
 #   # unauthenticated. flowgen keeps no server-side session store: the
 #   # browser's cookie holds the IdP's tokens, encrypted with cookie_secret,
 #   # so cookie_secret is required whenever auth is set.
+#   #
+#   # Both secrets below can come from a mounted file instead — see
+#   # credentials_path — or from APP_WEB__AUTH__CLIENT_SECRET and
+#   # APP_WEB__COOKIE_SECRET in the environment.
 #   auth:
 #     issuer_url: "https://auth.example.com"
-#     client_id: "flowgen-admin"
+#     client_id: "flowgen-web"
 #     client_secret: "your-oidc-client-secret"
+#     # JSON file holding client_secret and cookie_secret, e.g. a mounted
+#     # Kubernetes secret. Takes precedence over the inline values.
+#     # credentials_path: "/etc/flowgen/credentials/web.json"
 #     # Must exactly match a redirect URI registered with the IdP, and
 #     # include the `path` prefix above (here, "/flowgen").
 #     redirect_uri: "https://example.com/flowgen/auth/callback"
 #     # extra_scopes: ["groups"]
+#     # The IdP's logout URL, with its own return URL already embedded and
+#     # registered with the IdP. flowgen appends `id_token_hint`. Unset signs
+#     # out of flowgen only, leaving the IdP session intact.
+#     # signout_redirect_url: "https://example.okta.com/oauth2/default/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
 #   cookie_secret: "a long random string, at least 32 bytes"
 #   # Login cookies require HTTPS by default. Set to false only for a
 #   # plain-HTTP deployment (local testing, or a proxy that already

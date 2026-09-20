@@ -125,12 +125,16 @@
 		}
 	});
 
-	async function logout() {
-		try {
-			await fetch(apiUrl('auth/logout'), { method: 'POST' });
-		} finally {
-			window.location.reload();
-		}
+	// Providers vary in which of these they issue, and `user_id` is whatever
+	// claim `web.auth.user_id_claim` names — an opaque id for the default `sub`.
+	function displayName(u: UserContext): string {
+		const claim = (name: string): string | null => {
+			const value = u.claims?.[name];
+			return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+		};
+		const parts = [claim('given_name'), claim('family_name')].filter(Boolean);
+		const fullName = parts.length > 0 ? parts.join(' ') : null;
+		return claim('name') ?? fullName ?? claim('email') ?? u.user_id;
 	}
 
 	function setTheme(pref: ThemePref) {
@@ -285,15 +289,15 @@
 					</div>
 
 					{#if user}
-						<div class="tooltip tooltip-bottom" data-tip="Sign out ({user.user_id})">
-							<button
-								type="button"
+						<div class="tooltip tooltip-left" data-tip="Sign out ({displayName(user)})">
+							<a
+								href={apiUrl('auth/logout')}
+								data-sveltekit-reload
 								class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
-								aria-label="Sign out ({user.user_id})"
-								onclick={logout}
+								aria-label="Sign out ({displayName(user)})"
 							>
 								<Icon icon="tabler:user-check" class="h-6 w-6" />
-							</button>
+							</a>
 						</div>
 					{:else}
 						<div

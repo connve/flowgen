@@ -9,7 +9,7 @@ resources:         # External resource loading (optional).
 http_server:       # Webhook / metrics HTTP server (optional).
 mcp_server:        # MCP server for tools/resources/prompts (optional).
 ai_gateway:        # OpenAI-compatible LLM gateway (optional).
-web:               # Admin web UI (optional).
+web:               # Web UI (optional).
 health:            # k8s liveness/readiness listener (defaults on).
 retry:             # Default retry policy for every task (optional).
 event_buffer_size: # Per-edge channel capacity (optional).
@@ -185,14 +185,14 @@ OpenAI-compatible LLM gateway that serves every registered `llm_proxy` flow.
 
 ## `web`
 
-Embedded admin dashboard and read-only JSON API.
+Embedded web dashboard and read-only JSON API.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | required | Set `true` to start the server. |
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
-| `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the admin server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the admin server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
+| `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
 
 The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.yaml`.
 
@@ -206,7 +206,7 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 | `GET <path>/api/resources` | List discoverable resources. |
 | `GET <path>/api/resources/{key}` | Fetch one resource's content. |
 | `GET <path>/api/version` | Running build version. |
-| `GET <path>/api/config` | Non-secret config info shown in the admin UI (e.g. whether the Agents chat is configured). |
+| `GET <path>/api/config` | Non-secret config info shown in the web UI (e.g. whether the Agents chat is configured). |
 | `POST <path>/api/agents/chat` | Proxies a chat-completion request to the AI gateway for the built-in Agents chat. Streams the response back; same-origin, so no gateway-side CORS is required. |
 | `GET <path>/api/agents/models` | Proxies `GET /models` on the AI gateway for the built-in Agents chat's model picker. |
 | `GET <path>/api/openapi.yaml` | The spec itself. |

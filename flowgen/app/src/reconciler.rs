@@ -351,7 +351,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
             Err(source) => {
                 tracing::warn!(
                     error = %source,
-                    "Failed to serialize flow config to YAML for admin API"
+                    "Failed to serialize flow config to YAML for web API"
                 );
                 String::new()
             }
@@ -501,7 +501,7 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
 
 /// Parses a raw cache value as a `FlowConfigRaw`, returning the deserialized
 /// config along with the original text (so the caller can wrap it with
-/// `FlowConfig::from_path` and retain the verbatim YAML for the admin API).
+/// `FlowConfig::from_path` and retain the verbatim YAML for the web API).
 fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<(FlowConfigRaw, String), Error> {
     let content = String::from_utf8_lossy(value).into_owned();
     let format = match key.ends_with(".json") {

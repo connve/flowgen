@@ -485,6 +485,7 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
                         .instrument(tracing::Span::current()),
                     );
                     handlers.push(handle);
+                    handlers.retain(|h| !h.is_finished());
                 }
                 None => {
                     // Channel closed, wait for all spawned handlers to complete.

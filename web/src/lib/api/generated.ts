@@ -141,7 +141,7 @@ export interface paths {
          * Live log stream, optionally scoped to one flow.
          * @description Server-Sent Events with a single named event type `log` carrying
          *     one `LogRecord` per frame. Unscoped, this emits every captured
-         *     record and the admin UI applies level and free-text filters
+         *     record and the web UI applies level and free-text filters
          *     client-side; the per-flow Activity panel passes `flow` so it only
          *     receives that flow's live records.
          */
@@ -208,7 +208,7 @@ export interface paths {
          * @description Forwards an OpenAI-compatible chat completion request to the
          *     configured AI gateway (`web.ai_gateway_url`, or the same-process
          *     gateway on loopback) and streams the response back. Same-origin
-         *     with the admin server, so the built-in Agents chat needs no
+         *     with the web server, so the built-in Agents chat needs no
          *     gateway-side CORS. The request and response bodies are the stock
          *     OpenAI chat-completions shape; route by `model`
          *     (`"<gateway-name>/<downstream-model>"`).
@@ -305,7 +305,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Starts admin UI login.
+         * Starts web UI login.
          * @description Redirects to the configured OIDC identity provider. 404 when
          *     `web.auth` is not configured.
          */
@@ -347,10 +347,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Clears the local session cookie and redirects.
+         * @description Navigated to, not fetched — the browser follows the redirect chain
+         *     itself. Redirects to `web.auth.signout_redirect_url` when set (with
+         *     `id_token_hint` appended), ending the identity provider's session as
+         *     well; otherwise back to the web UI, having cleared flowgen's session
+         *     only.
+         */
+        get: operations["authLogout"];
         put?: never;
-        /** Clears the local session cookie. */
-        post: operations["authLogout"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -366,7 +373,11 @@ export interface paths {
         };
         /**
          * The signed-in user.
-         * @description 404 when `web.auth` is not configured — distinct from 401 (not
+         * @description Validates the session, silently refreshing it against the identity
+         *     provider once past `exp` — the same check `/api/*` applies, so a
+         *     caller that gets 200 here will not be rejected a moment later.
+         *
+         *     404 when `web.auth` is not configured — distinct from 401 (not
          *     signed in) so callers can tell "no login offered" apart from
          *     "not logged in yet".
          */
@@ -1131,7 +1142,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Login succeeded; redirects back into the admin UI. */
+            /** @description Login succeeded; redirects back into the web UI. */
             302: {
                 headers: {
                     [name: string]: unknown;
@@ -1170,9 +1181,10 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Signed out. */
-            204: {
+            /** @description Signed out; continue to the provider or the web UI. */
+            303: {
                 headers: {
+                    Location?: string;
                     [name: string]: unknown;
                 };
                 content?: never;

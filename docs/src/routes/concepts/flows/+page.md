@@ -32,7 +32,7 @@ Identity is used for:
 - The cache namespace for `ctx.cache` inside scripts.
 - The URI for MCP resources exposed by the flow.
 - The tracing `flow=` field on every log line and activity event.
-- Folder grouping in the admin UI (segments before the last `/`).
+- Folder grouping in the web UI (segments before the last `/`).
 
 Because identity is derived from the path, two flows with the same basename can live in different folders without colliding — `demo/salesforce/reader.yaml` and `demo/hubspot/reader.yaml` are distinct identities.
 

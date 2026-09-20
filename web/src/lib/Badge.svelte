@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Single badge style for the whole admin: uppercase, small.
+	// Single badge style for the whole UI: uppercase, small.
 	// - neutral: outlined, monochrome, faded (used for type tags: flow, sql, json).
 	// - success/error/warning: filled soft (bg-*/10 + text-*) — same look as the
 	//   Copied confirmation, reads strongly against row background.

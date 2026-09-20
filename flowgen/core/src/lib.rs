@@ -49,9 +49,9 @@ pub mod service;
 /// OpenTelemetry integration for metrics and distributed tracing.
 pub mod telemetry;
 /// Flow-scoped runtime bookkeeping: activity metrics fed by a custom
-/// tracing layer, plus the SSE broadcast channel the admin UI reads.
+/// tracing layer, plus the SSE broadcast channel the web UI reads.
 pub mod flow {
-    /// Atomic counters + broadcast channel used by the admin API.
+    /// Atomic counters + broadcast channel used by the web API.
     pub mod activity;
     /// Tracing layer that populates activity from runtime log events.
     pub mod activity_layer;

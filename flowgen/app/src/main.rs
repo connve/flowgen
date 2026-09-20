@@ -89,7 +89,7 @@ async fn main() {
     // Boot-time errors go straight to stderr — the canonical Rust CLI pattern.
     let config = match Config::builder()
         .add_source(config::File::with_name(&cli.config))
-        .add_source(config::Environment::with_prefix("APP"))
+        .add_source(flowgen::config::env_source())
         .build()
     {
         Ok(config) => config,
