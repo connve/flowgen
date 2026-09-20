@@ -159,12 +159,18 @@ http_server:
 #   # standard-compliant provider — including one that itself federates to
 #   # an upstream customer IdP). Omit `auth` to leave the web UI
 #   # unauthenticated. flowgen keeps no server-side session store: the
-#   # browser's cookie holds the IdP's tokens, encrypted with cookie_secret,
-#   # so cookie_secret is required whenever auth is set.
+#   # browser's cookie holds the IdP's tokens, encrypted with a cookie
+#   # secret, so one is required whenever auth is set — from the file below
+#   # or from web.cookie_secret.
 #   auth:
 #     issuer_url: "https://auth.example.com"
 #     client_id: "flowgen-web"
-#     client_secret: "your-oidc-client-secret"
+#     # JSON file holding client_secret and cookie_secret, e.g. a mounted
+#     # Kubernetes secret — keeps both out of this file. Wins over
+#     # client_secret here and over web.cookie_secret below.
+#     credentials_path: "/etc/flowgen/credentials/web.json"
+#     # Inline alternative to the file above.
+#     # client_secret: "your-oidc-client-secret"
 #     # Must exactly match a redirect URI registered with the IdP, and
 #     # include the `path` prefix above (here, "/flowgen").
 #     redirect_uri: "https://example.com/flowgen/auth/callback"
@@ -173,11 +179,8 @@ http_server:
 #     # registered with the IdP. flowgen appends `id_token_hint`. Unset signs
 #     # out of flowgen only, leaving the IdP session intact.
 #     # signout_redirect_url: "https://example.okta.com/oauth2/default/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
-#     # JSON file holding client_secret and cookie_secret, e.g. a mounted
-#     # Kubernetes secret. Wins over client_secret above and over the
-#     # web.cookie_secret below.
-#     # credentials_path: "/etc/flowgen/credentials/web.json"
-#   cookie_secret: "a long random string, at least 32 bytes"
+#   # Set unless credentials_path supplies it.
+#   # cookie_secret: "a long random string, at least 32 bytes"
 #   # Login cookies require HTTPS by default. Set to false only for a
 #   # plain-HTTP deployment (local testing, or a proxy that already
 #   # terminates TLS and is trusted to keep the connection private).

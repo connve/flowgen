@@ -180,7 +180,7 @@ Login cookies carry the `Secure` attribute by default, which browsers require HT
 
 Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted with `cookie_secret` so the browser can carry it but never read or forge it. Every request re-validates the token; near expiry, flowgen transparently refreshes it against the identity provider. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
 
-`cookie_secret` is required whenever `auth` is set — flowgen refuses to start the web server without it, rather than falling back to an unauthenticated UI.
+A cookie secret is required whenever `auth` is set, from either `web.cookie_secret` or `auth.credentials_path` — flowgen refuses to start the web server without one, rather than falling back to an unauthenticated UI.
 
 ### Keeping the secrets out of the config
 

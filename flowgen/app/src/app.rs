@@ -174,10 +174,11 @@ pub enum Error {
         #[source]
         source: flowgen_core::http_server::Error,
     },
-    /// Web UI login is enabled but has no cookie-signing secret set.
+    /// Web UI login is enabled but has no cookie secret from either source.
     #[error(
-        "Web UI login is enabled (web.auth) but web.cookie_secret is missing. Set \
-         web.cookie_secret to a random string so logged-in sessions survive a restart."
+        "Web UI login is enabled (web.auth) but no cookie secret is set. Put a random \
+         string in web.cookie_secret, or a `cookie_secret` key in the JSON file at \
+         web.auth.credentials_path, so logged-in sessions survive a restart."
     )]
     MissingCookieSecret,
     /// Web UI could not reach or was rejected by the configured identity provider.
