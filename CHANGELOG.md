@@ -2,6 +2,17 @@
 
 ## 0.140.0
 
+### Fixes
+
+- **Docker build for `rdkafka-sys` now includes a C/C++ toolchain.** The
+  `rust:slim-bookworm` base image does not ship `make`, `gcc`, or `g++`, so
+  CMake failed to build `librdkafka` with `CMAKE_MAKE_PROGRAM is not set`.
+  `build-essential` is now installed in the `rust_base` stage.
+- **Docker layer caching for the builder image is split.** System packages,
+  Node.js, and Rust tooling (`cargo-chef`, `sccache`) now live in separate
+  `RUN` layers, so bumps to `cargo-chef`/`sccache` or Node.js do not
+  invalidate the slower apt layer.
+
 ### Features
 
 - **New `kafka_produce` task.** Publishes the incoming event to a Kafka topic

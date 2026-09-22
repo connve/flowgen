@@ -2,8 +2,11 @@
 # `rust-toolchain.toml`; `rustup` inside this image resolves it at the
 # first `cargo` invocation once the source is copied in.
 FROM rust:slim-bookworm AS rust_base
-# Node is required by `flowgen/app/build.rs`.
+
+# Base system dependencies required to build native crates (rdkafka, openssl,
+# sasl, protobuf). Kept in a separate layer because they change rarely.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     pkg-config \
     libssl-dev \
     libsasl2-dev \
@@ -14,9 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node is required by `flowgen/app/build.rs`. Installed separately so updates
+# to Node do not invalidate the cached system dependency layer above.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Rust build tooling. Kept in its own layer so cargo-chef/sccache version
+# bumps do not invalidate the (much slower) apt layers.
 RUN cargo install cargo-chef --version 0.1.68
 RUN cargo install sccache --version 0.8.2
 ENV RUSTC_WRAPPER=sccache
