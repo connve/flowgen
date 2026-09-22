@@ -45,6 +45,9 @@ pub struct Collection {
     /// on. Used by `operation: read`, and required by `operation: upsert`.
     #[serde(default)]
     pub filter: serde_json::Map<String, serde_json::Value>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
     /// Optional retry configuration (overrides app-level retry config).
@@ -58,6 +61,9 @@ impl ConfigExt for Collection {}
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeStream {
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
     /// Path to credentials file containing MongoDB authentication details.

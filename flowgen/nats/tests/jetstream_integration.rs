@@ -20,6 +20,15 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::mpsc;
 
+/// NATS integration tests start a real server container. Running several of
+/// them in parallel exhausts Docker resources on typical developer machines
+/// and causes startup timeouts, so they serialize on this mutex.
+static NATS_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn lock_nats_test() -> tokio::sync::MutexGuard<'static, ()> {
+    NATS_TEST_MUTEX.lock().await
+}
+
 /// Starts a NATS 2.11.8 container with JetStream enabled and returns
 /// its connection URL.
 async fn start_nats() -> (ContainerAsync<GenericImage>, String) {
@@ -109,7 +118,7 @@ async fn spawn_publisher(
 ) -> (
     mpsc::Sender<flowgen_core::event::Event>,
     mpsc::Receiver<flowgen_core::event::Event>,
-    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<Result<(), flowgen_nats::jetstream::publisher::Error>>,
 ) {
     let (in_tx, in_rx) = mpsc::channel(4);
     let (out_tx, out_rx) = mpsc::channel(4);
@@ -125,7 +134,7 @@ async fn spawn_publisher(
         .expect("build publisher");
     let handle = tokio::spawn(async move {
         use flowgen_core::task::runner::Runner;
-        let _ = publisher.run().await;
+        publisher.run().await
     });
     (in_tx, out_rx, handle)
 }
@@ -142,6 +151,8 @@ async fn stream_info(url: &str, stream_name: &str) -> async_nats::jetstream::str
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn publisher_writes_event_to_stream() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
 
     let pub_config = Arc::new(JsConfig {
@@ -186,6 +197,8 @@ async fn publisher_writes_event_to_stream() {
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn publisher_and_subscriber_round_trip_delivers_the_message() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
     let stream = stream_options("rt_stream", "rt.subject");
 
@@ -252,6 +265,8 @@ async fn publisher_and_subscriber_round_trip_delivers_the_message() {
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn discard_new_per_subject_rejects_second_publish_to_same_subject() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
 
     let stream = StreamOptions {
@@ -339,6 +354,8 @@ async fn discard_new_per_subject_rejects_second_publish_to_same_subject() {
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn msg_id_template_deduplicates_within_duplicate_window() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
 
     let stream = StreamOptions {
@@ -424,6 +441,8 @@ async fn msg_id_template_deduplicates_within_duplicate_window() {
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn msg_id_template_different_keys_are_not_deduplicated() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
 
     let stream = StreamOptions {
@@ -564,6 +583,8 @@ async fn idle_subscriber_does_not_poll_the_server() {
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn idle_subscriber_still_delivers_a_message_published_later() {
+    let _lock = lock_nats_test().await;
+
     let (_nats, url) = start_nats().await;
     let stream = stream_options("wake_stream", "wake.subject");
 
@@ -628,4 +649,575 @@ async fn idle_subscriber_still_delivers_a_message_published_later() {
     drop(pub_tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), pub_handle).await;
     sub_handle.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn subscriber_delivers_every_message_when_the_flow_is_slow() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+    let stream = stream_options("slow_stream", "slow.subject");
+
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "slow.subject".to_string(),
+        stream: Some(stream.clone()),
+        ..Default::default()
+    });
+    let (pub_tx, _pub_out_rx, pub_handle) = spawn_publisher(pub_config).await;
+
+    let total = 5;
+    for n in 0..total {
+        let event = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject("slow.subject".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event");
+        pub_tx.send(event).await.expect("publish event");
+    }
+
+    let sub_config = Arc::new(JsConfig {
+        name: "subscriber".to_string(),
+        url: url.clone(),
+        subject: "slow.subject".to_string(),
+        stream: Some(stream),
+        durable_name: Some("slow_consumer".to_string()),
+        max_messages_per_batch: 10,
+        batch_expires: Duration::from_secs(2),
+        ack_timeout: Some(Duration::from_secs(10)),
+        ..Default::default()
+    });
+    let (sub_out_tx, mut sub_out_rx) = mpsc::channel(16);
+    let subscriber = SubscriberBuilder::new()
+        .config(sub_config)
+        .sender(sub_out_tx)
+        .task_id(1)
+        .task_type("nats_jetstream_subscriber")
+        .task_context(test_task_context())
+        .build()
+        .await
+        .expect("build subscriber");
+    let sub_handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = subscriber.run().await;
+    });
+
+    // Each flow takes longer than `batch_expires`, so the outstanding batch
+    // request expires while the subscriber is still on the first message.
+    let mut delivered = Vec::new();
+    for _ in 0..total {
+        let event = tokio::time::timeout(Duration::from_secs(30), sub_out_rx.recv())
+            .await
+            .expect("every published message must be delivered")
+            .expect("channel open");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if let Some(arc) = event.completion_tx.as_ref() {
+            arc.signal_completion(None);
+        }
+        delivered.push(event);
+    }
+
+    assert_eq!(delivered.len(), total);
+
+    drop(pub_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_handle).await;
+    sub_handle.abort();
+}
+
+/// `max_messages_per_subject` is a retention limit, not an admission limit:
+/// without `discard_new_per_subject`, `discard: new` applies to the stream's
+/// own limits, so per-subject overflow evicts the oldest message after it was
+/// accepted. Every publish is acked with a fresh sequence and no error, so a
+/// flow that publishes more than the cap to one subject loses the earlier
+/// messages silently.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn per_subject_cap_evicts_older_messages_without_reporting_an_error() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+
+    let stream = StreamOptions {
+        name: "discard_new_stream".to_string(),
+        subjects: vec!["full.>".to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        discard: Some(DiscardPolicy::New),
+        max_messages_per_subject: Some(2),
+        ..Default::default()
+    };
+
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "full.records".to_string(),
+        stream: Some(stream),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (in_tx, mut out_rx, handle) = spawn_publisher(pub_config).await;
+
+    let mut acks = Vec::new();
+    for n in 0..4 {
+        let event = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject("full.records".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event");
+        in_tx.send(event).await.expect("send event");
+        let result = tokio::time::timeout(Duration::from_secs(10), out_rx.recv())
+            .await
+            .expect("publisher reports a result")
+            .expect("channel open");
+        acks.push((result.error.clone(), result.data_as_json().ok()));
+    }
+    let errors: Vec<_> = acks.iter().map(|(e, _)| e.clone()).collect();
+
+    let info = stream_info(&url, "discard_new_stream").await;
+
+    assert_eq!(
+        info.state.messages, 2,
+        "max_messages_per_subject caps the subject at 2"
+    );
+    assert!(
+        errors.iter().all(Option::is_none),
+        "every publish is accepted, so the loss is invisible to the flow: {acks:?}"
+    );
+    assert_eq!(
+        info.state.first_sequence, 3,
+        "the two oldest messages were evicted, not the two newest rejected"
+    );
+
+    drop(in_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+/// Even with `max_messages_per_subject: 1` and `discard: new`, but without
+/// `discard_new_per_subject: true`, NATS accepts every publish and evicts the
+/// previous message on that subject. The publisher sees a successful ack, not
+/// an error. This reproduces the customer setup exactly and confirms that
+/// rejected publishes only happen when `discard_new_per_subject` is enabled
+/// (or when `max_messages` caps the whole stream).
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn per_subject_cap_of_one_evicts_without_rejection() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+
+    let stream = StreamOptions {
+        name: "orders".to_string(),
+        subjects: vec!["orders.created".to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        discard: Some(DiscardPolicy::New),
+        max_messages_per_subject: Some(1),
+        ..Default::default()
+    };
+
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "orders.created".to_string(),
+        stream: Some(stream),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (in_tx, mut out_rx, handle) = spawn_publisher(pub_config).await;
+
+    let make_event = |n: i32| {
+        EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject("orders.created".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    };
+
+    for n in 0..3 {
+        in_tx.send(make_event(n)).await.expect("send event");
+        let result = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("publisher reports a result")
+            .expect("channel open");
+        assert!(
+            result.error.is_none(),
+            "publish {n} must be accepted without discard_new_per_subject: {:?}",
+            result.error
+        );
+    }
+
+    let info = stream_info(&url, "orders").await;
+    assert_eq!(
+        info.state.messages, 1,
+        "only the latest message per subject is retained"
+    );
+    assert_eq!(
+        info.state.last_sequence, 3,
+        "all three publishes were accepted and assigned sequences"
+    );
+
+    drop(in_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+/// `max_messages_per_subject` is a stream-level limit: every subject in the
+/// stream shares the same cap. When one publisher creates a stream with
+/// `discard: new` and `max_messages_per_subject: 1`, a second publisher on a
+/// different subject of the same stream inherits that cap through
+/// `create_or_update`. Without `discard_new_per_subject: true`, `discard: new`
+/// does not reject the overflow; it evicts the oldest message on each subject,
+/// so the stream ends up holding only the latest message per subject.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn shared_stream_inherits_per_subject_limit_across_subjects() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+
+    let shared_stream = StreamOptions {
+        name: "orders".to_string(),
+        subjects: vec!["orders.created".to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        discard: Some(DiscardPolicy::New),
+        max_messages_per_subject: Some(1),
+        ..Default::default()
+    };
+
+    let make_event = |subject: &str, n: i32| {
+        EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject(subject.to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    };
+
+    let pub_b_config = Arc::new(JsConfig {
+        name: "pub_b".to_string(),
+        url: url.clone(),
+        subject: "orders.created".to_string(),
+        stream: Some(shared_stream.clone()),
+        ..Default::default()
+    });
+    let (pub_b_tx, mut pub_b_out_rx, pub_b_handle) = spawn_publisher(pub_b_config).await;
+
+    pub_b_tx
+        .send(make_event("orders.created", 1))
+        .await
+        .expect("send pub b event");
+    let pub_b_first = tokio::time::timeout(Duration::from_secs(5), pub_b_out_rx.recv())
+        .await
+        .expect("pub b first ack")
+        .expect("channel open");
+    assert!(
+        pub_b_first.error.is_none(),
+        "first publish to pub b subject must succeed: {:?}",
+        pub_b_first.error
+    );
+
+    let pub_a_config = Arc::new(JsConfig {
+        name: "pub_a".to_string(),
+        url: url.clone(),
+        subject: "orders.updated".to_string(),
+        stream: Some(StreamOptions {
+            name: "orders".to_string(),
+            subjects: vec!["orders.created".to_string(), "orders.updated".to_string()],
+            create_or_update: true,
+            retention: Some(RetentionPolicy::Limits),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (pub_a_tx, mut pub_a_out_rx, pub_a_handle) = spawn_publisher(pub_a_config).await;
+
+    for n in 0..3 {
+        pub_a_tx
+            .send(make_event("orders.updated", n))
+            .await
+            .expect("send pub a event");
+        let ack = tokio::time::timeout(Duration::from_secs(5), pub_a_out_rx.recv())
+            .await
+            .expect("pub a ack")
+            .expect("channel open");
+        assert!(
+            ack.error.is_none(),
+            "without discard_new_per_subject, publishes are accepted and old messages are evicted"
+        );
+    }
+
+    let info = stream_info(&url, "orders").await;
+    assert_eq!(
+        info.config.max_messages_per_subject, 1,
+        "publisher a inherited the per-subject limit from the existing stream"
+    );
+    assert_eq!(
+        info.state.messages, 2,
+        "one message per subject remains after eviction: orders.created + orders.updated"
+    );
+    assert_eq!(
+        info.state.last_sequence, 4,
+        "all four publishes were accepted and assigned sequences"
+    );
+
+    drop(pub_b_tx);
+    drop(pub_a_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_b_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_a_handle).await;
+}
+
+/// With `discard_new_per_subject: true`, `discard: new` is enforced per
+/// subject using `max_messages_per_subject`. Two publishers on different
+/// subjects of the same stream are isolated: a message to one subject is
+/// accepted even though the other subject has reached its cap, and the cap
+/// still applies independently to each subject.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn discard_new_per_subject_isolates_subjects_on_shared_stream() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+
+    let shared_stream = StreamOptions {
+        name: "orders".to_string(),
+        subjects: vec!["orders.created".to_string(), "orders.updated".to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        discard: Some(DiscardPolicy::New),
+        discard_new_per_subject: Some(true),
+        max_messages_per_subject: Some(1),
+        ..Default::default()
+    };
+
+    let make_event = |subject: &str, n: i32| {
+        EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject(subject.to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    };
+
+    let pub_b_config = Arc::new(JsConfig {
+        name: "pub_b".to_string(),
+        url: url.clone(),
+        subject: "orders.created".to_string(),
+        stream: Some(shared_stream.clone()),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (pub_b_tx, mut pub_b_out_rx, pub_b_handle) = spawn_publisher(pub_b_config).await;
+
+    pub_b_tx
+        .send(make_event("orders.created", 1))
+        .await
+        .expect("send pub b first event");
+    let pub_b_first = tokio::time::timeout(Duration::from_secs(5), pub_b_out_rx.recv())
+        .await
+        .expect("pub b first ack")
+        .expect("channel open");
+    assert!(pub_b_first.error.is_none());
+
+    pub_b_tx
+        .send(make_event("orders.created", 2))
+        .await
+        .expect("send pub b second event");
+    let pub_b_second = tokio::time::timeout(Duration::from_secs(5), pub_b_out_rx.recv())
+        .await
+        .expect("pub b second ack")
+        .expect("channel open");
+    assert!(
+        pub_b_second.error.is_some(),
+        "second publish to a full subject must error: {:?}",
+        pub_b_second.data_as_json()
+    );
+
+    let pub_a_config = Arc::new(JsConfig {
+        name: "pub_a".to_string(),
+        url: url.clone(),
+        subject: "orders.updated".to_string(),
+        stream: Some(StreamOptions {
+            name: "orders".to_string(),
+            subjects: vec!["orders.created".to_string(), "orders.updated".to_string()],
+            create_or_update: true,
+            retention: Some(RetentionPolicy::Limits),
+            ..Default::default()
+        }),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (pub_a_tx, mut pub_a_out_rx, pub_a_handle) = spawn_publisher(pub_a_config).await;
+
+    pub_a_tx
+        .send(make_event("orders.updated", 0))
+        .await
+        .expect("send pub a first event");
+    let pub_a_first = tokio::time::timeout(Duration::from_secs(5), pub_a_out_rx.recv())
+        .await
+        .expect("pub a first ack")
+        .expect("channel open");
+    assert!(
+        pub_a_first.error.is_none(),
+        "first publish to a different subject must succeed: {:?}",
+        pub_a_first.error
+    );
+
+    pub_a_tx
+        .send(make_event("orders.updated", 1))
+        .await
+        .expect("send pub a second event");
+    let pub_a_second = tokio::time::timeout(Duration::from_secs(5), pub_a_out_rx.recv())
+        .await
+        .expect("pub a second ack")
+        .expect("channel open");
+    assert!(
+        pub_a_second.error.is_some(),
+        "second publish to the same subject must still be rejected: {:?}",
+        pub_a_second.data_as_json()
+    );
+
+    let info = stream_info(&url, "orders").await;
+    assert_eq!(
+        info.state.messages, 2,
+        "one accepted message per subject remains"
+    );
+
+    drop(pub_b_tx);
+    drop(pub_a_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_b_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_a_handle).await;
+}
+
+/// The safest way to avoid cross-task interference is to use separate
+/// streams. Two publishers on independent streams can each set
+/// `discard: new`, `max_messages_per_subject: 1`, and
+/// `discard_new_per_subject: true` without affecting each other.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn separate_streams_keep_independent_limits() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+
+    let make_limited_stream = |name: &str, subject: &str| StreamOptions {
+        name: name.to_string(),
+        subjects: vec![subject.to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        discard: Some(DiscardPolicy::New),
+        discard_new_per_subject: Some(true),
+        max_messages_per_subject: Some(1),
+        ..Default::default()
+    };
+
+    let make_unlimited_stream = |name: &str, subject: &str| StreamOptions {
+        name: name.to_string(),
+        subjects: vec![subject.to_string()],
+        create_or_update: true,
+        retention: Some(RetentionPolicy::Limits),
+        ..Default::default()
+    };
+
+    let make_event = |subject: &str, n: i32| {
+        EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject(subject.to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event")
+    };
+
+    let pub_a_config = Arc::new(JsConfig {
+        name: "pub_a".to_string(),
+        url: url.clone(),
+        subject: "orders.created".to_string(),
+        stream: Some(make_unlimited_stream("orders_created", "orders.created")),
+        ..Default::default()
+    });
+    let (pub_a_tx, mut pub_a_out_rx, pub_a_handle) = spawn_publisher(pub_a_config).await;
+
+    let pub_b_config = Arc::new(JsConfig {
+        name: "pub_b".to_string(),
+        url: url.clone(),
+        subject: "orders.updated".to_string(),
+        stream: Some(make_limited_stream("orders_updated", "orders.updated")),
+        retry: Some(flowgen_core::retry::RetryConfig {
+            max_attempts: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let (pub_b_tx, mut pub_b_out_rx, pub_b_handle) = spawn_publisher(pub_b_config).await;
+
+    for n in 0..3 {
+        pub_a_tx
+            .send(make_event("orders.created", n))
+            .await
+            .expect("send pub a event");
+        let ack = tokio::time::timeout(Duration::from_secs(5), pub_a_out_rx.recv())
+            .await
+            .expect("pub a ack")
+            .expect("channel open");
+        assert!(ack.error.is_none(), "pub a ack {n} should succeed");
+    }
+
+    pub_b_tx
+        .send(make_event("orders.updated", 0))
+        .await
+        .expect("send pub b first event");
+    let pub_b_first = tokio::time::timeout(Duration::from_secs(5), pub_b_out_rx.recv())
+        .await
+        .expect("pub b first ack")
+        .expect("channel open");
+    assert!(pub_b_first.error.is_none());
+
+    pub_b_tx
+        .send(make_event("orders.updated", 1))
+        .await
+        .expect("send pub b second event");
+    let pub_b_second = tokio::time::timeout(Duration::from_secs(5), pub_b_out_rx.recv())
+        .await
+        .expect("pub b second ack")
+        .expect("channel open");
+    assert!(
+        pub_b_second.error.is_some(),
+        "pub b second message must be rejected"
+    );
+
+    let info_a = stream_info(&url, "orders_created").await;
+    let info_b = stream_info(&url, "orders_updated").await;
+
+    assert_eq!(
+        info_a.state.messages, 3,
+        "stream a keeps all of its messages"
+    );
+    assert_eq!(info_b.state.messages, 1, "stream b caps its own subject");
+
+    drop(pub_a_tx);
+    drop(pub_b_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_a_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_b_handle).await;
 }

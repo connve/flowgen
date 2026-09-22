@@ -16,10 +16,10 @@ flow:
         name: trigger
         interval: 5m
 
-    - object-store-read:
+    - object_store:
         name: list_files
-        bucket: my-data-bucket
-        prefix: "input/"
+        operation: list
+        path: "gs://my-data-bucket/input"
         credentials_path: "/etc/secrets/gcp-credentials.json"
 
     # Cache key is name+md5 so a re-uploaded file with different content
@@ -48,13 +48,12 @@ flow:
 
           event
 
-    - bigquery-batch-upsert:
+    - gcp_bigquery_storage_write:
         name: load_to_bigquery
         project_id: my-project
         dataset_id: my_dataset
         table_id: my_table
         credentials_path: "/etc/secrets/gcp-credentials.json"
-        write_disposition: append
 
     - script:
         name: log_completion

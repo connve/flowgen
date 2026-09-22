@@ -124,6 +124,14 @@ export const navigation: NavSection[] = [
 		]
 	},
 	{
+		title: 'Kafka',
+		icon: '/icons/kafka.svg',
+		items: [
+			{ title: 'Overview', href: '/kafka' },
+			{ title: 'Produce', href: '/kafka/produce' }
+		]
+	},
+	{
 		title: 'MongoDB',
 		icon: '/icons/mongodb.svg',
 		items: [

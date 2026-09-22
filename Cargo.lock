@@ -1837,6 +1837,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "duct"
+version = "0.13.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4ab5718d1224b63252cd0c6f74f6480f9ffeb117438a2e0f5cf6d9a4798929c"
+dependencies = [
+ "libc",
+ "once_cell",
+ "os_pipe",
+ "shared_child",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2038,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "arrow",
  "atty",
@@ -2056,6 +2068,7 @@ dependencies = [
  "flowgen_git",
  "flowgen_html",
  "flowgen_http",
+ "flowgen_kafka",
  "flowgen_mcp",
  "flowgen_mongodb",
  "flowgen_mssql",
@@ -2092,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2100,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2130,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "braze",
@@ -2147,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2164,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2212,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -2243,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2261,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2277,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2302,8 +2315,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowgen_kafka"
+version = "0.140.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "flowgen_core",
+ "futures-util",
+ "humantime-serde",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-retry2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "flowgen_mcp"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2331,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2360,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2383,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2413,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2436,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2459,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.139.0"
+version = "0.140.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -5010,6 +5045,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5546,6 +5593,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_enum"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0bca838442ec211fa11de3a8b0e0e8f3a4522575b5c4c06ed722e005036f26"
+dependencies = [
+ "num_enum_derive",
+ "rustversion",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "oauth2"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5866,6 +5935,16 @@ checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6264,6 +6343,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-crate"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+dependencies = [
+ "toml_edit",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6635,6 +6723,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca3129af7b92a17112d59ad498c6f81eaf463253766b90396d39ea7a39d6613c"
 dependencies = [
  "rand_core 0.5.1",
+]
+
+[[package]]
+name = "rdkafka"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b52c81ac3cac39c9639b95c20452076e74b8d9a71bc6fc4d83407af2ea6fff"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "log",
+ "rdkafka-sys",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "slab",
+ "tokio",
+]
+
+[[package]]
+name = "rdkafka-sys"
+version = "4.10.0+2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77"
+dependencies = [
+ "cmake",
+ "libc",
+ "libz-sys",
+ "num_enum",
+ "openssl-sys",
+ "pkg-config",
+ "sasl2-sys",
 ]
 
 [[package]]
@@ -7286,6 +7407,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sasl2-sys"
+version = "0.1.22+2.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05f2a7f7efd9fc98b3a9033272df10709f5ee3fa0eabbd61a527a3a1ed6bd3c6"
+dependencies = [
+ "cc",
+ "duct",
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7740,6 +7873,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared_child"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "607549934f6cc26b89cfecfdc46fa90f1e5d1536a68349b0c3a4f9d1c0d37959"
+dependencies = [
+ "libc",
+ "sigchld",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "shell-words"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7750,6 +7894,27 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "sigchld"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24f2b37f04360cd465089b87a9c3869c08220a2f3458463f0adf8badf5e77f2c"
+dependencies = [
+ "libc",
+ "os_pipe",
+ "signal-hook",
+]
+
+[[package]]
+name = "signal-hook"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"
@@ -8449,18 +8614,30 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "1.1.0+spec-1.1.0"
+version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97251a7c317e03ad83774a8752a7e81fb6067740609f75ea2b585b569a59198f"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
 ]
 
 [[package]]
-name = "toml_parser"
-version = "1.1.0+spec-1.1.0"
+name = "toml_edit"
+version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2334f11ee363607eb04df9b8fc8a13ca1715a72ba8662a26ac285c98aabb4011"
+checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
+dependencies = [
+ "indexmap 2.13.0",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]

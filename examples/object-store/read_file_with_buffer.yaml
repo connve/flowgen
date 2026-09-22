@@ -18,8 +18,9 @@ flow:
         interval: 10s
         count: 1
 
-    - object_store_read:
+    - object_store:
         name: read_file
+        operation: read
         path: file:///flowgen/examples/data/orders.csv
         batch_size: 1000
         has_header: true

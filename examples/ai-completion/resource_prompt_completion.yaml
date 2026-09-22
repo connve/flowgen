@@ -16,7 +16,8 @@ flow:
     # POST /api/flowgen/workers/webhook/analyze with the payload to analyse.
     - http_endpoint:
         name: receive_data
-        path: /analyze
+        method: POST
+        endpoint: /analyze
 
     - ai_completion:
         name: analyze_data

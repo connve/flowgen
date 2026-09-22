@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.139.0"
+version = "0.140.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -158,3 +158,4 @@ rust-embed = { version = "8.7" }
 mime_guess = { version = "2.0" }
 bson = { version = "2.15" }
 mongodb = { version = "3.8" }
+rdkafka = { version = "0.37", default-features = false, features = ["cmake-build", "libz", "ssl", "sasl", "tokio"] }

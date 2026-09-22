@@ -17,8 +17,9 @@ flow:
         name: trigger
         interval: 5m
 
-    - object_store_list:
+    - object_store:
         name: list_unprocessed_files
+        operation: list
         path: gs://my-bucket/incoming/*.parquet
         credentials_path: /etc/gcp/credentials.json
 
@@ -61,8 +62,9 @@ flow:
         autodetect: true
 
     # Archive exactly the URIs that BigQuery loaded, atomic w.r.t. the load.
-    - object_store_move:
+    - object_store:
         name: archive_processed_files
+        operation: move
         source_files: "{{event.meta.source_uris}}"
         destination: gs://my-bucket/processed/
         credentials_path: /etc/gcp/credentials.json

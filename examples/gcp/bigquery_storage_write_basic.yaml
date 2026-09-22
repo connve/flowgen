@@ -15,7 +15,8 @@ flow:
     # POST /api/flowgen/workers/webhook/events; each POST becomes one event.
     - http_endpoint:
         name: receive_webhook
-        path: /webhooks/events
+        method: POST
+        endpoint: /webhooks/events
         max_concurrent_requests: 100
 
     # Task-level retry covers transient BigQuery API failures.

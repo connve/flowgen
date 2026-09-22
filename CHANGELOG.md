@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.140.0
+
+### Features
+
+- **New `kafka_produce` task.** Publishes the incoming event to a Kafka topic
+  and emits the delivery result (topic, partition, offset) downstream. JSON is
+  serialized as-is, `bytes`/Avro payloads are sent raw, and Arrow record batches
+  are serialized as an Arrow IPC stream. `message_key` is templated, and
+  `create_or_update` creates the topic if it is absent. SASL and SSL
+  credentials load from a file, matching the other connectors; the security
+  protocol follows from which blocks the file carries, so SASL over TLS
+  (`SASL_SSL`) works against managed Kafka. A topic created by
+  `create_or_update` takes its partition count, replication factor, retention,
+  and topic-level settings from `topic_options`. See `examples/kafka/`.
+
 ## 0.139.0
 
 ### Features

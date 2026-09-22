@@ -1,0 +1,23 @@
+# Produces a generated event to a Kafka topic at a fixed interval.
+#
+# Needs only a broker on localhost:9092; the topic is created on first run.
+flow:
+  labels:
+    display_name: "Kafka Produce (Triggered)"
+    description: "Generates periodic events and produces them to a Kafka topic."
+    tags: ["kafka", "producer", "generate", "example"]
+  tasks:
+
+    - generate:
+        name: trigger
+        interval: 60s
+        count: 5
+        data:
+          source: "flowgen-example"
+          timestamp: "{{now}}"
+
+    - kafka_produce:
+        name: produce_sample
+        brokers: "localhost:9092"
+        topic: sample-events
+        create_or_update: true

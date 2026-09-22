@@ -34,8 +34,9 @@ flow:
         schema:
           resource: "schemas/email_message.avsc"
 
-    - object_store_write:
+    - object_store:
         name: write_events
+        operation: write
         path: file:///cloudflare/email
         hive_partition_options:
           enabled: true

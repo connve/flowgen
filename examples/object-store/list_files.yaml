@@ -17,8 +17,9 @@ flow:
         count: 1
 
     # Returns metadata (path, size, mtime) for each match.
-    - object_store_list:
+    - object_store:
         name: list_gcs_files
+        operation: list
         path: gs://my-bucket/data/*.parquet
         credentials_path: /etc/gcp/credentials.json
 

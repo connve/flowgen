@@ -21,8 +21,9 @@ flow:
         count: 1
 
     # Source 1: canonical orders dataset.
-    - object_store_read:
+    - object_store:
         name: read_orders
+        operation: read
         path: file:///flowgen/examples/data/orders.csv
         batch_size: 10000
         has_header: true
@@ -34,8 +35,9 @@ flow:
         depends_on: [read_orders]
 
     # Source 2: small payment-type lookup table.
-    - object_store_read:
+    - object_store:
         name: read_payment_types
+        operation: read
         path: file:///flowgen/examples/data/payment_types.csv
         batch_size: 1000
         has_header: true

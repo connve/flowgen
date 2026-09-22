@@ -18,7 +18,8 @@ flow:
     # POST /api/flowgen/workers/webhook/ask_question with { "question": "..." }
     - http_endpoint:
         name: receive_question
-        path: /ask_question
+        method: POST
+        endpoint: /ask_question
 
     # Static context strings are loaded once at init.
     - ai_completion:

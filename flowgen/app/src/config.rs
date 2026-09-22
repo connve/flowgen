@@ -240,6 +240,8 @@ pub enum TaskType {
     mongodb_collection(flowgen_mongodb::config::Collection),
     /// MongoDB change stream reader task.
     mongodb_change_stream(flowgen_mongodb::config::ChangeStream),
+    /// Kafka produce task.
+    kafka_produce(flowgen_kafka::config::Produce),
 }
 
 impl TaskType {
@@ -282,6 +284,7 @@ impl TaskType {
             TaskType::braze_export_users_ids(_) => "braze_export_users_ids",
             TaskType::mongodb_collection(_) => "mongodb_collection",
             TaskType::mongodb_change_stream(_) => "mongodb_change_stream",
+            TaskType::kafka_produce(_) => "kafka_produce",
         }
     }
 
@@ -324,6 +327,7 @@ impl TaskType {
             TaskType::braze_export_users_ids(c) => &c.name,
             TaskType::mongodb_collection(c) => &c.name,
             TaskType::mongodb_change_stream(c) => &c.name,
+            TaskType::kafka_produce(c) => &c.name,
         }
     }
 
@@ -378,6 +382,7 @@ impl TaskType {
             TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
             TaskType::mongodb_collection(c) => c.depends_on.as_ref(),
             TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
+            TaskType::kafka_produce(c) => c.depends_on.as_ref(),
         }
     }
 }
@@ -973,6 +978,52 @@ mod tests {
     use super::*;
     use serde_json;
     use std::path::PathBuf;
+
+    /// Every example under `examples/` must deserialize through the real task
+    /// configs. Without this, a key that no struct declares is silently
+    /// dropped by serde and the example documents a setting that never
+    /// applies.
+    #[test]
+    fn test_examples_deserialize() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let mut checked = 0;
+        let mut failures: Vec<String> = Vec::new();
+
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "yaml") {
+                    continue;
+                }
+
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                let config = config::Config::builder()
+                    .add_source(config::File::from_str(&source, config::FileFormat::Yaml))
+                    .build()
+                    .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
+                if let Err(e) = config.try_deserialize::<FlowConfigRaw>() {
+                    failures.push(format!("{}: {e}", path.display()));
+                }
+                checked += 1;
+            }
+        }
+
+        assert!(checked > 0, "no examples found under {}", root.display());
+        assert!(
+            failures.is_empty(),
+            "{} example(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 
     #[test]
     fn test_flow_config_creation() {

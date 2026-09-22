@@ -35,14 +35,19 @@ flow:
     # Add ingestion metadata and provide defaults for optional fields.
     - script:
         name: enrich_event
-        runtime: javascript
-        script: |
-          event.data.ingested_at = new Date().toISOString();
+        code: |
+          event.data.ingested_at = timestamp_now();
           event.data.source = event.subject;
           event.data.event_id = event.id;
 
-          event.data.user_id = event.data.user_id || "unknown";
-          event.data.event_type = event.data.event_type || "unspecified";
+          if event.data.user_id == () {
+            event.data.user_id = "unknown";
+          }
+          if event.data.event_type == () {
+            event.data.event_type = "unspecified";
+          }
+
+          event
 
     # Templated `trace_id` gives per-row observability; task-level retry
     # covers transient BigQuery API failures.

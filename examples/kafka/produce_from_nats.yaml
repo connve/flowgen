@@ -1,0 +1,42 @@
+# Forwards every message on a NATS JetStream stream to a Kafka topic.
+#
+# Needs NATS credentials, the NATS_URL env var, and a reachable broker.
+# credentials_path is optional on the Kafka task; omit it to connect
+# unauthenticated.
+flow:
+  labels:
+    display_name: "Kafka Produce from NATS"
+    description: "Subscribes to a NATS JetStream stream and produces each event as a message to a Kafka topic."
+    tags: ["kafka", "nats", "producer", "example"]
+  tasks:
+
+    - nats_jetstream_subscriber:
+        name: consume_events
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: pubsub.data.kafka
+        stream:
+          create_or_update: true
+          name: kafka_events
+          description: "Events to be produced to Kafka."
+          subjects: ["pubsub.data.kafka"]
+          max_age: 24h
+          retention: limits
+          discard: old
+        durable_name: kafka_producer
+        ack_timeout: "60s"
+
+    # Note: {{event.id}} resolves to the NATS message id when the incoming
+    # message carries a Nats-Msg-Id header; otherwise a random UUID v7 is
+    # generated so the message key always resolves to a unique value.
+    - kafka_produce:
+        name: produce_to_kafka
+        credentials_path: /etc/kafka/credentials.json
+        brokers: "localhost:9092"
+        topic: my-topic
+        message_key: "key-{{event.id}}"
+        create_or_update: true
+        topic_options:
+          partitions: 6
+          replication_factor: 3
+          retention: 7d

@@ -6,6 +6,9 @@ FROM rust:slim-bookworm AS rust_base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    libsasl2-dev \
+    libcurl4-openssl-dev \
+    cmake \
     protobuf-compiler \
     git \
     ca-certificates \

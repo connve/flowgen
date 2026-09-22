@@ -190,6 +190,9 @@ pub enum Error {
     /// Error in MongoDB change stream task.
     #[error(transparent)]
     MongoDbChangeStream(#[from] flowgen_mongodb::change_stream::Error),
+    /// Error in Kafka produce task.
+    #[error(transparent)]
+    KafkaProduce(#[from] flowgen_kafka::produce::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -1999,6 +2002,28 @@ async fn spawn_task(
                             .task_id(task_id)
                             .task_type(task_type_str)
                             .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+
+        TaskType::kafka_produce(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_kafka::produce::ProducerBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }

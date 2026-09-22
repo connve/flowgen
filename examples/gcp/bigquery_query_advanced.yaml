@@ -33,9 +33,7 @@ flow:
           team: "analytics"
           environment: "production"
           cost_center: "engineering"
-        default_dataset:
-          project_id: "data-warehouse-project"
-          dataset_id: "analytics"
+        default_dataset: "data-warehouse-project.analytics"
         # Large analytics scan — route through the Storage Read backend
         # to skip per-row Tuple decoding on the way to Arrow.
         use_storage_read: true
