@@ -64,7 +64,7 @@ pub enum Error {
 enum FlushReason {
     /// Buffer reached the configured size limit.
     Size,
-    /// Timeout elapsed since last flush.
+    /// Timeout elapsed since the batch's first event.
     Timeout,
     /// Shutdown signal received.
     Shutdown,
@@ -285,7 +285,9 @@ impl Processor {
         // ack every one of them when the flush completes — keeping only the
         // last would silently drop N-1 source acks per flush.
         let mut buffer_completions: Vec<SharedCompletionTx> = Vec::new();
-        let mut last_flush = Instant::now();
+        // The timeout runs from the batch's first event, so an idle gap
+        // longer than the timeout cannot split the next burst.
+        let mut batch_started = Instant::now();
 
         loop {
             if self.task_context.cancellation_token.is_cancelled() {
@@ -294,7 +296,7 @@ impl Processor {
 
             // Calculate remaining time until next timeout flush.
             let time_until_flush = timeout_duration
-                .checked_sub(last_flush.elapsed())
+                .checked_sub(batch_started.elapsed())
                 .unwrap_or(Duration::ZERO);
 
             tokio::select! {
@@ -302,9 +304,10 @@ impl Processor {
                 result = self.rx.recv() => {
                     match result {
                         Some(event) => {
-                            // Capture meta from first event in buffer.
+                            // Capture meta and start the timeout on the first event in buffer.
                             if buffer.is_empty() {
                                 buffer_meta = event.meta.clone();
+                                batch_started = Instant::now();
                             }
 
                             // Extract JSON data from event.
@@ -348,7 +351,6 @@ impl Processor {
                                     FlushReason::Completion
                                 };
                                 self.flush_buffer(flush_buffer, reason, None, flush_meta, flush_completions);
-                                last_flush = Instant::now();
                             }
                         }
                         None => {
@@ -367,7 +369,6 @@ impl Processor {
                     let flush_meta = buffer_meta.take();
                     let flush_completions = std::mem::take(&mut buffer_completions);
                     self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta, flush_completions);
-                    last_flush = Instant::now();
                 }
             }
         }
@@ -383,7 +384,9 @@ impl Processor {
         // the last.
         let mut buffer_completions: HashMap<String, Vec<SharedCompletionTx>> =
             HashMap::with_capacity(16);
-        let mut last_flush_times: HashMap<String, Instant> = HashMap::with_capacity(16);
+        // Start of each active keyed batch; an entry exists only while its
+        // key has a buffer, so idle keys cannot drive the flush timer to zero.
+        let mut batch_started_times: HashMap<String, Instant> = HashMap::with_capacity(16);
 
         loop {
             if self.task_context.cancellation_token.is_cancelled() {
@@ -395,9 +398,9 @@ impl Processor {
             let min_time_until_flush = if buffers.is_empty() {
                 timeout_duration
             } else {
-                last_flush_times
+                batch_started_times
                     .values()
-                    .filter_map(|last_flush| timeout_duration.checked_sub(last_flush.elapsed()))
+                    .filter_map(|started| timeout_duration.checked_sub(started.elapsed()))
                     .min()
                     .unwrap_or(Duration::ZERO)
             };
@@ -455,7 +458,7 @@ impl Processor {
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), vec![tx]);
                                     }
-                                    last_flush_times.insert(key.clone(), Instant::now());
+                                    batch_started_times.insert(key.clone(), Instant::now());
                                     if trigger_completion_flush {
                                         Some(key)
                                     } else {
@@ -482,7 +485,7 @@ impl Processor {
                                         let buffer_meta = buffer_metas.remove(&key);
                                         let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
                                         self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta, buffer_completion);
-                                        last_flush_times.insert(key.clone(), Instant::now());
+                                        batch_started_times.remove(&key);
                                         None
                                     } else if trigger_completion_flush {
                                         Some(key)
@@ -504,7 +507,7 @@ impl Processor {
                                         buffer_meta,
                                         buffer_completion,
                                     );
-                                    last_flush_times.insert(key, Instant::now());
+                                    batch_started_times.remove(&key);
                                 }
                             }
                         }
@@ -528,8 +531,8 @@ impl Processor {
                     let mut keys_to_flush = Vec::new();
 
                     // Find all keys with active buffers whose timeout has been exceeded.
-                    for (key, last_flush) in &last_flush_times {
-                        if now.duration_since(*last_flush) >= timeout_duration && buffers.contains_key(key) {
+                    for (key, started) in &batch_started_times {
+                        if now.duration_since(*started) >= timeout_duration && buffers.contains_key(key) {
                             keys_to_flush.push(key.clone());
                         }
                     }
@@ -543,7 +546,7 @@ impl Processor {
                                 self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta, buffer_completion);
                             }
                         }
-                        last_flush_times.insert(key, now);
+                        batch_started_times.remove(&key);
                     }
                 }
             }
@@ -742,6 +745,67 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_idle_gap_longer_than_timeout_does_not_split_next_batch() {
+        use crate::event::EventData;
+        use serde_json::json;
+
+        let config = Arc::new(super::super::config::Processor {
+            name: "collect".to_string(),
+            size: 10_000,
+            timeout: Some(Duration::from_secs(5)),
+            partition_key: None,
+            flush_on_completion: true,
+            depends_on: None,
+            retry: None,
+        });
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(100);
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        let (completion, _completion_rx) = new_completion_channel(1);
+        for i in 0..25 {
+            let builder = EventBuilder::new()
+                .data(EventData::Json(json!({"layer": i})))
+                .subject("pull_repo".into())
+                .task_id(0)
+                .task_type("test");
+            let builder = match i {
+                24 => builder.completion_tx(completion.clone()),
+                _ => builder,
+            };
+            upstream_tx.send(builder.build().unwrap()).await.unwrap();
+            if i == 0 {
+                for _ in 0..10 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        drop(upstream_tx);
+        let _ = handle.await;
+
+        let mut batch_sizes = Vec::new();
+        while let Some(flushed) = downstream_rx.recv().await {
+            batch_sizes.push(flushed.data_as_json().unwrap()["batch_size"].clone());
+        }
+        assert_eq!(batch_sizes, vec![json!(25)]);
     }
 
     #[tokio::test]

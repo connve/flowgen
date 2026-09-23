@@ -9,14 +9,12 @@ jobs:
   detect-version:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.detect-and-tag.outputs.tag }}
-      previous-tag: ${{ steps.detect-and-tag.outputs.previous-tag }}
-      # TODO: restore change detection.
-      # version-changed: ${{ steps.detect-and-tag.outputs.tag != '' && steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
-      version-changed: 'true'
+      tag: ${{ steps.detect.outputs.tag }}
+      previous-tag: ${{ steps.detect.outputs.previous-tag }}
+      version-changed: ${{ steps.detect.outputs.version-changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,19 +26,22 @@ jobs:
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # TODO: restore change detection.
-      # - name: Detect and tag new version
-      #   id: detect-and-tag
-      #   uses: salsify/action-detect-and-tag-new-version@v2
-      #   with:
-      #     version-command: |
-      #       cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
-
-      - name: Derive tag from version (change detection disabled)
-        id: detect-and-tag
+      # Release whenever the version has no tag yet. The tag is created by
+      # `gh release create` at the end, so a release that fails before then
+      # is retried on the next push to main.
+      - name: Detect unreleased version
+        id: detect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          echo "tag=v${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
-          echo "previous-tag=" >> $GITHUB_OUTPUT
+          TAG="v${VERSION}"
+          if git rev-parse --quiet --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "version-changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "version-changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "previous-tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
 
   build-docker:
     needs: detect-version
@@ -176,7 +177,7 @@ jobs:
             if [ -z "${{ needs.detect-version.outputs.previous-tag }}" ]; then
               CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges -1)
             else
-              CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..${{ needs.detect-version.outputs.tag }})
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges ${{ needs.detect-version.outputs.previous-tag }}..HEAD)
             fi
           fi
 
@@ -192,6 +193,7 @@ jobs:
         run: |
           printf '## Changes in %s\n\n%s\n' "$TAG" "$CHANGELOG" > release-notes.md
           gh release create "$TAG" \
+            --target "${{ github.sha }}" \
             --title "Release $TAG" \
             --notes-file release-notes.md
 

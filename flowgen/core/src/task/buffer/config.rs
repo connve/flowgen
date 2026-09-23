@@ -43,7 +43,8 @@ pub struct Processor {
     pub name: String,
     /// Number of events to collect before flushing the buffer.
     pub size: usize,
-    /// Optional timeout duration to flush buffer even if not full (default: 30s).
+    /// Optional timeout duration to flush buffer even if not full (default: 30s),
+    /// measured from the first event in the batch.
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Option<Duration>,
