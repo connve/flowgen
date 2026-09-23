@@ -2,8 +2,22 @@
 
 ## 0.140.0
 
+### Changed
+
+- Hot reload stops the old flow before starting the replacement flow's tasks, so both never consume the same source concurrently. A replacement that fails to build or initialise leaves the old flow running; one that fails to start its tasks leaves the flow stopped until the next successful reload.
+- `generate` validates `cron` and `timezone` at startup and fails immediately on an invalid value, instead of retrying and then stopping silently. A task that exhausts its retries now reports an error to the flow.
+- `generate` tasks with an `interval` or `cron` schedule retry transient failures indefinitely, like other subscribers, instead of stopping after `max_attempts`. `interval` is capped at `100y`.
+- `script` gives each event emitted from an array its own `id` (`<upstream id>-<index>`) unless the element sets a string `id`, so id-based deduplication downstream no longer drops all but one of them.
+
 ### Fixes
 
+- Hot reload of an `http_endpoint` flow no longer removes the replacement flow's route. The old flow's webhook, MCP, and AI gateway entries are now deregistered before waiting for it to stop, so it stops at once instead of after a 30-second timeout.
+- `convert` preserves the upstream event `id` when producing a downstream event.
+- `generate` honours sub-second intervals such as `100ms`; they were rounded down to whole seconds, and anything below `1s` fired back-to-back.
+- `generate` waits one interval after a failed or timed-out run instead of refiring immediately, and run-once mode retries a failed run with the retry backoff.
+- `generate` treats a cache read error as an error to retry instead of "never ran", so a transient cache failure at startup no longer re-runs a completed `count` flow.
+- `generate` delays the first run by at most one interval when the last run is stamped in the future.
+- OCI sync example records the synced digest when a tick has nothing to write, and runs `mark_synced` once per tick behind a `collect_results` buffer.
 - **Docker build for `rdkafka-sys` now includes a C/C++ toolchain.** The
   `rust:slim-bookworm` base image does not ship `make`, `gcc`, or `g++`, so
   CMake failed to build `librdkafka` with `CMAKE_MAKE_PROGRAM is not set`.

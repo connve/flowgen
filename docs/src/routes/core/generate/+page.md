@@ -15,13 +15,13 @@ Produces events on a schedule. Source task — typically first in a flow.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `payload` | object | | Structured data to include in each event. |
-| `interval` | duration | | Interval schedule (e.g., `5s`, `1m`). Mutually exclusive with `cron`. |
-| `cron` | string | | Cron expression. Mutually exclusive with `interval`. |
-| `timezone` | string | `UTC` | Timezone for cron evaluation. |
+| `payload` | object | | Structured data to include in each event. `system_info` is added only when the payload is an object. |
+| `interval` | duration | | Interval schedule (e.g., `500ms`, `5s`, `1m`). The first run fires one interval after start, or at most one interval after the last successful run when resuming. Maximum `100y`. Mutually exclusive with `cron`. |
+| `cron` | string | | Cron expression, validated at startup. Mutually exclusive with `interval`. |
+| `timezone` | string | `UTC` | IANA timezone for cron evaluation (e.g., `Europe/London`), validated at startup. |
 | `count` | int | | Max events to generate. Runs indefinitely if omitted. |
 | `allow_rerun` | bool | false | Reset the counter on restart. |
-| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before the next scheduled run. Generated events that fail or time out skip the cache update so the next run retries from the same timestamp. |
+| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before the next scheduled run. A run that fails or times out is not recorded as completed: `interval` and `cron` schedules fire again at the next scheduled time, and run-once mode retries with the task's retry backoff. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

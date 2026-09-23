@@ -174,6 +174,10 @@ flow:
                   });
               }
           }
+          // No actions means nothing reaches mark_synced, so record the digest here.
+          if actions.len() == 0 {
+              ctx.cache.put("last_synced_digest", event.meta.current_digest);
+          }
           actions
 
     - script:
@@ -214,12 +218,17 @@ flow:
         key: "{{event.data.key}}"
         depends_on: [select_deletes]
 
-    # Persist the new digest only after both write branches have
-    # committed. Runs once per put and per delete, idempotent since
-    # they all write the same digest.
+    # Join both write branches so mark_synced runs once per tick.
+    - buffer:
+        name: collect_results
+        size: 10000
+        timeout: "5s"
+        flush_on_completion: true
+        depends_on: [write_to_cache, delete_from_cache]
+
     - script:
         name: mark_synced
         code: |
           ctx.cache.put("last_synced_digest", event.meta.current_digest);
           event
-        depends_on: [write_to_cache, delete_from_cache]
+        depends_on: [collect_results]

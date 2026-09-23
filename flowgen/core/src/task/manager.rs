@@ -476,9 +476,9 @@ impl TaskManager {
     ///
     /// Used by hot-reload: when a flow is replaced, the old flow's renewal /
     /// acquisition-retry task must stop, but the lease key itself stays under
-    /// the same `holder_identity` (the pod), and the replacement flow takes
-    /// over renewal seamlessly. Calling `release_lease_*` here would race the
-    /// new flow's renewal and delete a lease it now holds.
+    /// the same `holder_identity` (the pod) so the replacement flow reclaims it
+    /// without another pod taking over in between. Calling `release_lease_*`
+    /// here would open that window, or delete a lease the replacement already holds.
     ///
     /// No-op if no lease is tracked under `task_id`.
     pub async fn unregister(&self, task_id: &FlowIdentity) {
