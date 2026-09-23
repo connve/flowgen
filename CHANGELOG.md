@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.141.0
+
+### Fixes
+
+- **Kafka builds without Cyrus SASL (`libsasl2`).** Supported mechanisms are
+  `PLAIN` and `SCRAM-SHA-*`. `libsasl2-dev` is removed from the builder image.
+- **macOS binaries build OpenSSL from source**, which fixes cross-compiling
+  the Intel binary on ARM runners.
+
 ## 0.140.0
 
 ### Changed

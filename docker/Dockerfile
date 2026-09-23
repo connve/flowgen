@@ -4,12 +4,11 @@
 FROM rust:slim-bookworm AS rust_base
 
 # Base system dependencies required to build native crates (rdkafka, openssl,
-# sasl, protobuf). Kept in a separate layer because they change rarely.
+# protobuf). Kept in a separate layer because they change rarely.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
-    libsasl2-dev \
     libcurl4-openssl-dev \
     cmake \
     protobuf-compiler \
