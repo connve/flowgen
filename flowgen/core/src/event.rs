@@ -822,6 +822,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_event_builder_does_not_inherit_id_from_context() {
+        let event = Arc::new(Event {
+            data: EventData::Json(json!({"test": "value"})),
+            subject: "upstream.subject".to_string(),
+            id: Some("upstream-id-123".to_string()),
+            timestamp: 123456789,
+            task_id: 0,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        });
+
+        let built = with_event_context(&event, async {
+            EventBuilder::new()
+                .data(EventData::Json(json!({"item": 1})))
+                .subject("downstream.subject".to_string())
+                .task_id(1)
+                .task_type("iterate")
+                .build()
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(built.id, None);
+    }
+
     #[test]
     fn test_avro_data_serialization() {
         let avro_data = AvroData {

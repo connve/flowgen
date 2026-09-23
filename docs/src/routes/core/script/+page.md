@@ -188,7 +188,8 @@ The script's return value determines what the next task sees:
 
 | Return | Effect |
 |---|---|
-| Object / array / scalar | Becomes the next event's `data`. |
+| Object / scalar | Becomes the next event's `data`. |
+| Array | Emits one event per element; an empty array emits none. Each event's `id` is the upstream `id` with the element index appended (`<id>-0`, `<id>-1`, …), unless the element sets its own string `id`. |
 | The full `event` value | Forwards as-is (preserves `event.id`, etc.). Use this when you only modify metadata. |
 | `()` (unit) | **Filters the event.** No downstream event is emitted. The source's completion is signalled so it does not hang. |
 

@@ -245,8 +245,20 @@ impl EventHandler {
                     // Emit multiple events, attach completion_tx to last one.
                     let arr_len = arr.len();
                     for (idx, value) in arr.into_iter().enumerate() {
+                        let has_explicit_id = match &value {
+                            Value::Object(obj) => obj.get("id").and_then(Value::as_str).is_some(),
+                            _ => false,
+                        };
                         let mut new_event =
                             self.generate_script_event(value, &original_event, meta_json.as_ref())?;
+
+                        // Fanned-out events need distinct ids, or id-based dedup
+                        // downstream (e.g. a JetStream msg_id) drops all but one.
+                        if !has_explicit_id {
+                            if let Some(id) = &original_event.id {
+                                new_event.id = Some(format!("{id}-{idx}"));
+                            }
+                        }
 
                         // Attach completion_tx to the last event only.
                         if idx == arr_len - 1 {
@@ -1543,6 +1555,50 @@ mod tests {
             EventData::Json(value) => assert_eq!(value["id"], 3),
             _ => panic!("Expected JSON output"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_script_array_output_gives_each_event_a_distinct_id() {
+        let (tx, mut rx) = mpsc::channel(100);
+
+        let event_handler = EventHandler {
+            code: r#"[#{ n: 1 }, #{ n: 2 }, #{ id: "explicit", n: 3 }]"#.to_string(),
+            tx: Some(tx),
+            task_id: 1,
+            engine: Engine::new(),
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+
+        let input_event = Event {
+            data: EventData::Json(json!({})),
+            subject: "input.subject".to_string(),
+            task_id: 0,
+            id: Some("upstream".to_string()),
+            timestamp: 123456789,
+            task_type: "test",
+            meta: None,
+            error: None,
+            completion_tx: None,
+        };
+
+        tokio::spawn(async move {
+            let _ = event_handler.handle(input_event).await;
+        });
+
+        let ids = [
+            rx.recv().await.unwrap().id,
+            rx.recv().await.unwrap().id,
+            rx.recv().await.unwrap().id,
+        ];
+        assert_eq!(
+            ids,
+            [
+                Some("upstream-0".to_string()),
+                Some("upstream-1".to_string()),
+                Some("explicit".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

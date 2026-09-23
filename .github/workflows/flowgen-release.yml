@@ -14,7 +14,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.detect-and-tag.outputs.tag }}
       previous-tag: ${{ steps.detect-and-tag.outputs.previous-tag }}
-      version-changed: ${{ steps.detect-and-tag.outputs.tag != '' && steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
+      # TODO: restore change detection.
+      # version-changed: ${{ steps.detect-and-tag.outputs.tag != '' && steps.detect-and-tag.outputs.tag != steps.detect-and-tag.outputs.previous-tag }}
+      version-changed: 'true'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,12 +28,19 @@ jobs:
           VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Detect and tag new version
+      # TODO: restore change detection.
+      # - name: Detect and tag new version
+      #   id: detect-and-tag
+      #   uses: salsify/action-detect-and-tag-new-version@v2
+      #   with:
+      #     version-command: |
+      #       cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
+
+      - name: Derive tag from version (change detection disabled)
         id: detect-and-tag
-        uses: salsify/action-detect-and-tag-new-version@v2
-        with:
-          version-command: |
-            cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "flowgen") | .version'
+        run: |
+          echo "tag=v${{ steps.version.outputs.version }}" >> $GITHUB_OUTPUT
+          echo "previous-tag=" >> $GITHUB_OUTPUT
 
   build-docker:
     needs: detect-version

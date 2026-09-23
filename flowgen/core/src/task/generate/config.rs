@@ -4,7 +4,7 @@
 //! synthetic or scheduled data streams in workflows.
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 /// Errors that can occur during configuration validation.
 #[derive(thiserror::Error, Debug)]
@@ -14,7 +14,21 @@ pub enum ConfigError {
     MissingSchedule,
     #[error("Cannot specify both 'interval' and 'cron' params")]
     BothSchedulesSpecified,
+    #[error("Invalid cron expression '{expression}': {source}")]
+    InvalidCron {
+        expression: String,
+        #[source]
+        source: croner::errors::CronError,
+    },
+    #[error("Invalid timezone '{0}', expected an IANA name such as 'Europe/London'")]
+    InvalidTimezone(String),
+    #[error("Interval must not exceed 100 years")]
+    IntervalTooLong,
 }
+
+/// Longest accepted `interval` (`100y` in humantime, which counts 365.25-day years),
+/// keeping schedule arithmetic far from overflow.
+pub const MAX_INTERVAL: Duration = Duration::from_secs(3_155_760_000);
 
 /// Configuration for generate subscriber tasks that produce scheduled events.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Hash, Default)]
@@ -22,9 +36,11 @@ pub struct Subscriber {
     /// The unique name / identifier of the task.
     pub name: String,
     /// Optional structured payload for generated events.
-    /// Accepts arbitrary JSON that will be included in the event alongside system_info.
+    /// When the payload is a JSON object, a `system_info` field is added to it;
+    /// any other JSON value is sent as-is without `system_info`.
     pub payload: Option<serde_json::Value>,
-    /// Interval - runs IMMEDIATELY then repeats every duration.
+    /// Interval - waits one interval after startup, then repeats every duration.
+    /// After a restart, the first run is scheduled from the last successful run.
     /// Accepts duration strings: "100ms", "30s", "5m", etc.
     /// Mutually exclusive with `cron`.
     #[serde(default, with = "humantime_serde")]
@@ -66,19 +82,58 @@ pub struct Subscriber {
     pub retry: Option<crate::retry::RetryConfig>,
 }
 
+/// Parsed scheduling mode of a generate task.
+#[derive(Clone, Debug)]
+pub enum Schedule {
+    /// Fires every `interval`, measured from the previous attempt.
+    Interval(Duration),
+    /// Fires at each occurrence of `cron`, evaluated in `timezone`.
+    Cron {
+        cron: Box<croner::Cron>,
+        timezone: chrono_tz::Tz,
+    },
+    /// Fires back-to-back until `count` events have completed.
+    Once,
+}
+
 impl Subscriber {
-    /// Validates that exactly one scheduling method is specified.
-    /// Allows neither interval nor cron when count is specified (run-once mode).
+    /// Validates the config, including the cron expression and timezone.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.schedule()?;
+        Ok(())
+    }
+
+    /// Parses the scheduling fields into a [`Schedule`].
+    ///
+    /// Exactly one of `interval` or `cron` is required, except in run-once
+    /// mode where neither is set and `count` is.
+    pub fn schedule(&self) -> Result<Schedule, ConfigError> {
         match (&self.interval, &self.cron, &self.count) {
-            // Both interval and cron specified - error
             (Some(_), Some(_), _) => Err(ConfigError::BothSchedulesSpecified),
-            // Neither interval nor cron, but count is specified - OK (run-once mode)
-            (None, None, Some(_)) => Ok(()),
-            // Neither interval nor cron, and no count - error
+            (Some(interval), None, _) if *interval > MAX_INTERVAL => {
+                Err(ConfigError::IntervalTooLong)
+            }
+            (Some(interval), None, _) => Ok(Schedule::Interval(*interval)),
+            (None, Some(expression), _) => {
+                let cron = croner::Cron::from_str(expression).map_err(|source| {
+                    ConfigError::InvalidCron {
+                        expression: expression.clone(),
+                        source,
+                    }
+                })?;
+                let timezone = match &self.timezone {
+                    Some(name) => name
+                        .parse()
+                        .map_err(|_| ConfigError::InvalidTimezone(name.clone()))?,
+                    None => chrono_tz::UTC,
+                };
+                Ok(Schedule::Cron {
+                    cron: Box::new(cron),
+                    timezone,
+                })
+            }
+            (None, None, Some(_)) => Ok(Schedule::Once),
             (None, None, None) => Err(ConfigError::MissingSchedule),
-            // One of interval or cron specified - OK
-            _ => Ok(()),
         }
     }
 }
@@ -228,5 +283,54 @@ mod tests {
 
         let cloned = config.clone();
         assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_cron() {
+        let config = Subscriber {
+            cron: Some("0 25 * * *".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidCron { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_timezone() {
+        let config = Subscriber {
+            cron: Some("0 0 * * *".to_string()),
+            timezone: Some("Europe/Londn".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidTimezone(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_interval_above_max() {
+        let config = Subscriber {
+            interval: Some(MAX_INTERVAL + Duration::from_secs(1)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::IntervalTooLong)
+        ));
+    }
+
+    #[test]
+    fn test_schedule_defaults_cron_timezone_to_utc() {
+        let config = Subscriber {
+            cron: Some("0 0 * * *".to_string()),
+            ..Default::default()
+        };
+        match config.schedule() {
+            Ok(Schedule::Cron { timezone, .. }) => assert_eq!(timezone, chrono_tz::UTC),
+            other => panic!("expected a cron schedule, got {other:?}"),
+        }
     }
 }

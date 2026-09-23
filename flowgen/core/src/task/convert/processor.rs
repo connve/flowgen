@@ -273,6 +273,9 @@ impl EventHandler {
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
 
+            // One-in/one-out format transform, so the upstream id stays a valid dedup key.
+            e.id = event.id.clone();
+
             // Signal completion or pass through to next task.
             match self.tx {
                 None => {
@@ -671,7 +674,7 @@ mod tests {
             data: EventData::Json(json!({"test": "value"})),
             subject: "input.subject".to_string(),
             task_id: 0,
-            id: None,
+            id: Some("upstream-id".to_string()),
             timestamp: 123456789,
             task_type: "test",
             meta: None,
@@ -693,6 +696,7 @@ mod tests {
         }
         assert_eq!(output_event.subject, "test");
         assert_eq!(output_event.task_id, 1);
+        assert_eq!(output_event.id, Some("upstream-id".to_string()));
     }
 
     #[tokio::test]
