@@ -104,6 +104,7 @@ where
         let mut task: Option<String> = None;
         let mut task_type: Option<String> = None;
         let mut duration_ms: Option<u64> = None;
+        let mut unrecorded_handle: Option<tracing::Id> = None;
 
         for span in scope.from_root() {
             let name = span.name();
@@ -112,6 +113,9 @@ where
                 in_task_handle = true;
                 if let Some(SpanStart(start)) = ext.get::<SpanStart>() {
                     duration_ms = Some(start.elapsed().as_millis() as u64);
+                }
+                if ext.get::<DurationRecorded>().is_none() {
+                    unrecorded_handle = Some(span.id());
                 }
             }
             if let Some(SpanFlow(f)) = ext.get::<SpanFlow>() {
@@ -128,8 +132,13 @@ where
         // Backfill the `duration_ms` field on the `task.handle` span so
         // the JSON formatter includes it in the emitted line's `spans`
         // array. The field is declared as `field::Empty` on every
-        // `task.handle` instrument macro.
-        if let Some(ms) = duration_ms {
+        // `task.handle` instrument macro. Recorded once per span: fmt layers
+        // append a re-recorded field, so a handle that logs several events
+        // would otherwise repeat `duration_ms` on every line.
+        if let (Some(ms), Some(id)) = (duration_ms, unrecorded_handle) {
+            if let Some(span) = ctx.span(&id) {
+                span.extensions_mut().insert(DurationRecorded);
+            }
             tracing::Span::current().record("duration_ms", ms);
         }
 
@@ -259,6 +268,10 @@ struct SpanTaskType(String);
 /// duration when the terminal event fires.
 #[derive(Debug, Clone)]
 struct SpanStart(Instant);
+
+/// Marks a `task.handle` span whose `duration_ms` field is already recorded.
+#[derive(Debug, Clone)]
+struct DurationRecorded;
 
 #[derive(Default)]
 struct FieldCapture {

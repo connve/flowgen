@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.142.0
+
+### Fixes
+
+- `buffer` measures `timeout` from the first event in the batch. A burst
+  arriving after an idle gap longer than `timeout` is flushed as one batch.
+- `buffer` with `partition_key` keeps timeout state only for keys with an
+  active batch.
+- `task.handle` log lines carry `duration_ms` once.
+- The release workflow publishes a version when its `v<version>` tag does not
+  exist yet, and tags the built commit.
+
 ## 0.141.0
 
 ### Fixes

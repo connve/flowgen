@@ -17,7 +17,7 @@ Accumulates events into batches. Flushes when the batch reaches the configured s
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `size` | int | required | Number of events per batch. |
-| `timeout` | duration | `30s` | Flush timeout — sends the batch even if not full. |
+| `timeout` | duration | `30s` | Flush timeout — sends the batch even if not full, measured from the first event in the batch. |
 | `partition_key` | string | | Template for partitioned buffering. Events with the same key are batched together. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
@@ -30,7 +30,7 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html)
 |---|---|---|
 | `batch` | array | Accumulated events. |
 | `batch_size` | int | Number of events in the batch. |
-| `flush_reason` | string | `size`, `timeout`, or `shutdown`. |
+| `flush_reason` | string | `size`, `timeout`, `completion`, or `shutdown`. |
 
 ## Example: Partitioned buffering
 
