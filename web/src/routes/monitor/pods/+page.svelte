@@ -24,10 +24,10 @@
 						<th>Status</th>
 						<th>
 							<span
-								class="tooltip tooltip-bottom normal-case tracking-normal"
+								class="tooltip tooltip-bottom before:normal-case before:tracking-normal"
 								data-tip="Flows without leader election, plus the leader-elected flows this pod leads"
 							>
-								Running flows
+								Flows
 							</span>
 						</th>
 					</tr>

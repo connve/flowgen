@@ -99,6 +99,9 @@ impl LeaseTask {
         let Some(registry) = self.peer_registry.as_ref() else {
             return false;
         };
+        if self.response_tx.is_closed() {
+            return false;
+        }
         match registry.should_hand_over(&self.task_id).await {
             Ok(true) => {}
             Ok(false) => return false,
@@ -112,8 +115,8 @@ impl LeaseTask {
             .send(LeaderElectionResult::NotLeader)
             .is_err()
         {
-            debug!("Flow already terminated");
-            return true;
+            debug!(task_id = %self.task_id, "Flow already terminated, keeping its lease");
+            return false;
         }
         match self
             .executor
@@ -1040,6 +1043,75 @@ mod tests {
             LeaderElectionResult::Leader
         );
         assert!(other.is_err(), "non-preferred pod took over: {other:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebalancing_keeps_the_lease_of_a_finished_flow() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+        let flow_id = flow_id_preferring(&pods, 1);
+        let default_executor = |holder: &str| {
+            Arc::new(
+                Executor::new(
+                    cache.clone(),
+                    LeaseConfig {
+                        holder_identity: holder.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        let registry1 = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            pods[0].clone(),
+        ));
+        registry1.register().await.unwrap();
+        let manager1 = TaskManagerBuilder::new()
+            .executor(default_executor(&pods[0]))
+            .peer_registry(registry1)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx1 = manager1
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        assert_eq!(rx1.recv().await, Some(LeaderElectionResult::Leader));
+        drop(rx1);
+
+        let registry2 = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            pods[1].clone(),
+        ));
+        registry2.register().await.unwrap();
+        let manager2 = TaskManagerBuilder::new()
+            .executor(default_executor(&pods[1]))
+            .peer_registry(Arc::clone(&registry2))
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx2 = manager2
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        registry2.mark_ready().await.unwrap();
+
+        let taken_over = tokio::time::timeout(Duration::from_secs(120), rx2.recv()).await;
+        let revision = cache.get_revision(&lease_key(&flow_id)).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let renewed = cache.get_revision(&lease_key(&flow_id)).await.unwrap();
+
+        assert!(
+            taken_over.is_err(),
+            "pod-2 took over a finished flow: {taken_over:?}"
+        );
+        assert!(
+            renewed > revision,
+            "pod-1 stopped renewing the lease of its finished flow"
+        );
     }
 
     #[tokio::test(start_paused = true)]

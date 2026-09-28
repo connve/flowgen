@@ -46,6 +46,8 @@
 - A pod that reloads a leader-elected flow reclaims the lease it holds
   without waiting out the deferral window.
 - Doc examples in `flowgen_core::event` compile and run as doctests.
+- The Resources page lists files from a mounted ConfigMap once, under their
+  names, instead of under the ConfigMap's hidden `..<timestamp>` directories.
 
 ### Changed
 
