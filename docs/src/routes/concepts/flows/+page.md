@@ -215,6 +215,8 @@ When `require_leader_election` is enabled:
 
 - Only one pod runs the flow at a time (active/passive).
 - If the leader pod fails, another pod acquires the lease and takes over.
+- Pods spread leader-elected flows by rendezvous hashing over the live pods, so adding a pod changes the preferred owner only of the flows the new pod wins. A pod that is not the preferred owner of a flow waits 5 seconds before taking a free lease.
+- When a pod joins, the flows it now prefers move to it once it has started its flows. Once the pod list has not changed for 30 seconds, each pod hands over the leases it holds for flows another pod prefers, up to 10% of its leases (at least one) every 10 seconds. The flow stops on the old pod and starts on the new one. A flow that has finished keeps its lease on its pod, so it does not run again elsewhere. A flow that its preferred pod does not take stays where it is until the pod list changes again.
 - Lease renewal happens automatically with configurable TTL.
 
 This is useful for flows that must not run in parallel across pods — for example, a cron-triggered export that should only execute once.

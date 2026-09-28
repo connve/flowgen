@@ -28,8 +28,8 @@ pub struct LogFilter {
     pub flow: Option<String>,
     /// Restrict to records whose `task` attribute matches.
     pub task: Option<String>,
-    /// Restrict to records at the given tracing level (`info` / `warn` / `error`).
-    pub level: Option<String>,
+    /// Restrict to records at one of these tracing levels; empty matches every level.
+    pub levels: Vec<String>,
     /// Restrict to records emitted at or after this UNIX epoch (ms).
     pub since_ms: Option<u64>,
     /// Restrict to records emitted at or before this UNIX epoch (ms).
@@ -37,17 +37,24 @@ pub struct LogFilter {
 }
 
 impl LogFilter {
+    /// Parses comma-separated levels such as `warn,error`, skipping empty entries.
+    pub fn parse_levels(levels: &str) -> Vec<String> {
+        levels
+            .split(',')
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    }
+
     /// Returns `true` when `record` satisfies every populated field.
     pub fn matches(&self, record: &StoredLog) -> bool {
-        let level_ok = match &self.level {
-            Some(expected) => expected.eq_ignore_ascii_case(&record.level),
-            None => true,
-        };
-        let ts_ms = record
-            .timestamp
-            .as_deref()
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-            .map(|dt| dt.timestamp_millis() as u64);
+        let level_ok = self.levels.is_empty()
+            || self
+                .levels
+                .iter()
+                .any(|level| level.eq_ignore_ascii_case(&record.level));
+        let ts_ms = timestamp_ms(record);
         let since_ok = match self.since_ms {
             None => true,
             Some(cutoff) => matches!(ts_ms, Some(t) if t >= cutoff),
@@ -70,6 +77,14 @@ impl LogFilter {
     }
 }
 
+fn timestamp_ms(record: &StoredLog) -> Option<u64> {
+    record
+        .timestamp
+        .as_deref()
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.timestamp_millis() as u64)
+}
+
 /// Returns the first field value with `key` found across the span chain,
 /// leaf-to-root (so an inner span shadowing an outer span wins).
 fn span_field<'a>(record: &'a StoredLog, key: &str) -> Option<&'a str> {
@@ -81,6 +96,9 @@ fn span_field<'a>(record: &'a StoredLog, key: &str) -> Option<&'a str> {
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.as_str())
 }
+
+/// Largest `limit` a log query serves, bounding one response's size.
+pub const MAX_QUERY_LIMIT: usize = 10_000;
 
 /// Backend-agnostic log query facade.
 #[async_trait]
@@ -111,8 +129,8 @@ pub enum LogsStoreError {
     },
 }
 
-/// Creates a paired writer / query backed by an in-memory per-flow
-/// ring buffer of `capacity_per_flow` records.
+/// Creates a paired writer / query backed by in-memory ring buffers of
+/// `capacity_per_flow` records, one per flow and level.
 ///
 /// The writer is meant to be handed to
 /// `tracing_subscriber::fmt::layer().json().with_writer(...)`; the
@@ -133,9 +151,11 @@ pub fn pair(capacity_per_flow: usize) -> (MemoryLogsStoreWriter, MemoryLogsStore
     (writer, query)
 }
 
+type Buffers = HashMap<Option<String>, HashMap<String, VecDeque<StoredLog>>>;
+
 #[derive(Debug)]
 struct Inner {
-    buffers: Mutex<HashMap<String, VecDeque<StoredLog>>>,
+    buffers: Mutex<Buffers>,
     capacity_per_flow: usize,
 }
 
@@ -152,15 +172,12 @@ impl MemoryLogsStoreWriter {
             return;
         };
         let record = parsed.into_stored_log();
-        let flow = flow_of(&record).unwrap_or_default();
+        let flow = flow_of(&record);
         match self.inner.buffers.lock() {
-            Ok(mut guard) => push_bounded(
-                guard.entry(flow).or_default(),
-                &record,
-                self.inner.capacity_per_flow,
-            ),
+            Ok(mut guard) => push_bounded(&mut guard, flow, &record, self.inner.capacity_per_flow),
             Err(poisoned) => push_bounded(
-                poisoned.into_inner().entry(flow).or_default(),
+                &mut poisoned.into_inner(),
+                flow,
                 &record,
                 self.inner.capacity_per_flow,
             ),
@@ -269,25 +286,29 @@ impl LogsStore for MemoryLogsStore {
     }
 }
 
-fn collect_from(
-    buffers: &HashMap<String, VecDeque<StoredLog>>,
-    filter: &LogFilter,
-) -> Vec<StoredLog> {
-    if let Some(flow) = &filter.flow {
-        return match buffers.get(flow) {
-            Some(q) => q.iter().filter(|r| filter.matches(r)).cloned().collect(),
-            None => Vec::new(),
-        };
-    }
-    buffers
-        .values()
-        .flat_map(|q| q.iter())
-        .filter(|r| filter.matches(r))
+fn collect_from(buffers: &Buffers, filter: &LogFilter) -> Vec<StoredLog> {
+    let mut records: Vec<StoredLog> = buffers
+        .iter()
+        .filter(|(flow, _)| match (&filter.flow, flow) {
+            (None, _) => true,
+            (Some(expected), Some(flow)) => expected == flow,
+            (Some(_), None) => false,
+        })
+        .flat_map(|(_, levels)| levels.values())
+        .flat_map(|buffer| buffer.iter())
+        .filter(|record| filter.matches(record))
         .cloned()
-        .collect()
+        .collect();
+    records.sort_by_cached_key(timestamp_ms);
+    records
 }
 
-fn push_bounded(buffer: &mut VecDeque<StoredLog>, record: &StoredLog, capacity: usize) {
+fn push_bounded(buffers: &mut Buffers, flow: Option<String>, record: &StoredLog, capacity: usize) {
+    let buffer = buffers
+        .entry(flow)
+        .or_default()
+        .entry(record.level.clone())
+        .or_default();
     if buffer.len() == capacity {
         buffer.pop_front();
     }
@@ -417,6 +438,108 @@ mod tests {
         };
         assert!(f.matches(&record("orders", "handle", "ok", 1500)));
         assert!(!f.matches(&record("orders", "handle", "ok", 500)));
+    }
+
+    #[test]
+    fn filter_matches_any_of_the_levels() {
+        let at = |level: &str| StoredLog {
+            level: level.to_string(),
+            ..record("orders", "handle", "ok", 1)
+        };
+        let f = LogFilter {
+            levels: LogFilter::parse_levels("warn, ERROR,"),
+            ..Default::default()
+        };
+        assert_eq!(f.levels, vec!["warn", "error"]);
+        assert!(f.matches(&at("warn")));
+        assert!(f.matches(&at("error")));
+        assert!(!f.matches(&at("info")));
+    }
+
+    #[tokio::test]
+    async fn query_limit_counts_only_matching_levels() {
+        let (writer, store) = pair(100);
+        let mut line = writer.make_writer();
+        for level in ["ERROR", "INFO", "INFO", "INFO"] {
+            let json = format!(
+                r#"{{"level":"{level}","fields":{{"message":"m"}},"target":"t","spans":[{{"flow":"orders","name":"flow.run"}}]}}"#
+            );
+            io::Write::write_all(&mut line, json.as_bytes()).unwrap();
+            io::Write::write_all(&mut line, b"\n").unwrap();
+        }
+        let errors = LogFilter {
+            levels: vec!["error".to_string()],
+            ..Default::default()
+        };
+
+        let records = store.query(errors, 2).await.unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, "error");
+    }
+
+    fn write_line(writer: &MemoryLogsStoreWriter, flow: &str, level: &str, ts: &str, body: &str) {
+        let json = format!(
+            r#"{{"timestamp":"{ts}","level":"{level}","fields":{{"message":"{body}"}},"target":"t","spans":[{{"flow":"{flow}","name":"flow.run"}}]}}"#
+        );
+        let mut line = writer.make_writer();
+        io::Write::write_all(&mut line, json.as_bytes()).unwrap();
+        io::Write::write_all(&mut line, b"\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn logs_without_a_flow_match_no_flow_filter() {
+        let (writer, store) = pair(10);
+        let mut line = writer.make_writer();
+        io::Write::write_all(
+            &mut line,
+            br#"{"timestamp":"2026-09-28T10:00:00Z","level":"INFO","fields":{"message":"started"},"target":"t","spans":[]}"#,
+        )
+        .unwrap();
+        io::Write::write_all(&mut line, b"\n").unwrap();
+        drop(line);
+        write_line(&writer, "orders", "INFO", "2026-09-28T10:00:01Z", "ok");
+        let scoped = |flow: &str| LogFilter {
+            flow: Some(flow.to_string()),
+            ..Default::default()
+        };
+
+        let all = store.query(LogFilter::default(), 10).await.unwrap();
+        let orders = store.query(scoped("orders"), 10).await.unwrap();
+        let unnamed = store.query(scoped(""), 10).await.unwrap();
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(orders.len(), 1);
+        assert!(unnamed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn info_burst_does_not_evict_errors() {
+        let (writer, store) = pair(2);
+        write_line(&writer, "orders", "ERROR", "2026-09-28T10:00:00Z", "failed");
+        for second in 1..=5 {
+            let ts = format!("2026-09-28T10:00:0{second}Z");
+            write_line(&writer, "orders", "INFO", &ts, "ok");
+        }
+
+        let records = store.query(LogFilter::default(), 100).await.unwrap();
+
+        let levels: Vec<&str> = records.iter().map(|r| r.level.as_str()).collect();
+        assert_eq!(levels, vec!["error", "info", "info"]);
+    }
+
+    #[tokio::test]
+    async fn query_returns_the_newest_records_across_flows() {
+        let (writer, store) = pair(10);
+        write_line(&writer, "a", "INFO", "2026-09-28T10:00:01Z", "a1");
+        write_line(&writer, "b", "INFO", "2026-09-28T10:00:02Z", "b1");
+        write_line(&writer, "a", "INFO", "2026-09-28T10:00:03Z", "a2");
+        write_line(&writer, "b", "WARN", "2026-09-28T10:00:04Z", "b2");
+
+        let records = store.query(LogFilter::default(), 3).await.unwrap();
+
+        let bodies: Vec<&str> = records.iter().map(|r| r.body.as_str()).collect();
+        assert_eq!(bodies, vec!["b1", "a2", "b2"]);
     }
 
     #[test]

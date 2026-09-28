@@ -141,13 +141,60 @@ export interface paths {
          * Live log stream, optionally scoped to one flow.
          * @description Server-Sent Events with a single named event type `log` carrying
          *     one `LogRecord` per frame. Unscoped, this emits every captured
-         *     record and the web UI applies level and free-text filters
-         *     client-side; the per-flow Activity panel passes `flow` so it only
-         *     receives that flow's live records.
+         *     record; the web UI passes `levels` and applies free-text filters
+         *     client-side, and the per-flow Activity panel passes `flow` so it
+         *     only receives that flow's live records.
          */
         get: operations["streamLogs"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every pod behind the web UI, with reachability and flow count.
+         * @description With the `memory` telemetry backend and the cache, the serving pod
+         *     checks every registered pod; logs and flow counters of an
+         *     unreachable pod are missing from `/api/logs`, `/api/flows`, and
+         *     their streams. Otherwise only the serving pod is listed.
+         */
+        get: operations["getClusterStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cluster/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Replace the token pods use to reach each other.
+         * @description Available in cluster mode: the `memory` telemetry backend with the
+         *     cache. Generates a new
+         *     random token in the system cache, e.g. after the current one
+         *     leaked. Every pod switches to it within 30 seconds; until then,
+         *     some pods may miss others' logs and counters.
+         */
+        post: operations["regenerateClusterToken"];
         delete?: never;
         options?: never;
         head?: never;
@@ -540,6 +587,20 @@ export interface components {
             /** @description UTF-8 file contents. */
             content: string;
         };
+        ClusterStatus: {
+            /** @description Registered pods, the serving pod included, sorted by identity. */
+            pods: components["schemas"]["PodStatus"][];
+        };
+        PodStatus: {
+            /** @description Pod identity. */
+            identity: string;
+            /** @description `host:port` the pod advertises for the cluster endpoint. */
+            address?: string;
+            /** @description Why its logs and counters are missing from merged views. Absent when present. */
+            unreachable_reason?: string;
+            /** @description Flows running on the pod. Absent when it is unreachable. */
+            flows?: number;
+        };
         VersionInfo: {
             /** @description SemVer version derived from `CARGO_PKG_VERSION`. */
             version: string;
@@ -632,6 +693,11 @@ export interface components {
             value: string;
         };
         /**
+         * @description Lowercased tracing level.
+         * @enum {string}
+         */
+        LogLevel: "info" | "warn" | "error" | "debug" | "trace";
+        /**
          * @description A single log line captured by the telemetry backend, wire-shape
          *     of the internal `StoredLog`. Framework consumers get span
          *     topology (`spans`) alongside event-level `fields` so they can
@@ -640,11 +706,7 @@ export interface components {
         LogRecord: {
             /** @description The tracing event's `message` field. */
             body: string;
-            /**
-             * @description Lowercased tracing level.
-             * @enum {string}
-             */
-            level: "info" | "warn" | "error" | "debug" | "trace";
+            level: components["schemas"]["LogLevel"];
             /**
              * Format: date-time
              * @description RFC 3339 timestamp when present in the source line.
@@ -797,6 +859,8 @@ export interface operations {
                 limit?: number;
                 /** @description Restrict to one flow's records, by flow identity. */
                 flow?: string;
+                /** @description Levels to keep, one parameter each, e.g. `levels=warn&levels=error`. Omitted keeps every level; `limit` counts only kept records. */
+                levels?: components["schemas"]["LogLevel"][];
             };
             header?: never;
             path?: never;
@@ -820,6 +884,8 @@ export interface operations {
             query?: {
                 /** @description Restrict to one flow's records, by flow identity. */
                 flow?: string;
+                /** @description Levels to keep, one parameter each, e.g. `levels=warn&levels=error`. Omitted keeps every level. */
+                levels?: components["schemas"]["LogLevel"][];
             };
             header?: never;
             path?: never;
@@ -834,6 +900,62 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": string;
+                };
+            };
+        };
+    };
+    getClusterStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pods as seen from the serving pod. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStatus"];
+                };
+            };
+        };
+    };
+    regenerateClusterToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The token was replaced. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cluster mode is off. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description The token could not be written to the cache. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
                 };
             };
         };

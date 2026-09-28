@@ -6,7 +6,7 @@
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl } from '$lib/api';
+	import { apiUrl, encodePath } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
@@ -15,11 +15,6 @@
 
 	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;
-	}
-
-	// URL-encode a slash-delimited flow path so it survives fetch and goto.
-	function encodePath(path: string): string {
-		return path.split('/').map(encodeURIComponent).join('/');
 	}
 
 	let flows = $state<Flow[]>([]);
@@ -679,10 +674,10 @@
 								<div class="font-medium">{label(flow)}</div>
 								<div class="font-mono text-xs opacity-70">{flow.path}</div>
 							</td>
-							<td class="max-w-md text-sm">
-								{flow.description ?? '—'}
+							<td class="min-w-64 max-w-md text-sm">
+								<span class="line-clamp-2">{flow.description ?? '—'}</span>
 							</td>
-							<td>
+							<td class="min-w-48">
 								{#if flow.tags.length === 0}
 									<span class="opacity-50">—</span>
 								{:else}

@@ -34,7 +34,7 @@ cache:
 | `credentials_path` | string | optional | Path to NATS credentials. |
 | `url` | string | `localhost:4222` | NATS server URL. |
 | `runtime.db_name` | string | `flowgen_cache` | KV bucket for flow state — the one `ctx.cache` reads and writes. |
-| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases and peer registration. Created whenever the cache is enabled. |
+| `system.db_name` | string | `flowgen_system` | KV bucket for leader-election leases, peer registration, and the cluster mode token. Created whenever the cache is enabled. |
 | `history` | int | 64 | Historical entries retained per key. Server caps at 64. |
 | `tombstone_ttl` | duration | `1h` | TTL for delete markers. Enables per-key TTL on entries. |
 

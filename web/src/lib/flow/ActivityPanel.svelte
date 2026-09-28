@@ -1,7 +1,12 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
-	import { getFlowActivityLimit, setFlowActivityLimit } from '$lib/activityStore.svelte';
+	import {
+		activityLevels,
+		getFlowActivityLimit,
+		resetActivityLevels,
+		setFlowActivityLimit,
+	} from '$lib/activityStore.svelte';
 	import { levelBadgeColor, levelChipClass, levelDotClass, levelLabel } from '$lib/logRecord';
 	import type { ActivityLevel } from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
@@ -56,19 +61,11 @@
 	let viewportHeight = $state(256);
 	let selected = $state<Activity | null>(null);
 	let flowActivityLimit = $derived(getFlowActivityLimit());
+	let countWidth = $derived(`${String(flowActivityLimit).length}ch`);
 
-	// Filter state — level chips act as toggles. Info/Warn/Error default on
-	// (you're inspecting one flow's normal-vs-broken behavior); Debug/Trace
-	// default off everywhere, same as /logs — diagnostic noise, not
-	// something to review by default. Free-text runs against task + message
-	// + task_type, and a task lock pins to one node.
-	let levelFilter = $state<Record<ActivityLevel, boolean>>({
-		info: true,
-		warning: true,
-		error: true,
-		debug: false,
-		trace: false,
-	});
+	// Free-text runs against task + message + task_type, and a task lock pins
+	// to one node.
+	const levelFilter = activityLevels;
 	let search = $state('');
 	let taskFilter = $state<string | null>(null);
 
@@ -140,11 +137,11 @@
 
 	function toggleLevel(level: ActivityLevel, e: MouseEvent) {
 		e.stopPropagation();
-		levelFilter = { ...levelFilter, [level]: !levelFilter[level] };
+		levelFilter[level] = !levelFilter[level];
 	}
 
 	function clearFilters() {
-		levelFilter = { info: true, warning: true, error: true, debug: false, trace: false };
+		resetActivityLevels();
 		search = '';
 		searchDebounced = '';
 		taskFilter = null;
@@ -218,15 +215,21 @@
 			<span class="flex items-center gap-1">
 				<span class="chip-sm chip-info">
 					<span>Info</span>
-					<span class="tabular-nums opacity-60">{counts.info}</span>
+					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
+						>{counts.info}</span
+					>
 				</span>
 				<span class="chip-sm chip-warn">
 					<span>Warn</span>
-					<span class="tabular-nums opacity-60">{counts.warning}</span>
+					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
+						>{counts.warning}</span
+					>
 				</span>
 				<span class="chip-sm chip-error">
 					<span>Error</span>
-					<span class="tabular-nums opacity-60">{counts.error}</span>
+					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
+						>{counts.error}</span
+					>
 				</span>
 			</span>
 		{/if}
@@ -256,27 +259,34 @@
 						onclick={(e) => toggleLevel(level, e)}
 					>
 						<span>{levelLabel(level)}</span>
-						<span class="tabular-nums opacity-60">{counts[level]}</span>
+						{#if levelFilter[level]}
+							<span
+								class="inline-block text-left tabular-nums opacity-60"
+								style="min-width: {countWidth}">{counts[level]}</span
+							>
+						{/if}
 					</button>
 				{/each}
 			</span>
 
-			<label
-				class="input input-xs flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-			>
-				<Icon icon="tabler:stack-2" class="h-3.5 w-3.5 opacity-70" />
-				<span class="opacity-70">Limit</span>
-				<input
-					type="number"
-					min="1"
-					max={LOGS_LIMIT_MAX}
-					step="1000"
-					value={flowActivityLimit}
-					onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
-					class="no-spinner w-12 bg-transparent tabular-nums outline-none"
-					aria-label="Activity history limit"
-				/>
-			</label>
+			<div class="tooltip tooltip-bottom" data-tip="Max number of results per log level">
+				<label
+					class="input input-xs flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				>
+					<Icon icon="tabler:stack-2" class="h-3.5 w-3.5 opacity-70" />
+					<span class="opacity-70">Limit</span>
+					<input
+						type="number"
+						min="1"
+						max={LOGS_LIMIT_MAX}
+						step="1000"
+						value={flowActivityLimit}
+						onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
+						class="no-spinner w-12 bg-transparent tabular-nums outline-none"
+						aria-label="Activity history limit"
+					/>
+				</label>
+			</div>
 
 			{#if taskFilter}
 				<span

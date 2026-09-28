@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
-use tracing::{error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Tracks a running flow.
 ///
@@ -104,6 +104,46 @@ impl FlowHandle {
     }
 }
 
+/// Registered flows this pod runs, for the flow count peers see.
+pub struct RegistryFlows(pub Arc<RwLock<HashMap<String, FlowHandle>>>);
+
+#[async_trait::async_trait]
+impl flowgen_core::telemetry::cluster::RunningFlows for RegistryFlows {
+    async fn count(&self) -> usize {
+        let (unelected, elected) = match self.0.read() {
+            Ok(registry) => split_by_election(&registry),
+            Err(poisoned) => split_by_election(&poisoned.into_inner()),
+        };
+        let mut leading = 0;
+        for (flow, task_manager) in elected {
+            if task_manager.is_leader(&flow).await {
+                leading += 1;
+            }
+        }
+        unelected + leading
+    }
+}
+
+type ElectedFlow = (
+    flowgen_core::identity::FlowIdentity,
+    Arc<flowgen_core::task::manager::TaskManager>,
+);
+
+fn split_by_election(registry: &HashMap<String, FlowHandle>) -> (usize, Vec<ElectedFlow>) {
+    let mut unelected = 0;
+    let mut elected = Vec::new();
+    for handle in registry.values().filter(|handle| handle.is_running()) {
+        match (handle.require_leader_election, &handle.task_manager) {
+            (true, Some(task_manager)) => elected.push((
+                flowgen_core::identity::FlowIdentity::new(handle.identity.clone()),
+                Arc::clone(task_manager),
+            )),
+            _ => unelected += 1,
+        }
+    }
+    (unelected, elected)
+}
+
 /// Errors that can occur during application execution.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -173,6 +213,12 @@ pub enum Error {
     HttpServerStart {
         #[source]
         source: flowgen_core::http_server::Error,
+    },
+    /// Failed to set up the cluster-wide logs and metrics view.
+    #[error("Failed to set up cluster logs and metrics: {source}")]
+    ClusterSetup {
+        #[source]
+        source: flowgen_core::telemetry::cluster::Error,
     },
     /// Web UI login is enabled but has no cookie secret from either source.
     #[error(
@@ -962,13 +1008,56 @@ impl App {
         // and this pod's PeerRegistry agree on who "this pod" is.
         let holder_identity = flowgen_core::executor::resolve_holder_identity();
 
+        // Build the flow registry keyed by flow name. The watcher reconciler uses
+        // this to stop and deregister flows on hot-reload events.
+        let flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let running_flows: Arc<dyn flowgen_core::telemetry::cluster::RunningFlows> =
+            Arc::new(RegistryFlows(Arc::clone(&flow_registry)));
+
+        let cluster = match (
+            cluster_port(&app_config),
+            &system.cache,
+            self.logs_store.clone(),
+        ) {
+            (Some(port), Some(system_cache), Some(local_logs)) => {
+                let token = Arc::new(flowgen_core::telemetry::cluster::ClusterToken::new(
+                    Arc::clone(system_cache),
+                ));
+                let listener = flowgen_core::telemetry::cluster::bind(port)
+                    .await
+                    .map_err(|source| Error::ClusterSetup { source })?;
+                let serving = flowgen_core::telemetry::cluster::serve(
+                    listener,
+                    Arc::clone(&local_logs),
+                    Arc::clone(&self.metrics_store),
+                    Arc::clone(&token),
+                    Arc::clone(&running_flows),
+                );
+                let server = tokio::spawn(async move {
+                    if let Err(source) = serving.await {
+                        error!("{}", source);
+                    }
+                });
+                Some((port, token, local_logs, server))
+            }
+            _ => None,
+        };
+        let peer_address = match &cluster {
+            Some((port, ..)) => cluster_peer_address(*port),
+            None => None,
+        };
+
         // One instance per pod, not per flow: every flow's TaskManager
         // consults the same registry so the peer list reflects actual pod
         // count.
-        let peer_registry = Arc::new(flowgen_core::peer::PeerRegistry::new(
-            Arc::clone(&executor_cache),
-            holder_identity.clone(),
-        ));
+        let peer_registry = Arc::new(
+            flowgen_core::peer::PeerRegistry::new(
+                Arc::clone(&executor_cache),
+                holder_identity.clone(),
+            )
+            .with_address(peer_address),
+        );
         if let Err(e) = peer_registry.register().await {
             warn!("Failed to register peer: {}", e);
         }
@@ -977,6 +1066,8 @@ impl App {
         // one fewer token to keep in sync with the shutdown sequence.
         let peer_renewal_handle =
             peer_registry.spawn_renewal(tokio_util::sync::CancellationToken::new());
+        let peer_informer_handle =
+            peer_registry.spawn_informer(tokio_util::sync::CancellationToken::new());
 
         // Build all flows from configuration files.
         let mut flows: Vec<super::flow::Flow> = Vec::new();
@@ -1027,16 +1118,7 @@ impl App {
             };
         }
 
-        // Initialize flow setup.
-        for flow in &mut flows {
-            if let Err(source) = flow.init().await {
-                let err = Error::FlowInit {
-                    flow_name: flow.name().to_string(),
-                    source: Box::new(source),
-                };
-                error!("{}", err);
-            }
-        }
+        let flows = init_flows(flows).await;
 
         let mut http_handler_tasks = Vec::new();
         for flow in &flows {
@@ -1068,6 +1150,38 @@ impl App {
 
         let mut background_handles = Vec::new();
         background_handles.push(peer_renewal_handle);
+        background_handles.push(peer_informer_handle);
+
+        let (logs_store, metrics_store, cluster_peers) = match cluster {
+            Some((_, token, local_logs, server)) => {
+                background_handles.push(server);
+                let peers = Arc::new(
+                    flowgen_core::telemetry::cluster::ClusterPeers::new(
+                        Arc::clone(&peer_registry),
+                        token,
+                    )
+                    .map_err(|source| Error::ClusterSetup { source })?,
+                );
+                let logs = flowgen_core::telemetry::cluster::ClusterLogsStore::new(
+                    local_logs,
+                    Arc::clone(&peers),
+                );
+                let metrics = flowgen_core::telemetry::cluster::ClusterMetricsStore::new(
+                    Arc::clone(&self.metrics_store),
+                    Arc::clone(&peers),
+                );
+                (
+                    Some(Arc::new(logs) as Arc<dyn flowgen_core::telemetry::query::LogsStore>),
+                    Arc::new(metrics) as Arc<dyn flowgen_core::flow::activity::MetricsStore>,
+                    Some(peers),
+                )
+            }
+            None => (
+                self.logs_store.clone(),
+                Arc::clone(&self.metrics_store),
+                None,
+            ),
+        };
         if let Some(ref http_server) = http_server {
             let configured_port = app_config
                 .http_server
@@ -1132,11 +1246,6 @@ impl App {
         // Collect task managers for shutdown cleanup.
         let task_managers: Vec<Arc<flowgen_core::task::manager::TaskManager>> =
             flows.iter().filter_map(|f| f.task_manager()).collect();
-
-        // Build the flow registry keyed by flow name. The watcher reconciler uses
-        // this to stop and deregister flows on hot-reload events.
-        let flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>> =
-            Arc::new(RwLock::new(HashMap::new()));
 
         // Start all background flow tasks and populate the registry.
         for flow in flows {
@@ -1215,6 +1324,9 @@ impl App {
                 );
             }
         }
+        if let Err(e) = peer_registry.mark_ready().await {
+            warn!(error = %e, "Failed to mark this pod ready for rebalanced flows");
+        }
 
         // Start the web UI if enabled.
         let web_config = app_config.web.as_ref();
@@ -1234,8 +1346,11 @@ impl App {
                     flow_registry: Arc::clone(&flow_registry),
                     prefix: String::new(),
                     resource_loader: resource_loader.clone(),
-                    metrics_store: Arc::clone(&self.metrics_store),
-                    logs_store: self.logs_store.clone(),
+                    metrics_store: Arc::clone(&metrics_store),
+                    logs_store: logs_store.clone(),
+                    cluster_peers: cluster_peers.clone(),
+                    this_pod: holder_identity.clone(),
+                    running_flows: Arc::clone(&running_flows),
                     app_config: Arc::clone(&app_config),
                     conversation_cache: Arc::clone(&executor_cache),
                     system_bucket_present: system.cache.is_some(),
@@ -1364,6 +1479,62 @@ impl App {
     }
 }
 
+/// Initializes every flow and keeps the ones that succeed, logging each failure,
+/// the same way the reconciler skips a flow whose `init` fails.
+async fn init_flows(flows: Vec<super::flow::Flow>) -> Vec<super::flow::Flow> {
+    let mut initialized = Vec::with_capacity(flows.len());
+    for mut flow in flows {
+        match flow.init().await {
+            Ok(()) => initialized.push(flow),
+            Err(source) => {
+                let err = Error::FlowInit {
+                    flow_name: flow.name().to_string(),
+                    source: Box::new(source),
+                };
+                error!("{}", err);
+            }
+        }
+    }
+    initialized
+}
+
+/// Port peers read this pod's logs and counters from; `None` with the `remote` backend.
+fn cluster_port(app_config: &AppConfig) -> Option<u16> {
+    match app_config.telemetry.as_ref() {
+        Some(crate::config::TelemetryOptions {
+            enabled: true,
+            backend: Some(backend),
+            ..
+        }) => match backend {
+            crate::config::TelemetryBackendOptions::Memory { port, .. } => Some(*port),
+            crate::config::TelemetryBackendOptions::Remote { .. } => None,
+        },
+        _ => Some(crate::config::DEFAULT_CLUSTER_PORT),
+    }
+}
+
+/// `$POD_IP:port`, the address peers use to reach this pod.
+fn cluster_peer_address(port: u16) -> Option<String> {
+    let raw = match std::env::var("POD_IP") {
+        Ok(raw) => raw,
+        Err(_) => {
+            debug!("POD_IP is not set, so other pods cannot read this pod's logs and counters");
+            return None;
+        }
+    };
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(ip) => Some(std::net::SocketAddr::new(ip, port).to_string()),
+        Err(e) => {
+            warn!(
+                pod_ip = %raw,
+                error = %e,
+                "POD_IP is not an IP address, so other pods cannot read this pod's logs and counters"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the web UI's login client and cookie key from `web.auth`.
 ///
 /// `None` leaves the web server unstarted: a broken login config must not
@@ -1445,6 +1616,154 @@ fn compute_source_path(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn flow_from_yaml(identity: &str, yaml: &str) -> super::super::flow::Flow {
+        let raw: FlowConfigRaw = Config::builder()
+            .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let config = Arc::new(FlowConfig::from_path(raw, identity.to_string(), None).unwrap());
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        super::super::flow::FlowBuilder::new()
+            .config(config)
+            .cache(cache.clone())
+            .system_cache(cache)
+            .build()
+            .unwrap()
+    }
+
+    fn flow_handle(
+        identity: &str,
+        require_leader_election: bool,
+        join_handle: tokio::task::JoinHandle<()>,
+        task_manager: Option<Arc<flowgen_core::task::manager::TaskManager>>,
+    ) -> FlowHandle {
+        FlowHandle {
+            identity: identity.to_string(),
+            flow_display_name: None,
+            flow_description: None,
+            flow_tags: Vec::new(),
+            require_leader_election,
+            task_count: 1,
+            started_at: std::time::SystemTime::now(),
+            flow_yaml: String::new(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            join_handle,
+            from_filesystem: true,
+            task_manager,
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_flows_counts_running_flows_and_held_leases() {
+        use flowgen_core::identity::FlowIdentity;
+        use flowgen_core::task::manager::{
+            LeaderElectionOptions, LeaderElectionResult, TaskManagerBuilder,
+        };
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        let executor = |holder: &str| {
+            Arc::new(
+                flowgen_core::executor::Executor::new(
+                    Arc::clone(&cache),
+                    flowgen_core::executor::LeaseConfig {
+                        holder_identity: holder.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        executor("pod-b")
+            .acquire_lease(&format!(
+                "{}{}",
+                flowgen_core::executor::LEASE_KEY_PREFIX,
+                FlowIdentity::new("standby").as_key()
+            ))
+            .await
+            .unwrap();
+        let task_manager = Arc::new(
+            TaskManagerBuilder::new()
+                .executor(executor("pod-a"))
+                .build()
+                .unwrap()
+                .start()
+                .await,
+        );
+        let mut led = task_manager
+            .register(FlowIdentity::new("led"), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        let _standby = task_manager
+            .register(FlowIdentity::new("standby"), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        assert_eq!(led.recv().await, Some(LeaderElectionResult::Leader));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !task_manager.is_leader(&FlowIdentity::new("led")).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pod-a must renew the led lease");
+        let stopped = tokio::spawn(async {});
+        while !stopped.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let registry = Arc::new(RwLock::new(HashMap::from([
+            (
+                "plain".to_string(),
+                flow_handle("plain", false, tokio::spawn(std::future::pending()), None),
+            ),
+            (
+                "stopped".to_string(),
+                flow_handle("stopped", false, stopped, None),
+            ),
+            (
+                "led".to_string(),
+                flow_handle(
+                    "led",
+                    true,
+                    tokio::spawn(std::future::pending()),
+                    Some(Arc::clone(&task_manager)),
+                ),
+            ),
+            (
+                "standby".to_string(),
+                flow_handle(
+                    "standby",
+                    true,
+                    tokio::spawn(std::future::pending()),
+                    Some(Arc::clone(&task_manager)),
+                ),
+            ),
+        ])));
+
+        let count =
+            flowgen_core::telemetry::cluster::RunningFlows::count(&RegistryFlows(registry)).await;
+
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn init_flows_drops_flows_whose_init_fails() {
+        let webhook_without_http_server = flow_from_yaml(
+            "needs_http_server",
+            "flow:\n  tasks:\n    - http_endpoint:\n        name: hook\n        method: POST\n        endpoint: /hook\n",
+        );
+        let empty = flow_from_yaml("empty", "flow:\n  tasks: []\n");
+
+        let initialized = init_flows(vec![webhook_without_http_server, empty]).await;
+
+        let names: Vec<String> = initialized
+            .iter()
+            .map(|flow| flow.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["empty"]);
+    }
 
     #[test]
     fn compute_source_path_strips_root_and_extension() {

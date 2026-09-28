@@ -7,6 +7,7 @@
 //! backend also feeds a copy of that JSON stream into a per-flow ring
 //! buffer exposed via [`query::LogsStore`].
 
+pub mod cluster;
 pub mod query;
 
 use opentelemetry::KeyValue;
@@ -46,7 +47,7 @@ pub enum Error {
 /// (e.g. `task.run` carries `task`, `task_id`, `task_type`) so consumers
 /// can classify by span topology without losing which span contributed
 /// which field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredSpan {
     /// Span name (e.g. `flow.run`, `task.run`, `task.handle`).
     pub name: String,
@@ -55,7 +56,7 @@ pub struct StoredSpan {
 }
 
 /// A single log record captured by a telemetry backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredLog {
     /// Log record body (the tracing event's `message` field).
     pub body: String,

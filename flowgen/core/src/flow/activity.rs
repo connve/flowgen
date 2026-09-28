@@ -32,7 +32,8 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use opentelemetry::metrics::Counter;
 use opentelemetry::KeyValue;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,7 +67,7 @@ impl ActivityLevel {
 
 /// Derived status shown per flow on the web UI. Wins by recency: an
 /// error after an info is Error until the next info, and so on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FlowStatus {
     /// No events observed yet.
@@ -81,7 +82,7 @@ pub enum FlowStatus {
 
 /// Snapshot of a flow's counters plus the last-seen timestamps in unix
 /// milliseconds. `0` means "never seen".
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowMetricsSnapshot {
     /// Flow name (identifier from `flow.name`).
     pub flow: String,
@@ -117,6 +118,37 @@ impl FlowMetricsSnapshot {
             status: FlowStatus::Idle,
         }
     }
+
+    /// Adds `other`'s counters and keeps the later timestamps.
+    pub fn merge(&mut self, other: &FlowMetricsSnapshot) {
+        self.events_total += other.events_total;
+        self.warnings_total += other.warnings_total;
+        self.errors_total += other.errors_total;
+        self.last_event_at_ms = self.last_event_at_ms.max(other.last_event_at_ms);
+        self.last_warning_at_ms = self.last_warning_at_ms.max(other.last_warning_at_ms);
+        self.last_error_at_ms = self.last_error_at_ms.max(other.last_error_at_ms);
+        self.status = derive_status(
+            self.last_event_at_ms,
+            self.last_warning_at_ms,
+            self.last_error_at_ms,
+        );
+    }
+}
+
+/// Combines snapshots into one per flow with [`FlowMetricsSnapshot::merge`].
+pub fn merge_by_flow(
+    snapshots: impl IntoIterator<Item = FlowMetricsSnapshot>,
+) -> Vec<FlowMetricsSnapshot> {
+    let mut merged: HashMap<String, FlowMetricsSnapshot> = HashMap::new();
+    for snapshot in snapshots {
+        match merged.entry(snapshot.flow.clone()) {
+            Entry::Occupied(mut existing) => existing.get_mut().merge(&snapshot),
+            Entry::Vacant(slot) => {
+                slot.insert(snapshot);
+            }
+        }
+    }
+    merged.into_values().collect()
 }
 
 /// Atomic counter block used per flow. Lives behind an Arc so the tracing
@@ -438,6 +470,39 @@ mod tests {
             derive_status(Some(10), Some(20), Some(30)),
             FlowStatus::Error
         );
+    }
+
+    #[test]
+    fn merge_by_flow_sums_counters_and_keeps_latest_timestamps() {
+        let a = FlowMetricsSnapshot {
+            events_total: 3,
+            last_event_at_ms: Some(300),
+            status: FlowStatus::Ok,
+            ..FlowMetricsSnapshot::empty("f")
+        };
+        let b = FlowMetricsSnapshot {
+            events_total: 2,
+            errors_total: 1,
+            last_event_at_ms: Some(100),
+            last_error_at_ms: Some(400),
+            status: FlowStatus::Error,
+            ..FlowMetricsSnapshot::empty("f")
+        };
+        let other = FlowMetricsSnapshot {
+            events_total: 7,
+            ..FlowMetricsSnapshot::empty("g")
+        };
+
+        let mut merged = merge_by_flow([a, b, other]);
+        merged.sort_by(|x, y| x.flow.cmp(&y.flow));
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].events_total, 5);
+        assert_eq!(merged[0].errors_total, 1);
+        assert_eq!(merged[0].last_event_at_ms, Some(300));
+        assert_eq!(merged[0].last_error_at_ms, Some(400));
+        assert_eq!(merged[0].status, FlowStatus::Error);
+        assert_eq!(merged[1].events_total, 7);
     }
 
     #[tokio::test]

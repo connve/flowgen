@@ -251,10 +251,11 @@ OpenTelemetry providers for metrics, traces, and logs. See [Telemetry](/docs/flo
 |---|---|---|---|
 | `enabled` | bool | required | Set `true` to initialize the provider. |
 | `backend` | object | in-memory | Backend selection. Omit for the in-memory backend. |
-| `backend.type` | string | — | Either `memory` or `remote`. |
+| `backend.type` | string | — | `memory` or `remote`. |
 | `backend.endpoint` | string | — | Required for `remote`. gRPC endpoint of the collector. |
-| `backend.logs_per_flow` | usize | `1000` | Memory backend only. Log records retained per flow. |
+| `backend.logs_per_flow` | usize | `1000` | Memory backend only. Log records retained per flow and level on each pod. |
 | `backend.metrics_per_flow` | usize | `1000` | Memory backend only. Metric samples retained per flow. |
+| `backend.port` | int | `8082` | Memory backend only. Port of the internal endpoint the other pods read logs and flow counters from in cluster mode. |
 | `service_name` | string | `flowgen` | `service.name` resource attribute. |
 | `metrics_export_interval` | duration | `60s` | How often metric snapshots are pushed. Ignored by the memory backend. |
 

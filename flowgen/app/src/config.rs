@@ -937,18 +937,20 @@ pub struct TelemetryOptions {
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TelemetryBackendOptions {
-    /// Keep all signals in-process behind bounded per-flow ring buffers.
-    /// Intended for demo and single-node dev; multi-replica deploys
-    /// should use `remote` instead.
+    /// Keep logs and flow counters in memory on each pod; with `cache`, the
+    /// web UI shows every pod.
     Memory {
-        /// Log records retained per flow before oldest entries are
-        /// dropped. Defaults to 1000.
+        /// Log records retained per flow and level before oldest entries
+        /// are dropped. Defaults to 1000.
         #[serde(default = "default_logs_per_flow")]
         logs_per_flow: usize,
         /// Metric samples retained per flow before oldest entries are
         /// dropped. Defaults to 1000.
         #[serde(default = "default_metrics_per_flow")]
         metrics_per_flow: usize,
+        /// Port peers read logs and flow counters from. Defaults to 8082.
+        #[serde(default = "default_cluster_port")]
+        port: u16,
     },
     /// Push all signals over OTLP/gRPC to a remote collector.
     Remote {
@@ -963,6 +965,13 @@ fn default_service_name() -> String {
 
 fn default_metrics_interval() -> Duration {
     Duration::from_secs(60)
+}
+
+/// Default port peers read logs and flow counters from.
+pub const DEFAULT_CLUSTER_PORT: u16 = 8082;
+
+fn default_cluster_port() -> u16 {
+    DEFAULT_CLUSTER_PORT
 }
 
 fn default_logs_per_flow() -> usize {
@@ -1668,16 +1677,19 @@ flows:
             TelemetryBackendOptions::Memory {
                 logs_per_flow: 1000,
                 metrics_per_flow: 1000,
+                port: 8082,
             }
         ));
 
-        let yaml_memory_custom = "type: memory\nlogs_per_flow: 250\nmetrics_per_flow: 500\n";
+        let yaml_memory_custom =
+            "type: memory\nlogs_per_flow: 250\nmetrics_per_flow: 500\nport: 9090\n";
         let parsed: TelemetryBackendOptions = serde_yaml::from_str(yaml_memory_custom).unwrap();
         assert!(matches!(
             parsed,
             TelemetryBackendOptions::Memory {
                 logs_per_flow: 250,
                 metrics_per_flow: 500,
+                port: 9090,
             }
         ));
     }

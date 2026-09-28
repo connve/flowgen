@@ -62,6 +62,44 @@ async fn peer_registry_behaves_correctly_on_nats() {
     peer_registry_behaves_correctly(cache).await;
 }
 
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn informer_follows_peers_on_nats() {
+    let (_nats, url) = start_nats().await;
+    let config = app_config_with_cache(url);
+    let cache = flowgen::app::App::init_cache(&config, None)
+        .await
+        .expect("nats cache init");
+    let pod_a = PeerRegistry::new(cache.clone(), "pod-a".to_string());
+    let pod_b = PeerRegistry::new(cache.clone(), "pod-b".to_string());
+    pod_a.register().await.expect("pod-a registers");
+    let _informer = pod_a.spawn_informer(tokio_util::sync::CancellationToken::new());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !pod_a.informer_synced() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("informer did not sync on nats");
+
+    let converge = |expected: Vec<&'static str>| {
+        let pod_a = pod_a.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while pod_a.list_peers().await.expect("list_peers") != expected {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("pod-a's peer list did not converge");
+        }
+    };
+    pod_b.register().await.expect("pod-b registers");
+    converge(vec!["pod-a", "pod-b"]).await;
+    pod_b.deregister().await.expect("pod-b deregisters");
+    converge(vec!["pod-a"]).await;
+}
+
 /// The system bucket must exist whenever the cache does, even with flows
 /// loaded from the filesystem (`flows.cache: None` — the shape every
 /// git_sync deployment uses). It used to be created only as a side effect of
@@ -130,10 +168,14 @@ async fn dead_peer_drops_out_after_ttl_expiry_on_nats() {
     live.register().await.expect("live pod registers");
 
     let hard_killed_peer_key = "peers.pod-crashed";
+    let fresh_record = format!(
+        r#"{{"renewed_at_ms":{}}}"#,
+        chrono::Utc::now().timestamp_millis()
+    );
     cache
         .put(
             hard_killed_peer_key,
-            bytes::Bytes::from_static(b"pod-crashed"),
+            bytes::Bytes::from(fresh_record),
             Some(1),
         )
         .await
