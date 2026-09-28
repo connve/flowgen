@@ -3,7 +3,7 @@
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
-	import { apiUrl, type LogRecord } from '$lib/api';
+	import { apiUrl, encodePath, type LogRecord } from '$lib/api';
 	import { formatRelative } from '$lib/time';
 	import { rafBatch } from '$lib/rafBatch';
 	import {
@@ -13,7 +13,7 @@
 		timestampMs,
 	} from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
-	import { getLogsLimit, setLogsLimit } from '$lib/logsPageState.svelte';
+	import { getLogsLimit, logsLevels, setLogsLimit } from '$lib/logsPageState.svelte';
 
 	let logsLimit = $derived(getLogsLimit());
 
@@ -41,21 +41,9 @@
 		return b.id - a.id;
 	}
 
-	function encodePath(path: string): string {
-		return path.split('/').map(encodeURIComponent).join('/');
-	}
 
 	let rows = $state<LogRow[]>([]);
-	// Default filters: warn + error only. Info/debug/trace hidden until the
-	// operator explicitly widens the filter — matches how the Flows page
-	// leans on error/warning counters over ambient info noise.
-	let levelFilter = $state<Record<Level, boolean>>({
-		info: false,
-		warn: true,
-		error: true,
-		debug: false,
-		trace: false,
-	});
+	const levelFilter = logsLevels;
 	let search = $state('');
 	let live = $state(true);
 	let atTop = $state(true);
@@ -63,10 +51,10 @@
 	let scrollPane: HTMLDivElement | null = $state(null);
 	let source: EventSource | null = null;
 
-	// Line limit, defaulting to the Grafana/Loki-standard 1000. The operator
-	// can change it in the toolbar; it caps both the initial snapshot fetch
-	// and the in-browser buffer the live tail trims to. Clamped to the
-	// backend ceiling (`LOGS_SNAPSHOT_MAX_LIMIT`, 10000). Lives in
+	// Line limit per level, defaulting to the Grafana/Loki-standard 1000. The
+	// operator can change it in the toolbar; it caps both each level's
+	// snapshot fetch and the in-browser buffer the live tail trims to.
+	// Clamped to the backend ceiling (`MAX_QUERY_LIMIT`, 10000). Lives in
 	// `logsPageState` (module-level), not local `$state`, so it survives
 	// switching to another tab and back — only a full reload resets it.
 
@@ -84,10 +72,18 @@
 		return c;
 	});
 
+	function selectedLevels(): Level[] {
+		return (Object.keys(levelFilter) as Level[]).filter((level) => levelFilter[level]);
+	}
+
+	function trimPerLevel(list: LogRow[], limit: number): LogRow[] {
+		const kept: Record<Level, number> = { info: 0, warn: 0, error: 0, debug: 0, trace: 0 };
+		return list.filter((row) => kept[row.record.level]++ < limit);
+	}
+
 	let filtered = $derived(
 		rows.filter((row) => {
 			const r = row.record;
-			if (!levelFilter[r.level]) return false;
 			if (search.trim().length === 0) return true;
 			const needle = search.toLowerCase();
 			if (r.body.toLowerCase().includes(needle)) return true;
@@ -110,11 +106,18 @@
 	let bottomPad = $derived(Math.max(0, (filtered.length - endIdx) * ROW_HEIGHT));
 
 	function toggleLevel(level: Level) {
-		levelFilter = { ...levelFilter, [level]: !levelFilter[level] };
+		levelFilter[level] = !levelFilter[level];
+		if (levelFilter[level]) {
+			void loadLevels([level], logsLimit);
+		} else {
+			rows = rows.filter((row) => row.record.level !== level);
+			if (selected?.level === level) selected = null;
+		}
+		connectStream();
 	}
 
 	onMount(() => {
-		void loadHistory();
+		void loadLevels(selectedLevels(), logsLimit);
 		connectStream();
 	});
 
@@ -122,14 +125,28 @@
 		source?.close();
 	});
 
-	async function loadHistory() {
+	const levelRequests: Record<Level, number> = { info: 0, warn: 0, error: 0, debug: 0, trace: 0 };
+
+	async function loadLevels(levels: Level[], limit: number) {
+		await Promise.all(levels.map((level) => loadLevel(level, limit)));
+		await tick();
+		scrollToTop();
+	}
+
+	async function loadLevel(level: Level, limit: number) {
+		const request = ++levelRequests[level];
 		try {
-			const res = await fetch(apiUrl(`api/logs?limit=${logsLimit}`));
+			const res = await fetch(apiUrl(`api/logs?limit=${limit}&levels=${level}`));
 			if (!res.ok) return;
 			const body = (await res.json()) as LogRecord[];
-			rows = body.map((record) => ({ id: nextId++, record })).sort(rowOrder);
-			await tick();
-			scrollToTop();
+			if (request !== levelRequests[level] || !levelFilter[level]) return;
+			const fresh = body.map((record) => ({ id: nextId++, record }));
+			const newest = Math.max(-Infinity, ...body.map((record) => timestampMs(record) ?? -Infinity));
+			const kept = rows.filter(
+				(row) =>
+					row.record.level !== level || (timestampMs(row.record) ?? -Infinity) > newest,
+			);
+			rows = trimPerLevel([...kept, ...fresh].sort(rowOrder), limit);
 		} catch {
 			// history fetch is best-effort; the SSE stream backfills.
 		}
@@ -145,8 +162,8 @@
 		// Use `clamped`, not the `logsLimit` derived binding: Svelte doesn't
 		// re-run $derived synchronously within this same function call, so
 		// reading it here would still see the pre-update value.
-		if (rows.length > clamped) rows.length = clamped;
-		void loadHistory();
+		rows = trimPerLevel(rows, clamped);
+		void loadLevels(selectedLevels(), clamped);
 	}
 
 	// Coalesce SSE frames into one state mutation per animation frame. A
@@ -154,13 +171,10 @@
 	// per frame instead of per record keeps the event loop responsive.
 	const flushLogs = rafBatch<LogRecord>((batch) => {
 		for (const record of batch) {
-			rows.push({ id: nextId++, record });
+			if (levelFilter[record.level]) rows.push({ id: nextId++, record });
 		}
 		rows.sort(rowOrder);
-		// Oldest rows are now at the tail; trim from there.
-		if (rows.length > logsLimit) {
-			rows.length = logsLimit;
-		}
+		rows = trimPerLevel(rows, logsLimit);
 		if (live && atTop) {
 			void tick().then(scrollToTop);
 		}
@@ -168,7 +182,11 @@
 
 	function connectStream() {
 		source?.close();
-		source = new EventSource(apiUrl('api/logs/stream'));
+		source = null;
+		const levels = selectedLevels();
+		if (levels.length === 0) return;
+		const query = levels.map((level) => `levels=${level}`).join('&');
+		source = new EventSource(apiUrl(`api/logs/stream?${query}`));
 		source.addEventListener('log', (ev) => {
 			try {
 				flushLogs(JSON.parse(ev.data) as LogRecord);
@@ -305,14 +323,9 @@
 	}
 </script>
 
-<section class="flex h-[calc(100vh-4rem)] min-w-0 flex-col overflow-hidden">
+<section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="flex items-center gap-1.5 text-sm">
-				<span>All logs</span>
-				<span class="text-xs opacity-50">· {filtered.length} of {rows.length}</span>
-			</div>
-
 			<div class="flex items-center gap-1">
 				{#each [
 					{ key: 'info' as Level, label: 'Info' },
@@ -328,27 +341,34 @@
 						onclick={() => toggleLevel(key)}
 					>
 						<span>{label}</span>
-						<span class="tabular-nums opacity-60">{levelCounts[key]}</span>
+						{#if levelFilter[key]}
+							<span
+								class="inline-block text-left tabular-nums opacity-60"
+								style="min-width: {String(logsLimit).length}ch">{levelCounts[key]}</span
+							>
+						{/if}
 					</button>
 				{/each}
 			</div>
 
-			<label
-				class="input input-sm flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
-			>
-				<Icon icon="tabler:stack-2" class="h-4 w-4 opacity-70" />
-				<span class="opacity-70">Limit</span>
-				<input
-					type="number"
-					min="1"
-					max={LOGS_LIMIT_MAX}
-					step="1000"
-					value={logsLimit}
-					onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
-					class="no-spinner w-12 bg-transparent tabular-nums outline-none"
-					aria-label="Line limit"
-				/>
-			</label>
+			<div class="tooltip tooltip-bottom" data-tip="Max number of results per log level">
+				<label
+					class="input input-sm flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
+				>
+					<Icon icon="tabler:stack-2" class="h-4 w-4 opacity-70" />
+					<span class="opacity-70">Limit</span>
+					<input
+						type="number"
+						min="1"
+						max={LOGS_LIMIT_MAX}
+						step="1000"
+						value={logsLimit}
+						onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
+						class="no-spinner w-12 bg-transparent tabular-nums outline-none"
+						aria-label="Line limit"
+					/>
+				</label>
+			</div>
 
 			{#if !atTop && live}
 				<div class="tooltip tooltip-bottom" data-tip="Jump to latest">

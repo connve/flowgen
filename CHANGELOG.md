@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.143.0
+
+### Features
+
+- **Cluster mode.** With the `memory` telemetry backend (the default) and the
+  cache enabled, each pod serves its log ring buffer and flow counters to the
+  other pods on an internal port (`backend.port`, default `8082`). The web UI
+  shows the logs, event counts, and status of every pod from any pod. Pods
+  find each other through the peer registry and authenticate with a random
+  token the first pod stores in the system cache; `POST /api/cluster/token`
+  regenerates it. Helm chart 0.20.0 sets `POD_IP`, declares the port with
+  `flowgen.cluster.port` (default `8082`), and renders a NetworkPolicy that
+  admits it only from flowgen pods with `flowgen.cluster.networkPolicy: true`.
+- **Monitor in the web UI**, with **Logs** and **Pods** tabs. Pods lists every
+  pod with its status, the reason it is unreachable, and the number of flows
+  it runs; the tab shows `<reachable>/<total>` while a pod's logs and counters
+  are missing. Outside cluster mode, Pods lists the serving pod only.
+  `GET /api/cluster` returns the same data. `/logs` redirects to
+  `/monitor/logs`.
+- **Rebalancing of leader-elected flows.** When a pod joins and has started
+  its flows, the flows it now prefers move to it once the pod list has not
+  changed for 30 seconds, up to 10% of each pod's leases (at least one) every
+  10 seconds.
+
+### Fixes
+
+- Lease takeovers of leader-elected flows, e.g. after a rolling restart, go to
+  the preferred pod.
+- The preferred pod of a leader-elected flow is chosen by rendezvous hashing,
+  so adding a pod changes it only for the flows the new pod wins. After the
+  upgrade, some flows have a different preferred pod and move to it.
+- The peer registry ignores registrations not renewed within 30 seconds, so
+  pods that stopped without deregistering drop out of lease placement.
+- Flow registrations on a pod that is not the preferred owner wait out the
+  deferral window in parallel.
+- A flow whose initialization fails at startup is not started, matching hot
+  reload. Its initialization error is the only error it logs.
+- The Logs page keeps warnings and errors under heavy info traffic. The line
+  limit applies to each level separately, so selecting or clearing one level
+  leaves the others unchanged. `/api/logs` and `/api/logs/stream` take
+  `levels`, once per level (e.g. `levels=warn&levels=error`).
+- The memory backend retains `logs_per_flow` log records per flow and level.
+- `/api/logs` returns the newest records across flows.
+- A pod that reloads a leader-elected flow reclaims the lease it holds
+  without waiting out the deferral window.
+- Doc examples in `flowgen_core::event` compile and run as doctests.
+
+### Changed
+
+- Pods keep the peer list in memory, following registrations with a cache
+  watch, and read the cache directly only until the watch is synced or when
+  the cache cannot watch.
+- With the cache enabled and the `memory` telemetry backend, each pod listens
+  on `backend.port` (default `8082`) for the other pods; flowgen does not
+  start if the port is taken.
+- The builder image drops `ca-certificates`.
+
 ## 0.142.0
 
 ### Fixes

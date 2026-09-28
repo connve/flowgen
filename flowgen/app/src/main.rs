@@ -142,6 +142,7 @@ async fn main() {
                 Some(flowgen::config::TelemetryBackendOptions::Memory {
                     logs_per_flow,
                     metrics_per_flow,
+                    ..
                 }) => flowgen_core::telemetry::Backend::Memory {
                     logs_per_flow: *logs_per_flow,
                     metrics_per_flow: *metrics_per_flow,

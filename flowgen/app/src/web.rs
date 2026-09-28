@@ -81,6 +81,12 @@ pub struct WebState {
     /// Backend-agnostic log query used by the SSE stream and the
     /// history endpoint.
     pub logs_store: Option<Arc<dyn flowgen_core::telemetry::query::LogsStore>>,
+    /// Peers sharing their logs and counters, in cluster mode.
+    pub cluster_peers: Option<Arc<flowgen_core::telemetry::cluster::ClusterPeers>>,
+    /// This pod's identity, for `/api/cluster` outside cluster mode.
+    pub this_pod: String,
+    /// Flows this pod runs, for `/api/cluster`.
+    pub running_flows: Arc<dyn flowgen_core::telemetry::cluster::RunningFlows>,
     /// Running application configuration, surfaced read-only by the
     /// config viewer. Secrets serialize as `"***"` (see `JwtConfig`).
     pub app_config: Arc<crate::config::AppConfig>,
@@ -171,6 +177,11 @@ pub async fn start_web_server(port: u16, path: &str, mut state: WebState) -> Res
         .route(&format!("{api_prefix}/flows/{{*path}}"), get(get_flow))
         .route(&format!("{api_prefix}/logs"), get(list_logs))
         .route(&format!("{api_prefix}/logs/stream"), get(stream_logs))
+        .route(&format!("{api_prefix}/cluster"), get(get_cluster_status))
+        .route(
+            &format!("{api_prefix}/cluster/token"),
+            post(regenerate_cluster_token),
+        )
         .route(&format!("{api_prefix}/version"), get(get_version))
         .route(&format!("{api_prefix}/config"), get(get_config))
         .route(&format!("{api_prefix}/agents/chat"), post(proxy_chat))
@@ -537,7 +548,7 @@ fn apply_refreshed_cookies(response: &mut axum::response::Response, jar: AuthJar
 async fn auth_middleware(
     State(state): State<Arc<WebState>>,
     jar: AuthJar,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if state.login_client.is_none() {
@@ -545,6 +556,9 @@ async fn auth_middleware(
     }
     match resolve_session(&state, &jar).await {
         Some(resolved) => {
+            request
+                .extensions_mut()
+                .insert(resolved.session.user.clone());
             let mut response = next.run(request).await;
             if let Some(jar) = resolved.refreshed {
                 apply_refreshed_cookies(&mut response, jar);
@@ -739,9 +753,8 @@ async fn stream_flows(
     )
 }
 
-/// Default and maximum `?limit` for `/api/logs` snapshots.
+/// Default `?limit` for `/api/logs` snapshots.
 const LOGS_SNAPSHOT_DEFAULT_LIMIT: usize = 500;
-const LOGS_SNAPSHOT_MAX_LIMIT: usize = 10_000;
 
 /// Returns retained log records — framework, lifecycle, and per-task
 /// activity in one place. The per-flow Activity panel calls this with
@@ -749,21 +762,17 @@ const LOGS_SNAPSHOT_MAX_LIMIT: usize = 10_000;
 /// `/logs` viewer uses (unscoped).
 async fn list_logs(
     State(state): State<Arc<WebState>>,
-    axum::extract::Query(params): axum::extract::Query<LogsQuery>,
+    axum_extra::extract::Query(params): axum_extra::extract::Query<LogsQuery>,
 ) -> Json<Vec<api::LogRecord>> {
     let query = match state.logs_store.as_ref() {
         Some(q) => q,
         None => return Json(Vec::new()),
     };
     let limit = match params.limit {
-        Some(n) => n.min(LOGS_SNAPSHOT_MAX_LIMIT),
+        Some(n) => n.min(flowgen_core::telemetry::query::MAX_QUERY_LIMIT),
         None => LOGS_SNAPSHOT_DEFAULT_LIMIT,
     };
-    let filter = flowgen_core::telemetry::query::LogFilter {
-        flow: params.flow,
-        ..Default::default()
-    };
-    let records = match query.query(filter, limit).await {
+    let records = match query.query(params.filter(), limit).await {
         Ok(r) => r,
         Err(source) => {
             warn!(error = %source, "Log query history read failed");
@@ -775,23 +784,19 @@ async fn list_logs(
 }
 
 /// Streams log records as they arrive. Same scope as `list_logs`:
-/// unscoped by default (the global `/logs` UI groups and filters by
-/// level / task / flow / free text client-side); the per-flow Activity
-/// panel passes `flow` so it only receives that flow's live records.
+/// unscoped by default (the global `/logs` UI passes `levels` and filters
+/// free text client-side); the per-flow Activity panel passes `flow` so it
+/// only receives that flow's live records.
 async fn stream_logs(
     State(state): State<Arc<WebState>>,
-    axum::extract::Query(params): axum::extract::Query<LogsQuery>,
+    axum_extra::extract::Query(params): axum_extra::extract::Query<LogsQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, axum::Error>>> {
     // Tail-only: `/api/logs` returns the initial snapshot, this endpoint
     // streams new records as they arrive. Sending history here too would
     // duplicate every retained record for a UI that already loaded them.
     let live = match state.logs_store.as_ref() {
         Some(query) => {
-            let filter = flowgen_core::telemetry::query::LogFilter {
-                flow: params.flow,
-                ..Default::default()
-            };
-            let tail = match query.tail(filter).await {
+            let tail = match query.tail(params.filter()).await {
                 Ok(stream) => stream,
                 Err(source) => {
                     warn!(error = %source, "Log query tail subscription failed");
@@ -828,6 +833,19 @@ struct LogsQuery {
     /// Restrict to one flow's records. Used by the per-flow Activity panel;
     /// omitted by the global `/logs` viewer, which shows every flow.
     flow: Option<String>,
+    /// Levels to keep, one `levels` parameter each; omitted keeps every level.
+    #[serde(default)]
+    levels: Vec<api::LogLevel>,
+}
+
+impl LogsQuery {
+    fn filter(self) -> flowgen_core::telemetry::query::LogFilter {
+        flowgen_core::telemetry::query::LogFilter {
+            flow: self.flow,
+            levels: self.levels.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        }
+    }
 }
 
 /// Converts an internal `StoredLog` to the OpenAPI wire shape.
@@ -848,11 +866,11 @@ fn stored_to_wire(record: flowgen_core::telemetry::StoredLog) -> api::LogRecord 
         },
     };
     let level = match record.level.as_str() {
-        "warn" | "warning" => api::LogRecordLevel::Warn,
-        "error" => api::LogRecordLevel::Error,
-        "debug" => api::LogRecordLevel::Debug,
-        "trace" => api::LogRecordLevel::Trace,
-        _ => api::LogRecordLevel::Info,
+        "warn" | "warning" => api::LogLevel::Warn,
+        "error" => api::LogLevel::Error,
+        "debug" => api::LogLevel::Debug,
+        "trace" => api::LogLevel::Trace,
+        _ => api::LogLevel::Info,
     };
     api::LogRecord {
         body: record.body,
@@ -933,6 +951,77 @@ async fn get_resource(
             }))
         }
         Err(source) => Err((StatusCode::NOT_FOUND, source.to_string())),
+    }
+}
+
+/// Lists the pods behind the web UI with their reachability and flow count;
+/// only this pod when pods do not share their logs and counters.
+async fn get_cluster_status(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<api::ClusterStatus>, (StatusCode, String)> {
+    use flowgen_core::telemetry::cluster::{PodStatus, Reachability};
+    let flows = state.running_flows.count().await;
+    let pods = match state.cluster_peers.as_ref() {
+        Some(peers) => peers.status(flows).await,
+        None => Ok(vec![PodStatus {
+            identity: state.this_pod.clone(),
+            address: None,
+            reachability: Reachability::Reachable { flows },
+        }]),
+    };
+    match pods {
+        Ok(pods) => Ok(Json(api::ClusterStatus {
+            pods: pods
+                .into_iter()
+                .map(|pod| {
+                    let (flows, unreachable_reason) = match pod.reachability {
+                        Reachability::Reachable { flows } => (Some(flows as u64), None),
+                        Reachability::Unreachable { reason } => (None, Some(reason)),
+                    };
+                    api::PodStatus {
+                        identity: pod.identity,
+                        address: pod.address,
+                        unreachable_reason,
+                        flows,
+                    }
+                })
+                .collect(),
+        })),
+        Err(e) => {
+            warn!(error = %e, "Failed to list peers for cluster status");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to list peers".into(),
+            ))
+        }
+    }
+}
+
+/// Replaces the token pods present to each other, e.g. after a leak.
+async fn regenerate_cluster_token(
+    State(state): State<Arc<WebState>>,
+    user: Option<axum::Extension<flowgen_core::auth::UserContext>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let Some(peers) = state.cluster_peers.as_ref() else {
+        return Err((StatusCode::NOT_FOUND, "Cluster mode is off".into()));
+    };
+    match peers.regenerate_token().await {
+        Ok(()) => {
+            match user {
+                Some(axum::Extension(user)) => {
+                    warn!(user_id = %user.user_id, "Cluster token regenerated through the web API")
+                }
+                None => warn!("Cluster token regenerated through the web API"),
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to regenerate the cluster token");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to regenerate the cluster token".into(),
+            ))
+        }
     }
 }
 
@@ -1345,8 +1434,7 @@ mod tests {
         assert_eq!(DEFAULT_WEB_PATH, "/");
     }
 
-    #[test]
-    fn test_web_state_allows_empty_registry() {
+    fn test_state() -> WebState {
         let app_config = Arc::new(crate::config::AppConfig {
             cache: None,
             flows: crate::config::FlowOptions {
@@ -1363,12 +1451,16 @@ mod tests {
             event_buffer_size: None,
             telemetry: None,
         });
-        let state = WebState {
-            flow_registry: Arc::new(RwLock::new(HashMap::new())),
+        let flow_registry = Arc::new(RwLock::new(HashMap::new()));
+        WebState {
+            flow_registry: Arc::clone(&flow_registry),
             prefix: String::new(),
             resource_loader: None,
             metrics_store: flowgen_core::flow::activity::OtlpMetricsStore::builder().build(),
             logs_store: None,
+            cluster_peers: None,
+            this_pod: "test-pod".to_string(),
+            running_flows: Arc::new(crate::app::RegistryFlows(flow_registry)),
             app_config,
             conversation_cache: Arc::new(flowgen_core::cache::memory::MemoryCache::new()),
             system_bucket_present: false,
@@ -1376,9 +1468,59 @@ mod tests {
             login_client: None,
             cookie_key: axum_extra::extract::cookie::Key::generate(),
             cookie_secure: true,
-        };
+        }
+    }
+
+    #[test]
+    fn test_web_state_allows_empty_registry() {
+        let state = test_state();
         let registry = state.flow_registry.read().unwrap();
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn logs_query_takes_one_levels_parameter_per_level() {
+        let query = |query: &str| {
+            let uri: Uri = format!("/api/logs?{query}").parse().unwrap();
+            axum_extra::extract::Query::<LogsQuery>::try_from_uri(&uri)
+        };
+
+        let filter = query("levels=warn&levels=error").unwrap().0.filter();
+        let unfiltered = query("limit=10").unwrap().0.filter();
+        let rejected = query("levels=warn&levels=loud");
+
+        assert_eq!(filter.levels, vec!["warn", "error"]);
+        assert!(unfiltered.levels.is_empty());
+        assert!(rejected.is_err());
+    }
+
+    #[tokio::test]
+    async fn cluster_status_lists_only_this_pod_without_cache() {
+        let state = test_state();
+        state.flow_registry.write().unwrap().insert(
+            "orders".to_string(),
+            crate::app::FlowHandle {
+                identity: "orders".to_string(),
+                flow_display_name: None,
+                flow_description: None,
+                flow_tags: Vec::new(),
+                require_leader_election: false,
+                task_count: 1,
+                started_at: std::time::SystemTime::now(),
+                flow_yaml: String::new(),
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+                join_handle: tokio::spawn(std::future::pending()),
+                from_filesystem: true,
+                task_manager: None,
+            },
+        );
+
+        let Json(status) = get_cluster_status(State(Arc::new(state))).await.unwrap();
+
+        assert_eq!(status.pods.len(), 1);
+        assert_eq!(status.pods[0].identity, "test-pod");
+        assert_eq!(status.pods[0].flows, Some(1));
+        assert_eq!(status.pods[0].unreachable_reason, None);
     }
 
     #[test]

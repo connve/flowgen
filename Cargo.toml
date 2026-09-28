@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.142.0"
+version = "0.143.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -116,7 +116,7 @@ apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
 uuid = { version = "1", features = ["v7"] }
 axum = { version = "0.8" }
-axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "cookie-key-expansion"] }
+axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "cookie-key-expansion", "query"] }
 time = { version = "0.3" }
 base64 = { version = "0.22" }
 http = { version = "1.4" }
@@ -152,6 +152,8 @@ schemars = { version = "1.2" }
 scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 secrecy = { version = "0.10", features = ["serde"] }
+subtle = { version = "2.6" }
+getrandom = { version = "0.3" }
 walkdir = { version = "2.5" }
 testcontainers = { version = "0.27" }
 rust-embed = { version = "8.7" }

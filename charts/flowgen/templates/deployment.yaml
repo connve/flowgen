@@ -57,6 +57,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         {{- with $worker.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -79,6 +83,11 @@ spec:
         {{- if $worker.web }}
         - name: web
           containerPort: {{ $worker.web.port }}
+          protocol: TCP
+        {{- end }}
+        {{- if $worker.cluster }}
+        - name: cluster
+          containerPort: {{ default 8082 $worker.cluster.port }}
           protocol: TCP
         {{- end }}
         - name: health

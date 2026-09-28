@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.142.0
+  version: 0.143.0
   license:
     name: MPL-2.0
 servers:
@@ -145,6 +145,14 @@ paths:
           description: Restrict to one flow's records, by flow identity.
           schema:
             type: string
+        - name: levels
+          in: query
+          required: false
+          description: Levels to keep, one parameter each, e.g. `levels=warn&levels=error`. Omitted keeps every level; `limit` counts only kept records.
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LogLevel"
       responses:
         "200":
           description: Retained framework logs, oldest first.
@@ -162,9 +170,9 @@ paths:
       description: |
         Server-Sent Events with a single named event type `log` carrying
         one `LogRecord` per frame. Unscoped, this emits every captured
-        record and the web UI applies level and free-text filters
-        client-side; the per-flow Activity panel passes `flow` so it only
-        receives that flow's live records.
+        record; the web UI passes `levels` and applies free-text filters
+        client-side, and the per-flow Activity panel passes `flow` so it
+        only receives that flow's live records.
       tags: [logs]
       parameters:
         - name: flow
@@ -173,11 +181,64 @@ paths:
           description: Restrict to one flow's records, by flow identity.
           schema:
             type: string
+        - name: levels
+          in: query
+          required: false
+          description: Levels to keep, one parameter each, e.g. `levels=warn&levels=error`. Omitted keeps every level.
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LogLevel"
       responses:
         "200":
           description: Long-lived event stream.
           content:
             text/event-stream:
+              schema:
+                type: string
+
+  /api/cluster:
+    get:
+      operationId: getClusterStatus
+      summary: Every pod behind the web UI, with reachability and flow count.
+      description: |
+        With the `memory` telemetry backend and the cache, the serving pod
+        checks every registered pod; logs and flow counters of an
+        unreachable pod are missing from `/api/logs`, `/api/flows`, and
+        their streams. Otherwise only the serving pod is listed.
+      tags: [meta]
+      responses:
+        "200":
+          description: Pods as seen from the serving pod.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterStatus"
+
+  /api/cluster/token:
+    post:
+      operationId: regenerateClusterToken
+      summary: Replace the token pods use to reach each other.
+      description: |
+        Available in cluster mode: the `memory` telemetry backend with the
+        cache. Generates a new
+        random token in the system cache, e.g. after the current one
+        leaked. Every pod switches to it within 30 seconds; until then,
+        some pods may miss others' logs and counters.
+      tags: [meta]
+      responses:
+        "204":
+          description: The token was replaced.
+        "404":
+          description: Cluster mode is off.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: The token could not be written to the cache.
+          content:
+            text/plain:
               schema:
                 type: string
 
@@ -650,6 +711,34 @@ components:
           type: string
           description: UTF-8 file contents.
 
+    ClusterStatus:
+      type: object
+      required: [pods]
+      properties:
+        pods:
+          type: array
+          description: Registered pods, the serving pod included, sorted by identity.
+          items:
+            $ref: "#/components/schemas/PodStatus"
+
+    PodStatus:
+      type: object
+      required: [identity]
+      properties:
+        identity:
+          type: string
+          description: Pod identity.
+        address:
+          type: string
+          description: "`host:port` the pod advertises for the cluster endpoint."
+        unreachable_reason:
+          type: string
+          description: Why its logs and counters are missing from merged views. Absent when present.
+        flows:
+          type: integer
+          minimum: 0
+          description: Flows running on the pod. Absent when it is unreachable.
+
     VersionInfo:
       type: object
       required: [version]
@@ -796,6 +885,11 @@ components:
         value:
           type: string
 
+    LogLevel:
+      type: string
+      description: Lowercased tracing level.
+      enum: [info, warn, error, debug, trace]
+
     LogRecord:
       type: object
       description: |
@@ -809,9 +903,7 @@ components:
           type: string
           description: The tracing event's `message` field.
         level:
-          type: string
-          description: Lowercased tracing level.
-          enum: [info, warn, error, debug, trace]
+          $ref: "#/components/schemas/LogLevel"
         timestamp:
           type: string
           nullable: true

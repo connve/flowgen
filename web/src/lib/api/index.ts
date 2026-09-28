@@ -10,6 +10,11 @@ export function apiUrl(path: string): string {
 	return `${base}${clean}`;
 }
 
+// URL-encode a slash-delimited flow or resource path so it survives fetch and goto.
+export function encodePath(path: string): string {
+	return path.split('/').map(encodeURIComponent).join('/');
+}
+
 type Schemas = components['schemas'];
 
 export type FlowSummary = Schemas['FlowSummary'];
@@ -19,6 +24,8 @@ export type FlowSummarySource = Schemas['FlowSummary']['source'];
 export type ResourceSummary = Schemas['ResourceSummary'];
 export type ResourceContent = Schemas['ResourceContent'];
 export type VersionInfo = Schemas['VersionInfo'];
+export type ClusterStatus = Schemas['ClusterStatus'];
+export type PodStatus = Schemas['PodStatus'];
 export type ConfigInfo = Schemas['ConfigInfo'];
 export type LogRecord = Schemas['LogRecord'];
 export type LogSpan = Schemas['LogSpan'];

@@ -4,11 +4,11 @@
 // - Metrics/status: one shared EventSource on `/api/flows/stream`, opened
 //   once for the whole session (cheap — a handful of counters per flow).
 // - Event history + live tail: per-flow, opened lazily the first time a
-//   flow's activity is actually read. History comes from
-//   `GET /api/logs?flow=X&limit=1000` (the same endpoint and limit the
-//   global /logs viewer uses, just scoped), then `/api/logs/stream?flow=X`
-//   appends new records — so a flow that already finished emitting still
-//   shows its history instead of "No events yet".
+//   flow's activity is actually read. History comes from one
+//   `GET /api/logs?flow=X&levels=L&limit=1000` per level L (the limit applies
+//   to each level, as on the global /logs viewer), then
+//   `/api/logs/stream?flow=X` appends new records — so a flow that already
+//   finished emitting still shows its history instead of "No events yet".
 //
 // The server ships raw `LogRecord` frames; the classification (task-scope
 // filter, span hoisting, level bucketing) happens client-side so the
@@ -101,6 +101,26 @@ export function getFlowActivityLimit(): number {
 	return flowActivityLimit;
 }
 
+// Level chips of the Activity panel. Info/Warn/Error default on (you're
+// inspecting one flow's normal-vs-broken behavior); Debug/Trace default off
+// everywhere, same as /logs — diagnostic noise, not something to review by
+// default.
+const DEFAULT_ACTIVITY_LEVELS: Record<ActivityLevel, boolean> = {
+	info: true,
+	warning: true,
+	error: true,
+	debug: false,
+	trace: false,
+};
+
+export const activityLevels = $state<Record<ActivityLevel, boolean>>({
+	...DEFAULT_ACTIVITY_LEVELS,
+});
+
+export function resetActivityLevels() {
+	Object.assign(activityLevels, DEFAULT_ACTIVITY_LEVELS);
+}
+
 // Opens the single shared metrics stream. Independent of any per-flow
 // event subscription — metrics/status are read from `MetricsStore` on
 // the backend and pushed on every counter change, not derived from the
@@ -122,16 +142,54 @@ function ensureMetricsSubscription() {
 	});
 }
 
-// Fetches a flow's history from `/api/logs?flow=X` (same endpoint the
-// global /logs viewer uses, scoped server-side to this flow, capped at
-// `flowActivityLimit`) and replaces its bucket.
+const API_LEVELS = ['info', 'warn', 'error', 'debug', 'trace'] as const;
+
+function trimPerLevel(list: FlowActivity[], limit: number): FlowActivity[] {
+	const kept: Record<ActivityLevel, number> = { info: 0, warning: 0, error: 0, debug: 0, trace: 0 };
+	const out: FlowActivity[] = [];
+	for (let i = list.length - 1; i >= 0; i--) {
+		if (kept[list[i].level]++ < limit) out.push(list[i]);
+	}
+	return out.reverse();
+}
+
+let historyRequest = 0;
+
+// Fetches a flow's history from `/api/logs?flow=X`, up to
+// `flowActivityLimit` records per level, and replaces its bucket, keeping
+// live records newer than the history.
 async function refetchFlowHistory(flow: string) {
+	const request = ++historyRequest;
+	const limit = flowActivityLimit;
 	try {
-		const res = await fetch(
-			apiUrl(`api/logs?flow=${encodeURIComponent(flow)}&limit=${flowActivityLimit}`),
+		const perLevel = await Promise.all(
+			API_LEVELS.map(async (level) => {
+				const res = await fetch(
+					apiUrl(
+						`api/logs?flow=${encodeURIComponent(flow)}&limit=${limit}&levels=${level}`,
+					),
+				);
+				return res.ok ? ((await res.json()) as LogRecord[]) : [];
+			}),
 		);
-		const records = (await res.json()) as LogRecord[];
-		buckets[flow] = records.map(recordToActivity).filter((a): a is FlowActivity => a !== null);
+		if (request !== historyRequest) return;
+		const history = perLevel
+			.flat()
+			.map(recordToActivity)
+			.filter((a): a is FlowActivity => a !== null);
+		const newest: Record<ActivityLevel, number> = {
+			info: -Infinity,
+			warning: -Infinity,
+			error: -Infinity,
+			debug: -Infinity,
+			trace: -Infinity,
+		};
+		for (const a of history) newest[a.level] = Math.max(newest[a.level], a.ts_ms);
+		const later = (buckets[flow] ?? []).filter((a) => a.ts_ms > newest[a.level]);
+		buckets[flow] = trimPerLevel(
+			[...history, ...later].sort((a, b) => a.ts_ms - b.ts_ms),
+			limit,
+		);
 	} catch {
 		// History backfill is best-effort — live tail keeps working regardless.
 	}
@@ -170,7 +228,7 @@ async function ensureFlowSubscription(flow: string) {
 		}
 		for (const [f, evts] of groups) {
 			const existing = buckets[f] ?? [];
-			buckets[f] = [...existing, ...evts];
+			buckets[f] = trimPerLevel([...existing, ...evts], flowActivityLimit);
 		}
 	});
 

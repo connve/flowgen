@@ -186,7 +186,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/logs', icon: 'tabler:terminal-2', label: 'Logs', match: (p: string) => p.startsWith(base + '/logs') }] as item (item.href)}
+				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/monitor/logs', icon: 'tabler:activity', label: 'Monitor', match: (p: string) => p.startsWith(base + '/monitor') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"
@@ -262,7 +262,7 @@
 			</div>
 		</aside>
 
-		<div class="flex flex-1 flex-col bg-base-100">
+		<div class="flex min-w-0 flex-1 flex-col bg-base-100">
 			{#if !chromeless}
 				<header class="flex h-16 items-center justify-end gap-3 border-b border-base-300 px-6">
 					<div

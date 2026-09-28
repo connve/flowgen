@@ -98,6 +98,13 @@ flowgen:
   #   type: ClusterIP
   #   port: 8080
 
+  # Internal port pods read each other's logs and counters from in cluster
+  # mode (no Service). Match `telemetry.backend.port`.
+  cluster:
+    port: 8082
+    # Admits the cluster port only from flowgen pods; blocks ports not declared here.
+    networkPolicy: false
+
   # Kubernetes liveness/readiness listener. Independent from the API
   # listeners so probes keep working regardless of which surfaces are
   # enabled. Endpoints: /livez (always 200), /readyz (200 once >=1 flow

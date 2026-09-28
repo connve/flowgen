@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Task manager errors.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +35,132 @@ fn lease_key(task_id: &FlowIdentity) -> String {
     format!("{}{}", crate::executor::LEASE_KEY_PREFIX, task_id.as_key())
 }
 
+#[derive(Clone)]
+struct LeaseTask {
+    task_id: FlowIdentity,
+    lease_name: String,
+    executor: Arc<crate::executor::Executor>,
+    current_revision: Arc<Mutex<u64>>,
+    response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
+    active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
+    peer_registry: Option<Arc<crate::peer::PeerRegistry>>,
+}
+
+struct Leading {
+    registry: Arc<crate::peer::PeerRegistry>,
+    task_id: FlowIdentity,
+}
+
+impl Drop for Leading {
+    fn drop(&mut self) {
+        self.registry.note_leading(&self.task_id, false);
+    }
+}
+
+impl LeaseTask {
+    async fn hand_off_to_acquisition(self, delay: Duration) {
+        let key = self.task_id.as_key();
+        let active_leases = Arc::clone(&self.active_leases);
+        let mut leases = active_leases.lock().await;
+        let handle = spawn_acquisition_retry_task(self, delay);
+        leases.insert(
+            key,
+            ActiveLease {
+                handle,
+                leading: false,
+            },
+        );
+    }
+
+    async fn hand_off_to_renewal(self, generation: u64) {
+        let key = self.task_id.as_key();
+        let active_leases = Arc::clone(&self.active_leases);
+        let mut leases = active_leases.lock().await;
+        let handle = spawn_renewal_task(self, generation);
+        leases.insert(
+            key,
+            ActiveLease {
+                handle,
+                leading: true,
+            },
+        );
+    }
+
+    fn leading(&self) -> Option<Leading> {
+        let registry = self.peer_registry.as_ref()?;
+        registry.note_leading(&self.task_id, true);
+        Some(Leading {
+            registry: Arc::clone(registry),
+            task_id: self.task_id.clone(),
+        })
+    }
+
+    async fn hand_over(&self, revision: u64) -> bool {
+        let Some(registry) = self.peer_registry.as_ref() else {
+            return false;
+        };
+        match registry.should_hand_over(&self.task_id).await {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(e) => {
+                warn!(error = %e, task_id = %self.task_id, "Failed to check whether to hand the lease over");
+                return false;
+            }
+        }
+        if self
+            .response_tx
+            .send(LeaderElectionResult::NotLeader)
+            .is_err()
+        {
+            debug!("Flow already terminated");
+            return true;
+        }
+        match self
+            .executor
+            .release_lease_with_revision(&self.lease_name, revision)
+            .await
+        {
+            Ok(()) => {
+                info!(task_id = %self.task_id, "Handed the lease over to the preferred pod");
+                self.clone()
+                    .hand_off_to_acquisition(self.executor.config.renewal_interval)
+                    .await;
+            }
+            Err(e) => {
+                warn!(error = %e, task_id = %self.task_id, "Failed to release the lease for its preferred pod, reclaiming it");
+                self.clone().hand_off_to_acquisition(Duration::ZERO).await;
+            }
+        }
+        true
+    }
+
+    async fn defer_unless_preferred(&self) {
+        let Some(registry) = self.peer_registry.as_ref() else {
+            return;
+        };
+        if let Ok(Some(_)) = self.executor.still_owns_lease(&self.lease_name).await {
+            return;
+        }
+        match registry.is_preferred_owner(&self.task_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let deferral = registry.deferral_duration();
+                debug!(
+                    task_id = %self.task_id,
+                    deferral_ms = %deferral.as_millis(),
+                    "This pod is not the preferred owner, deferring acquisition"
+                );
+                tokio::time::sleep(deferral).await;
+            }
+            Err(e) => warn!(
+                error = %e,
+                task_id = %self.task_id,
+                "Failed to check preferred ownership, proceeding with normal acquisition"
+            ),
+        }
+    }
+}
+
 /// Spawns a task to continuously renew a lease with retry logic.
 ///
 /// This function spawns a background task that attempts to renew the lease at the configured interval.
@@ -47,42 +173,43 @@ fn lease_key(task_id: &FlowIdentity) -> String {
 /// one stored — otherwise a later `unregister` would abort a long-exited task
 /// and leave the actual renewer running, which is exactly the orphan-renewer
 /// race the hot-reload path used to hit.
-fn spawn_renewal_task(
-    task_id: FlowIdentity,
-    lease_name: String,
-    executor: Arc<crate::executor::Executor>,
-    current_revision: Arc<Mutex<u64>>,
-    generation: u64,
-    response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
-    active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
-) -> JoinHandle<()> {
+fn spawn_renewal_task(lease: LeaseTask, generation: u64) -> JoinHandle<()> {
     tokio::spawn(
         async move {
-            let mut interval = tokio::time::interval(executor.config.renewal_interval);
+            let _leading = lease.leading();
+            let mut interval = tokio::time::interval(lease.executor.config.renewal_interval);
 
             loop {
                 interval.tick().await;
 
-                let revision = *current_revision.lock().await;
+                let revision = *lease.current_revision.lock().await;
 
-                match executor
-                    .renew_lease(&lease_name, revision, generation)
+                match lease
+                    .executor
+                    .renew_lease(&lease.lease_name, revision, generation)
                     .await
                 {
                     Ok(crate::executor::RenewalResult::Renewed {
                         revision: new_revision,
                     }) => {
-                        *current_revision.lock().await = new_revision;
-                        debug!(task_id = %task_id, revision = %new_revision, "Renewed lease");
+                        *lease.current_revision.lock().await = new_revision;
+                        debug!(task_id = %lease.task_id, revision = %new_revision, "Renewed lease");
+                        if lease.hand_over(new_revision).await {
+                            break;
+                        }
                     }
                     Ok(crate::executor::RenewalResult::LostOwnership { holder }) => {
                         warn!(
-                            task_id = %task_id,
+                            task_id = %lease.task_id,
                             current_holder = %holder,
                             "Lost lease ownership, notifying flow and re-arming acquisition"
                         );
 
-                        if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
+                        if lease
+                            .response_tx
+                            .send(LeaderElectionResult::NotLeader)
+                            .is_err()
+                        {
                             debug!("Flow already terminated");
                             break;
                         }
@@ -91,47 +218,25 @@ fn spawn_renewal_task(
                         // this pod gets another shot at leadership when the
                         // current holder yields. Without this the flow would
                         // sit waiting on `leadership_rx.recv()` forever.
-                        let retry_handle = spawn_acquisition_retry_task(
-                            task_id.clone(),
-                            lease_name.clone(),
-                            executor.clone(),
-                            current_revision.clone(),
-                            response_tx.clone(),
-                            active_leases.clone(),
-                        );
-                        active_leases.lock().await.insert(
-                            task_id.as_key(),
-                            ActiveLease {
-                                handle: retry_handle,
-                            },
-                        );
+                        lease.clone().hand_off_to_acquisition(Duration::ZERO).await;
                         break;
                     }
                     Ok(crate::executor::RenewalResult::LeaseDeleted) => {
                         warn!(
-                            task_id = %task_id,
+                            task_id = %lease.task_id,
                             "Lease was deleted, notifying flow and re-arming acquisition"
                         );
 
-                        if response_tx.send(LeaderElectionResult::NotLeader).is_err() {
+                        if lease
+                            .response_tx
+                            .send(LeaderElectionResult::NotLeader)
+                            .is_err()
+                        {
                             debug!("Flow already terminated");
                             break;
                         }
 
-                        let retry_handle = spawn_acquisition_retry_task(
-                            task_id.clone(),
-                            lease_name.clone(),
-                            executor.clone(),
-                            current_revision.clone(),
-                            response_tx.clone(),
-                            active_leases.clone(),
-                        );
-                        active_leases.lock().await.insert(
-                            task_id.as_key(),
-                            ActiveLease {
-                                handle: retry_handle,
-                            },
-                        );
+                        lease.clone().hand_off_to_acquisition(Duration::ZERO).await;
                         break;
                     }
                     Err(e) => {
@@ -149,32 +254,29 @@ fn spawn_renewal_task(
 ///
 /// Unlike task execution retries, lease acquisition uses infinite retries (no max_attempts).
 /// This prevents outages where all pods give up trying to acquire leases during high contention
-/// (e.g., rolling restarts with DELETE tombstone races).
-fn spawn_acquisition_retry_task(
-    task_id: FlowIdentity,
-    lease_name: String,
-    executor: Arc<crate::executor::Executor>,
-    current_revision: Arc<Mutex<u64>>,
-    response_tx: mpsc::UnboundedSender<LeaderElectionResult>,
-    active_leases: Arc<Mutex<HashMap<String, ActiveLease>>>,
-) -> JoinHandle<()> {
+/// (e.g., rolling restarts with DELETE tombstone races). The first attempt waits `delay`.
+fn spawn_acquisition_retry_task(lease: LeaseTask, delay: Duration) -> JoinHandle<()> {
     tokio::spawn(
         async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let infinite_retry_config = crate::retry::RetryConfig {
                 max_attempts: None,
-                initial_backoff: executor.config.retry_config.initial_backoff,
+                initial_backoff: lease.executor.config.retry_config.initial_backoff,
             };
             let mut retry_strategy = infinite_retry_config.strategy();
             // A held lease is the expected state for a standby, not a failure,
             // so backoff is capped: an uncapped one keeps doubling until the
             // pod checks once a day and can no longer take over.
-            let max_backoff = executor.config.renewal_interval;
+            let max_backoff = lease.executor.config.renewal_interval;
             let mut attempt = 0;
 
             loop {
                 attempt += 1;
+                lease.defer_unless_preferred().await;
 
-                match executor.acquire_lease(&lease_name).await {
+                match lease.executor.acquire_lease(&lease.lease_name).await {
                     Ok(crate::executor::LeaseResult::Acquired {
                         revision,
                         generation,
@@ -183,41 +285,30 @@ fn spawn_acquisition_retry_task(
                         revision,
                         generation,
                     }) => {
-                        *current_revision.lock().await = revision;
+                        *lease.current_revision.lock().await = revision;
 
                         debug!(
-                            task_id = %task_id,
+                            task_id = %lease.task_id,
                             revision = %revision,
                             attempt = %attempt,
                             "Acquired lease, transitioning to leader"
                         );
 
-                        if response_tx.send(LeaderElectionResult::Leader).is_err() {
+                        if lease
+                            .response_tx
+                            .send(LeaderElectionResult::Leader)
+                            .is_err()
+                        {
                             debug!("Flow already terminated");
                             break;
                         }
 
-                        // Switch to renewal task.
-                        let renewal_handle = spawn_renewal_task(
-                            task_id.clone(),
-                            lease_name.clone(),
-                            executor.clone(),
-                            current_revision.clone(),
-                            generation,
-                            response_tx.clone(),
-                            active_leases.clone(),
-                        );
-                        active_leases.lock().await.insert(
-                            task_id.as_key(),
-                            ActiveLease {
-                                handle: renewal_handle,
-                            },
-                        );
+                        lease.clone().hand_off_to_renewal(generation).await;
                         break;
                     }
                     Ok(crate::executor::LeaseResult::HeldByOther { holder }) => {
                         debug!(
-                            task_id = %task_id,
+                            task_id = %lease.task_id,
                             holder = %holder,
                             attempt = %attempt,
                             "Lease held by other, will retry"
@@ -240,7 +331,7 @@ fn spawn_acquisition_retry_task(
 
                 if let Some(delay) = retry_strategy.next().map(|d| d.min(max_backoff)) {
                     debug!(
-                        task_id = %task_id,
+                        task_id = %lease.task_id,
                         delay_ms = %delay.as_millis(),
                         attempt = %attempt,
                         "Waiting before next lease acquisition attempt"
@@ -284,6 +375,8 @@ pub struct TaskRegistration {
 struct ActiveLease {
     /// Background task handle for renewal or retry operations.
     handle: JoinHandle<()>,
+    /// Whether `handle` renews a lease this pod holds.
+    leading: bool,
 }
 
 /// Centralized task lifecycle manager.
@@ -318,38 +411,7 @@ impl TaskManager {
             async move {
                 while let Some(registration) = rx.recv().await {
                     debug!("Received task registration: {:?}", registration.task_id);
-                    let result = if registration.leader_election_options.is_some() {
-                        let lease_name = lease_key(&registration.task_id);
-
-                        // If peer registry is configured, non-preferred pods defer
-                        // their acquisition attempt to let the preferred pod win.
-                        if let Some(ref registry) = peer_registry {
-                            match registry.is_preferred_owner(&registration.task_id).await {
-                                Ok(true) => {
-                                    debug!(
-                                        task_id = %registration.task_id,
-                                        "This pod is the preferred owner, acquiring immediately"
-                                    );
-                                }
-                                Ok(false) => {
-                                    let deferral = registry.deferral_duration();
-                                    debug!(
-                                        task_id = %registration.task_id,
-                                        deferral_ms = %deferral.as_millis(),
-                                        "This pod is not the preferred owner, deferring acquisition"
-                                    );
-                                    tokio::time::sleep(deferral).await;
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        error = %e,
-                                        task_id = %registration.task_id,
-                                        "Failed to check preferred ownership, proceeding with normal acquisition"
-                                    );
-                                }
-                            }
-                        }
-
+                    if registration.leader_election_options.is_some() {
                         // Defensive: a stale entry for this task_id (e.g. a
                         // prior registration whose `unregister` was missed)
                         // must be aborted before we install the new handle.
@@ -364,73 +426,23 @@ impl TaskManager {
                             prev.handle.abort();
                         }
 
-                        match executor.acquire_lease(&lease_name).await {
-                            Ok(crate::executor::LeaseResult::Acquired {
-                                revision,
-                                generation,
-                            })
-                            | Ok(crate::executor::LeaseResult::TakenOver {
-                                revision,
-                                generation,
-                            }) => {
-                                // Successfully acquired the lease.
-                                let current_revision = Arc::new(Mutex::new(revision));
-                                let renewal_handle = spawn_renewal_task(
-                                    registration.task_id.clone(),
-                                    lease_name.clone(),
-                                    executor.clone(),
-                                    current_revision,
-                                    generation,
-                                    registration.response_tx.clone(),
-                                    active_leases.clone(),
-                                );
-
-                                // Store the renewal handle.
-                                active_leases.lock().await.insert(
-                                    registration.task_id.as_key(),
-                                    ActiveLease {
-                                        handle: renewal_handle,
-                                    },
-                                );
-
-                                LeaderElectionResult::Leader
-                            }
-                            Ok(crate::executor::LeaseResult::HeldByOther { .. }) | Err(_) => {
-                                // Failed to acquire lease, spawn retry task.
-                                debug!("Did not acquire lease for task: {}", registration.task_id);
-
-                                let current_revision = Arc::new(Mutex::new(0));
-                                let retry_handle = spawn_acquisition_retry_task(
-                                    registration.task_id.clone(),
-                                    lease_name.clone(),
-                                    executor.clone(),
-                                    current_revision,
-                                    registration.response_tx.clone(),
-                                    active_leases.clone(),
-                                );
-
-                                // Store the retry handle.
-                                active_leases.lock().await.insert(
-                                    registration.task_id.as_key(),
-                                    ActiveLease {
-                                        handle: retry_handle,
-                                    },
-                                );
-
-                                // Don't send any result now - the retry task will send Leader when it succeeds.
-                                // This prevents duplicate task spawning.
-                                continue;
-                            }
+                        LeaseTask {
+                            lease_name: lease_key(&registration.task_id),
+                            task_id: registration.task_id,
+                            executor: executor.clone(),
+                            current_revision: Arc::new(Mutex::new(0)),
+                            response_tx: registration.response_tx,
+                            active_leases: active_leases.clone(),
+                            peer_registry: peer_registry.clone(),
                         }
-                    } else {
-                        // No leader election required.
-                        LeaderElectionResult::NoElection
-                    };
+                        .hand_off_to_acquisition(Duration::ZERO)
+                        .await;
+                        continue;
+                    }
 
-                    // Send the result back to the caller.
                     registration
                         .response_tx
-                        .send(result)
+                        .send(LeaderElectionResult::NoElection)
                         .map_err(|e| {
                             error!(
                                 task_id = %registration.task_id,
@@ -469,6 +481,14 @@ impl TaskManager {
         }
 
         Ok(response_rx)
+    }
+
+    /// Whether this pod holds the lease of `task_id`.
+    pub async fn is_leader(&self, task_id: &FlowIdentity) -> bool {
+        match self.active_leases.lock().await.get(&task_id.as_key()) {
+            Some(active) => active.leading,
+            None => false,
+        }
     }
 
     /// Aborts the background lease task for a single `task_id` without touching
@@ -610,10 +630,18 @@ mod tests {
     use std::time::Duration;
 
     fn make_executor(holder: &str, cache: Arc<dyn crate::cache::Cache>) -> Arc<Executor> {
+        make_executor_renewing_every(holder, cache, Duration::from_millis(100))
+    }
+
+    fn make_executor_renewing_every(
+        holder: &str,
+        cache: Arc<dyn crate::cache::Cache>,
+        renewal_interval: Duration,
+    ) -> Arc<Executor> {
         let config = LeaseConfig {
             holder_identity: holder.to_string(),
             lease_duration: Duration::from_secs(2),
-            renewal_interval: Duration::from_millis(100),
+            renewal_interval,
             ..Default::default()
         };
         Arc::new(Executor::new(cache, config).unwrap())
@@ -656,13 +684,16 @@ mod tests {
         let stale_revision = Arc::new(Mutex::new(pod2_revision.saturating_sub(1)));
         let active_leases = Arc::new(Mutex::new(HashMap::new()));
         spawn_renewal_task(
-            FlowIdentity::new("acct_nba"),
-            "acct_nba".to_string(),
-            exec1.clone(),
-            stale_revision,
+            LeaseTask {
+                task_id: FlowIdentity::new("acct_nba"),
+                lease_name: "acct_nba".to_string(),
+                executor: exec1.clone(),
+                current_revision: stale_revision,
+                response_tx,
+                active_leases,
+                peer_registry: None,
+            },
             pod2_generation,
-            response_tx,
-            active_leases,
         );
 
         // 1. NotLeader must arrive within a couple of renewal intervals.
@@ -690,6 +721,40 @@ mod tests {
         .await
         .expect("manager must re-arm acquisition after lost ownership");
         assert!(became_leader, "leadership channel closed prematurely");
+    }
+
+    #[tokio::test]
+    async fn is_leader_is_true_only_on_the_lease_holder() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let manager = |holder: &str| {
+            TaskManagerBuilder::new()
+                .executor(make_executor(holder, cache.clone()))
+                .build()
+                .unwrap()
+                .start()
+        };
+        let (leader, standby) = (manager("pod-1").await, manager("pod-2").await);
+        let flow = FlowIdentity::new("orders");
+        let mut leader_rx = leader
+            .register(flow.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), leader_rx.recv())
+            .await
+            .expect("pod-1 must be elected")
+            .unwrap();
+        let mut standby_rx = standby
+            .register(flow.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        let standby_result =
+            tokio::time::timeout(Duration::from_millis(300), standby_rx.recv()).await;
+
+        assert_eq!(first, LeaderElectionResult::Leader);
+        assert!(standby_result.is_err(), "pod-2 must stay standby");
+        assert!(leader.is_leader(&flow).await);
+        assert!(!standby.is_leader(&flow).await);
+        assert!(!leader.is_leader(&FlowIdentity::new("unknown")).await);
     }
 
     /// `unregister` must abort the live background lease task so the renewer
@@ -749,16 +814,15 @@ mod tests {
     }
 
     /// Finds an identity whose preferred peer (per `peer::preferred_peer`)
-    /// is `pods[want_index]`. Sorts `pods` first so `want_index` indexes
-    /// the same order `PeerRegistry::list_peers()` produces at runtime —
-    /// `preferred_peer` is only meaningful against a sorted peer list.
+    /// is `pods[want_index]`, indexing `pods` in the sorted order
+    /// `PeerRegistry::list_peers()` produces at runtime.
     fn flow_id_preferring(pods: &[String], want_index: usize) -> FlowIdentity {
         let mut sorted_pods = pods.to_vec();
         sorted_pods.sort();
         for n in 0..1000 {
             let candidate = FlowIdentity::new(format!("flow-{n}"));
             if crate::peer::preferred_peer(&candidate.as_key(), &sorted_pods)
-                == sorted_pods[want_index]
+                == Some(sorted_pods[want_index].as_str())
             {
                 return candidate;
             }
@@ -917,18 +981,173 @@ mod tests {
         );
     }
 
-    // A same-pod hot-reload swap (`reconciler.rs::reconcile_put`, where the
-    // old and new `Flow`'s `TaskManager`s share one `holder_identity`) is
-    // immune to peer-deferral timing by construction: `Executor::acquire_lease`'s
-    // same-identity check is pure string equality against cache state, so
-    // once the old flow's `stop_and_deregister` (which calls
-    // `TaskManager::unregister`) leaves the lease stamped with this pod's
-    // identity, the new flow's `acquire_lease` takes the self-renewal fast
-    // path regardless of whether a deferral ran first, how long it ran, or
-    // whether the deferral branch even exists — a test asserting only the
-    // eventual `Leader` outcome here would pass unconditionally. The
-    // dimension that genuinely depends on deferral timing — two *different*
-    // `holder_identity` values racing the same lease — is already covered
-    // above by `non_preferred_pod_defers_to_preferred_pod`
-    // and `non_preferred_pod_acquires_after_deferral_if_uncontested`.
+    #[tokio::test(start_paused = true)]
+    async fn standby_takeover_goes_to_preferred_pod() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+        let registry1 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[0].clone()).with_deferral_secs(1),
+        );
+        let registry2 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[1].clone()).with_deferral_secs(1),
+        );
+        registry1.register().await.unwrap();
+        registry2.register().await.unwrap();
+        let flow_id = flow_id_preferring(&pods, 0);
+        let departing_holder = make_executor("pod-departing", cache.clone());
+        departing_holder
+            .acquire_lease(&lease_key(&flow_id))
+            .await
+            .unwrap();
+
+        let manager2 = TaskManagerBuilder::new()
+            .executor(make_executor_renewing_every(
+                &pods[1],
+                cache.clone(),
+                Duration::from_millis(10),
+            ))
+            .peer_registry(registry2)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let manager1 = TaskManagerBuilder::new()
+            .executor(make_executor(&pods[0], cache.clone()))
+            .peer_registry(registry1)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx2 = manager2
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        let mut rx1 = manager1
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1355)).await;
+        departing_holder
+            .release_lease(&lease_key(&flow_id))
+            .await
+            .unwrap();
+
+        let preferred = tokio::time::timeout(Duration::from_millis(500), rx1.recv()).await;
+        let other = tokio::time::timeout(Duration::from_millis(1000), rx2.recv()).await;
+
+        assert_eq!(
+            preferred.expect("preferred pod must take over").unwrap(),
+            LeaderElectionResult::Leader
+        );
+        assert!(other.is_err(), "non-preferred pod took over: {other:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebalancing_hands_a_lease_to_a_new_preferred_pod() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+        let registry1 = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            pods[0].clone(),
+        ));
+        registry1.register().await.unwrap();
+        let flow_id = flow_id_preferring(&pods, 1);
+        let default_executor = |holder: &str| {
+            Arc::new(
+                Executor::new(
+                    cache.clone(),
+                    LeaseConfig {
+                        holder_identity: holder.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        let manager1 = TaskManagerBuilder::new()
+            .executor(default_executor(&pods[0]))
+            .peer_registry(Arc::clone(&registry1))
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx1 = manager1
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        assert_eq!(rx1.recv().await, Some(LeaderElectionResult::Leader));
+
+        let registry2 = Arc::new(crate::peer::PeerRegistry::new(
+            cache.clone(),
+            pods[1].clone(),
+        ));
+        registry2.register().await.unwrap();
+        let manager2 = TaskManagerBuilder::new()
+            .executor(default_executor(&pods[1]))
+            .peer_registry(Arc::clone(&registry2))
+            .build()
+            .unwrap()
+            .start()
+            .await;
+        let mut rx2 = manager2
+            .register(flow_id.clone(), Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        registry2.mark_ready().await.unwrap();
+
+        let handed_over = tokio::time::timeout(Duration::from_secs(60), rx1.recv()).await;
+        let taken_over = tokio::time::timeout(Duration::from_secs(15), rx2.recv()).await;
+        let reclaimed = tokio::time::timeout(Duration::from_secs(60), rx1.recv()).await;
+
+        assert_eq!(
+            handed_over.expect("pod-1 must hand the lease over"),
+            Some(LeaderElectionResult::NotLeader)
+        );
+        assert_eq!(
+            taken_over.expect("pod-2 must take the lease"),
+            Some(LeaderElectionResult::Leader)
+        );
+        assert!(
+            reclaimed.is_err(),
+            "pod-1 took the lease back: {reclaimed:?}"
+        );
+        assert!(manager2.is_leader(&flow_id).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hot_reload_reclaims_own_lease_without_deferral() {
+        let cache: Arc<dyn crate::cache::Cache> = Arc::new(MemoryCache::new());
+        let pods = vec!["pod-1".to_string(), "pod-2".to_string()];
+        let registry1 = Arc::new(
+            crate::peer::PeerRegistry::new(cache.clone(), pods[0].clone()).with_deferral_secs(1),
+        );
+        crate::peer::PeerRegistry::new(cache.clone(), pods[1].clone())
+            .register()
+            .await
+            .unwrap();
+        registry1.register().await.unwrap();
+        let flow_id = flow_id_preferring(&pods, 1);
+        make_executor(&pods[0], cache.clone())
+            .acquire_lease(&lease_key(&flow_id))
+            .await
+            .unwrap();
+        let manager = TaskManagerBuilder::new()
+            .executor(make_executor(&pods[0], cache.clone()))
+            .peer_registry(registry1)
+            .build()
+            .unwrap()
+            .start()
+            .await;
+
+        let mut rx = manager
+            .register(flow_id, Some(LeaderElectionOptions {}))
+            .await
+            .unwrap();
+        let reclaimed = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+
+        assert_eq!(
+            reclaimed.expect("own lease must be reclaimed before the deferral ends"),
+            Some(LeaderElectionResult::Leader)
+        );
+    }
 }

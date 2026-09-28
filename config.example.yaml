@@ -63,11 +63,12 @@ telemetry:
   # backend:
   #   type: remote
   #   endpoint: "http://otel-collector:4317"
-  # Or, for the in-memory backend (demo / single-node dev):
+  # Or, the default in-memory backend; with `cache`, the web UI shows every pod:
   # backend:
   #   type: memory
   #   logs_per_flow: 1000
   #   metrics_per_flow: 1000
+  #   port: 8082
   # Optional: service name (defaults to "flowgen").
   # service_name: "flowgen"
   # Optional: metrics export interval using human-readable format (defaults to "60s").

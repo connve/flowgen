@@ -27,6 +27,7 @@ flowgen_git = { path = "../git" }
 flowgen_oci = { path = "../oci" }
 flowgen_braze = { path = "../braze" }
 flowgen_kafka = { path = "../kafka" }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

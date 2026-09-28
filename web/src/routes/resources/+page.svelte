@@ -8,7 +8,12 @@
 	import CopyButton from '$lib/CopyButton.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
-	import { apiUrl, type ResourceSummary as Resource, type ResourceContent } from '$lib/api';
+	import {
+		apiUrl,
+		encodePath,
+		type ResourceSummary as Resource,
+		type ResourceContent
+	} from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
 
 	let resources = $state<Resource[]>([]);
@@ -77,9 +82,6 @@
 		return (node.children ?? []).some((c) => c.isFolder);
 	}
 
-	function encodePath(path: string): string {
-		return path.split('/').map(encodeURIComponent).join('/');
-	}
 
 	let searchActive = $derived(search.trim().length > 0);
 	let sidebarTree = $derived(buildTree<Resource>(resources, (r) => r.key));

@@ -315,3 +315,77 @@ fn probes_set_their_timeout_explicitly() {
         );
     }
 }
+
+fn network_policy(manifests: &[Manifest]) -> Option<Manifest> {
+    manifests
+        .iter()
+        .find(|m| m.kind == "NetworkPolicy")
+        .cloned()
+}
+
+fn rule_ports(rule: &serde_yaml::Value) -> Vec<u64> {
+    rule.get("ports")
+        .and_then(|p| p.as_sequence())
+        .expect("ingress rule should list ports")
+        .iter()
+        .map(|p| {
+            p.get("port")
+                .and_then(|v| v.as_u64())
+                .expect("port should be numeric")
+        })
+        .collect()
+}
+
+#[test]
+fn cluster_port_declared_without_network_policy_by_default() {
+    let manifests = render("");
+    let deployment = find_deployment(&manifests);
+    let cluster_port = container(pod_spec(&deployment))
+        .get("ports")
+        .and_then(|v| v.as_sequence())
+        .expect("container should declare ports")
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("cluster"))
+        .and_then(|p| p.get("containerPort"))
+        .and_then(|v| v.as_u64());
+
+    assert_eq!(cluster_port, Some(8082));
+    assert!(network_policy(&manifests).is_none());
+}
+
+#[test]
+fn cluster_network_policy_limits_cluster_port_to_flowgen_pods() {
+    let manifests = render(
+        r#"flowgen:
+  web:
+    type: ClusterIP
+    port: 8080
+  cluster:
+    networkPolicy: true
+"#,
+    );
+    let deployment = find_deployment(&manifests);
+    let cluster_port = container(pod_spec(&deployment))
+        .get("ports")
+        .and_then(|v| v.as_sequence())
+        .expect("container should declare ports")
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("cluster"))
+        .and_then(|p| p.get("containerPort"))
+        .and_then(|v| v.as_u64());
+    let policy = network_policy(&manifests).expect("NetworkPolicy should render");
+    let rules = policy
+        .spec
+        .as_ref()
+        .and_then(|s| s.get("ingress"))
+        .and_then(|i| i.as_sequence())
+        .expect("NetworkPolicy should have ingress rules")
+        .clone();
+
+    assert_eq!(cluster_port, Some(8082));
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rule_ports(&rules[0]), vec![8082]);
+    assert!(rules[0].get("from").is_some());
+    assert_eq!(rule_ports(&rules[1]), vec![3000, 8080, 8081]);
+    assert!(rules[1].get("from").is_none());
+}

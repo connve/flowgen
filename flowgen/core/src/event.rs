@@ -147,19 +147,31 @@ tokio::task_local! {
 /// Takes an Arc<Event> to avoid cloning the event data, only the Arc pointer is cloned inside.
 ///
 /// # Example
-/// ```ignore
-/// async fn handle(&self, event: Event) -> Result<(), Error> {
-///     let event = Arc::new(event);
-///     with_event_context(&Arc::clone(&event), async move {
-///         // EventBuilder::new() will automatically preserve event.meta
-///         // Access event fields via event.data, event.subject, etc.
-///         let new_event = EventBuilder::new()
-///             .data(some_data)
-///             .subject("example")
-///             .build()?;
-///         Ok(())
-///     }).await
-/// }
+/// ```
+/// # use flowgen_core::event::{with_event_context, Error, EventBuilder, EventData};
+/// # use serde_json::Value;
+/// # use std::sync::Arc;
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Error> {
+/// # let event = EventBuilder::new()
+/// #     .data(EventData::Json(Value::Null))
+/// #     .subject("source".to_string())
+/// #     .task_id(0)
+/// #     .task_type("example")
+/// #     .build()?;
+/// let event = Arc::new(event);
+/// let new_event = with_event_context(&Arc::clone(&event), async {
+///     EventBuilder::new()
+///         .data(EventData::Json(Value::Bool(true)))
+///         .subject("example".to_string())
+///         .task_id(1)
+///         .task_type("example")
+///         .build()
+/// })
+/// .await?;
+/// assert_eq!(new_event.meta, event.meta);
+/// # Ok(())
+/// # }
 /// ```
 pub async fn with_event_context<F, R>(event: &Arc<Event>, f: F) -> R
 where
@@ -186,11 +198,24 @@ impl<'a> EventLogger<'a> {
     /// Add a context field to the structured log output.
     ///
     /// # Example
-    /// ```ignore
-    /// event.send_with_logging(Some(&tx))
+    /// ```
+    /// # use flowgen_core::event::{Error, EventBuilder, EventData, EventExt};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Error> {
+    /// # let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    /// # let event = EventBuilder::new()
+    /// #     .data(EventData::Json(serde_json::Value::Null))
+    /// #     .subject("example".to_string())
+    /// #     .task_id(0)
+    /// #     .task_type("example")
+    /// #     .build()?;
+    /// event
+    ///     .send_with_logging(Some(&tx))
     ///     .context("row_count", 1000)
     ///     .context("external_id", "job-123")
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn context(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
         self.fields.push((key, value.to_string()));
@@ -253,15 +278,29 @@ pub trait EventExt {
     /// The builder implements `IntoFuture`, so you can await it directly.
     ///
     /// # Example
-    /// ```ignore
-    /// // Simple usage without context
-    /// event.send_with_logging(Some(&tx)).await?;
+    /// ```
+    /// # use flowgen_core::event::{Error, EventBuilder, EventData, EventExt};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Error> {
+    /// # let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    /// # let event = || {
+    /// #     EventBuilder::new()
+    /// #         .data(EventData::Json(serde_json::Value::Null))
+    /// #         .subject("example".to_string())
+    /// #         .task_id(0)
+    /// #         .task_type("example")
+    /// #         .build()
+    /// # };
+    /// event()?.send_with_logging(Some(&tx)).await?;
     ///
-    /// // With context fields
-    /// event.send_with_logging(Some(&tx))
+    /// event()?
+    ///     .send_with_logging(Some(&tx))
     ///     .context("row_count", 1000)
     ///     .context("external_id", "job-123")
     ///     .await?;
+    /// # assert!(rx.recv().await.is_some());
+    /// # Ok(())
+    /// # }
     /// ```
     fn send_with_logging<'a>(
         self,
@@ -318,9 +357,20 @@ impl Event {
     /// Use this when you need to work with just the data portion of an event.
     ///
     /// # Example
-    /// ```ignore
-    /// let event_data = event.data_as_json()?;
-    /// // event_data is the raw array/object/value, not wrapped in {"event": {...}}
+    /// ```
+    /// # use flowgen_core::event::{Error, EventBuilder, EventData};
+    /// # use serde_json::Value;
+    /// # fn main() -> Result<(), Error> {
+    /// let event = EventBuilder::new()
+    ///     .data(EventData::Json(Value::Bool(true)))
+    ///     .subject("example".to_string())
+    ///     .task_id(0)
+    ///     .task_type("example")
+    ///     .build()?;
+    ///
+    /// assert_eq!(event.data_as_json()?, Value::Bool(true));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn data_as_json(&self) -> Result<Value, Error> {
         Value::try_from(&self.data)
