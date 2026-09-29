@@ -562,7 +562,7 @@ impl EventHandler {
                     .task_id(self.task_id)
                     .task_type(self.task_type);
                 if let Some(meta_map) = meta {
-                    builder = builder.meta(meta_map);
+                    builder = builder.meta_merge(meta_map);
                 }
                 let mut e = builder
                     .build()

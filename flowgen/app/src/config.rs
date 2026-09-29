@@ -242,6 +242,8 @@ pub enum TaskType {
     mongodb_change_stream(flowgen_mongodb::config::ChangeStream),
     /// Kafka produce task.
     kafka_produce(flowgen_kafka::config::Produce),
+    /// Kafka subscribe task.
+    kafka_subscribe(flowgen_kafka::config::Subscribe),
 }
 
 impl TaskType {
@@ -285,6 +287,7 @@ impl TaskType {
             TaskType::mongodb_collection(_) => "mongodb_collection",
             TaskType::mongodb_change_stream(_) => "mongodb_change_stream",
             TaskType::kafka_produce(_) => "kafka_produce",
+            TaskType::kafka_subscribe(_) => "kafka_subscribe",
         }
     }
 
@@ -328,6 +331,7 @@ impl TaskType {
             TaskType::mongodb_collection(c) => &c.name,
             TaskType::mongodb_change_stream(c) => &c.name,
             TaskType::kafka_produce(c) => &c.name,
+            TaskType::kafka_subscribe(c) => &c.name,
         }
     }
 
@@ -383,6 +387,7 @@ impl TaskType {
             TaskType::mongodb_collection(c) => c.depends_on.as_ref(),
             TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
             TaskType::kafka_produce(c) => c.depends_on.as_ref(),
+            TaskType::kafka_subscribe(c) => c.depends_on.as_ref(),
         }
     }
 }

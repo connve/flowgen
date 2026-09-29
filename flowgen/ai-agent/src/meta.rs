@@ -122,20 +122,25 @@ pub struct CompletionContext {
 }
 
 impl CompletionContext {
-    /// Flatten into `event.meta`. Token fields are skipped when
-    /// missing rather than written as `null` so budget guards can
-    /// use a plain `event.meta.total_tokens ?? 0` idiom.
+    /// Flatten into `event.meta`. A token count the provider did not report
+    /// is removed rather than written as `null`, so budget guards can use a
+    /// plain `event.meta.total_tokens ?? 0` idiom.
     pub fn insert_into(&self, meta: &mut Map<String, Value>) {
         meta.insert(PROVIDER.into(), Value::String(self.provider.clone()));
         meta.insert(MODEL.into(), Value::String(self.model.clone()));
-        if let Some(v) = self.prompt_tokens {
-            meta.insert(PROMPT_TOKENS.into(), Value::Number(v.into()));
-        }
-        if let Some(v) = self.completion_tokens {
-            meta.insert(COMPLETION_TOKENS.into(), Value::Number(v.into()));
-        }
-        if let Some(v) = self.total_tokens {
-            meta.insert(TOTAL_TOKENS.into(), Value::Number(v.into()));
+        for (key, tokens) in [
+            (PROMPT_TOKENS, self.prompt_tokens),
+            (COMPLETION_TOKENS, self.completion_tokens),
+            (TOTAL_TOKENS, self.total_tokens),
+        ] {
+            match tokens {
+                Some(tokens) => {
+                    meta.insert(key.into(), Value::Number(tokens.into()));
+                }
+                None => {
+                    meta.remove(key);
+                }
+            }
         }
         meta.insert(LATENCY_MS.into(), Value::Number(self.latency_ms.into()));
     }
@@ -234,5 +239,31 @@ mod tests {
         // Provider / model / latency are always populated.
         assert_eq!(meta.get(PROVIDER), Some(&Value::String("custom".into())));
         assert_eq!(meta.get(LATENCY_MS).and_then(|v| v.as_u64()), Some(1000));
+    }
+
+    #[test]
+    fn completion_context_drops_token_counts_left_by_an_earlier_completion() {
+        let ctx = CompletionContext {
+            provider: "custom".into(),
+            model: "m".into(),
+            prompt_tokens: None,
+            completion_tokens: Some(3),
+            total_tokens: None,
+            latency_ms: 1,
+        };
+        let mut meta = Map::new();
+        meta.insert(PROMPT_TOKENS.into(), Value::Number(10.into()));
+        meta.insert(TOTAL_TOKENS.into(), Value::Number(20.into()));
+        meta.insert("custom".into(), Value::Bool(true));
+
+        ctx.insert_into(&mut meta);
+
+        assert!(!meta.contains_key(PROMPT_TOKENS));
+        assert!(!meta.contains_key(TOTAL_TOKENS));
+        assert_eq!(
+            meta.get(COMPLETION_TOKENS).and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(meta.get("custom"), Some(&Value::Bool(true)));
     }
 }

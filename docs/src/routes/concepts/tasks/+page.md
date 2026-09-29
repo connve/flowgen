@@ -15,6 +15,7 @@ Subscribers are source tasks that ingest data into the flow. They connect to ext
 | `nats_jetstream_subscriber` | Consumes messages from a NATS JetStream stream with durable consumers. |
 | `salesforce_pubsubapi_subscriber` | Subscribes to Salesforce Platform Events via gRPC. |
 | `mongodb_change_stream` | Watches a MongoDB database for real-time document changes. |
+| `kafka_subscribe` | Consumes every partition of a Kafka topic. |
 | `http_endpoint` | Listens for incoming HTTP requests and converts them to events. |
 | `generate` | Produces events on a schedule (cron or interval). |
 

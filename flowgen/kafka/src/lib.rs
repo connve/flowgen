@@ -1,7 +1,8 @@
 //! # Flowgen Kafka Integration
 //!
-//! Publishes flowgen events to Apache Kafka topics. Covers client and
-//! credentials handling, the task configuration, and the produce task itself.
+//! Publishes flowgen events to Apache Kafka topics and consumes topics into
+//! flows. Covers client and credentials handling, the task configuration,
+//! and the produce and subscribe tasks.
 
 /// Kafka client and SASL/SSL credentials handling.
 pub mod client;
@@ -9,3 +10,5 @@ pub mod client;
 pub mod config;
 /// Kafka produce task.
 pub mod produce;
+/// Kafka subscribe task.
+pub mod subscribe;

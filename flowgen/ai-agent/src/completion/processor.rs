@@ -871,17 +871,14 @@ impl EventHandler {
             total_tokens: final_usage.as_ref().map(|u| u.total_tokens),
             latency_ms: started_at.elapsed().as_millis() as u64,
         };
-        let mut meta = serde_json::Map::new();
-        completion_ctx.insert_into(&mut meta);
-
         let mut e = EventBuilder::new()
             .data(EventData::Json(payload))
             .subject(self.config.name.clone())
             .task_id(self.task_id)
             .task_type(self.task_type)
-            .meta(meta)
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
+        completion_ctx.insert_into(e.meta.get_or_insert_with(serde_json::Map::new));
 
         match self.tx {
             None => {
@@ -1093,17 +1090,14 @@ impl EventHandler {
                 total_tokens: final_usage.as_ref().map(|u| u.total_tokens),
                 latency_ms: started_at.elapsed().as_millis() as u64,
             };
-            let mut meta = serde_json::Map::new();
-            completion_ctx.insert_into(&mut meta);
-
             let mut e = EventBuilder::new()
                 .data(EventData::Json(data))
                 .subject(self.config.name.clone())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
-                .meta(meta)
                 .build()
                 .map_err(|source| Error::EventBuilder { source })?;
+            completion_ctx.insert_into(e.meta.get_or_insert_with(serde_json::Map::new));
 
             // Only the final event carries the completion signal.
             match self.tx {

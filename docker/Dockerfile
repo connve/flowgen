@@ -3,14 +3,12 @@
 # first `cargo` invocation once the source is copied in.
 FROM rust:slim-bookworm AS rust_base
 
-# Base system dependencies required to build native crates (rdkafka, openssl,
+# Base system dependencies required to build native crates (openssl,
 # protobuf). Kept in a separate layer because they change rarely.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
-    libcurl4-openssl-dev \
-    cmake \
     protobuf-compiler \
     git \
     curl \

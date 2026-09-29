@@ -25,10 +25,18 @@ Watches a MongoDB database for real-time change events and emits each change doc
 
 | Format | Crate | Description |
 |---|---|---|
-| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [mongodb](https://docs.rs/mongodb/latest/mongodb/) | The `fullDocument` from each change stream event, converted to JSON. Event ID is set to the document's `_id`. |
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [mongodb](https://docs.rs/mongodb/latest/mongodb/) | The changed document, converted to JSON. See [Behaviour](#behaviour). |
+
+| Event field | Value |
+|---|---|
+| `event.subject` | Collection the change happened in; the database name for a database-level change. |
+| `event.id` | The change's resume token, unique per change. |
+| `event.meta.document_key` | The changed document's key (`{"_id": ...}`), absent for a collection or database change. |
+| `event.meta.database` | Database the change happened in. |
+| `event.meta.operation_type` | Change type: `insert`, `update`, `replace`, `delete`, `drop`, `rename`, `dropDatabase`, or `invalidate`. |
 
 ## Behaviour
 
-The change stream watches the entire database for document inserts, updates, and replacements. Only operations that include a `fullDocument` are emitted. If a change event lacks a full document (e.g., unset `fullDocument` for pre- and post-images), the operation is skipped.
+The change stream watches the entire database and emits every change. `event.data` is the changed document for an insert or a replacement, and the current version of the document for an update, looked up when the change is read; an update to a document deleted before the lookup carries `null`. For a delete it is the deleted document's key (`{"_id": ...}`), and for a collection or database change such as a drop it is `null`. Route on `event.meta.operation_type` to handle each kind.
 
 The stream reconnects automatically on connection loss using an infinite retry loop with exponential backoff and jitter.

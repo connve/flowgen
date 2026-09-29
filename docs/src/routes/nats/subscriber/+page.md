@@ -60,6 +60,12 @@ Consumes messages from a NATS JetStream stream. Source task — typically first 
 |---|---|---|
 | [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) / [Avro](https://docs.rs/apache-avro/latest/apache_avro/) / [Arrow](https://docs.rs/arrow/latest/arrow/record_batch/struct.RecordBatch.html) | [async-nats](https://docs.rs/async-nats/latest/async_nats/) | Message payload from JetStream. Format depends on how the message was published. |
 
+| Event field | Value |
+|---|---|
+| `event.subject` | Subject the message was published to. |
+| `event.id` | The `Nats-Msg-Id` header, when the message has one. |
+| `event.meta.headers` | Message headers. A header set more than once keeps its first value. |
+
 ## Example
 
 ```yaml

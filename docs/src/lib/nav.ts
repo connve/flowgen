@@ -128,7 +128,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/kafka.svg',
 		items: [
 			{ title: 'Overview', href: '/kafka' },
-			{ title: 'Produce', href: '/kafka/produce' }
+			{ title: 'Produce', href: '/kafka/produce' },
+			{ title: 'Subscribe', href: '/kafka/subscribe' }
 		]
 	},
 	{

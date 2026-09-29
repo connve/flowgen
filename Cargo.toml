@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.143.0"
+version = "0.144.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -160,4 +160,6 @@ rust-embed = { version = "8.7" }
 mime_guess = { version = "2.0" }
 bson = { version = "2.15" }
 mongodb = { version = "3.8" }
-rdkafka = { version = "0.37", default-features = false, features = ["cmake-build", "libz", "ssl", "tokio"] }
+rskafka = { git = "https://github.com/connve/rskafka", branch = "feat/create-topics-with-configs", default-features = false, features = ["transport-tls", "compression-gzip", "compression-lz4", "compression-snappy", "compression-zstd"] }
+rustls-native-certs = { version = "0.8" }
+pkcs8 = { version = "0.10", features = ["encryption", "pem", "3des"] }

@@ -507,8 +507,11 @@ async fn dispatch<A: ProtocolAdapter>(
 
     let mut meta = serde_json::Map::new();
     if let Some(ref uctx) = ctx.user_context {
-        if let Ok(value) = serde_json::to_value(uctx) {
-            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+        match serde_json::to_value(uctx) {
+            Ok(value) => {
+                meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+            }
+            Err(source) => return DispatchError::PayloadSerialization { source }.into_response(),
         }
     }
 
@@ -661,18 +664,13 @@ async fn dispatch_blocking<A: ProtocolAdapter>(
 ) -> Result<Response, DispatchError> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
-    let mut builder = EventBuilder::new()
+    let e = EventBuilder::new()
         .data(EventData::Json(request.data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
-        .completion_tx(completion_state);
-
-    if !request.meta.is_empty() {
-        builder = builder.meta(request.meta);
-    }
-
-    let e = builder
+        .completion_tx(completion_state)
+        .meta_merge(request.meta)
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;
 
@@ -814,7 +812,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
-        .meta(meta)
+        .meta_merge(meta)
         .completion_tx(completion_state_tx)
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;

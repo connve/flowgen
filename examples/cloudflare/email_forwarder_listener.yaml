@@ -7,7 +7,7 @@
 flow:
   labels:
     display_name: "Cloudflare Email Webhook Listener"
-    description: "Receives forwarded emails from a Cloudflare Email Worker over an HTTP webhook, unwraps the payload, and publishes each message to a NATS JetStream stream."
+    description: "Receives forwarded emails from a Cloudflare Email Worker over an HTTP webhook and publishes each message to a NATS JetStream stream."
     tags: ["cloudflare", "email", "webhook", "nats", "example"]
   tasks:
 
@@ -17,12 +17,6 @@ flow:
         credentials_path: /etc/cloudflare-emails/credentials.json
         method: POST
         endpoint: /cloudflare/emails
-
-    # Cloudflare wraps the message in `payload`; unwrap before publishing.
-    - script:
-        name: return_payload
-        code: |
-          event.data.payload
 
     - nats_jetstream_publisher:
         name: publish_events

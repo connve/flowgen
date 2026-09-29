@@ -486,6 +486,109 @@ async fn change_stream_emits_event_on_insert() {
 
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn change_stream_emits_updates_and_deletes() {
+    let (mongo, credentials_path) = start_mongo().await;
+    let port = mongo
+        .get_host_port_ipv4(27017)
+        .await
+        .expect("map mongo port");
+
+    let (change_tx, mut change_rx) = mpsc::channel::<Event>(8);
+    let change_reader = ChangeStreamReaderBuilder::new()
+        .config(Arc::new(ChangeStreamConfig {
+            name: "watch".to_string(),
+            credentials_path: Some(credentials_path),
+            db_name: "d".to_string(),
+            depends_on: None,
+            retry: None,
+        }))
+        .sender(change_tx)
+        .task_id(0)
+        .task_type("mongodb_change_stream")
+        .task_context(test_task_context())
+        .build()
+        .await
+        .expect("build change stream reader");
+    tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = change_reader.run().await;
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let collection =
+        mongodb::Client::with_uri_str(format!("mongodb://127.0.0.1:{port}/?directConnection=true"))
+            .await
+            .expect("connect")
+            .database("d")
+            .collection::<mongodb::bson::Document>("c");
+    let mut received = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for step in 0..4 {
+        match step {
+            0 => collection
+                .insert_one(mongodb::bson::doc! { "_id": 1, "n": "a" })
+                .await
+                .map(|_| ()),
+            1 => collection
+                .update_one(
+                    mongodb::bson::doc! { "_id": 1 },
+                    mongodb::bson::doc! { "$set": { "n": "b" } },
+                )
+                .await
+                .map(|_| ()),
+            2 => collection
+                .delete_one(mongodb::bson::doc! { "_id": 1 })
+                .await
+                .map(|_| ()),
+            _ => collection
+                .insert_one(mongodb::bson::doc! { "_id": 2, "n": "c" })
+                .await
+                .map(|_| ()),
+        }
+        .expect("write");
+        let event = tokio::time::timeout(Duration::from_secs(10), change_rx.recv())
+            .await
+            .expect("change stream emits event")
+            .expect("channel open");
+        let meta = event.meta.clone().expect("meta");
+        ids.insert(event.id.clone().expect("event id"));
+        received.push((
+            event.subject.clone(),
+            meta["operation_type"].clone(),
+            event.data_as_json().expect("json"),
+        ));
+    }
+
+    assert_eq!(ids.len(), 4, "every change needs its own event id");
+    assert_eq!(
+        received,
+        vec![
+            (
+                "c".to_string(),
+                "insert".into(),
+                serde_json::json!({"_id": 1, "n": "a"})
+            ),
+            (
+                "c".to_string(),
+                "update".into(),
+                serde_json::json!({"_id": 1, "n": "b"})
+            ),
+            (
+                "c".to_string(),
+                "delete".into(),
+                serde_json::json!({"_id": 1})
+            ),
+            (
+                "c".to_string(),
+                "insert".into(),
+                serde_json::json!({"_id": 2, "n": "c"})
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn upsert_updates_matching_or_inserts_new_document() {
     let (_mongo, credentials_path) = start_mongo().await;
 

@@ -93,6 +93,30 @@ impl FlowgenMessageExt for flowgen_core::event::Event {
     }
 }
 
+/// Key under `event.meta` holding the message headers.
+const HEADERS_META_KEY: &str = "headers";
+
+/// Message headers as event meta, keeping the first value of a repeated header.
+fn headers_meta(headers: &async_nats::HeaderMap) -> serde_json::Map<String, serde_json::Value> {
+    let headers = headers
+        .iter()
+        .filter_map(|(name, values)| {
+            values.first().map(|value| {
+                (
+                    name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
+        })
+        .collect();
+    [(
+        HEADERS_META_KEY.to_string(),
+        serde_json::Value::Object(headers),
+    )]
+    .into_iter()
+    .collect()
+}
+
 impl NatsMessageExt for async_nats::Message {
     type Error = Error;
     fn to_event(
@@ -109,6 +133,7 @@ impl NatsMessageExt for async_nats::Message {
             if let Some(id) = headers.get(async_nats::header::NATS_MESSAGE_ID) {
                 event_builder = event_builder.id(id.to_string());
             }
+            event_builder = event_builder.meta_merge(headers_meta(headers));
         }
 
         let event_data = match deserialize::<AvroData>(&self.payload) {
@@ -236,6 +261,8 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(async_nats::header::NATS_MESSAGE_ID, "msg-123");
+        headers.insert("x-a", "1");
+        headers.append("x-a", "2");
 
         let message = async_nats::Message {
             subject: "test.headers".into(),
@@ -255,6 +282,13 @@ mod tests {
         assert_eq!(event.id, Some("msg-123".to_string()));
         assert_eq!(event.task_id, 1);
         assert_eq!(event.task_type, "test");
+
+        let meta = event.meta.expect("meta");
+        assert_eq!(
+            meta["headers"],
+            json!({"Nats-Msg-Id": "msg-123", "x-a": "1"})
+        );
+        assert!(meta.contains_key("correlation_id"));
     }
 
     #[test]
