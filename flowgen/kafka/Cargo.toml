@@ -18,6 +18,7 @@ pkcs8 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+secrecy = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 flowgen_core = { path = "../core" }

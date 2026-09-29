@@ -155,10 +155,15 @@ impl EventHandler {
             .await
             .map_err(|source| Error::MongoDB { source })?;
 
-        while let Some(result) = change_stream.next().await {
-            if self.task_context.cancellation_token.is_cancelled() {
-                return Ok(());
-            }
+        loop {
+            let result = tokio::select! {
+                _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                result = change_stream.next() => result,
+            };
+
+            let Some(result) = result else {
+                return Err(Error::StreamEnded);
+            };
 
             let change_event = result.map_err(|source| Error::MongoDB { source })?;
 
@@ -192,8 +197,6 @@ impl EventHandler {
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
         }
-
-        Err(Error::StreamEnded)
     }
 }
 

@@ -7,6 +7,7 @@ use axum::{body::Body, response::IntoResponse};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
+use flowgen_core::credentials::BasicAuth;
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{
     new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
@@ -18,6 +19,7 @@ use reqwest::{
 };
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
+use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -394,21 +396,25 @@ fn validate_endpoint_auth(
     if let Some(basic_auth) = &credentials.basic_auth {
         if let Some(encoded) = auth_value.strip_prefix("Basic ") {
             match STANDARD.decode(encoded) {
-                Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_str) => {
-                        let expected = format!("{}:{}", basic_auth.username, basic_auth.password);
-                        return match decoded_str == expected {
-                            true => Ok(()),
-                            false => Err(Error::InvalidCredentials),
-                        };
-                    }
-                    Err(_) => return Err(Error::MalformedCredentials),
-                },
+                Ok(decoded_bytes) => {
+                    return validate_basic_auth(basic_auth, &decoded_bytes);
+                }
                 Err(_) => return Err(Error::MalformedCredentials),
             }
         }
     }
     Err(Error::InvalidCredentials)
+}
+
+/// Compares a decoded basic-auth payload with the configured credentials in
+/// constant time.
+fn validate_basic_auth(basic_auth: &BasicAuth, decoded_bytes: &[u8]) -> Result<(), Error> {
+    let expected = format!("{}:{}", basic_auth.username, basic_auth.password);
+    if decoded_bytes.ct_eq(expected.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(Error::InvalidCredentials)
+    }
 }
 
 /// Validates user-level authentication via the worker auth provider when
@@ -624,64 +630,65 @@ async fn dispatch_stream(
             tokio::sync::oneshot::error::RecvError,
         >;
 
-        let result: Option<CompletionResult> = loop {
-            tokio::select! {
-                progress = progress_rx.recv() => {
-                    match progress {
-                        Some(evt) => {
+        let stream = async {
+            let result: Option<CompletionResult> = loop {
+                tokio::select! {
+                    _ = sse_tx.closed() => return,
+                    progress = progress_rx.recv() => {
+                        match progress {
+                            Some(evt) => {
+                                if let Ok(value) = serde_json::to_value(&evt) {
+                                    if let Some(msg) = format_data(&value) {
+                                        if sse_tx.send(Ok(msg)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            None => break None,
+                        }
+                    }
+                    result = async {
+                        match ack_timeout {
+                            Some(timeout) => {
+                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                                    Ok(result) => Some(result),
+                                    Err(_) => {
+                                        let err = json!({"error": "Flow completion timed out."});
+                                        if let Some(msg) = format_data(&err) {
+                                            let _ = sse_tx.send(Ok(msg)).await;
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None => Some((&mut completion_rx).await),
+                        }
+                    } => {
+                        while let Ok(evt) = progress_rx.try_recv() {
                             if let Ok(value) = serde_json::to_value(&evt) {
                                 if let Some(msg) = format_data(&value) {
-                                    if sse_tx.send(Ok(msg)).await.is_err() {
-                                        registry.remove(&cid).await;
-                                        return;
-                                    }
+                                    let _ = sse_tx.send(Ok(msg)).await;
                                 }
                             }
                         }
-                        None => break None,
+
+                        match result {
+                            Some(completion) => break Some(completion),
+                            None => return,
+                        }
                     }
                 }
-                result = async {
-                    match ack_timeout {
-                        Some(timeout) => {
-                            match tokio::time::timeout(timeout, &mut completion_rx).await {
-                                Ok(result) => Some(result),
-                                Err(_) => {
-                                    registry.remove(&cid).await;
-                                    let err = json!({"error": "Flow completion timed out."});
-                                    if let Some(msg) = format_data(&err) {
-                                        let _ = sse_tx.send(Ok(msg)).await;
-                                    }
-                                    None
-                                }
-                            }
-                        }
-                        None => Some((&mut completion_rx).await),
-                    }
-                } => {
-                    registry.remove(&cid).await;
+            };
 
-                    while let Ok(evt) = progress_rx.try_recv() {
-                        if let Ok(value) = serde_json::to_value(&evt) {
-                            if let Some(msg) = format_data(&value) {
-                                let _ = sse_tx.send(Ok(msg)).await;
-                            }
-                        }
-                    }
-
-                    match result {
-                        Some(completion) => break Some(completion),
-                        None => return,
-                    }
+            if let Some(Ok(Ok(Some(data)))) = result {
+                if let Some(msg) = format_data(&data) {
+                    let _ = sse_tx.send(Ok(msg)).await;
                 }
             }
         };
-
-        if let Some(Ok(Ok(Some(data)))) = result {
-            if let Some(msg) = format_data(&data) {
-                let _ = sse_tx.send(Ok(msg)).await;
-            }
-        }
+        stream.await;
+        registry.remove(&cid).await;
     });
 
     let stream = ReceiverStream::new(sse_rx);
@@ -852,5 +859,23 @@ mod tests {
         assert!(matches!(event.data, EventData::Json(data) if data == json!({"id": 1})));
         assert_eq!(meta[HEADERS_META_KEY], json!({"x-a": "1"}));
         assert!(meta.contains_key(flowgen_core::registry::CORRELATION_ID));
+    }
+
+    #[test]
+    fn test_validate_basic_auth() {
+        let auth = BasicAuth {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        };
+
+        assert!(validate_basic_auth(&auth, b"user:pass").is_ok());
+        assert!(matches!(
+            validate_basic_auth(&auth, b"user:wrong"),
+            Err(Error::InvalidCredentials)
+        ));
+        assert!(matches!(
+            validate_basic_auth(&auth, b"user:password"),
+            Err(Error::InvalidCredentials)
+        ));
     }
 }

@@ -54,6 +54,18 @@
   `correlation_id`, `auth`, and source metadata, and drops token counts the
   provider did not report. A non-streaming `http_endpoint` or `llm_proxy`
   request with auth keeps its `correlation_id`.
+- `async-nats` 0.50 from crates.io, which includes the fix for
+  RUSTSEC-2026-0049, and `native-tls` 0.2.18.
+
+### Fixed
+
+- A streaming `http_endpoint` request ends when the client disconnects, and
+  its response-registry entry is removed, also while the flow is still running.
+- `http_endpoint` compares basic-auth credentials in constant time. A basic-auth
+  header that does not decode to UTF-8 is rejected as invalid credentials.
+- Kafka SASL and SSL key passwords are hidden in debug output.
+- `mongodb_change_stream` stops on task cancellation while it waits for the
+  next change.
 
 ## 0.143.0
 

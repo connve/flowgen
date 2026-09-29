@@ -8,6 +8,7 @@ use rskafka::client::{ClientBuilder, SaslConfig};
 use rskafka::BackoffConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use secrecy::{ExposeSecret, SecretString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +26,7 @@ pub const SECURITY_PROTOCOL_SSL: &str = "SSL";
 /// Security protocol without TLS or SASL.
 pub const SECURITY_PROTOCOL_PLAINTEXT: &str = "PLAINTEXT";
 
-#[derive(serde::Deserialize, Debug, Clone, PartialEq, Default)]
+#[derive(serde::Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
     pub sasl: Option<SaslCredentials>,
@@ -48,11 +49,11 @@ impl Credentials {
     }
 }
 
-#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SaslCredentials {
     pub username: String,
-    pub password: String,
+    pub password: SecretString,
     #[serde(default = "default_sasl_mechanism")]
     pub mechanism: String,
 }
@@ -61,13 +62,14 @@ fn default_sasl_mechanism() -> String {
     DEFAULT_SASL_MECHANISM.to_string()
 }
 
-#[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+#[derive(serde::Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SslCredentials {
     pub ca_location: Option<PathBuf>,
     pub certificate_location: Option<PathBuf>,
     pub key_location: Option<PathBuf>,
-    pub key_password: Option<String>,
+    #[serde(default)]
+    pub key_password: Option<SecretString>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -171,8 +173,10 @@ fn read_credentials(path: &PathBuf) -> Result<Credentials, Error> {
 }
 
 fn sasl_config(sasl: &SaslCredentials) -> Result<SaslConfig, Error> {
-    let credentials =
-        rskafka::client::Credentials::new(sasl.username.clone(), sasl.password.clone());
+    let credentials = rskafka::client::Credentials::new(
+        sasl.username.clone(),
+        sasl.password.expose_secret().to_string(),
+    );
     match sasl.mechanism.to_ascii_uppercase().as_str() {
         "PLAIN" => Ok(SaslConfig::Plain(credentials)),
         "SCRAM-SHA-256" => Ok(SaslConfig::ScramSha256(credentials)),
@@ -277,7 +281,11 @@ fn tls_config(ssl: Option<&SslCredentials>) -> Result<Arc<rustls::ClientConfig>,
         (Some(certificate), Some(key)) => builder
             .with_client_auth_cert(
                 certificates(certificate)?,
-                private_key(key, ssl.and_then(|ssl| ssl.key_password.as_deref()))?,
+                private_key(
+                    key,
+                    ssl.and_then(|ssl| ssl.key_password.as_ref())
+                        .map(ExposeSecret::expose_secret),
+                )?,
             )
             .map_err(|source| Error::Tls { source })?,
         _ => builder.with_no_client_auth(),
@@ -408,7 +416,7 @@ mod tests {
     fn sasl() -> SaslCredentials {
         SaslCredentials {
             username: "u".to_string(),
-            password: "p".to_string(),
+            password: SecretString::from("p"),
             mechanism: default_sasl_mechanism(),
         }
     }
@@ -553,6 +561,15 @@ mod tests {
     }
 
     #[test]
+    fn test_ssl_credentials_deserialize_password_into_secret_string() {
+        let ssl: SslCredentials = serde_json::from_str(r#"{ "key_password": "secret" }"#).unwrap();
+        assert_eq!(
+            ssl.key_password.as_ref().map(ExposeSecret::expose_secret),
+            Some("secret")
+        );
+    }
+
+    #[test]
     fn test_unknown_credentials_field_is_rejected() {
         let result = serde_json::from_str::<Credentials>(r#"{ "SASL": { "username": "u" } }"#);
         assert!(result.is_err());
@@ -587,6 +604,19 @@ mod tests {
             tls_config(Some(&ssl)),
             Err(Error::EmptyCaFile { path }) if path == ca.path()
         ));
+    }
+
+    #[test]
+    fn test_debug_output_hides_passwords() {
+        let credentials: Credentials = serde_json::from_str(
+            r#"{ "sasl": { "username": "u", "password": "sasl-secret" },
+                 "ssl": { "key_password": "key-secret" } }"#,
+        )
+        .unwrap();
+        let debug = format!("{credentials:?}");
+
+        assert!(!debug.contains("sasl-secret"));
+        assert!(!debug.contains("key-secret"));
     }
 
     fn pem_file(label: &str) -> tempfile::NamedTempFile {

@@ -40,3 +40,7 @@ Watches a MongoDB database for real-time change events and emits each change doc
 The change stream watches the entire database and emits every change. `event.data` is the changed document for an insert or a replacement, and the current version of the document for an update, looked up when the change is read; an update to a document deleted before the lookup carries `null`. For a delete it is the deleted document's key (`{"_id": ...}`), and for a collection or database change such as a drop it is `null`. Route on `event.meta.operation_type` to handle each kind.
 
 The stream reconnects automatically on connection loss using an infinite retry loop with exponential backoff and jitter.
+
+:::caution[No resume token]
+The reader does not store MongoDB resume tokens. After a reconnection or restart it opens a new change stream, which starts at the current point in the oplog, so changes made while the reader was disconnected are not emitted.
+:::

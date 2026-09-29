@@ -867,6 +867,15 @@ mod tests {
     }
 
     #[test]
+    fn test_added_partitions_reinitialize_the_subscriber() {
+        let added = Error::PartitionsAdded {
+            topic: "t".to_string(),
+            partitions: vec![1],
+        };
+        assert!(!added.is_permanent());
+    }
+
+    #[test]
     fn test_delivery_delays_repeat_the_last_configured_delay() {
         let delays: Vec<_> = delivery_delays(
             &[Duration::from_secs(1), Duration::from_secs(5)],

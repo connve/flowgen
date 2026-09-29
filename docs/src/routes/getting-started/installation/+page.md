@@ -86,18 +86,21 @@ sudo mv flowgen /usr/local/bin/
 
 ## From source
 
-Requires [Rust](https://rustup.rs) 1.88+ and `protoc` (the Protocol Buffers compiler).
+Requires [Rust](https://rustup.rs) 1.88+, a C compiler, `protoc` (the Protocol Buffers compiler), and Node.js with npm for the embedded web UI. On Linux, `pkg-config` and the OpenSSL headers are needed as well.
 
 ```bash
 # macOS
-brew install protobuf
+xcode-select --install
+brew install protobuf node
 
 # Ubuntu / Debian
-sudo apt install -y protobuf-compiler
+sudo apt install -y build-essential pkg-config libssl-dev protobuf-compiler nodejs npm
 
 # Verify
 protoc --version
 ```
+
+Set `FLOWGEN_SKIP_WEB_BUILD=1` to build without Node.js; the binary then serves no web UI.
 
 Then build and install:
 
