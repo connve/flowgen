@@ -1,8 +1,8 @@
 //! # Kafka Configuration
 //!
-//! Configuration for the Kafka produce task: broker addresses, credentials,
-//! the target topic and its message key, and the settings applied when the
-//! task creates a topic that does not yet exist.
+//! Configuration for the Kafka tasks: broker addresses, credentials, the
+//! topic, and per task the message key and topic creation settings (produce)
+//! or the start offset and completion timeout (subscribe).
 
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
@@ -143,19 +143,170 @@ impl Default for Produce {
 
 impl ConfigExt for Produce {}
 
-impl Produce {
-    /// Validates that required string fields are non-empty after any
-    /// templating has been applied.
-    pub fn validate(&self) -> Result<(), crate::produce::Error> {
+/// Where a partition starts when no offset is stored for it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum StartOffset {
+    /// The oldest record the topic still retains.
+    Earliest,
+    /// The next record written after the subscriber starts.
+    #[default]
+    Latest,
+    /// The first record written at or after this time.
+    Timestamp(chrono::DateTime<chrono::Utc>),
+}
+
+const START_OFFSET_EARLIEST: &str = "earliest";
+const START_OFFSET_LATEST: &str = "latest";
+
+/// Kafka task configuration errors.
+#[derive(thiserror::Error, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum ConfigError {
+    #[error("Topic must be non-empty")]
+    EmptyTopic,
+    #[error("Brokers must be non-empty")]
+    EmptyBrokers,
+    #[error("Ack timeout must be greater than zero")]
+    ZeroAckTimeout,
+    #[error("Max deliver must be at least 1")]
+    ZeroMaxDeliver,
+    #[error("Start offset must be `earliest`, `latest`, or an RFC 3339 timestamp from 1970 on, got `{value}`")]
+    InvalidStartOffset { value: String },
+}
+
+impl TryFrom<String> for StartOffset {
+    type Error = ConfigError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            START_OFFSET_EARLIEST => Ok(StartOffset::Earliest),
+            START_OFFSET_LATEST => Ok(StartOffset::Latest),
+            other => match chrono::DateTime::parse_from_rfc3339(other) {
+                Ok(timestamp) if timestamp.timestamp_millis() >= 0 => {
+                    Ok(StartOffset::Timestamp(timestamp.to_utc()))
+                }
+                _ => Err(ConfigError::InvalidStartOffset { value }),
+            },
+        }
+    }
+}
+
+impl From<StartOffset> for String {
+    fn from(start_offset: StartOffset) -> Self {
+        match start_offset {
+            StartOffset::Earliest => START_OFFSET_EARLIEST.to_string(),
+            StartOffset::Latest => START_OFFSET_LATEST.to_string(),
+            StartOffset::Timestamp(timestamp) => timestamp.to_rfc3339(),
+        }
+    }
+}
+
+/// Kafka subscribe task configuration.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subscribe {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to credentials file containing SASL/SSL authentication details.
+    /// Omit to connect without authentication.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// Comma-separated bootstrap broker addresses.
+    #[serde(default = "default_brokers")]
+    pub brokers: String,
+    /// Topic to consume.
+    pub topic: String,
+    /// Where a partition starts when no offset is stored for it, or when the
+    /// stored offset is no longer retained by the topic.
+    #[serde(default)]
+    pub start_offset: StartOffset,
+    /// How long to wait for the flow to complete a record. Waits
+    /// indefinitely when omitted.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<Duration>,
+    /// How many times a record is sent through the flow before it is skipped.
+    /// Delivered until the flow completes it when omitted.
+    #[serde(default)]
+    pub max_deliver: Option<u32>,
+    /// Delays between deliveries of a record the flow failed to complete
+    /// (e.g. ["1s", "5s", "1m"]); the last entry repeats.
+    #[serde(default, with = "duration_list", skip_serializing_if = "Vec::is_empty")]
+    pub backoff: Vec<Duration>,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration for connecting (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl Default for Subscribe {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            credentials_path: None,
+            brokers: default_brokers(),
+            topic: String::new(),
+            start_offset: StartOffset::default(),
+            ack_timeout: None,
+            max_deliver: None,
+            backoff: Vec::new(),
+            depends_on: None,
+            retry: None,
+        }
+    }
+}
+
+/// Serde for a list of human-readable durations.
+mod duration_list {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(
+        durations: &[Duration],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(durations.iter().map(|d| humantime_serde::Serde::from(*d)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Duration>, D::Error> {
+        let durations = Vec::<humantime_serde::Serde<Duration>>::deserialize(deserializer)?;
+        Ok(durations.into_iter().map(|d| d.into_inner()).collect())
+    }
+}
+
+impl ConfigExt for Subscribe {}
+
+impl Subscribe {
+    /// Validates the config after any templating has been applied.
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.topic.trim().is_empty() {
-            return Err(crate::produce::Error::InvalidConfig {
-                message: "topic must be non-empty".to_string(),
-            });
+            return Err(ConfigError::EmptyTopic);
         }
         if self.brokers.trim().is_empty() {
-            return Err(crate::produce::Error::InvalidConfig {
-                message: "brokers must be non-empty".to_string(),
-            });
+            return Err(ConfigError::EmptyBrokers);
+        }
+        if self.max_deliver == Some(0) {
+            return Err(ConfigError::ZeroMaxDeliver);
+        }
+        Ok(())
+    }
+}
+
+impl Produce {
+    /// Validates the config after any templating has been applied.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.topic.trim().is_empty() {
+            return Err(ConfigError::EmptyTopic);
+        }
+        if self.brokers.trim().is_empty() {
+            return Err(ConfigError::EmptyBrokers);
+        }
+        if self.ack_timeout.is_zero() {
+            return Err(ConfigError::ZeroAckTimeout);
         }
         Ok(())
     }
@@ -350,8 +501,7 @@ mod tests {
             topic: "".into(),
             ..Default::default()
         };
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("topic must be non-empty"));
+        assert_eq!(config.validate(), Err(ConfigError::EmptyTopic));
     }
 
     #[test]
@@ -362,7 +512,18 @@ mod tests {
             topic: "   ".into(),
             ..Default::default()
         };
-        assert!(config.validate().is_err());
+        assert_eq!(config.validate(), Err(ConfigError::EmptyTopic));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_ack_timeout() {
+        let config = Produce {
+            name: "test".into(),
+            topic: "t".into(),
+            ack_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        assert_eq!(config.validate(), Err(ConfigError::ZeroAckTimeout));
     }
 
     #[test]
@@ -373,8 +534,127 @@ mod tests {
             topic: "t".into(),
             ..Default::default()
         };
-        let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("brokers must be non-empty"));
+        assert_eq!(config.validate(), Err(ConfigError::EmptyBrokers));
+    }
+
+    #[test]
+    fn test_subscribe_defaults() {
+        let json = r#"{ "name": "n", "topic": "t" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config,
+            Subscribe {
+                name: "n".into(),
+                topic: "t".into(),
+                ..Default::default()
+            }
+        );
+        assert_eq!(config.start_offset, StartOffset::Latest);
+        assert_eq!(config.ack_timeout, None);
+    }
+
+    #[test]
+    fn test_subscribe_parses_start_offset_and_ack_timeout() {
+        let json =
+            r#"{ "name": "n", "topic": "t", "start_offset": "earliest", "ack_timeout": "2m" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.start_offset, StartOffset::Earliest);
+        assert_eq!(config.ack_timeout, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn test_subscribe_parses_a_timestamp_start_offset() {
+        let json = r#"{ "name": "n", "topic": "t", "start_offset": "2026-09-01T02:00:00+02:00" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.start_offset,
+            StartOffset::Timestamp("2026-09-01T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_start_offset_round_trips() {
+        for start_offset in [
+            StartOffset::Earliest,
+            StartOffset::Latest,
+            StartOffset::Timestamp("2026-09-01T00:00:00Z".parse().unwrap()),
+        ] {
+            let json = serde_json::to_string(&start_offset).unwrap();
+            assert_eq!(
+                serde_json::from_str::<StartOffset>(&json).unwrap(),
+                start_offset
+            );
+        }
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_start_offset() {
+        assert_eq!(
+            StartOffset::try_from("middle".to_string()),
+            Err(ConfigError::InvalidStartOffset {
+                value: "middle".to_string()
+            })
+        );
+        let json = r#"{ "name": "n", "topic": "t", "start_offset": "middle" }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    #[test]
+    fn test_start_offset_rejects_a_timestamp_before_1970() {
+        assert!(matches!(
+            StartOffset::try_from("1969-12-31T23:59:59Z".to_string()),
+            Err(ConfigError::InvalidStartOffset { .. })
+        ));
+    }
+
+    #[test]
+    fn test_subscribe_parses_max_deliver_and_backoff() {
+        let json = r#"{ "name": "n", "topic": "t", "max_deliver": 3, "backoff": ["1s", "1m"] }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_deliver, Some(3));
+        assert_eq!(
+            config.backoff,
+            vec![Duration::from_secs(1), Duration::from_secs(60)]
+        );
+        assert_eq!(config.render(&serde_json::json!({})).unwrap(), config);
+    }
+
+    #[test]
+    fn test_subscribe_validate_rejects_zero_max_deliver() {
+        let config = Subscribe {
+            name: "n".into(),
+            topic: "t".into(),
+            max_deliver: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(config.validate(), Err(ConfigError::ZeroMaxDeliver));
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_fields() {
+        let json = r#"{ "name": "n", "topic": "t", "group_id": "g" }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    #[test]
+    fn test_subscribe_validate_rejects_empty_topic_and_brokers() {
+        let empty_topic = Subscribe {
+            name: "n".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty_topic.validate(), Err(ConfigError::EmptyTopic));
+
+        let empty_brokers = Subscribe {
+            name: "n".into(),
+            topic: "t".into(),
+            brokers: " ".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty_brokers.validate(), Err(ConfigError::EmptyBrokers));
     }
 
     #[test]

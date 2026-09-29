@@ -35,6 +35,16 @@ docker run \
 
 ### Local Development
 
+Building flowgen needs:
+
+- Rust via [`rustup`](https://rustup.rs)
+- a C compiler (macOS: `xcode-select --install`; Debian/Ubuntu: `build-essential`)
+- `protoc` (macOS: `brew install protobuf`; Debian/Ubuntu: `protobuf-compiler`)
+- on Linux, `pkg-config` and the OpenSSL headers (Debian/Ubuntu: `libssl-dev`)
+- Node.js and npm for the embedded web UI; set `FLOWGEN_SKIP_WEB_BUILD=1` to build without it
+
+Docker is needed only for the integration tests.
+
 1. Copy `config.example.yaml` to `config.yaml` and configure as needed
 2. Create flow definitions in the flows directory
 3. Update the flow path in `config.yaml`

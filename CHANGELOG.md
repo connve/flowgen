@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.144.0
+
+### Breaking
+
+- **`http_endpoint` puts the request body in `event.data` and the configured
+  headers in `event.meta.headers`.** Replace `event.data.payload` with
+  `event.data`, and `event.data.headers` with `event.meta.headers`. Configured
+  header names match case-insensitively and are stored lowercase.
+- **`mongodb_change_stream` emits every change.** An insert or replacement
+  carries the document, an update the current version of the document, a
+  delete the document key, and a collection or database change `null`.
+  `event.subject` is the collection, `event.id` the change's resume token, and
+  `event.meta` holds `database`, `operation_type`, and `document_key`. Route on
+  `event.meta.operation_type` where a flow expects documents only.
+- **Kafka credentials accept a narrower set of values.** SASL supports `PLAIN`,
+  `SCRAM-SHA-256`, and `SCRAM-SHA-512`; an encrypted client key
+  (`ssl.key_password`) must be PKCS#8; `ssl.ca_location` must be a PEM file;
+  a client certificate needs both `certificate_location` and `key_location`;
+  unknown fields are rejected. Without `ssl.ca_location`, TLS trusts the
+  system's root certificates.
+- **A keyed Kafka message goes to the partition the Kafka Java client chooses
+  for that key** (murmur2), so a key can land on a different partition than
+  with 0.143.0.
+
+### Features
+
+- **`kafka_subscribe` task.** Consumes every partition of a Kafka topic and
+  emits each record as an event: the value in `event.data`, the topic in
+  `event.subject`, the record time in `event.timestamp`, and `partition`,
+  `offset`, `key`, and `headers` in `event.meta`. The next offset of each
+  partition is stored in the cache once the flow completes the record. A record
+  the flow fails to complete is delivered again after `backoff`, until it
+  succeeds or `max_deliver` deliveries have failed. `start_offset` (`earliest`,
+  `latest`, or an RFC 3339 timestamp) sets where a partition without a stored
+  offset starts. The task joins no consumer group; flows running on more than
+  one replica need `require_leader_election: true`.
+
+### Changed
+
+- **Kafka runs on a pure-Rust client (`rskafka`).** The builder image and CI
+  drop `cmake` and `libcurl4-openssl-dev`, and macOS builds link no OpenSSL.
+  Compressed batches (gzip, snappy, lz4, zstd) are read.
+- `kafka_produce` retries connecting when the brokers are unreachable at
+  startup, waits for a topic it created to appear in the cluster metadata,
+  looks up a topic's partitions again every five minutes, and sends a message
+  without `message_key` with an empty key to the topic's partitions in turn.
+  An `ack_timeout` of zero is rejected. A broker address without a port uses
+  `9092`.
+- `nats_jetstream_subscriber` puts the message headers in `event.meta.headers`.
+- `ai_completion`, `http_endpoint`, `mcp_tool`, `llm_proxy`, and `oci_sync`
+  add their keys to `event.meta`. `ai_completion` output keeps the upstream
+  `correlation_id`, `auth`, and source metadata, and drops token counts the
+  provider did not report. A non-streaming `http_endpoint` or `llm_proxy`
+  request with auth keeps its `correlation_id`.
+- `async-nats` 0.50 from crates.io, which includes the fix for
+  RUSTSEC-2026-0049, and `native-tls` 0.2.18.
+
+### Fixed
+
+- A streaming `http_endpoint` request ends when the client disconnects, and
+  its response-registry entry is removed, also while the flow is still running.
+- `http_endpoint` compares basic-auth credentials in constant time. A basic-auth
+  header that does not decode to UTF-8 is rejected as invalid credentials.
+- Kafka SASL and SSL key passwords are hidden in debug output.
+- `mongodb_change_stream` stops on task cancellation while it waits for the
+  next change.
+
 ## 0.143.0
 
 ### Features

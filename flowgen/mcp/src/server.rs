@@ -48,6 +48,11 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to serialize the user context: {source}")]
+    UserContextSerialize {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("Invalid tool call parameters: {source}")]
     InvalidParams {
         #[source]
@@ -1440,6 +1445,12 @@ async fn execute_tool_call(
     let user_context = validate_user_auth(state, headers, auth_required)
         .await
         .map_err(|_| Error::Unauthorized)?;
+    let auth = match user_context {
+        Some(ctx) => Some(
+            serde_json::to_value(ctx).map_err(|source| Error::UserContextSerialize { source })?,
+        ),
+        None => None,
+    };
 
     let correlation_id = uuid::Uuid::now_v7().to_string();
 
@@ -1462,10 +1473,8 @@ async fn execute_tool_call(
         flowgen_core::registry::CORRELATION_ID.to_string(),
         serde_json::Value::String(correlation_id.clone()),
     );
-    if let Some(ctx) = user_context {
-        if let Ok(value) = serde_json::to_value(ctx) {
-            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
-        }
+    if let Some(auth) = auth {
+        meta.insert(flowgen_core::auth::AUTH.to_string(), auth);
     }
 
     let (completion_state, completion_rx) = flowgen_core::event::new_completion_channel(leaf_count);
@@ -1475,7 +1484,7 @@ async fn execute_tool_call(
         .subject(params.name.clone())
         .task_id(0)
         .task_type("mcp_tool")
-        .meta(meta)
+        .meta_merge(meta)
         .completion_tx(completion_state)
         .build()
         .map_err(|source| Error::EventBuild { source })?;

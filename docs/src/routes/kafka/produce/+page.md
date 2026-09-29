@@ -25,7 +25,7 @@ Publishes the incoming event to a Kafka topic and emits the delivery result (top
 | `message_key` | string | | Message key template (e.g. `key-{{event.id}}`). See [Templating](/docs/flowgen/concepts/templating). |
 | `create_or_update` | bool | `false` | When `true`, the topic is created from `topic_options` if it does not exist. When `false`, an error is returned if the topic is absent from the cluster. |
 | `topic_options` | object | | Settings for a topic created by `create_or_update`. See [Topic creation](#topic-creation). |
-| `ack_timeout` | duration | `30s` | How long to wait for the broker to acknowledge a message before the attempt fails. |
+| `ack_timeout` | duration | `30s` | How long to wait for the broker to acknowledge a message before the attempt fails. Must be greater than zero. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -91,10 +91,12 @@ The defaults suit a local broker only — a single partition caps throughput at 
 
 `topic_options` applies only when the topic is created. An existing topic is left as it is, so changing these values does not reshape a live topic.
 
-On a cluster with `auto.create.topics.enable` (the broker default), a topic is otherwise created on first use with the broker's own defaults. The task checks for the topic over the admin protocol, which does not trigger that, so `topic_options` is what the topic is actually created with.
+On a cluster with `auto.create.topics.enable` (the broker default), a topic is otherwise created on first use with the broker's own defaults. The task checks for the topic in the metadata of every topic, which does not trigger that, so `topic_options` is what the topic is actually created with.
 
 ## Behaviour
 
 The message payload is the incoming event's data — JSON is serialized as-is, `bytes`/Avro payloads are sent raw, and Arrow record batches are serialized as an Arrow IPC stream. Delivery is acknowledged before the result event is emitted downstream; if the broker does not acknowledge within `ack_timeout`, the task fails and retries per the [retry configuration](/docs/flowgen/concepts/retry).
+
+A message with a `message_key` goes to the partition the Kafka Java client's default partitioner chooses for that key (murmur2 hash). A message without `message_key` is sent with an empty key to the topic's partitions in turn. The topic's partitions are looked up again every five minutes, so partitions added to the topic are used.
 
 Errors that cannot succeed on a second attempt — a missing topic with `create_or_update: false`, a template that fails to render, a payload that cannot be serialized — fail immediately instead of consuming the retry budget.

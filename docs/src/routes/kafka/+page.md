@@ -1,8 +1,9 @@
 # Kafka
 
-Flowgen produces messages to Apache Kafka topics.
+Flowgen produces messages to Apache Kafka topics and consumes topics into flows.
 
 - [Produce](/docs/flowgen/kafka/produce) — sends the incoming event to a topic and emits the delivery result downstream.
+- [Subscribe](/docs/flowgen/kafka/subscribe) — consumes every partition of a topic and emits each record as an event.
 
 ## Credentials
 
@@ -38,9 +39,9 @@ Both `sasl` and `ssl` are optional, and which blocks are present decides the sec
 |---|---|---|---|
 | `sasl.username` | string | required | SASL username. |
 | `sasl.password` | string | required | SASL password. |
-| `sasl.mechanism` | string | `SCRAM-SHA-256` | SASL mechanism. |
-| `ssl.ca_location` | string | | Path to the CA certificate bundle. |
-| `ssl.certificate_location` | string | | Path to the client certificate. |
-| `ssl.key_location` | string | | Path to the client private key. |
-| `ssl.key_password` | string | | Password protecting the private key. |
-| `security_protocol` | string | derived | Overrides the protocol implied by the blocks above. |
+| `sasl.mechanism` | string | `SCRAM-SHA-256` | `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512`. |
+| `ssl.ca_location` | string | | Path to a PEM file with the CA certificates. Omit to trust the system's root certificates. |
+| `ssl.certificate_location` | string | | Path to the client certificate chain (PEM). Requires `ssl.key_location`. |
+| `ssl.key_location` | string | | Path to the client private key (PEM: PKCS#8, PKCS#1, or SEC1). |
+| `ssl.key_password` | string | | Password of an encrypted PKCS#8 key (`BEGIN ENCRYPTED PRIVATE KEY`). Ignored for an unencrypted key. |
+| `security_protocol` | string | derived | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, or `SASL_SSL`. Overrides the protocol implied by the blocks above. |

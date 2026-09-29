@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.143.0"
+version = "0.144.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -101,9 +101,7 @@ flate2 = { version = "1.0", default-features = false, features = [
 ] }
 tar = { version = "0.4", default-features = false }
 braze = { version = "0.1.0" }
-# Security fix: Using PR branch until 0.47 is released (RUSTSEC-2026-0049)
-# https://github.com/nats-io/nats.rs/pull/1550
-async-nats = { git = "https://github.com/nats-io/nats.rs", rev = "7e6672c240a4a1bd7726d37ac7b52a290af6b690" }
+async-nats = { version = "0.50" }
 bincode = { version = "1.3" }
 tonic = { version = "0.14", features = ["tls-native-roots"] }
 config = { version = "0.15" }
@@ -116,7 +114,12 @@ apache-avro = { version = "0.19" }
 regex = { version = "1.12" }
 uuid = { version = "1", features = ["v7"] }
 axum = { version = "0.8" }
-axum-extra = { version = "0.12", features = ["cookie", "cookie-private", "cookie-key-expansion", "query"] }
+axum-extra = { version = "0.12", features = [
+    "cookie",
+    "cookie-private",
+    "cookie-key-expansion",
+    "query",
+] }
 time = { version = "0.3" }
 base64 = { version = "0.22" }
 http = { version = "1.4" }
@@ -133,8 +136,7 @@ humantime-serde = { version = "1.1" }
 croner = { version = "3.0.1" }
 dashmap = { version = "6.1" }
 tower = { version = "0.5", features = ["util"] }
-# Pinned to avoid 0.2.17 which has a non-exhaustive match compile error on recent Rust toolchains.
-native-tls = { version = "=0.2.16" }
+native-tls = { version = "0.2.18" }
 opentelemetry = { version = "0.27" }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
@@ -160,4 +162,12 @@ rust-embed = { version = "8.7" }
 mime_guess = { version = "2.0" }
 bson = { version = "2.15" }
 mongodb = { version = "3.8" }
-rdkafka = { version = "0.37", default-features = false, features = ["cmake-build", "libz", "ssl", "tokio"] }
+rskafka = { git = "https://github.com/connve/rskafka", default-features = false, features = [
+    "transport-tls",
+    "compression-gzip",
+    "compression-lz4",
+    "compression-snappy",
+    "compression-zstd",
+] }
+rustls-native-certs = { version = "0.8" }
+pkcs8 = { version = "0.10", features = ["encryption", "pem", "3des"] }

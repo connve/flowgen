@@ -1,12 +1,13 @@
 //! HTTP endpoint processor for handling incoming requests.
 //!
-//! Processes incoming HTTP endpoint requests, extracting headers and payload
-//! data and converting them into events for further processing in the pipeline.
+//! Processes incoming HTTP endpoint requests into events: the request body
+//! becomes the event data and the configured headers go into the event meta.
 
 use axum::{body::Body, response::IntoResponse};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flowgen_core::auth::{extract_bearer_token, AuthProvider};
 use flowgen_core::config::ConfigExt;
+use flowgen_core::credentials::BasicAuth;
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::{
     new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
@@ -18,15 +19,14 @@ use reqwest::{
 };
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
+use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
 
-/// JSON key for HTTP headers in endpoint events.
-const DEFAULT_HEADERS_KEY: &str = "headers";
-/// JSON key for HTTP payload in endpoint events.
-const DEFAULT_PAYLOAD_KEY: &str = "payload";
+/// Key under `event.meta` holding the configured request headers.
+const HEADERS_META_KEY: &str = "headers";
 
 /// Errors that can occur during endpoint processing.
 #[derive(thiserror::Error, Debug)]
@@ -75,6 +75,11 @@ pub enum Error {
     FlowCompletionFailed,
     #[error("Request body exceeds configured max_body_bytes limit of {limit} bytes")]
     BodyTooLarge { limit: usize },
+    #[error("Failed to serialize the user context: {source}")]
+    UserContextSerialize {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl IntoResponse for Error {
@@ -391,21 +396,25 @@ fn validate_endpoint_auth(
     if let Some(basic_auth) = &credentials.basic_auth {
         if let Some(encoded) = auth_value.strip_prefix("Basic ") {
             match STANDARD.decode(encoded) {
-                Ok(decoded_bytes) => match String::from_utf8(decoded_bytes) {
-                    Ok(decoded_str) => {
-                        let expected = format!("{}:{}", basic_auth.username, basic_auth.password);
-                        return match decoded_str == expected {
-                            true => Ok(()),
-                            false => Err(Error::InvalidCredentials),
-                        };
-                    }
-                    Err(_) => return Err(Error::MalformedCredentials),
-                },
+                Ok(decoded_bytes) => {
+                    return validate_basic_auth(basic_auth, &decoded_bytes);
+                }
                 Err(_) => return Err(Error::MalformedCredentials),
             }
         }
     }
     Err(Error::InvalidCredentials)
+}
+
+/// Compares a decoded basic-auth payload with the configured credentials in
+/// constant time.
+fn validate_basic_auth(basic_auth: &BasicAuth, decoded_bytes: &[u8]) -> Result<(), Error> {
+    let expected = format!("{}:{}", basic_auth.username, basic_auth.password);
+    if decoded_bytes.ct_eq(expected.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(Error::InvalidCredentials)
+    }
 }
 
 /// Validates user-level authentication via the worker auth provider when
@@ -440,13 +449,13 @@ async fn validate_user_auth(
 }
 
 /// Reads the request body (bounded by `config.max_body_bytes`), parses it as
-/// JSON, projects configured headers into the event payload, and runs auth.
-/// Returns the event-payload `Value` and any user context.
+/// JSON, and runs auth. Returns the body as the event payload and the event
+/// meta: the configured headers and any user context.
 async fn parse_request(
     registration: &crate::server::EndpointRegistration,
     headers: &HeaderMap,
     body: Body,
-) -> Result<(Value, Option<flowgen_core::auth::UserContext>), Error> {
+) -> Result<(Value, Map<String, Value>), Error> {
     if registration.cancellation_token.is_cancelled() {
         return Err(Error::FlowCompletionFailed);
     }
@@ -468,23 +477,27 @@ async fn parse_request(
 
     let mut headers_map = Map::new();
     if let Some(configured_headers) = &registration.config.headers {
-        for (key, value) in headers.iter() {
-            let header_name = key.as_str();
-            if configured_headers.contains_key(header_name) {
-                headers_map.insert(
-                    header_name.to_string(),
-                    Value::String(value.to_str().unwrap_or("").to_string()),
-                );
-            }
+        for name in configured_headers.keys() {
+            let Some(value) = headers.get(name.as_str()) else {
+                continue;
+            };
+            let value = match value.to_str() {
+                Ok(value) => value.to_string(),
+                Err(_) => String::new(),
+            };
+            headers_map.insert(name.to_ascii_lowercase(), Value::String(value));
         }
     }
 
-    let data = json!({
-        DEFAULT_HEADERS_KEY: Value::Object(headers_map),
-        DEFAULT_PAYLOAD_KEY: json_body,
-    });
+    let mut meta = Map::new();
+    meta.insert(HEADERS_META_KEY.to_string(), Value::Object(headers_map));
+    if let Some(ctx) = user_context {
+        let value =
+            serde_json::to_value(ctx).map_err(|source| Error::UserContextSerialize { source })?;
+        meta.insert(flowgen_core::auth::AUTH.to_string(), value);
+    }
 
-    Ok((data, user_context))
+    Ok((json_body, meta))
 }
 
 /// Builds an event with a per-request completion channel sized to the flow's
@@ -493,22 +506,17 @@ async fn parse_request(
 async fn inject_event(
     registration: &crate::server::EndpointRegistration,
     data: Value,
-    meta: Option<serde_json::Map<String, Value>>,
+    meta: Map<String, Value>,
 ) -> Result<CompletionRx, Error> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
-    let mut builder = EventBuilder::new()
+    let e = EventBuilder::new()
         .data(EventData::Json(data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
-        .completion_tx(completion_state);
-
-    if let Some(meta) = meta {
-        builder = builder.meta(meta);
-    }
-
-    let e = builder
+        .completion_tx(completion_state)
+        .meta_merge(meta)
         .build()
         .map_err(|source| Error::EventBuilder { source })?;
 
@@ -527,7 +535,7 @@ async fn dispatch_blocking(
     headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, Error> {
-    let (data, user_context) = match parse_request(registration, &headers, body).await {
+    let (data, meta) = match parse_request(registration, &headers, body).await {
         Ok(result) => result,
         Err(Error::FlowCompletionFailed) => return Ok(StatusCode::SERVICE_UNAVAILABLE),
         Err(
@@ -535,14 +543,6 @@ async fn dispatch_blocking(
         ) => return Ok(e.into_response().status()),
         Err(e) => return Err(e),
     };
-
-    let meta = user_context.map(|ctx| {
-        let mut meta = serde_json::Map::new();
-        if let Ok(value) = serde_json::to_value(ctx) {
-            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
-        }
-        meta
-    });
 
     let completion_rx = inject_event(registration, data, meta).await?;
 
@@ -572,7 +572,7 @@ async fn dispatch_stream(
     headers: HeaderMap,
     body: Body,
 ) -> Result<axum::response::Response<Body>, Error> {
-    let (data, user_context) = match parse_request(registration, &headers, body).await {
+    let (data, mut meta) = match parse_request(registration, &headers, body).await {
         Ok(result) => result,
         Err(Error::FlowCompletionFailed) => {
             return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
@@ -598,18 +598,12 @@ async fn dispatch_stream(
         )
         .await;
 
-    let mut meta = serde_json::Map::new();
     meta.insert(
         flowgen_core::registry::CORRELATION_ID.to_string(),
         Value::String(correlation_id.clone()),
     );
-    if let Some(ctx) = user_context {
-        if let Ok(value) = serde_json::to_value(ctx) {
-            meta.insert(flowgen_core::auth::AUTH.to_string(), value);
-        }
-    }
 
-    let completion_rx = inject_event(registration, data, Some(meta)).await?;
+    let completion_rx = inject_event(registration, data, meta).await?;
 
     info!(
         endpoint = %registration.config.name,
@@ -636,64 +630,65 @@ async fn dispatch_stream(
             tokio::sync::oneshot::error::RecvError,
         >;
 
-        let result: Option<CompletionResult> = loop {
-            tokio::select! {
-                progress = progress_rx.recv() => {
-                    match progress {
-                        Some(evt) => {
+        let stream = async {
+            let result: Option<CompletionResult> = loop {
+                tokio::select! {
+                    _ = sse_tx.closed() => return,
+                    progress = progress_rx.recv() => {
+                        match progress {
+                            Some(evt) => {
+                                if let Ok(value) = serde_json::to_value(&evt) {
+                                    if let Some(msg) = format_data(&value) {
+                                        if sse_tx.send(Ok(msg)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            None => break None,
+                        }
+                    }
+                    result = async {
+                        match ack_timeout {
+                            Some(timeout) => {
+                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                                    Ok(result) => Some(result),
+                                    Err(_) => {
+                                        let err = json!({"error": "Flow completion timed out."});
+                                        if let Some(msg) = format_data(&err) {
+                                            let _ = sse_tx.send(Ok(msg)).await;
+                                        }
+                                        None
+                                    }
+                                }
+                            }
+                            None => Some((&mut completion_rx).await),
+                        }
+                    } => {
+                        while let Ok(evt) = progress_rx.try_recv() {
                             if let Ok(value) = serde_json::to_value(&evt) {
                                 if let Some(msg) = format_data(&value) {
-                                    if sse_tx.send(Ok(msg)).await.is_err() {
-                                        registry.remove(&cid).await;
-                                        return;
-                                    }
+                                    let _ = sse_tx.send(Ok(msg)).await;
                                 }
                             }
                         }
-                        None => break None,
+
+                        match result {
+                            Some(completion) => break Some(completion),
+                            None => return,
+                        }
                     }
                 }
-                result = async {
-                    match ack_timeout {
-                        Some(timeout) => {
-                            match tokio::time::timeout(timeout, &mut completion_rx).await {
-                                Ok(result) => Some(result),
-                                Err(_) => {
-                                    registry.remove(&cid).await;
-                                    let err = json!({"error": "Flow completion timed out."});
-                                    if let Some(msg) = format_data(&err) {
-                                        let _ = sse_tx.send(Ok(msg)).await;
-                                    }
-                                    None
-                                }
-                            }
-                        }
-                        None => Some((&mut completion_rx).await),
-                    }
-                } => {
-                    registry.remove(&cid).await;
+            };
 
-                    while let Ok(evt) = progress_rx.try_recv() {
-                        if let Ok(value) = serde_json::to_value(&evt) {
-                            if let Some(msg) = format_data(&value) {
-                                let _ = sse_tx.send(Ok(msg)).await;
-                            }
-                        }
-                    }
-
-                    match result {
-                        Some(completion) => break Some(completion),
-                        None => return,
-                    }
+            if let Some(Ok(Ok(Some(data)))) = result {
+                if let Some(msg) = format_data(&data) {
+                    let _ = sse_tx.send(Ok(msg)).await;
                 }
             }
         };
-
-        if let Some(Ok(Ok(Some(data)))) = result {
-            if let Some(msg) = format_data(&data) {
-                let _ = sse_tx.send(Ok(msg)).await;
-            }
-        }
+        stream.await;
+        registry.remove(&cid).await;
     });
 
     let stream = ReceiverStream::new(sse_rx);
@@ -822,9 +817,65 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_request_body_is_the_event_data_and_headers_are_meta() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let registration = crate::server::EndpointRegistration {
+            flow_name: "f".to_string(),
+            config: Arc::new(crate::config::Processor {
+                name: "receive".to_string(),
+                headers: Some([("X-A".to_string(), String::new())].into_iter().collect()),
+                ..Default::default()
+            }),
+            credentials: None,
+            auth_provider: None,
+            tx,
+            task_id: 0,
+            task_type: "http_endpoint",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-a", "1".parse().unwrap());
+        headers.insert("x-b", "2".parse().unwrap());
+
+        let leaf = tokio::spawn(async move {
+            let event = rx.recv().await.expect("event");
+            event
+                .completion_tx
+                .as_ref()
+                .expect("completion")
+                .signal_completion(None);
+            event
+        });
+        let status = dispatch_blocking(&registration, headers, Body::from(r#"{"id": 1}"#))
+            .await
+            .unwrap();
+        let event = leaf.await.unwrap();
+        let meta = event.meta.expect("meta");
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(event.data, EventData::Json(data) if data == json!({"id": 1})));
+        assert_eq!(meta[HEADERS_META_KEY], json!({"x-a": "1"}));
+        assert!(meta.contains_key(flowgen_core::registry::CORRELATION_ID));
+    }
+
     #[test]
-    fn test_constants() {
-        assert_eq!(DEFAULT_HEADERS_KEY, "headers");
-        assert_eq!(DEFAULT_PAYLOAD_KEY, "payload");
+    fn test_validate_basic_auth() {
+        let auth = BasicAuth {
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        };
+
+        assert!(validate_basic_auth(&auth, b"user:pass").is_ok());
+        assert!(matches!(
+            validate_basic_auth(&auth, b"user:wrong"),
+            Err(Error::InvalidCredentials)
+        ));
+        assert!(matches!(
+            validate_basic_auth(&auth, b"user:password"),
+            Err(Error::InvalidCredentials)
+        ));
     }
 }

@@ -32,5 +32,6 @@ uuid = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 dashmap = { workspace = true }
+subtle = { workspace = true }
 [lints]
 workspace = true

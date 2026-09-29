@@ -1,0 +1,31 @@
+# Forwards every record on a Kafka topic to a NATS JetStream stream.
+#
+# Pair with produce_triggered.yaml, which writes the topic. Needs a
+# reachable broker, NATS credentials, and the NATS_URL env var.
+flow:
+  require_leader_election: true
+  labels:
+    display_name: "Kafka Subscribe to NATS"
+    description: "Consumes a Kafka topic and publishes each record to a NATS JetStream subject."
+    tags: ["kafka", "nats", "subscriber", "example"]
+  tasks:
+
+    - kafka_subscribe:
+        name: consume_topic
+        brokers: "localhost:9092"
+        topic: sample-events
+        start_offset: earliest
+        ack_timeout: 60s
+        backoff: ["1s", "10s", "1m"]
+
+    - nats_jetstream_publisher:
+        name: publish_to_nats
+        credentials_path: /etc/nats/credentials.json
+        url: "{{env.NATS_URL}}"
+        subject: "kafka.sample_events"
+        stream:
+          create_or_update: true
+          name: kafka_sample_events
+          description: "Records consumed from the sample-events Kafka topic."
+          subjects: ["kafka.sample_events"]
+          max_age: 24h

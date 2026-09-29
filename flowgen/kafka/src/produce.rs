@@ -9,10 +9,11 @@ use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use futures_util::future;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, ResourceSpecifier, TopicReplication};
-use rdkafka::client::DefaultClientContext;
-use rdkafka::producer::FutureRecord;
-use rdkafka::types::RDKafkaErrorCode;
+use rskafka::client::error::{Error as KafkaError, ProtocolError};
+use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
+use rskafka::record::Record;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, Instrument};
@@ -45,25 +46,41 @@ pub enum Error {
     #[error("Produce error: {source}")]
     Produce {
         #[source]
-        source: rdkafka::error::KafkaError,
+        source: Box<KafkaError>,
     },
+    #[error("Broker did not acknowledge the message to '{topic}' within {timeout:?}")]
+    ProduceTimeout {
+        topic: String,
+        timeout: std::time::Duration,
+    },
+    #[error("Broker acknowledged the message to '{topic}' without an offset")]
+    MissingOffset { topic: String },
     #[error("Topic '{topic}' does not exist on the Kafka cluster")]
     TopicNotFound { topic: String },
+    #[error("Topic '{topic}' has no partitions")]
+    NoPartitions { topic: String },
     #[error("Topic creation error for '{topic}': {source}")]
     TopicCreation {
         topic: String,
         #[source]
-        source: rdkafka::error::KafkaError,
+        source: Box<KafkaError>,
     },
-    #[error("Broker rejected creation of topic '{topic}': {code}")]
+    #[error("Broker rejected creation of topic '{topic}': {protocol_error}")]
     TopicCreationRejected {
         topic: String,
-        code: rdkafka::types::RDKafkaErrorCode,
+        protocol_error: ProtocolError,
     },
     #[error("Metadata fetch error: {source}")]
     MetadataFetch {
         #[source]
-        source: rdkafka::error::KafkaError,
+        source: Box<KafkaError>,
+    },
+    #[error("Error connecting to partition {partition} of '{topic}': {source}")]
+    PartitionClient {
+        topic: String,
+        partition: i32,
+        #[source]
+        source: Box<KafkaError>,
     },
     #[error("JSON serialization error: {source}")]
     SerdeJson {
@@ -93,8 +110,17 @@ pub enum Error {
         "Client registry type mismatch -- same credentials used with incompatible client types"
     )]
     ClientRegistryMismatch,
-    #[error("Invalid configuration: {message}")]
-    InvalidConfig { message: String },
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
+    #[error("Replication factor {value} is out of range")]
+    ReplicationFactorOutOfRange { value: i32 },
+    #[error(
+        "Topic '{topic}' was created but did not appear in the cluster metadata within {timeout:?}"
+    )]
+    TopicNotVisible {
+        topic: String,
+        timeout: std::time::Duration,
+    },
 }
 
 impl Error {
@@ -104,19 +130,23 @@ impl Error {
     /// next attempt, so retrying one just delays the failure by the full
     /// backoff.
     fn is_permanent(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            Error::ClientAuth {
+                source: crate::client::Error::Connect { .. },
+            } => false,
             Error::ConfigRender { .. }
-                | Error::SerdeJson { .. }
-                | Error::Arrow { .. }
-                | Error::TopicNotFound { .. }
-                | Error::TopicCreationRejected { .. }
-                | Error::MissingClient
-                | Error::ClientAuth { .. }
-                | Error::ClientRegistryMismatch
-                | Error::InvalidConfig { .. }
-                | Error::TopicCreation { .. }
-        )
+            | Error::SerdeJson { .. }
+            | Error::Arrow { .. }
+            | Error::TopicNotFound { .. }
+            | Error::NoPartitions { .. }
+            | Error::TopicCreationRejected { .. }
+            | Error::MissingClient
+            | Error::ClientAuth { .. }
+            | Error::ClientRegistryMismatch
+            | Error::Config(_)
+            | Error::ReplicationFactorOutOfRange { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -161,82 +191,173 @@ fn ensure_event_id(event_value: &mut serde_json::Value) {
     }
 }
 
+/// Kafka's murmur2 hash, as used by the Java client's default partitioner.
+fn murmur2(data: &[u8]) -> u32 {
+    const SEED: u32 = 0x9747_b28c;
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+
+    let mut h = SEED ^ data.len() as u32;
+    let (chunks, tail) = data.as_chunks::<4>();
+    for chunk in chunks {
+        let mut k = u32::from_le_bytes(*chunk);
+        k = k.wrapping_mul(M);
+        k ^= k >> R;
+        k = k.wrapping_mul(M);
+        h = h.wrapping_mul(M);
+        h ^= k;
+    }
+    match tail.len() {
+        3 => {
+            h ^= u32::from(tail[2]) << 16;
+            h ^= u32::from(tail[1]) << 8;
+            h ^= u32::from(tail[0]);
+            h = h.wrapping_mul(M);
+        }
+        2 => {
+            h ^= u32::from(tail[1]) << 8;
+            h ^= u32::from(tail[0]);
+            h = h.wrapping_mul(M);
+        }
+        1 => {
+            h ^= u32::from(tail[0]);
+            h = h.wrapping_mul(M);
+        }
+        _ => {}
+    }
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^= h >> 15;
+    h
+}
+
+/// Partition index for a keyed message, matching the Java client's default
+/// partitioner so producers in other languages agree on where a key lands.
+fn partition_for_key(key: &[u8], partitions: usize) -> usize {
+    (murmur2(key) & 0x7fff_ffff) as usize % partitions
+}
+
 /// Ensures the configured topic exists.
 ///
 /// When `create_or_update` is `true` the topic is created from
 /// `topic_options` if it does not already exist. When `false` an error is
 /// returned if the topic is absent from the cluster.
 ///
-/// Existence is checked over the admin protocol rather than by fetching the
-/// topic's metadata: asking a broker with `auto.create.topics.enable` for one
-/// topic by name makes it create the topic right there, with broker defaults,
+/// Existence is checked against the metadata of every topic rather than by
+/// asking for this one by name: a broker with `auto.create.topics.enable`
+/// creates a topic asked for by name right there, with broker defaults,
 /// before `topic_options` can be applied.
-async fn setup_topic(config: &super::config::Produce) -> Result<(), Error> {
+async fn setup_topic(
+    client: &rskafka::client::Client,
+    config: &super::config::Produce,
+) -> Result<(), Error> {
     let topic = config.topic.as_str();
-    let timeout = crate::client::clamp_timeout(config.ack_timeout);
-    let client_config =
-        crate::client::build_base_config(&config.credentials_path, &config.brokers, timeout)
-            .map_err(|e| Error::ClientAuth { source: e })?;
-    let admin_client: AdminClient<DefaultClientContext> =
-        client_config.create().map_err(|e| Error::ClientAuth {
-            source: crate::client::Error::CreateAdminClient { source: e },
-        })?;
-
-    let describe_options = AdminOptions::new().request_timeout(Some(timeout));
-    let described = admin_client
-        .describe_configs(&[ResourceSpecifier::Topic(topic)], &describe_options)
+    let topics = client
+        .list_topics()
         .await
-        .map_err(|e| Error::MetadataFetch { source: e })?;
-
-    // A topic that does not exist is described with no config entries.
-    let exists = match described.into_iter().next() {
-        Some(Ok(resource)) => !resource.entries.is_empty(),
-        Some(Err(_)) | None => false,
-    };
-
-    if exists {
+        .map_err(|source| Error::MetadataFetch {
+            source: Box::new(source),
+        })?;
+    if topics.iter().any(|t| t.name == topic) {
         return Ok(());
     }
+    if !config.create_or_update {
+        return Err(Error::TopicNotFound {
+            topic: topic.to_string(),
+        });
+    }
 
-    if config.create_or_update {
-        let topic_options = &config.topic_options;
-        let mut new_topic = NewTopic::new(
+    let topic_options = &config.topic_options;
+    let replication_factor = i16::try_from(topic_options.replication_factor).map_err(|_| {
+        Error::ReplicationFactorOutOfRange {
+            value: topic_options.replication_factor,
+        }
+    })?;
+    let timeout = crate::client::clamp_timeout(config.ack_timeout);
+    let controller = client
+        .controller_client()
+        .map_err(|source| Error::TopicCreation {
+            topic: topic.to_string(),
+            source: Box::new(source),
+        })?;
+    match controller
+        .create_topic_with_configs(
             topic,
             topic_options.partitions,
-            TopicReplication::Fixed(topic_options.replication_factor),
-        );
-        let broker_config = topic_options.broker_config();
-        for (key, value) in &broker_config {
-            new_topic = new_topic.set(key, value);
-        }
-
-        // Without an operation timeout the call returns before the controller
-        // has created the topic, and the first send races it.
-        let admin_options = AdminOptions::new().operation_timeout(Some(timeout));
-        let results = admin_client
-            .create_topics(&[new_topic], &admin_options)
-            .await
-            .map_err(|e| Error::TopicCreation {
-                topic: topic.to_string(),
-                source: e,
-            })?;
-
-        for result in results {
-            match result {
-                Err((_, RDKafkaErrorCode::TopicAlreadyExists)) | Ok(_) => {}
-                Err((topic, code)) => return Err(Error::TopicCreationRejected { topic, code }),
-            }
-        }
+            replication_factor,
+            topic_options.broker_config().into_iter().collect(),
+            timeout.as_millis() as i32,
+        )
+        .await
+    {
         Ok(())
-    } else {
-        Err(Error::TopicNotFound {
+        | Err(KafkaError::ServerError {
+            protocol_error: ProtocolError::TopicAlreadyExists,
+            ..
+        }) => {}
+        Err(KafkaError::ServerError { protocol_error, .. }) => {
+            return Err(Error::TopicCreationRejected {
+                topic: topic.to_string(),
+                protocol_error,
+            })
+        }
+        Err(source) => {
+            return Err(Error::TopicCreation {
+                topic: topic.to_string(),
+                source: Box::new(source),
+            })
+        }
+    }
+    wait_for_topic(client, topic, timeout).await
+}
+
+/// Waits until a just-created topic shows up in the cluster metadata, which
+/// a broker other than the controller can take a moment to learn about.
+async fn wait_for_topic(
+    client: &rskafka::client::Client,
+    topic: &str,
+    timeout: std::time::Duration,
+) -> Result<(), Error> {
+    let visible = async {
+        loop {
+            let topics = client
+                .list_topics()
+                .await
+                .map_err(|source| Error::MetadataFetch {
+                    source: Box::new(source),
+                })?;
+            if topics.iter().any(|t| t.name == topic) {
+                return Ok(());
+            }
+            tokio::time::sleep(TOPIC_VISIBILITY_POLL_INTERVAL).await;
+        }
+    };
+    match tokio::time::timeout(timeout, visible).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::TopicNotVisible {
             topic: topic.to_string(),
-        })
+            timeout,
+        }),
     }
 }
 
+/// How often a just-created topic is looked up until it becomes visible.
+const TOPIC_VISIBILITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a topic's partition list is used before it is looked up again,
+/// so partitions added to the topic are picked up.
+const METADATA_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// A topic's partition clients and when they were looked up.
+struct TopicPartitions {
+    clients: Arc<Vec<PartitionClient>>,
+    fetched_at: std::time::Instant,
+}
+
 pub struct EventHandler {
-    producer: Arc<rdkafka::producer::FutureProducer>,
+    client: Arc<rskafka::client::Client>,
+    partitions: tokio::sync::Mutex<HashMap<String, TopicPartitions>>,
+    next_partition: AtomicUsize,
     task_id: usize,
     tx: Option<Sender<Event>>,
     config: Arc<super::config::Produce>,
@@ -245,6 +366,54 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    async fn partition_clients(&self, topic: &str) -> Result<Arc<Vec<PartitionClient>>, Error> {
+        let mut cache = self.partitions.lock().await;
+        if let Some(cached) = cache.get(topic) {
+            if cached.fetched_at.elapsed() < METADATA_MAX_AGE {
+                return Ok(Arc::clone(&cached.clients));
+            }
+        }
+        let topics = self
+            .client
+            .list_topics()
+            .await
+            .map_err(|source| Error::MetadataFetch {
+                source: Box::new(source),
+            })?;
+        let Some(metadata) = topics.into_iter().find(|t| t.name == topic) else {
+            return Err(Error::TopicNotFound {
+                topic: topic.to_string(),
+            });
+        };
+        let mut clients = Vec::with_capacity(metadata.partitions.len());
+        for partition in metadata.partitions {
+            let client = self
+                .client
+                .partition_client(topic, partition, UnknownTopicHandling::Retry)
+                .await
+                .map_err(|source| Error::PartitionClient {
+                    topic: topic.to_string(),
+                    partition,
+                    source: Box::new(source),
+                })?;
+            clients.push(client);
+        }
+        if clients.is_empty() {
+            return Err(Error::NoPartitions {
+                topic: topic.to_string(),
+            });
+        }
+        let clients = Arc::new(clients);
+        cache.insert(
+            topic.to_string(),
+            TopicPartitions {
+                clients: Arc::clone(&clients),
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+        Ok(clients)
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
@@ -271,15 +440,47 @@ impl EventHandler {
             // `config` is already rendered, so the key is too. Rendering it a
             // second time would treat event data containing `{{ }}` as a
             // template of its own.
-            let record = FutureRecord::to(&config.topic)
-                .payload(&payload)
-                .key(config.message_key.as_deref().unwrap_or(""));
+            let key = config
+                .message_key
+                .as_ref()
+                .map(|key| key.as_bytes().to_vec());
+            let clients = self.partition_clients(&config.topic).await?;
+            let index = match &key {
+                Some(key) => partition_for_key(key, clients.len()),
+                None => self.next_partition.fetch_add(1, Ordering::Relaxed) % clients.len(),
+            };
+            let partition_client = &clients[index];
+            let record = Record {
+                key: match key {
+                    Some(key) => Some(key),
+                    None => Some(Vec::new()),
+                },
+                value: Some(payload),
+                headers: BTreeMap::new(),
+                timestamp: chrono::Utc::now(),
+            };
 
-            let (partition, offset) = self
-                .producer
-                .send(record, crate::client::clamp_timeout(config.ack_timeout))
-                .await
-                .map_err(|(e, _)| Error::Produce { source: e })?;
+            let timeout = crate::client::clamp_timeout(config.ack_timeout);
+            let produced = tokio::time::timeout(
+                timeout,
+                partition_client.produce(vec![record], Compression::NoCompression),
+            )
+            .await
+            .map_err(|_| Error::ProduceTimeout {
+                topic: config.topic.clone(),
+                timeout,
+            })?
+            .map_err(|source| Error::Produce {
+                source: Box::new(source),
+            })?;
+            let partition = partition_client.partition();
+            let offset = produced
+                .offsets
+                .first()
+                .copied()
+                .ok_or_else(|| Error::MissingOffset {
+                    topic: config.topic.clone(),
+                })?;
 
             let result = ProduceResult {
                 topic: config.topic.clone(),
@@ -345,15 +546,12 @@ impl flowgen_core::task::runner::Runner for Producer {
 
         init_config.validate()?;
 
-        // `ack_timeout` is baked into the producer's `message.timeout.ms`, so
-        // it keys the registry too -- otherwise tasks with different timeouts
-        // would share whichever producer initialized first.
         let kafka_key = flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
             .field("credentials_path", &init_config.credentials_path)
             .field("brokers", &init_config.brokers)
             .field("ack_timeout", &init_config.ack_timeout)
             .build();
-        let producer = self
+        let client = self
             .task_context
             .client_registry
             .get_or_init(kafka_key, || {
@@ -367,7 +565,7 @@ impl flowgen_core::task::runner::Runner for Producer {
                         .connect()
                         .await
                         .map_err(|source| Error::ClientAuth { source })?
-                        .producer
+                        .client
                         .ok_or(Error::MissingClient)
                 }
             })
@@ -377,10 +575,12 @@ impl flowgen_core::task::runner::Runner for Producer {
                 flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
             })?;
 
-        setup_topic(&init_config).await?;
+        setup_topic(&client, &init_config).await?;
 
         let event_handler = EventHandler {
-            producer: Arc::clone(&producer),
+            client: Arc::clone(&client),
+            partitions: tokio::sync::Mutex::new(HashMap::new()),
+            next_partition: AtomicUsize::new(0),
             task_id: self.task_id,
             tx: self.tx.clone(),
             config: Arc::clone(&self.config),
@@ -580,6 +780,21 @@ mod tests {
     // ------------------------------------------------------------------
     // Error display
     // ------------------------------------------------------------------
+
+    #[test]
+    fn test_unreachable_broker_is_retried_but_bad_credentials_are_not() {
+        let unreachable = Error::ClientAuth {
+            source: crate::client::Error::Connect {
+                source: Box::new(KafkaError::InvalidResponse("Connection refused".into())),
+            },
+        };
+        let no_credentials = Error::ClientAuth {
+            source: crate::client::Error::NoCredentials,
+        };
+
+        assert!(!unreachable.is_permanent());
+        assert!(no_credentials.is_permanent());
+    }
 
     #[test]
     fn test_error_display() {
@@ -824,6 +1039,34 @@ mod tests {
     // ------------------------------------------------------------------
     // message_key id fallback
     // ------------------------------------------------------------------
+
+    #[test]
+    fn test_murmur2_matches_the_java_client() {
+        let cases: [(&[u8], i32); 6] = [
+            (b"21", -973_932_308),
+            (b"foobar", -790_332_482),
+            (b"a-little-bit-long-string", -985_981_536),
+            (b"a-little-bit-longer-string", -1_486_304_829),
+            (
+                b"lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8",
+                -58_897_971,
+            ),
+            (b"abc", 479_470_107),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(murmur2(key) as i32, expected, "murmur2({key:?})");
+        }
+    }
+
+    #[test]
+    fn test_partition_for_key_is_stable_and_in_range() {
+        for partitions in 1..=8 {
+            let partition = partition_for_key(b"customer-42", partitions);
+            assert!(partition < partitions);
+            assert_eq!(partition, partition_for_key(b"customer-42", partitions));
+        }
+    }
 
     #[test]
     fn test_ensure_event_id_patches_null_id() {

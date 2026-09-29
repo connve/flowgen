@@ -11,9 +11,14 @@ name = "flowgen_kafka"
 path = "src/lib.rs"
 
 [dependencies]
-rdkafka = { workspace = true }
+rskafka = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+pkcs8 = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+secrecy = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 flowgen_core = { path = "../core" }
@@ -25,12 +30,6 @@ bytes = { workspace = true }
 arrow = { workspace = true }
 humantime-serde = { workspace = true }
 uuid = { workspace = true }
-
-# Build OpenSSL from source on macOS: pkg-config cannot find it when
-# cross-compiling Intel binaries on ARM runners, and the shipped binary
-# must not depend on Homebrew's openssl at runtime.
-[target.'cfg(target_os = "macos")'.dependencies]
-rdkafka = { workspace = true, features = ["ssl-vendored"] }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

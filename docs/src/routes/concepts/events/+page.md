@@ -7,9 +7,9 @@ Events are the data records that flow between tasks. Each task receives events, 
 | Field | Type | Description |
 |---|---|---|
 | `data` | EventData | Payload — JSON, Arrow RecordBatch, Avro, or raw bytes. |
-| `subject` | string | Task name that produced the event. |
+| `subject` | string | Set by the task that produced the event: the task name for most tasks, the source's own subject for a source (e.g., NATS subject, Kafka topic, MongoDB collection). |
 | `id` | string | Optional identifier set by the source (e.g., Salesforce record ID, NATS message ID). |
-| `timestamp` | int | Creation time in microseconds since Unix epoch. |
+| `timestamp` | int | Creation time in microseconds since Unix epoch; a source can set the time of the record it read (e.g., Kafka record time). |
 | `task_id` | int | Task index in the flow. |
 | `task_type` | string | Task type (e.g., `script`, `http_request`). |
 | `meta` | map | Key-value metadata that travels with the event. |

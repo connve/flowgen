@@ -25,7 +25,7 @@ http_server:
 | `name` | string | required | Task name. |
 | `endpoint` | string | required | Route path (e.g., `/webhooks/orders`). |
 | `method` | string | `GET` | HTTP method: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`. |
-| `headers` | map | | Expected headers. |
+| `headers` | map | | Request headers to copy into `event.meta.headers`, by name. Names match case-insensitively; values are ignored. |
 | `credentials_path` | string | | Path to credentials for request authentication. |
 | `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before responding. |
 | `max_body_bytes` | int | `10485760` | Maximum accepted request body size in bytes (10 MiB default). Larger requests are rejected with HTTP 413 before being read into memory. |
@@ -60,9 +60,9 @@ With `stream: true`, the client receives intermediate results as SSE events whil
 
 ## Output
 
-Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each received request produces an event with `event.data` containing:
+Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each received request produces an event:
 
-| Field | Type | Description |
-|---|---|---|
-| `headers` | object | Selected HTTP headers from the request. |
-| `payload` | value | Parsed request body as JSON. |
+| Event field | Value |
+|---|---|
+| `event.data` | Parsed request body as JSON, or `null` for an empty body. |
+| `event.meta.headers` | The request headers listed in `headers`, under their lowercase names. A header sent more than once keeps its first value. |

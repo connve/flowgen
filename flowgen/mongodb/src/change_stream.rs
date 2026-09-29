@@ -1,8 +1,9 @@
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{new_completion_channel, Event, EventExt};
+use flowgen_core::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
 use futures_util::StreamExt;
+use mongodb::options::FullDocumentType;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::{error, warn};
@@ -43,8 +44,6 @@ pub enum Error {
         #[source]
         source: crate::message::Error,
     },
-    #[error("Full document is not available for this operation")]
-    NoFullDocument(),
     #[error("Stream ended unexpectedly")]
     StreamEnded,
     #[error(
@@ -56,6 +55,73 @@ pub enum Error {
         #[source]
         source: flowgen_core::config::Error,
     },
+    #[error("JSON serialization error: {source}")]
+    SerdeJson {
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+type ChangeEvent = mongodb::change_stream::event::ChangeStreamEvent<mongodb::bson::Document>;
+
+/// Change metadata the event has no field for, merged into `event.meta`.
+#[derive(Debug, serde::Serialize)]
+struct ChangeMeta<'a> {
+    database: Option<&'a str>,
+    operation_type: &'a mongodb::change_stream::event::OperationType,
+    document_key: Option<&'a mongodb::bson::Document>,
+}
+
+/// Where a change lands on the event: its subject, id, and meta.
+#[derive(Debug)]
+struct ChangeDetails {
+    collection: Option<String>,
+    id: String,
+    meta: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Key under a resume token holding its value.
+const RESUME_TOKEN_DATA_KEY: &str = "_data";
+
+fn change_details(change_event: &ChangeEvent) -> Result<ChangeDetails, Error> {
+    let (database, collection) = match &change_event.ns {
+        Some(ns) => (Some(ns.db.as_str()), ns.coll.clone()),
+        None => (None, None),
+    };
+    let meta = match serde_json::to_value(ChangeMeta {
+        database,
+        operation_type: &change_event.operation_type,
+        document_key: change_event.document_key.as_ref(),
+    }) {
+        Ok(serde_json::Value::Object(meta)) => meta,
+        Ok(_) => serde_json::Map::new(),
+        Err(source) => return Err(Error::SerdeJson { source }),
+    };
+    let token =
+        serde_json::to_value(&change_event.id).map_err(|source| Error::SerdeJson { source })?;
+    let id = match token.get(RESUME_TOKEN_DATA_KEY) {
+        Some(serde_json::Value::String(data)) => data.clone(),
+        _ => token.to_string(),
+    };
+    Ok(ChangeDetails {
+        collection,
+        id,
+        meta,
+    })
+}
+
+/// The change's payload: the document when the change carries one, the
+/// document key for a delete, and nothing otherwise.
+fn change_document(change_event: &ChangeEvent) -> Option<&mongodb::bson::Document> {
+    match (
+        &change_event.full_document,
+        &change_event.operation_type,
+        &change_event.document_key,
+    ) {
+        (Some(document), _, _) => Some(document),
+        (None, mongodb::change_stream::event::OperationType::Delete, Some(key)) => Some(key),
+        _ => None,
+    }
 }
 
 /// Event handler that watches a MongoDB change stream and forwards events downstream.
@@ -85,36 +151,52 @@ impl EventHandler {
 
         let mut change_stream = db
             .watch()
+            .full_document(FullDocumentType::UpdateLookup)
             .await
             .map_err(|source| Error::MongoDB { source })?;
 
-        while let Some(result) = change_stream.next().await {
-            if self.task_context.cancellation_token.is_cancelled() {
-                return Ok(());
-            }
+        loop {
+            let result = tokio::select! {
+                _ = self.task_context.cancellation_token.cancelled() => return Ok(()),
+                result = change_stream.next() => result,
+            };
+
+            let Some(result) = result else {
+                return Err(Error::StreamEnded);
+            };
 
             let change_event = result.map_err(|source| Error::MongoDB { source })?;
-
-            let doc = change_event
-                .full_document
-                .as_ref()
-                .ok_or(Error::NoFullDocument())?;
 
             let (completion_state, _completion_rx) =
                 new_completion_channel(self.task_context.leaf_count);
 
-            let mut e = doc
-                .to_event(self.task_type, self.task_id)
-                .map_err(|source| Error::MessageConversion { source })?;
+            let mut e = match change_document(&change_event) {
+                Some(document) => document
+                    .to_event(self.task_type, self.task_id)
+                    .map_err(|source| Error::MessageConversion { source })?,
+                None => EventBuilder::new()
+                    .subject(self.config.db_name.clone())
+                    .data(EventData::Json(serde_json::Value::Null))
+                    .task_id(self.task_id)
+                    .task_type(self.task_type)
+                    .build()
+                    .map_err(|source| Error::Event { source })?,
+            };
 
             e.completion_tx = Some(completion_state);
+            let details = change_details(&change_event)?;
+            if let Some(collection) = details.collection {
+                e.subject = collection;
+            }
+            e.id = Some(details.id);
+            e.meta
+                .get_or_insert_with(serde_json::Map::new)
+                .extend(details.meta);
 
             e.send_with_logging(self.tx.as_ref())
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
         }
-
-        Err(Error::StreamEnded)
     }
 }
 
@@ -320,8 +402,46 @@ impl ChangeStreamReaderBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mongodb::bson::doc;
     use std::path::PathBuf;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn test_change_details() {
+        let change_event: ChangeEvent = mongodb::bson::from_document(doc! {
+            "_id": { "_data": "token" },
+            "operationType": "insert",
+            "ns": { "db": "d", "coll": "c" },
+            "documentKey": { "_id": 1 },
+            "fullDocument": { "_id": 1 },
+        })
+        .unwrap();
+
+        let details = change_details(&change_event).unwrap();
+
+        assert_eq!(details.collection.as_deref(), Some("c"));
+        assert_eq!(details.id, "token");
+        assert_eq!(details.meta["database"], "d");
+        assert_eq!(details.meta["operation_type"], "insert");
+        assert_eq!(details.meta["document_key"], serde_json::json!({"_id": 1}));
+    }
+
+    #[test]
+    fn test_change_document() {
+        let change = |fields: mongodb::bson::Document| -> ChangeEvent {
+            let mut event = doc! { "_id": { "_data": "token" }, "documentKey": { "_id": 1 } };
+            event.extend(fields);
+            mongodb::bson::from_document(event).unwrap()
+        };
+        let delete = change(doc! { "operationType": "delete" });
+        let update_without_document = change(doc! { "operationType": "update" });
+        let update =
+            change(doc! { "operationType": "update", "fullDocument": { "_id": 1, "n": 2 } });
+
+        assert_eq!(change_document(&delete), Some(&doc! { "_id": 1 }));
+        assert_eq!(change_document(&update_without_document), None);
+        assert_eq!(change_document(&update), Some(&doc! { "_id": 1, "n": 2 }));
+    }
 
     fn create_mock_config() -> super::super::config::ChangeStream {
         super::super::config::ChangeStream {
@@ -417,15 +537,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Message conversion failed with error: Error getting record batch"
-        );
-    }
-
-    #[test]
-    fn test_error_display_no_full_document() {
-        let err = Error::NoFullDocument();
-        assert_eq!(
-            err.to_string(),
-            "Full document is not available for this operation"
         );
     }
 
