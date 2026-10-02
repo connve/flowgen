@@ -17,6 +17,7 @@ pub const DEFAULT_MAX_ATTEMPTS: usize = 10;
 
 /// Retry configuration with exponential backoff and jitter.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (default: 10 = ~15 minutes total).
     /// With 1s initial backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s.

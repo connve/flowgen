@@ -5,7 +5,7 @@ info:
     HTTP API for flowgen. Two listeners: `web` (flow / resource /
     SSE endpoints under `web.path`) and `health` (Kubernetes probes
     on the root path).
-  version: 0.144.0
+  version: 0.145.0
   license:
     name: MPL-2.0
 servers:
@@ -418,6 +418,164 @@ paths:
         "503":
           description: The conversation store is unavailable.
 
+  /api/workspace/validate:
+    post:
+      operationId: validateWorkspaceFiles
+      summary: Validate flow and resource files without running them.
+      description: |
+        Paths are relative to the workspace root: `flows/…` files are parsed
+        and checked as flows (unknown fields, task wiring, task settings,
+        inline scripts), `resources/…` files by extension (`.rhai` must
+        compile, `.json` must parse).
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspaceFiles"
+      responses:
+        "200":
+          description: Issues per file; an empty list means every file is valid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceValidation"
+
+  /api/changes:
+    get:
+      operationId: listChanges
+      summary: List proposed workspace changes, newest first.
+      tags: [workspace]
+      responses:
+        "200":
+          description: Change summaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [changes]
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ChangeSummary"
+        "404":
+          description: "`web.authoring` is not configured."
+        "503":
+          description: The change store is unavailable.
+    post:
+      operationId: proposeChange
+      summary: Propose a workspace change for approval.
+      description: |
+        Records the change as pending together with the deployed content of
+        every file it touches, so the diff shows exactly what approval
+        replaces. Invalid files are recorded too, with their issues.
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeProposal"
+      responses:
+        "201":
+          description: The recorded change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "400":
+          description: A file path is outside `flows/` and `resources/`.
+        "404":
+          description: "`web.authoring` is not configured."
+        "503":
+          description: The change store is unavailable.
+
+  /api/changes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getChange
+      summary: Fetch one change with its diff.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "404":
+          description: No change with that id, or `web.authoring` is not configured.
+        "503":
+          description: The change store is unavailable.
+
+  /api/changes/{id}/approve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: approveChange
+      summary: Approve a pending change and publish it, or publish a failed one again.
+      description: |
+        Requires a signed-in user's session, and membership of one of
+        `web.authoring.approver_groups` when set; machine keys are refused.
+        Runs the flow behind `web.authoring.publish_endpoint` with
+        `{id, title, author, files}` and records its result. A `failed`
+        change, or one left `publishing` past `web.authoring.publish_timeout`,
+        can be approved again.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The change after publishing, `published` or `failed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "403":
+          description: The request does not carry a user session.
+        "404":
+          description: No change with that id, or `web.authoring` is not configured.
+        "409":
+          description: The change cannot be published in its status, or has invalid files.
+        "503":
+          description: The change store is unavailable.
+
+  /api/changes/{id}/reject:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: rejectChange
+      summary: Reject a pending or failed change.
+      tags: [workspace]
+      responses:
+        "200":
+          description: The rejected change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "403":
+          description: The request does not carry a user session.
+        "404":
+          description: No change with that id, or `web.authoring` is not configured.
+        "409":
+          description: The change is not pending or failed.
+        "503":
+          description: The change store is unavailable.
+
   /auth/login:
     get:
       operationId: authLogin
@@ -749,13 +907,16 @@ components:
 
     ConfigInfo:
       type: object
-      required: [yaml]
+      required: [yaml, authoring]
       properties:
         yaml:
           type: string
           description: |
             The running `AppConfig` serialized to YAML, with secrets
             redacted to `"***"`.
+        authoring:
+          type: boolean
+          description: Whether `web.authoring` is set, so changes can be proposed.
 
     UserContext:
       type: object
@@ -781,6 +942,149 @@ components:
         arguments:
           type: string
           description: The tool call's arguments, as a JSON string.
+
+    WorkspaceFile:
+      type: object
+      description: A file in the workspace; `content` null deletes it.
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Path from the workspace root, under `flows/` or `resources/`.
+        content:
+          type: string
+          nullable: true
+
+    WorkspaceFiles:
+      type: object
+      required: [files]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceFile"
+
+    ValidationIssue:
+      type: object
+      required: [path, message]
+      properties:
+        path:
+          type: string
+          description: The file the issue is in.
+        location:
+          type: string
+          description: Where in the file, e.g. `flow.tasks.0.generate.intreval`.
+        message:
+          type: string
+
+    WorkspaceValidation:
+      type: object
+      required: [issues]
+      properties:
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+
+    ChangeProposal:
+      type: object
+      required: [title, files]
+      properties:
+        title:
+          type: string
+          description: One line, used as the commit message.
+        description:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceFile"
+
+    ChangeStatus:
+      type: string
+      enum: [pending, rejected, publishing, published, failed]
+
+    ChangeFile:
+      type: object
+      required: [path, diff]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+          nullable: true
+          description: Proposed content; null deletes the file.
+        previous:
+          type: string
+          nullable: true
+          description: Deployed content when the change was proposed; null for a new file.
+        diff:
+          type: string
+          description: Unified diff from `previous` to `content`.
+
+    Change:
+      type: object
+      required: [id, title, status, proposedBy, createdAt, files, issues]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: "#/components/schemas/ChangeStatus"
+        proposedBy:
+          type: string
+          description: The user or machine key that proposed the change.
+        createdAt:
+          type: integer
+          format: int64
+          description: Epoch milliseconds.
+        decidedBy:
+          type: string
+          description: The user who approved or rejected the change.
+        decidedAt:
+          type: integer
+          format: int64
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChangeFile"
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+        result:
+          type: object
+          additionalProperties: true
+          description: What the publish flow returned, e.g. the commit and digest.
+        error:
+          type: string
+          description: Why publishing failed.
+
+    ChangeSummary:
+      type: object
+      required: [id, title, status, proposedBy, createdAt, fileCount, paths]
+      properties:
+        paths:
+          type: array
+          description: Workspace paths the change touches.
+          items:
+            type: string
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/ChangeStatus"
+        proposedBy:
+          type: string
+        createdAt:
+          type: integer
+          format: int64
+        fileCount:
+          type: integer
 
     ConversationMessage:
       type: object

@@ -12,7 +12,7 @@ flow:
         name: trigger
         interval: 60s
         count: 5
-        data:
+        payload:
           source: "flowgen-example"
           timestamp: "{{now}}"
 

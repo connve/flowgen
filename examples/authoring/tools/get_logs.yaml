@@ -1,0 +1,25 @@
+# MCP tool for the flow operator agent: reads a flow's recent logs.
+#
+# Required: as for list_flows.yaml.
+flow:
+  labels:
+    display_name: "Workspace Tool: Get Logs"
+    description: "Returns a flow's recent warnings and errors so the flow operator agent can check a deployment."
+    tags: ["mcp", "authoring", "example"]
+  tasks:
+
+    - mcp_tool:
+        name: get_logs
+        description: "Get the latest warning and error logs of one flow, by identity."
+        input_schema:
+          type: object
+          properties:
+            identity:
+              type: string
+          required: [identity]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_API_URL}}/api/logs?flow={{event.data.identity}}&levels=warn&levels=error&limit=50"
+        method: GET
+        credentials_path: /etc/flowgen/credentials/operator.json

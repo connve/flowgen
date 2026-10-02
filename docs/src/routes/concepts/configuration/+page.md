@@ -185,7 +185,7 @@ OpenAI-compatible LLM gateway that serves every registered `llm_proxy` flow.
 
 ## `web`
 
-Embedded web dashboard and read-only JSON API.
+Embedded web dashboard and JSON API.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -193,6 +193,11 @@ Embedded web dashboard and read-only JSON API.
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
 | `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
+| `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
+| `authoring.publish_endpoint` | string | | Enables change proposals; the `http_endpoint` path of the flow that publishes approved changes. See [Authoring](/docs/flowgen/concepts/authoring). |
+| `authoring.approver_groups` | list of string | `[]` | Identity provider groups whose members may approve and reject. Empty allows every signed-in user. |
+| `authoring.groups_claim` | string | `groups` | Claim of the signed-in user that lists their groups. |
+| `authoring.publish_timeout` | duration | `5m` | How long publishing may take before the change is recorded as failed. |
 
 The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.yaml`.
 
@@ -209,6 +214,10 @@ The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.
 | `GET <path>/api/config` | Non-secret config info shown in the web UI (e.g. whether the Agents chat is configured). |
 | `POST <path>/api/agents/chat` | Proxies a chat-completion request to the AI gateway for the built-in Agents chat. Streams the response back; same-origin, so no gateway-side CORS is required. |
 | `GET <path>/api/agents/models` | Proxies `GET /models` on the AI gateway for the built-in Agents chat's model picker. |
+| `POST <path>/api/workspace/validate` | Validates flow and resource files without running them. |
+| `GET`, `POST <path>/api/changes` | List and propose workspace changes. |
+| `GET <path>/api/changes/{id}` | One change with its diff. |
+| `POST <path>/api/changes/{id}/approve`, `/reject` | Decide a pending change; a signed-in user only. |
 | `GET <path>/api/openapi.yaml` | The spec itself. |
 
 ## `health`

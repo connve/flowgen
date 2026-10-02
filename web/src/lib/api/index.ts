@@ -31,3 +31,6 @@ export type LogRecord = Schemas['LogRecord'];
 export type LogSpan = Schemas['LogSpan'];
 export type KeyValue = Schemas['KeyValue'];
 export type UserContext = Schemas['UserContext'];
+export type Change = Schemas['Change'];
+export type ChangeSummary = Schemas['ChangeSummary'];
+export type ChangeStatus = Schemas['ChangeStatus'];

@@ -65,6 +65,7 @@ pub enum QueryJobOperation {
 ///   has_header: true
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryJob {
     /// Unique task identifier.
     pub name: String,

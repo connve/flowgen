@@ -78,6 +78,7 @@ pub enum Operation {
 ///     destination: gs://my-bucket/processed/
 /// ```
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique task identifier.
     pub name: String,
@@ -164,6 +165,7 @@ pub enum WriteFormat {
 
 /// Configuration for Hive-style directory partitioning.
 #[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HivePartitionOptions {
     /// Whether to enable Hive partitioning.
     pub enabled: bool,

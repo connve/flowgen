@@ -116,6 +116,74 @@ pub struct WebState {
     /// Whether login cookies carry `Secure` (browsers require HTTPS to send
     /// them). From `web.cookie_secure`, default `true`.
     pub cookie_secure: bool,
+    /// Machine keys `/api/*` accepts as `Authorization: Bearer`, from
+    /// `web.api_credentials_path`.
+    pub api_keys: Vec<flowgen_core::credentials::ApiKey>,
+    /// From `web.authoring`; `None` disables `/api/changes`.
+    pub authoring: Option<crate::config::AuthoringOptions>,
+    /// Endpoint server whose flows approved changes are published through.
+    pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    /// Bucket the synced flow sources are read from, when flows load from the
+    /// cache (`flows.cache`).
+    pub flows_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
+}
+
+/// Who an `/api/*` request authenticated as, when `web.auth` is set.
+#[derive(Clone, Debug)]
+pub(crate) enum Caller {
+    /// A signed-in user, through the session cookie.
+    User(flowgen_core::auth::UserContext),
+    /// A machine key from `web.api_credentials_path`, by name.
+    Key(String),
+}
+
+impl Caller {
+    /// How the caller appears in audit fields.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Caller::User(user) => user.user_id.clone(),
+            Caller::Key(name) => format!("key:{name}"),
+        }
+    }
+}
+
+/// Shortest machine key `/api/*` accepts; shorter keys in the file are ignored.
+pub(crate) const MIN_API_KEY_LEN: usize = 32;
+
+/// Routes a machine key may call: reading flows, resources, logs and changes,
+/// validating files, and proposing changes.
+fn key_may_call(api_prefix: &str, method: &axum::http::Method, path: &str) -> bool {
+    let route = match path.strip_prefix(api_prefix) {
+        Some(route) => route,
+        None => return false,
+    };
+    let under = |base: &str| route == base || route.starts_with(&format!("{base}/"));
+    match *method {
+        axum::http::Method::GET => ["/flows", "/resources", "/logs", "/changes", "/version"]
+            .iter()
+            .any(|base| under(base)),
+        axum::http::Method::POST => route == "/changes" || route == "/workspace/validate",
+        _ => false,
+    }
+}
+
+/// The machine key whose value is the request's bearer token, compared in
+/// constant time.
+fn matching_key<'a>(
+    keys: &'a [flowgen_core::credentials::ApiKey],
+    headers: &axum::http::HeaderMap,
+) -> Option<&'a flowgen_core::credentials::ApiKey> {
+    use secrecy::ExposeSecret;
+    use subtle::ConstantTimeEq;
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let token = flowgen_core::auth::extract_bearer_token(header)?;
+    keys.iter().find(|key| {
+        let key = key.key.expose_secret().as_bytes();
+        key.len() >= MIN_API_KEY_LEN && bool::from(key.ct_eq(token.as_bytes()))
+    })
 }
 
 /// Wraps `cookie::Key` so `FromRef<Arc<WebState>>` can be implemented here
@@ -216,6 +284,26 @@ fn router(path: &str, mut state: WebState) -> Router {
                 .put(put_conversation)
                 .delete(delete_conversation),
         )
+        .route(
+            &format!("{api_prefix}/workspace/validate"),
+            post(crate::authoring::validate_workspace),
+        )
+        .route(
+            &format!("{api_prefix}/changes"),
+            get(crate::authoring::list_changes).post(crate::authoring::propose_change),
+        )
+        .route(
+            &format!("{api_prefix}/changes/{{id}}"),
+            get(crate::authoring::get_change),
+        )
+        .route(
+            &format!("{api_prefix}/changes/{{id}}/approve"),
+            post(crate::authoring::approve_change),
+        )
+        .route(
+            &format!("{api_prefix}/changes/{{id}}/reject"),
+            post(crate::authoring::reject_change),
+        )
         .route(&format!("{api_prefix}/openapi.yaml"), get(get_openapi))
         .route(&format!("{api_prefix}/resources"), get(list_resources))
         .route(
@@ -296,13 +384,68 @@ fn removal_cookie(
     cookie
 }
 
-/// `GET /auth/login` — redirects the browser to the IdP.
-async fn auth_login(State(state): State<Arc<WebState>>, jar: AuthJar) -> impl IntoResponse {
+/// What's encrypted into `SSO_STATE_COOKIE` between `/auth/login` and `/auth/callback`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingLogin {
+    #[serde(flatten)]
+    login: crate::login::LoginState,
+    /// Where the callback sends the browser, already checked by [`return_path`].
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthLoginQuery {
+    return_to: Option<String>,
+}
+
+/// `return_to` when it is a web UI page on this origin, outside the auth routes.
+fn return_path(prefix: &str, return_to: &str) -> Option<String> {
+    let path = return_to.strip_prefix(prefix)?;
+    let safe = path.starts_with('/')
+        && !return_to.starts_with("//")
+        && return_to.chars().all(|c| c.is_ascii_graphic() && c != '\\')
+        && !has_dot_segment(path)
+        && !path.starts_with("/auth/");
+    match safe {
+        true => Some(return_to.to_string()),
+        false => None,
+    }
+}
+
+/// Whether the path part holds a `.` or `..` segment, plain or percent-encoded,
+/// which a browser resolves before following the redirect.
+fn has_dot_segment(path_and_query: &str) -> bool {
+    let path = match path_and_query.split_once(['?', '#']) {
+        Some((path, _)) => path,
+        None => path_and_query,
+    };
+    path.split('/').any(|segment| {
+        let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    })
+}
+
+/// `GET /auth/login` — redirects the browser to the IdP. `return_to` names
+/// the page to come back to after the callback.
+async fn auth_login(
+    State(state): State<Arc<WebState>>,
+    jar: AuthJar,
+    axum::extract::Query(query): axum::extract::Query<AuthLoginQuery>,
+) -> impl IntoResponse {
     let Some(login_client) = &state.login_client else {
         return (StatusCode::NOT_FOUND, "OIDC login is not configured").into_response();
     };
     let (url, login_state) = login_client.authorize_url();
-    let Ok(encoded) = serde_json::to_string(&login_state) else {
+    let return_to = match query.return_to {
+        Some(return_to) => return_path(&state.prefix, &return_to),
+        None => None,
+    };
+    let pending = PendingLogin {
+        login: login_state,
+        return_to,
+    };
+    let Ok(encoded) = serde_json::to_string(&pending) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to start login").into_response();
     };
     let jar = jar.add(auth_cookie(
@@ -347,12 +490,12 @@ async fn auth_callback(
     let Some(stashed_raw) = jar.get(SSO_STATE_COOKIE) else {
         return (StatusCode::BAD_REQUEST, "Login session expired, try again").into_response();
     };
-    let Ok(stashed) = serde_json::from_str::<crate::login::LoginState>(stashed_raw.value()) else {
+    let Ok(stashed) = serde_json::from_str::<PendingLogin>(stashed_raw.value()) else {
         return (StatusCode::BAD_REQUEST, "Corrupt login session, try again").into_response();
     };
 
     let result = match login_client
-        .exchange_code(code, &returned_state, &stashed)
+        .exchange_code(code, &returned_state, &stashed.login)
         .await
     {
         Ok(result) => result,
@@ -386,7 +529,11 @@ async fn auth_callback(
             None,
             state.cookie_secure,
         ));
-    (jar, Redirect::to(&ui_url(&state.prefix))).into_response()
+    let redirect_to = match stashed.return_to {
+        Some(return_to) => return_to,
+        None => ui_url(&state.prefix),
+    };
+    (jar, Redirect::to(&redirect_to)).into_response()
 }
 
 /// Where the web UI lives, for redirecting back to it.
@@ -547,7 +694,8 @@ fn apply_refreshed_cookies(response: &mut axum::response::Response, jar: AuthJar
 }
 
 /// Protects `/api/*` when `web.auth` is configured, on the session
-/// [`resolve_session`] resolves. Not layered at all when `web.auth` is unset.
+/// [`resolve_session`] resolves or else a machine key. Not layered at all
+/// when `web.auth` is unset.
 async fn auth_middleware(
     State(state): State<Arc<WebState>>,
     jar: AuthJar,
@@ -559,16 +707,38 @@ async fn auth_middleware(
     }
     match resolve_session(&state, &jar).await {
         Some(resolved) => {
-            request
-                .extensions_mut()
-                .insert(resolved.session.user.clone());
+            let user = resolved.session.user.clone();
+            request.extensions_mut().insert(Caller::User(user.clone()));
+            request.extensions_mut().insert(user);
             let mut response = next.run(request).await;
             if let Some(jar) = resolved.refreshed {
                 apply_refreshed_cookies(&mut response, jar);
             }
             response
         }
-        None => StatusCode::UNAUTHORIZED.into_response(),
+        None => match matching_key(&state.api_keys, request.headers()) {
+            Some(_)
+                if !key_may_call(
+                    &format!("{}/api", state.prefix),
+                    request.method(),
+                    request.uri().path(),
+                ) =>
+            {
+                StatusCode::FORBIDDEN.into_response()
+            }
+            Some(key) => {
+                let caller = Caller::Key(key.name.clone());
+                request
+                    .extensions_mut()
+                    .insert(flowgen_core::auth::UserContext {
+                        user_id: caller.label(),
+                        claims: Default::default(),
+                    });
+                request.extensions_mut().insert(caller);
+                next.run(request).await
+            }
+            None => StatusCode::UNAUTHORIZED.into_response(),
+        },
     }
 }
 
@@ -1049,7 +1219,10 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
             String::new()
         }
     };
-    Json(api::ConfigInfo { yaml })
+    Json(api::ConfigInfo {
+        yaml,
+        authoring: state.authoring.is_some(),
+    })
 }
 
 /// Header and value identifying the built-in Agents chat to the AI gateway.
@@ -1474,6 +1647,10 @@ mod tests {
             login_client: None,
             cookie_key: axum_extra::extract::cookie::Key::generate(),
             cookie_secure: true,
+            api_keys: Vec::new(),
+            authoring: None,
+            http_server: None,
+            flows_cache: None,
         }
     }
 
@@ -1606,6 +1783,215 @@ mod tests {
             .collect();
 
         assert!(open.is_empty(), "reachable without a session: {open:?}");
+    }
+
+    const MACHINE_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn machine_keys_reach_only_the_reading_and_proposing_routes() {
+        use axum::http::Method;
+        let allowed = [
+            (Method::GET, "/f/api/flows"),
+            (Method::GET, "/f/api/flows/a/b"),
+            (Method::GET, "/f/api/changes/abc"),
+            (Method::POST, "/f/api/changes"),
+            (Method::POST, "/f/api/workspace/validate"),
+        ];
+        let refused = [
+            (Method::POST, "/f/api/changes/abc/approve"),
+            (Method::POST, "/f/api/cluster/token"),
+            (Method::GET, "/f/api/agents/conversations"),
+            (Method::GET, "/f/api/config"),
+            (Method::GET, "/f/api/flowsx"),
+        ];
+        for (method, path) in allowed {
+            assert!(key_may_call("/f/api", &method, path), "{method} {path}");
+        }
+        for (method, path) in refused {
+            assert!(!key_may_call("/f/api", &method, path), "{method} {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_machine_key_can_propose_a_change_but_not_approve_it() {
+        let login_client = crate::login::LoginClient::new(
+            crate::login::LoginConfig {
+                issuer_url: issuer().await,
+                client_id: "flowgen".to_string(),
+                client_secret: None,
+                credentials_path: None,
+                redirect_uri: "http://localhost/flowgen/auth/callback".to_string(),
+                extra_scopes: Vec::new(),
+                signout_redirect_url: None,
+            },
+            &secrecy::SecretString::from("client-secret"),
+        )
+        .await
+        .unwrap();
+        let mut state = test_state();
+        state.login_client = Some(Arc::new(login_client));
+        state.api_keys = vec![
+            flowgen_core::credentials::ApiKey {
+                name: "agent".to_string(),
+                key: secrecy::SecretString::from(MACHINE_KEY),
+            },
+            flowgen_core::credentials::ApiKey {
+                name: "blank".to_string(),
+                key: secrecy::SecretString::from(""),
+            },
+        ];
+        state.authoring = Some(crate::config::AuthoringOptions {
+            publish_endpoint: "/workspace/publish".to_string(),
+            approver_groups: Vec::new(),
+            groups_claim: "groups".to_string(),
+            publish_timeout: std::time::Duration::from_secs(5),
+        });
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+        let proposal = api::ChangeProposal {
+            title: "Add a".to_string(),
+            description: None,
+            files: vec![api::WorkspaceFile {
+                path: "flows/a.yaml".to_string(),
+                content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
+            }],
+        };
+
+        for wrong in ["other", ""] {
+            let wrong_key = client
+                .post(format!("{base}/flowgen/api/changes"))
+                .header("authorization", format!("Bearer {wrong}"))
+                .json(&proposal)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(wrong_key.status(), 401, "{wrong:?}");
+        }
+
+        let rotate = client
+            .post(format!("{base}/flowgen/api/cluster/token"))
+            .bearer_auth(MACHINE_KEY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rotate.status(), 403);
+
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .bearer_auth(MACHINE_KEY)
+            .json(&proposal)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(proposed.proposed_by, "key:agent");
+        assert_eq!(proposed.status, api::ChangeStatus::Pending);
+        assert!(proposed.issues.is_empty(), "{:?}", proposed.issues);
+        assert!(proposed.files[0].diff.contains("--- /dev/null"));
+
+        let approve = client
+            .post(format!(
+                "{base}/flowgen/api/changes/{}/approve",
+                proposed.id
+            ))
+            .bearer_auth(MACHINE_KEY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approve.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn approving_a_change_runs_the_publish_flow_and_records_its_result() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
+        let server = Arc::new(flowgen_http::server::EndpointServer::new("/".to_string()));
+        server.register(
+            "/workspace/publish".to_string(),
+            flowgen_http::server::EndpointRegistration {
+                flow_name: "publish".to_string(),
+                config: Arc::new(flowgen_http::config::Processor {
+                    name: "publish".to_string(),
+                    ..Default::default()
+                }),
+                credentials: None,
+                auth_provider: None,
+                tx,
+                task_id: 0,
+                task_type: "http_endpoint",
+                response_registry: Arc::new(flowgen_core::registry::ResponseRegistry::new()),
+                leaf_count: 1,
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        let published = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let data = event.data_as_json().unwrap();
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(Some(serde_json::json!({"commit": "abc"})));
+            data
+        });
+        let mut state = test_state();
+        state.authoring = Some(crate::config::AuthoringOptions {
+            publish_endpoint: "/workspace/publish".to_string(),
+            approver_groups: Vec::new(),
+            groups_claim: "groups".to_string(),
+            publish_timeout: std::time::Duration::from_secs(5),
+        });
+        state.http_server = Some(server);
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add script".to_string(),
+                description: None,
+                files: vec![api::WorkspaceFile {
+                    path: "resources/s.rhai".to_string(),
+                    content: Some("event".to_string()),
+                }],
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let approved: api::Change = client
+            .post(format!(
+                "{base}/flowgen/api/changes/{}/approve",
+                proposed.id
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(approved.status, api::ChangeStatus::Published);
+        assert_eq!(approved.result["commit"], "abc");
+        let sent = published.await.unwrap();
+        assert_eq!(sent["title"], "Add script");
+        assert_eq!(
+            sent["files"],
+            serde_json::json!([{"path": "resources/s.rhai", "content": "event", "previous": null}])
+        );
+
+        let again = client
+            .post(format!(
+                "{base}/flowgen/api/changes/{}/approve",
+                proposed.id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(again.status(), 409);
     }
 
     #[tokio::test]
@@ -1766,6 +2152,54 @@ mod tests {
     fn removal_cookie_omits_secure_when_cookie_secure_is_off() {
         let removal = removal_cookie(SSO_SESSION_COOKIE, false).to_string();
         assert!(!removal.contains("Secure"), "{removal}");
+    }
+
+    #[test]
+    fn return_path_accepts_pages_under_the_prefix() {
+        assert_eq!(
+            return_path("/flowgen", "/flowgen/agents/abc?x=1#top").as_deref(),
+            Some("/flowgen/agents/abc?x=1#top")
+        );
+        assert_eq!(
+            return_path("/flowgen", "/flowgen/").as_deref(),
+            Some("/flowgen/")
+        );
+        assert_eq!(return_path("", "/logs").as_deref(), Some("/logs"));
+        assert_eq!(
+            return_path("/flowgen", "/flowgen/logs?q=..").as_deref(),
+            Some("/flowgen/logs?q=..")
+        );
+    }
+
+    #[test]
+    fn return_path_rejects_anything_that_could_leave_the_ui() {
+        for rejected in [
+            "https://evil.example/",
+            "//evil.example/",
+            "/\\evil.example/",
+            "/flowgen\\..\\x",
+            "/flowgenx/agents",
+            "/flowgen",
+            "/other/page",
+            "/flowgen/auth/login",
+            "/flowgen/../other/",
+            "/flowgen/%2e%2E/other/",
+            "/flowgen/./agents",
+            "/flowgen/a b",
+            "/flowgen/\r\nSet-Cookie:x",
+        ] {
+            assert_eq!(return_path("/flowgen", rejected), None, "{rejected:?}");
+        }
+        assert_eq!(return_path("", "//evil.example/"), None);
+        assert_eq!(return_path("", "evil.example"), None);
+    }
+
+    #[test]
+    fn a_login_state_cookie_without_return_to_still_parses() {
+        let encoded = r#"{"csrf_state":"s","nonce":"n","pkce_verifier":"v"}"#;
+        let pending: PendingLogin = serde_json::from_str(encoded).unwrap();
+        assert_eq!(pending.login.csrf_state, "s");
+        assert_eq!(pending.return_to, None);
     }
 
     #[test]

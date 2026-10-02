@@ -9,6 +9,7 @@ use std::path::PathBuf;
 /// This is a thin wrapper around [`braze::export::UserAlias`] so the config struct
 /// can derive `PartialEq` while the upstream type does not.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserAlias {
     /// Alias value.
     pub alias_name: String,
@@ -48,6 +49,7 @@ impl From<UserAlias> for braze::export::UserAlias {
 ///     - last_name
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique name / identifier of the task.
     pub name: String,

@@ -1,5 +1,5 @@
 # Deduplicate events by ID using `ctx.cache`. Duplicate events return
-# null and are dropped; unseen ones are stamped with a 24 h TTL.
+# () and are dropped; unseen ones are stamped with a 24 h TTL.
 flow:
   labels:
     display_name: "Cache Deduplication"
@@ -22,7 +22,7 @@ flow:
 
           if already_processed != () {
             print("Event " + event_id + " already processed, skipping");
-            return null;
+            return ();
           }
 
           ctx.cache.put(cache_key, "true", 86400);

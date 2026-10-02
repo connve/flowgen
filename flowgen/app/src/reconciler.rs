@@ -505,19 +505,10 @@ fn derive_flow_name(key: &str, ctx: &ReconcilerContext) -> Option<String> {
 /// `FlowConfig::from_path` and retain the verbatim YAML for the web API).
 fn parse_flow_config(key: &str, value: &bytes::Bytes) -> Result<(FlowConfigRaw, String), Error> {
     let content = String::from_utf8_lossy(value).into_owned();
-    let format = match key.ends_with(".json") {
-        true => config::FileFormat::Json,
-        false => config::FileFormat::Yaml,
-    };
-
-    let raw: FlowConfigRaw = config::Config::builder()
-        .add_source(config::File::from_str(&content, format))
-        .build()
-        .and_then(|c| c.try_deserialize::<FlowConfigRaw>())
-        .map_err(|source| Error::FlowConfigParse {
-            key: key.to_string(),
-            source,
-        })?;
+    let raw = FlowConfigRaw::parse(key, &content).map_err(|source| Error::FlowConfigParse {
+        key: key.to_string(),
+        source,
+    })?;
     Ok((raw, content))
 }
 

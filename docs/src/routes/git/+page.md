@@ -3,6 +3,7 @@
 Flowgen can sync flow definitions and resources from a Git repository.
 
 - [Git Sync](/docs/flowgen/git/sync) — pulls a remote Git repository on a schedule and reconciles flow definitions.
+- [Git Push](/docs/flowgen/git/push) — commits files to a branch and pushes them.
 
 ## Credentials
 

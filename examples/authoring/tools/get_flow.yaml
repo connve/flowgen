@@ -1,0 +1,26 @@
+# MCP tool for the flow operator agent: reads one deployed flow's YAML.
+#
+# Required: as for list_flows.yaml.
+flow:
+  labels:
+    display_name: "Workspace Tool: Get Flow"
+    description: "Returns a deployed flow's YAML and task summary for the flow operator agent."
+    tags: ["mcp", "authoring", "example"]
+  tasks:
+
+    - mcp_tool:
+        name: get_flow
+        description: "Get a deployed flow by identity (its path in flows/ without the extension)."
+        input_schema:
+          type: object
+          properties:
+            identity:
+              type: string
+              description: "Flow identity, e.g. orders/sync."
+          required: [identity]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_API_URL}}/api/flows/{{event.data.identity}}"
+        method: GET
+        credentials_path: /etc/flowgen/credentials/operator.json

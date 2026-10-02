@@ -24,7 +24,7 @@ flow:
           retention: limits
           discard: old
         durable_name: mongo_upserter
-        max_messages: 100
+        max_messages_per_batch: 100
         delay: 1s
 
     - mongodb_collection:

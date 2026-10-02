@@ -6,5 +6,14 @@
 //! are pulled and emitted as one event per file, mirroring the shape of
 //! `git_sync` so bootstrap pipelines can swap one for the other.
 
+/// OCI push — release files to a registry as an artifact.
+pub mod push {
+    /// Artifact packing and the registry push.
+    pub mod client;
+    /// Configuration for the OCI push task.
+    pub mod config;
+    /// OCI push processor implementation.
+    pub mod processor;
+}
 /// OCI registry artifact sync processor.
 pub mod sync;

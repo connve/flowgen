@@ -161,7 +161,7 @@ web:
     # Must exactly match a redirect URI registered with the IdP, and
     # include `path` above.
     redirect_uri: "https://example.com/flowgen/auth/callback"
-    # extra_scopes: ["groups"]
+    # extra_scopes: ["offline_access", "groups"]
     # The provider's logout URL, ending its session too on sign-out.
     # signout_redirect_url: "https://auth.example.com/v1/logout?post_logout_redirect_uri=https%3A%2F%2Fexample.com%2Fflowgen%2F"
     # JSON file holding client_secret and cookie_secret.
@@ -178,7 +178,9 @@ Login cookies carry the `Secure` attribute by default, which browsers require HT
 
 ### No server-side session store
 
-Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted with `cookie_secret` so the browser can carry it but never read or forge it. Every request re-validates the token; near expiry, flowgen transparently refreshes it against the identity provider. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
+Flowgen does not keep a session table. The browser's cookie *is* the session: after login, it holds the identity provider's ID and refresh tokens, encrypted with `cookie_secret` so the browser can carry it but never read or forge it. Every request re-validates the token; once it expires, flowgen transparently refreshes it against the identity provider. Concurrent requests to one instance share a single refresh, so a provider that rotates refresh tokens never sees one reused. With several replicas, keep a rotation grace period at the provider, since requests landing on different replicas refresh separately.
+
+Refreshing needs a refresh token, which most providers issue only when the `offline_access` scope is requested and the application allows the refresh token grant. Without one, the session ends when the ID token expires and the browser goes back through the identity provider, returning to the page it was on. Signing out at the identity provider is what actually revokes access — flowgen has no session state of its own to invalidate.
 
 A cookie secret is required whenever `auth` is set, from either `web.cookie_secret` or `auth.credentials_path` — flowgen refuses to start the web server without one, rather than falling back to an unauthenticated UI.
 
@@ -213,7 +215,7 @@ Without it, sign-out is local to flowgen: the provider still considers the brows
 
 | Route | Purpose |
 |---|---|
-| `GET {path}/auth/login` | Redirects to the identity provider. 404 if `auth` isn't configured. |
+| `GET {path}/auth/login` | Redirects to the identity provider. `return_to` names a web UI page to come back to after sign-in. 404 if `auth` isn't configured. |
 | `GET {path}/auth/callback` | Identity provider redirect target; exchanges the code and sets the session cookie. |
 | `GET {path}/auth/logout` | Clears the session cookie, then redirects to `signout_redirect_url` or back to the UI. 404 if `auth` isn't configured. |
 | `GET {path}/auth/me` | The signed-in user, 401 if not signed in, or 404 if `auth` isn't configured. |

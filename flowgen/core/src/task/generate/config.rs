@@ -32,6 +32,7 @@ pub const MAX_INTERVAL: Duration = Duration::from_secs(3_155_760_000);
 
 /// Configuration for generate subscriber tasks that produce scheduled events.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Hash, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Subscriber {
     /// The unique name / identifier of the task.
     pub name: String,

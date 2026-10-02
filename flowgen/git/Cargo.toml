@@ -21,10 +21,14 @@ walkdir = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 futures-util = { workspace = true }
-gix = { workspace = true }
+gix = { workspace = true, features = ["tree-editor"] }
+reqwest = { workspace = true }
+humantime-serde = { workspace = true }
+flate2 = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+axum = { workspace = true }
 
 [lints]
 workspace = true

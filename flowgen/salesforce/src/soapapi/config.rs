@@ -40,6 +40,7 @@ use std::path::PathBuf;
 ///   allow_duplicate_save: true
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Merge {
     /// Unique task identifier.
     pub name: String,

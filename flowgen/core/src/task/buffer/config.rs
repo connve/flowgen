@@ -38,6 +38,7 @@ use std::time::Duration;
 ///   partition_key: "{{event.data.program_id}}.{{event.data.country}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique name identifier for this buffer task.
     pub name: String,

@@ -233,6 +233,18 @@ pub enum Error {
         #[source]
         source: crate::login::LoginError,
     },
+    /// A machine key is too short to be accepted.
+    #[error(
+        "Machine key '{name}' in web.api_credentials_path is shorter than {} characters and is ignored",
+        crate::web::MIN_API_KEY_LEN
+    )]
+    ApiKeyTooShort { name: String },
+    /// The web API's machine keys could not be loaded; none are accepted.
+    #[error("Failed to load web.api_credentials_path, no machine keys are accepted: {source}")]
+    ApiCredentials {
+        #[source]
+        source: flowgen_core::credentials::Error,
+    },
     /// MCP server startup error.
     #[error("Failed to start MCP server: {source}")]
     McpServerStart {
@@ -1342,6 +1354,31 @@ impl App {
             };
 
             if let Some((login_client, cookie_key)) = auth_setup {
+                let api_keys = match &web_config.api_credentials_path {
+                    Some(path) => {
+                        match flowgen_core::credentials::load_api_credentials(path).await {
+                            Ok(credentials) => {
+                                use secrecy::ExposeSecret;
+                                for key in &credentials.api_keys {
+                                    if key.key.expose_secret().len() < crate::web::MIN_API_KEY_LEN {
+                                        error!(
+                                            "{}",
+                                            Error::ApiKeyTooShort {
+                                                name: key.name.clone()
+                                            }
+                                        );
+                                    }
+                                }
+                                credentials.api_keys
+                            }
+                            Err(source) => {
+                                error!("{}", Error::ApiCredentials { source });
+                                Vec::new()
+                            }
+                        }
+                    }
+                    None => Vec::new(),
+                };
                 let web_state = crate::web::WebState {
                     flow_registry: Arc::clone(&flow_registry),
                     prefix: String::new(),
@@ -1358,6 +1395,15 @@ impl App {
                     login_client,
                     cookie_key,
                     cookie_secure: web_config.cookie_secure,
+                    api_keys,
+                    authoring: web_config.authoring.clone(),
+                    http_server: http_server.clone(),
+                    flows_cache: match &flow_cache {
+                        Some((cache, _)) => {
+                            Some(Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>)
+                        }
+                        None => None,
+                    },
                 };
                 let web_handle = tokio::spawn(async move {
                     if let Err(source) = crate::web::start_web_server(port, &path, web_state).await
@@ -1513,26 +1559,51 @@ fn cluster_port(app_config: &AppConfig) -> Option<u16> {
     }
 }
 
-/// `$POD_IP:port`, the address peers use to reach this pod.
+/// Addresses probed for the default route: TEST-NET-1 and the IPv6 documentation prefix.
+const DEFAULT_ROUTE_PROBES: [(&str, &str); 2] =
+    [("0.0.0.0:0", "192.0.2.1:9"), ("[::]:0", "[2001:db8::1]:9")];
+
+/// `ip:port` the peers use to reach this pod: `$POD_IP`, else the default route's source address.
 fn cluster_peer_address(port: u16) -> Option<String> {
-    let raw = match std::env::var("POD_IP") {
-        Ok(raw) => raw,
-        Err(_) => {
-            debug!("POD_IP is not set, so other pods cannot read this pod's logs and counters");
-            return None;
-        }
+    let ip = match std::env::var("POD_IP") {
+        Ok(raw) => match raw.parse::<std::net::IpAddr>() {
+            Ok(ip) => ip,
+            Err(e) => {
+                warn!(
+                    pod_ip = %raw,
+                    error = %e,
+                    "POD_IP is not an IP address, so other pods cannot read this pod's logs and counters"
+                );
+                return None;
+            }
+        },
+        Err(_) => match default_route_ip() {
+            Some(ip) => ip,
+            None => {
+                debug!("POD_IP is not set and there is no default route, so other pods cannot read this pod's logs and counters");
+                return None;
+            }
+        },
     };
-    match raw.parse::<std::net::IpAddr>() {
-        Ok(ip) => Some(std::net::SocketAddr::new(ip, port).to_string()),
-        Err(e) => {
-            warn!(
-                pod_ip = %raw,
-                error = %e,
-                "POD_IP is not an IP address, so other pods cannot read this pod's logs and counters"
-            );
-            None
+    Some(std::net::SocketAddr::new(ip, port).to_string())
+}
+
+/// Source address of the interface that holds the default route.
+fn default_route_ip() -> Option<std::net::IpAddr> {
+    for (bind, target) in DEFAULT_ROUTE_PROBES {
+        match route_source(bind, target) {
+            Ok(ip) if !ip.is_unspecified() && !ip.is_loopback() => return Some(ip),
+            _ => {}
         }
     }
+    None
+}
+
+/// Local address the kernel picks for `target`; connecting a UDP socket sends nothing.
+fn route_source(bind: &str, target: &str) -> std::io::Result<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind(bind)?;
+    socket.connect(target)?;
+    Ok(socket.local_addr()?.ip())
 }
 
 /// Builds the web UI's login client and cookie key from `web.auth`.
@@ -1616,6 +1687,12 @@ fn compute_source_path(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn route_source_returns_the_interface_address_for_the_target() {
+        let ip = route_source("127.0.0.1:0", "127.0.0.1:9").unwrap();
+        assert_eq!(ip, std::net::IpAddr::from([127, 0, 0, 1]));
+    }
 
     fn flow_from_yaml(identity: &str, yaml: &str) -> super::super::flow::Flow {
         let raw: FlowConfigRaw = Config::builder()

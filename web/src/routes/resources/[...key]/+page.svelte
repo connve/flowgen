@@ -5,9 +5,13 @@
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, type ResourceContent } from '$lib/api';
+	import Icon from '@iconify/svelte';
+	import { apiUrl, type ChangeSummary, type ResourceContent } from '$lib/api';
+	import { authoringEnabled, editUrl, pendingChanges, touchesResource } from '$lib/changes';
 
 	let content = $state<ResourceContent | null>(null);
+	let authoring = $state(false);
+	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -16,7 +20,15 @@
 	let folderSegments = $derived(keySegments.slice(0, -1));
 	let leafName = $derived(keySegments[keySegments.length - 1] ?? '');
 
+	$effect(() => {
+		const key = resourceKey;
+		pendingChanges().then((changes) => {
+			if (key === resourceKey) pending = changes.filter((change) => touchesResource(change, key));
+		});
+	});
+
 	onMount(async () => {
+		authoringEnabled().then((enabled) => (authoring = enabled));
 		try {
 			const response = await fetch(apiUrl(`api/resources/${resourceKey}`));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -44,8 +56,28 @@
 			<span class="opacity-40">/</span>
 			<span class="font-mono">{leafName}</span>
 		</div>
-		<h1 class="text-lg font-medium">{leafName}</h1>
+		<div class="flex items-center justify-between gap-2">
+			<h1 class="text-lg font-medium">{leafName}</h1>
+			{#if authoring && content}
+				<a href={editUrl(base, `resources/${resourceKey}`)} class="btn btn-ghost btn-sm">
+					<Icon icon="tabler:pencil" class="h-4 w-4" />
+					Edit
+				</a>
+			{/if}
+		</div>
 	</div>
+
+	{#each pending as change (change.id)}
+		<a
+			href="{base}/changes/{encodeURIComponent(change.id)}"
+			class="mb-3 flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-sm hover:bg-warning/10"
+		>
+			<Icon icon="tabler:git-pull-request" class="h-4 w-4 text-warning" />
+			<span>Pending change: {change.title}</span>
+			<span class="text-xs opacity-60">by {change.proposedBy}</span>
+			<span class="ml-auto text-primary">Review</span>
+		</a>
+	{/each}
 
 	{#if loading}
 		<div class="flex justify-center py-12">

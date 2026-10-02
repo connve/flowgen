@@ -90,6 +90,7 @@ impl Protocol {
 ///
 /// Clients then send `model: "proxy/<downstream-model>"` to reach this proxy.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task. Used as the routing key
     /// inside the chosen protocol (e.g. the prefix of OpenAI's `model` field).

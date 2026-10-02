@@ -181,6 +181,12 @@ pub enum Error {
     /// Error in OCI sync task.
     #[error(transparent)]
     OciSync(#[from] flowgen_oci::sync::processor::Error),
+    /// Error in Git push task.
+    #[error(transparent)]
+    GitPush(#[from] flowgen_git::push::processor::Error),
+    /// Error in OCI push task.
+    #[error(transparent)]
+    OciPush(#[from] flowgen_oci::push::processor::Error),
     /// Error in Braze export user IDs task.
     #[error(transparent)]
     BrazeExportUsersIds(#[from] flowgen_braze::export::users::processor::Error),
@@ -217,6 +223,69 @@ pub enum Error {
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
+    /// Task wiring is invalid.
+    #[error(transparent)]
+    Dag(#[from] DagError),
+}
+
+/// Invalid task wiring in a flow.
+#[derive(thiserror::Error, Debug, Clone, PartialEq)]
+pub enum DagError {
+    #[error("Duplicate task name '{name}' in flow")]
+    DuplicateTask { name: String },
+    #[error("Task '{task}' depends on unknown task '{dependency}'")]
+    UnknownDependency { task: String, dependency: String },
+    #[error("Task '{task}' depends on '{dependency}' which appears later in the list")]
+    LaterDependency { task: String, dependency: String },
+}
+
+/// Resolves each task's parent indices from `depends_on`, or the previous
+/// pipeline task when unset. Registration-only tasks get no implicit parent,
+/// and the implicit-parent walk skips over them.
+pub fn resolve_parents(tasks: &[TaskType]) -> Result<Vec<Vec<usize>>, DagError> {
+    let mut name_to_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (idx, task_type) in tasks.iter().enumerate() {
+        if name_to_idx.insert(task_type.name(), idx).is_some() {
+            return Err(DagError::DuplicateTask {
+                name: task_type.name().to_string(),
+            });
+        }
+    }
+
+    let mut parent_indices: Vec<Vec<usize>> = Vec::with_capacity(tasks.len());
+    for (idx, task_type) in tasks.iter().enumerate() {
+        let parents = match task_type.depends_on() {
+            Some(deps) => {
+                let mut indices = Vec::with_capacity(deps.len());
+                for dep_name in deps {
+                    let parent_idx = match name_to_idx.get(dep_name.as_str()) {
+                        Some(&parent_idx) => parent_idx,
+                        None => {
+                            return Err(DagError::UnknownDependency {
+                                task: task_type.name().to_string(),
+                                dependency: dep_name.clone(),
+                            })
+                        }
+                    };
+                    if parent_idx >= idx {
+                        return Err(DagError::LaterDependency {
+                            task: task_type.name().to_string(),
+                            dependency: dep_name.clone(),
+                        });
+                    }
+                    indices.push(parent_idx);
+                }
+                indices
+            }
+            None if !task_type.has_pipeline_io() => vec![],
+            None => match (0..idx).rev().find(|&i| tasks[i].has_pipeline_io()) {
+                Some(i) => vec![i],
+                None => vec![],
+            },
+        };
+        parent_indices.push(parents);
+    }
+    Ok(parent_indices)
 }
 
 /// Descriptor for a task with its channel endpoints.
@@ -383,55 +452,7 @@ impl TaskRegistryBuilder {
     /// use a dispatcher that clones events to each child channel.
     fn build_dag(&self, tasks_config: &[TaskType]) -> Result<TaskRegistry, Error> {
         let task_count = tasks_config.len();
-
-        let mut name_to_idx: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for (idx, task_type) in tasks_config.iter().enumerate() {
-            let name = task_type.name().to_string();
-            if name_to_idx.contains_key(&name) {
-                return Err(Error::ConfigError(format!(
-                    "Duplicate task name '{name}' in flow"
-                )));
-            }
-            name_to_idx.insert(name, idx);
-        }
-
-        // Resolve each task's parent indices from `depends_on` names.
-        // Registration-only tasks never get an implicit parent, and the
-        // implicit-parent walk skips over any earlier registration-only task
-        // so a normal task following one still chains to the last real
-        // pipeline task.
-        let mut parent_indices: Vec<Vec<usize>> = Vec::with_capacity(task_count);
-        for (idx, task_type) in tasks_config.iter().enumerate() {
-            let parents = match task_type.depends_on() {
-                Some(deps) => {
-                    let mut indices = Vec::with_capacity(deps.len());
-                    for dep_name in deps {
-                        let &parent_idx = name_to_idx.get(dep_name).ok_or_else(|| {
-                            Error::ConfigError(format!(
-                                "Task '{}' depends on unknown task '{dep_name}'",
-                                task_type.name()
-                            ))
-                        })?;
-                        if parent_idx >= idx {
-                            return Err(Error::ConfigError(format!(
-                                "Task '{}' depends on '{dep_name}' which appears later in the list",
-                                task_type.name()
-                            )));
-                        }
-                        indices.push(parent_idx);
-                    }
-                    indices
-                }
-                None if !task_type.has_pipeline_io() => vec![],
-                None => (0..idx)
-                    .rev()
-                    .find(|&i| tasks_config[i].has_pipeline_io())
-                    .map(|i| vec![i])
-                    .unwrap_or_default(),
-            };
-            parent_indices.push(parents);
-        }
+        let parent_indices = resolve_parents(tasks_config)?;
 
         // Group children by parent to identify fan-out points.
         let mut children_per_parent: std::collections::HashMap<usize, Vec<usize>> =
@@ -1934,6 +1955,48 @@ async fn spawn_task(
             tokio::spawn(
                 async move {
                     let mut builder = flowgen_oci::sync::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::git_push(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_git::push::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::oci_push(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_oci::push::processor::ProcessorBuilder::new()
                         .config(config)
                         .task_id(task_id)
                         .task_type(task_type_str)

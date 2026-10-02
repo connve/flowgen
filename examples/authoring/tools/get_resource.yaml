@@ -1,0 +1,25 @@
+# MCP tool for the flow operator agent: reads one deployed resource.
+#
+# Required: as for list_flows.yaml.
+flow:
+  labels:
+    display_name: "Workspace Tool: Get Resource"
+    description: "Returns a deployed resource (script, query, schema) for the flow operator agent."
+    tags: ["mcp", "authoring", "example"]
+  tasks:
+
+    - mcp_tool:
+        name: get_resource
+        description: "Get a deployed resource by key (its path in resources/), e.g. scripts/route.rhai."
+        input_schema:
+          type: object
+          properties:
+            key:
+              type: string
+          required: [key]
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_API_URL}}/api/resources/{{event.data.key}}"
+        method: GET
+        credentials_path: /etc/flowgen/credentials/operator.json

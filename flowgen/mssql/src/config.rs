@@ -31,6 +31,7 @@ use std::path::PathBuf;
 ///     batch_size: 5000
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
     /// Unique task identifier.
     pub name: String,

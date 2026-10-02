@@ -52,6 +52,53 @@ pub struct FlowConfigRaw {
     pub flow: Flow,
 }
 
+impl FlowConfigRaw {
+    /// Parses a flow file: JSON when `key` ends in `.json`, YAML otherwise.
+    pub fn parse(key: &str, content: &str) -> Result<Self, config::ConfigError> {
+        Self::parse_reporting_unknown(key, content, |_| {})
+    }
+
+    /// Parses like [`FlowConfigRaw::parse`], calling `unknown` with the path
+    /// segments of every field no task or flow setting recognises.
+    pub fn parse_reporting_unknown(
+        key: &str,
+        content: &str,
+        mut unknown: impl FnMut(Vec<String>),
+    ) -> Result<Self, config::ConfigError> {
+        let format = match key.ends_with(".json") {
+            true => config::FileFormat::Json,
+            false => config::FileFormat::Yaml,
+        };
+        let source = config::Config::builder()
+            .add_source(config::File::from_str(content, format))
+            .build()?;
+        serde_ignored::deserialize(source, |path| {
+            let mut segments = Vec::new();
+            path_segments(&path, &mut segments);
+            unknown(segments)
+        })
+    }
+}
+
+/// Map keys and sequence indices of `path`, root first, without the
+/// `Option` and newtype wrappers that have no name in the file.
+fn path_segments(path: &serde_ignored::Path, segments: &mut Vec<String>) {
+    match path {
+        serde_ignored::Path::Root => {}
+        serde_ignored::Path::Seq { parent, index } => {
+            path_segments(parent, segments);
+            segments.push(index.to_string());
+        }
+        serde_ignored::Path::Map { parent, key } => {
+            path_segments(parent, segments);
+            segments.push(key.clone());
+        }
+        serde_ignored::Path::Some { parent }
+        | serde_ignored::Path::NewtypeStruct { parent }
+        | serde_ignored::Path::NewtypeVariant { parent } => path_segments(parent, segments),
+    }
+}
+
 /// Top-level configuration for an individual flow.
 ///
 /// Construct via [`FlowConfig::from_path`]. Deserialize the YAML into
@@ -234,6 +281,10 @@ pub enum TaskType {
     git_sync(flowgen_git::sync::config::Processor),
     /// OCI sync task for pulling flow artifacts from an OCI registry into the cache.
     oci_sync(flowgen_oci::sync::config::Processor),
+    /// Git push task for committing files and pushing them to a Git repository.
+    git_push(flowgen_git::push::config::Processor),
+    /// OCI push task for releasing files to an OCI registry as an artifact.
+    oci_push(flowgen_oci::push::config::Processor),
     /// Braze export user IDs task.
     braze_export_users_ids(flowgen_braze::export::users::config::Processor),
     /// MongoDB collection read/write task.
@@ -283,6 +334,8 @@ impl TaskType {
             TaskType::llm_proxy(_) => "llm_proxy",
             TaskType::git_sync(_) => "git_sync",
             TaskType::oci_sync(_) => "oci_sync",
+            TaskType::git_push(_) => "git_push",
+            TaskType::oci_push(_) => "oci_push",
             TaskType::braze_export_users_ids(_) => "braze_export_users_ids",
             TaskType::mongodb_collection(_) => "mongodb_collection",
             TaskType::mongodb_change_stream(_) => "mongodb_change_stream",
@@ -327,6 +380,8 @@ impl TaskType {
             TaskType::llm_proxy(c) => &c.name,
             TaskType::git_sync(c) => &c.name,
             TaskType::oci_sync(c) => &c.name,
+            TaskType::git_push(c) => &c.name,
+            TaskType::oci_push(c) => &c.name,
             TaskType::braze_export_users_ids(c) => &c.name,
             TaskType::mongodb_collection(c) => &c.name,
             TaskType::mongodb_change_stream(c) => &c.name,
@@ -383,6 +438,8 @@ impl TaskType {
             TaskType::llm_proxy(c) => c.depends_on.as_ref(),
             TaskType::git_sync(c) => c.depends_on.as_ref(),
             TaskType::oci_sync(c) => c.depends_on.as_ref(),
+            TaskType::git_push(c) => c.depends_on.as_ref(),
+            TaskType::oci_push(c) => c.depends_on.as_ref(),
             TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
             TaskType::mongodb_collection(c) => c.depends_on.as_ref(),
             TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
@@ -794,6 +851,14 @@ pub struct WebOptions {
     /// trusted to keep the connection private).
     #[serde(default = "default_cookie_secure")]
     pub cookie_secure: bool,
+    /// JSON file with machine keys (`{"api_keys": [{"name", "key"}]}`) that
+    /// `/api/*` accepts as `Authorization: Bearer <key>` alongside the login
+    /// session. Only used when `auth` is set.
+    #[serde(default)]
+    pub api_credentials_path: Option<PathBuf>,
+    /// Change proposals and their publishing. Omit to disable `/api/changes`.
+    #[serde(default)]
+    pub authoring: Option<AuthoringOptions>,
 }
 
 fn default_cookie_secure() -> bool {
@@ -813,7 +878,37 @@ impl PartialEq for WebOptions {
             && self.auth == other.auth
             && self.cookie_secret.is_some() == other.cookie_secret.is_some()
             && self.cookie_secure == other.cookie_secure
+            && self.api_credentials_path == other.api_credentials_path
+            && self.authoring == other.authoring
     }
+}
+
+/// Proposing workspace changes from the web API and publishing approved ones.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoringOptions {
+    /// `http_endpoint` path of the flow that publishes an approved change,
+    /// e.g. `/workspace/publish`. It receives `{id, title, author, files}`.
+    pub publish_endpoint: String,
+    /// Identity provider groups whose members may approve and reject. Empty
+    /// allows every signed-in user.
+    #[serde(default)]
+    pub approver_groups: Vec<String>,
+    /// Claim of the signed-in user that lists their groups. Defaults to `groups`.
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// How long publishing may take before the change is recorded as failed.
+    /// Defaults to 5 minutes.
+    #[serde(default = "default_publish_timeout", with = "humantime_serde")]
+    pub publish_timeout: Duration,
+}
+
+fn default_groups_claim() -> String {
+    "groups".to_string()
+}
+
+fn default_publish_timeout() -> Duration {
+    Duration::from_secs(300)
 }
 
 fn serialize_redacted_cookie_secret<S>(

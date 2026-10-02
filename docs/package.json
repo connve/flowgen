@@ -1,7 +1,7 @@
 {
 	"name": "docs",
 	"private": true,
-	"version": "0.144.0",
+	"version": "0.145.0",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",

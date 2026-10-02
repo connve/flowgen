@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Log processor that outputs event data to logs.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Task name identifier.
     pub name: String,

@@ -601,13 +601,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                                 if let Err(err) = result {
                                     error!(error = %err, "Bulk query job failed after all retry attempts");
-                                    let mut error_event = event_clone.clone();
-                                    error_event.error = Some(err.to_string());
-                                    if let Some(ref tx) = event_handler.tx {
-                                        tx.send(error_event).await.ok();
-                                    } else if let Some(arc) = event_clone.completion_tx.as_ref() {
-                                        arc.signal_completion_with_error(err.to_string());
-                                    }
+                                    event_clone
+                                        .forward_failure(event_handler.tx.as_ref(), err.to_string())
+                                        .await;
                                 }
                             }
                             .instrument(tracing::Span::current()),

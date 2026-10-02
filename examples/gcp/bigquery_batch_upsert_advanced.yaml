@@ -30,7 +30,7 @@ flow:
           retention: limits
           discard: old
         durable_name: bigquery_upsert_consumer
-        max_messages: 1
+        max_messages_per_batch: 1
         delay: "1s"
 
     # Arrow → JSON so the batch can travel as a query parameter.

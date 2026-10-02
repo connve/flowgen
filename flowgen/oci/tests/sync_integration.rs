@@ -1103,3 +1103,59 @@ async fn oci_sync_second_tick_skips_when_manifest_unchanged() {
         second.len()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
+    use flowgen_oci::push::client::{ArtifactFile, Push};
+
+    let (_registry, host) = boot_registry().await;
+    let push = Push {
+        repository: format!("{host}/flowgen/workspace"),
+        credentials_path: None,
+    };
+    let files = [
+        ArtifactFile {
+            path: "flows/a.yaml".to_string(),
+            content: b"name: a\n".to_vec(),
+        },
+        ArtifactFile {
+            path: "resources/scripts/s.rhai".to_string(),
+            content: b"event".to_vec(),
+        },
+    ];
+
+    let pushed = push
+        .push(&files, &["abc123".to_string(), "latest".to_string()])
+        .await
+        .expect("push workspace");
+    assert!(pushed.digest.starts_with("sha256:"));
+
+    for tag in ["abc123", "latest"] {
+        let events = run_sync_and_collect(Arc::new(OciSyncConfig {
+            name: "pull".to_string(),
+            artifact: format!("{host}/flowgen/workspace:{tag}"),
+            ..Default::default()
+        }))
+        .await;
+        let mut extracted: Vec<(String, String)> = events
+            .iter()
+            .map(|e| {
+                let data = e.data_as_json().unwrap();
+                (
+                    data["path"].as_str().unwrap().to_string(),
+                    data["content"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        extracted.sort();
+        assert_eq!(
+            extracted,
+            vec![
+                ("flows/a.yaml".to_string(), "name: a\n".to_string()),
+                ("resources/scripts/s.rhai".to_string(), "event".to_string()),
+            ],
+            "tag {tag}"
+        );
+    }
+}

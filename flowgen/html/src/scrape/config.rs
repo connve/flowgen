@@ -30,6 +30,7 @@ use std::collections::HashMap;
 /// refer to the row element itself — typically combined with `@attr` to read
 /// an attribute off the row (e.g. `.@data-url`).
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique task name.
     pub name: String,

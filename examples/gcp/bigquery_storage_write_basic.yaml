@@ -17,7 +17,6 @@ flow:
         name: receive_webhook
         method: POST
         endpoint: /webhooks/events
-        max_concurrent_requests: 100
 
     # Task-level retry covers transient BigQuery API failures.
     - gcp_bigquery_storage_write:
@@ -28,7 +27,6 @@ flow:
         table_id: events
         retry:
           max_attempts: 3
-          max_delay: "10s"
 
     - log:
         name: log_result

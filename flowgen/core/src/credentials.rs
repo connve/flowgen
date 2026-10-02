@@ -368,6 +368,29 @@ pub async fn load_web_credentials(path: &Path) -> Result<WebCredentials, Error> 
     load_credentials(path).await
 }
 
+/// Machine keys accepted by the web API, as stored on disk.
+///
+/// ```json
+/// { "api_keys": [{ "name": "operator-agent", "key": "a long random string" }] }
+/// ```
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ApiCredentials {
+    #[serde(default)]
+    pub api_keys: Vec<ApiKey>,
+}
+
+/// A named machine key; the name identifies the caller in logs and audit.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ApiKey {
+    pub name: String,
+    pub key: SecretString,
+}
+
+/// Loads and parses web API machine keys from a JSON file.
+pub async fn load_api_credentials(path: &Path) -> Result<ApiCredentials, Error> {
+    load_credentials(path).await
+}
+
 /// Loads and parses HTTP credentials from a JSON file.
 pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error> {
     load_credentials(path).await

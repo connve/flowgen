@@ -1330,13 +1330,9 @@ impl flowgen_core::task::runner::Runner for Processor {
                                 let context_msg = event_handler
                                     .render_error_context(&event, &err)
                                     .unwrap_or_else(|| err.to_string());
-                                let mut error_event = event.clone();
-                                error_event.error = Some(context_msg.clone());
-                                if let Some(ref tx) = event_handler.tx {
-                                    tx.send(error_event).await.ok();
-                                } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    arc.signal_completion_with_error(context_msg);
-                                }
+                                event
+                                    .forward_failure(event_handler.tx.as_ref(), context_msg)
+                                    .await;
                             }
                         }
                         .instrument(tracing::Span::current()),

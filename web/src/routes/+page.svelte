@@ -12,12 +12,16 @@
 	import Icon from '@iconify/svelte';
 	import type { FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
+	import { authoringEnabled, pendingChanges, touchesFlows } from '$lib/changes';
+	import type { ChangeSummary } from '$lib/api';
 
 	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;
 	}
 
 	let flows = $state<Flow[]>([]);
+	let pending = $state<ChangeSummary[]>([]);
+	let authoring = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let nowTick = $state(Date.now());
@@ -117,6 +121,9 @@
 				// ignore corrupt state
 			}
 		}
+
+		pendingChanges().then((changes) => (pending = changes.filter(touchesFlows)));
+		authoringEnabled().then((enabled) => (authoring = enabled));
 
 		const url = apiUrl('api/flows');
 		fetch(url)
@@ -556,6 +563,18 @@
 			{/if}
 		{/if}
 		<div class="flex-1"></div>
+		{#if pending.length > 0}
+			<a href="{base}/changes" class="btn btn-ghost btn-sm text-warning">
+				<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
+				{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
+			</a>
+		{/if}
+		{#if authoring}
+			<a href="{base}/edit?new=flow" class="btn btn-ghost btn-sm">
+				<Icon icon="tabler:plus" class="h-4 w-4" />
+				New flow
+			</a>
+		{/if}
 		<label
 			class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 		>

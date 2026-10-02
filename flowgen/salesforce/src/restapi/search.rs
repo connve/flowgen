@@ -316,13 +316,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                                 if let Err(err) = result {
                                     error!(error = %err, "SOSL search failed after all retry attempts");
-                                    let mut error_event = event_clone.clone();
-                                    error_event.error = Some(err.to_string());
-                                    if let Some(ref tx) = event_handler.tx {
-                                        tx.send(error_event).await.ok();
-                                    } else if let Some(arc) = event_clone.completion_tx.as_ref() {
-                                        arc.signal_completion_with_error(err.to_string());
-                                    }
+                                    event_clone
+                                        .forward_failure(event_handler.tx.as_ref(), err.to_string())
+                                        .await;
                                 }
                             }
                             .instrument(tracing::Span::current()),
@@ -531,7 +527,7 @@ mod tests {
             "name": "retryable_search",
             "credentials_path": "/creds.json",
             "query": "FIND {test}",
-            "retry": { "max_retries": 5, "initial_interval": "2s" }
+            "retry": { "max_attempts": 5, "initial_backoff": "2s" }
         }"#;
         let config: Search = serde_json::from_str(json).unwrap();
         assert!(config.retry.is_some());

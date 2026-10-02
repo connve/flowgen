@@ -346,7 +346,8 @@ mod tests {
     #[test]
     fn test_rejects_unknown_fields() {
         let json = r#"{ "name": "n", "topic": "t", "bogus": 1 }"#;
-        assert!(serde_json::from_str::<Produce>(json).is_err());
+        let err = serde_json::from_str::<Produce>(json).unwrap_err();
+        assert!(err.to_string().contains("bogus"));
     }
 
     #[test]

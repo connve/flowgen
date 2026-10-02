@@ -41,7 +41,6 @@ flow:
         data_format: arrow
         retry:
           max_attempts: 5
-          max_delay: "30s"
 
     # Group RecordBatches before conversion.
     - buffer:

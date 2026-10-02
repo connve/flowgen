@@ -4,10 +4,20 @@
 	import { onDestroy, onMount } from 'svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, type FlowDetail } from '$lib/api';
+	import Icon from '@iconify/svelte';
+	import { apiUrl, type ChangeSummary, type FlowDetail } from '$lib/api';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
+	import {
+		authoringEnabled,
+		editUrl,
+		flowFilePath,
+		pendingChanges,
+		touchesFlow
+	} from '$lib/changes';
 
 	let detail = $state<FlowDetail | null>(null);
+	let pending = $state<ChangeSummary[]>([]);
+	let authoring = $state(false);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -19,7 +29,15 @@
 	let folderSegments = $derived(pathSegments.slice(0, -1));
 	let leafName = $derived(pathSegments[pathSegments.length - 1] ?? '');
 
+	$effect(() => {
+		const identity = flowPath;
+		pendingChanges().then((changes) => {
+			if (identity === flowPath) pending = changes.filter((change) => touchesFlow(change, identity));
+		});
+	});
+
 	onMount(() => {
+		authoringEnabled().then((enabled) => (authoring = enabled));
 		fetch(apiUrl(`api/flows/${flowPath.split('/').map(encodeURIComponent).join('/')}`))
 			.then((r) => {
 				if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -55,7 +73,27 @@
 		<span class="opacity-40">/</span>
 		<span class="font-mono">{leafName}</span>
 	</div>
-	<h1 class="mb-4 text-lg font-medium">{detail?.display_name ?? leafName}</h1>
+	<div class="mb-4 flex items-center justify-between gap-2">
+		<h1 class="text-lg font-medium">{detail?.display_name ?? leafName}</h1>
+		{#if authoring && detail}
+			<a href={editUrl(base, flowFilePath(flowPath))} class="btn btn-ghost btn-sm">
+				<Icon icon="tabler:pencil" class="h-4 w-4" />
+				Edit
+			</a>
+		{/if}
+	</div>
+
+	{#each pending as change (change.id)}
+		<a
+			href="{base}/changes/{encodeURIComponent(change.id)}"
+			class="mb-3 flex items-center gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2 text-sm hover:bg-warning/10"
+		>
+			<Icon icon="tabler:git-pull-request" class="h-4 w-4 text-warning" />
+			<span>Pending change: {change.title}</span>
+			<span class="text-xs opacity-60">by {change.proposedBy}</span>
+			<span class="ml-auto text-primary">Review</span>
+		</a>
+	{/each}
 
 	{#if loading}
 		<div class="flex justify-center py-12">

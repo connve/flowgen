@@ -26,6 +26,16 @@ use oauth2::{
     StandardRevocableToken, StandardTokenResponse, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::OnceCell;
+use tokio::time::Instant;
+
+/// How long a refresh result answers requests still carrying the refresh token it replaced.
+const REFRESH_REUSE_WINDOW: Duration = Duration::from_secs(30);
 
 /// Errors from the interactive login flow. Separate from
 /// `flowgen_core::auth::AuthError` — that type covers token *validation*
@@ -181,6 +191,7 @@ pub struct LoginState {
 
 /// A verified login: the raw tokens (the caller decides how to persist
 /// them — see `web.rs`'s encrypted auth cookie) plus the resolved identity.
+#[derive(Clone)]
 pub struct LoginResult {
     pub user: UserContext,
     pub id_token: String,
@@ -226,6 +237,54 @@ pub struct LoginClient {
     /// From `web.auth.signout_redirect_url`, parsed at startup so a malformed
     /// URL fails there rather than on someone's first sign-out.
     signout_redirect_url: Option<url::Url>,
+    /// Shares one refresh per refresh token between concurrent requests.
+    refreshes: SingleFlight<LoginResult>,
+}
+
+/// Runs one future per key and hands its result to every caller within
+/// `window`. A failed run is not shared: the next caller runs again.
+struct SingleFlight<T> {
+    window: Duration,
+    /// Keyed by the SHA-256 of the key, so refresh tokens are not kept.
+    flights: Mutex<HashMap<Vec<u8>, Flight<T>>>,
+}
+
+struct Flight<T> {
+    started: Instant,
+    result: Arc<OnceCell<T>>,
+}
+
+impl<T: Clone> SingleFlight<T> {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            flights: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn run<E, F, Fut>(&self, key: &str, run: F) -> Result<T, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let result = self.flight(key);
+        result.get_or_try_init(run).await.cloned()
+    }
+
+    fn flight(&self, key: &str) -> Arc<OnceCell<T>> {
+        let now = Instant::now();
+        let mut flights = match self.flights.lock() {
+            Ok(flights) => flights,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        flights.retain(|_, flight| now.duration_since(flight.started) < self.window);
+        let digest = Sha256::digest(key.as_bytes()).to_vec();
+        let flight = flights.entry(digest).or_insert_with(|| Flight {
+            started: now,
+            result: Arc::new(OnceCell::new()),
+        });
+        Arc::clone(&flight.result)
+    }
 }
 
 impl LoginClient {
@@ -302,6 +361,7 @@ impl LoginClient {
             scopes,
             id_token_validator,
             signout_redirect_url,
+            refreshes: SingleFlight::new(REFRESH_REUSE_WINDOW),
         })
     }
 
@@ -400,9 +460,17 @@ impl LoginClient {
     }
 
     /// Exchanges a refresh token for a new `id_token` (and possibly a new
-    /// `refresh_token`, if the IdP rotates them). No `nonce` to check here —
-    /// that's only meaningful on the original authorization response.
+    /// `refresh_token`, if the IdP rotates them). Concurrent requests with the
+    /// same token share one exchange, so a rotating IdP never sees it reused.
     pub async fn refresh(&self, refresh_token: &str) -> Result<LoginResult, LoginError> {
+        self.refreshes
+            .run(refresh_token, || self.exchange_refresh_token(refresh_token))
+            .await
+    }
+
+    /// No `nonce` to check here — that's only meaningful on the original
+    /// authorization response.
+    async fn exchange_refresh_token(&self, refresh_token: &str) -> Result<LoginResult, LoginError> {
         let token_response: OidcTokenResponse = self
             .client
             .exchange_refresh_token(&oauth2::RefreshToken::new(refresh_token.to_string()))
@@ -441,6 +509,7 @@ fn extract_id_token(response: &OidcTokenResponse) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn id_token_is_read_from_a_token_response() {
@@ -504,5 +573,82 @@ mod tests {
         }"#;
         let response: OidcTokenResponse = serde_json::from_str(body).expect("parses");
         assert!(extract_id_token(&response).is_none());
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct RunFailed;
+
+    async fn counted(runs: &AtomicUsize, value: &str) -> Result<String, RunFailed> {
+        runs.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        Ok(value.to_string())
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_with_one_key_share_a_single_run() {
+        let flight = SingleFlight::new(Duration::from_secs(30));
+        let runs = AtomicUsize::new(0);
+
+        let results =
+            futures::future::join_all((0..10).map(|_| flight.run("a", || counted(&runs, "new"))))
+                .await;
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert!(results.iter().all(|r| r.as_deref() == Ok("new")));
+    }
+
+    #[tokio::test]
+    async fn a_caller_after_the_run_reuses_its_result_within_the_window() {
+        let flight = SingleFlight::new(Duration::from_secs(30));
+        let runs = AtomicUsize::new(0);
+
+        let first = flight.run("a", || counted(&runs, "first")).await;
+        let second = flight.run("a", || counted(&runs, "second")).await;
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn different_keys_run_separately() {
+        let flight = SingleFlight::new(Duration::from_secs(30));
+        let runs = AtomicUsize::new(0);
+
+        let a = flight.run("a", || counted(&runs, "a")).await;
+        let b = flight.run("b", || counted(&runs, "b")).await;
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!((a.as_deref(), b.as_deref()), (Ok("a"), Ok("b")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_is_retried_by_the_next_caller() {
+        let flight = SingleFlight::new(Duration::from_secs(30));
+        let runs = AtomicUsize::new(0);
+
+        let failed = flight
+            .run("a", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Err::<String, _>(RunFailed)
+            })
+            .await;
+        let retried = flight.run("a", || counted(&runs, "ok")).await;
+
+        assert_eq!(failed, Err(RunFailed));
+        assert_eq!(retried.as_deref(), Ok("ok"));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_result_older_than_the_window_is_not_reused() {
+        let flight = SingleFlight::new(Duration::from_millis(50));
+        let runs = AtomicUsize::new(0);
+
+        let first = flight.run("a", || counted(&runs, "first")).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let second = flight.run("a", || counted(&runs, "second")).await;
+
+        assert_eq!(first.as_deref(), Ok("first"));
+        assert_eq!(second.as_deref(), Ok("second"));
     }
 }

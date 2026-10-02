@@ -34,6 +34,7 @@ fn default_nats_url() -> String {
 ///     key: "flows.{{event.data.path}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Task name.
     pub name: String,

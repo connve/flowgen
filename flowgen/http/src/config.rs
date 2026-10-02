@@ -20,6 +20,7 @@ pub(crate) fn default_connect_timeout() -> Option<Duration> {
 
 /// HTTP processor configuration.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -105,6 +106,7 @@ impl Default for Processor {
 
 /// HTTP request payload configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Payload {
     /// JSON object to send as payload.
     pub object: Option<Map<String, Value>>,

@@ -39,7 +39,7 @@ use tokio::fs;
 ///   resource: "queries/get_orders.sql"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum Source {
     /// Resource key referencing an external file.
     /// Example: "queries/get_orders.sql" resolves to "{resource_path}/queries/get_orders.sql".

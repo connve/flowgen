@@ -58,6 +58,7 @@ use std::path::PathBuf;
 ///   max_turns: 3
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -145,6 +146,7 @@ pub struct Processor {
 /// `effort` is the portable knob; it maps to `reasoning_effort` for
 /// OpenAI-shape providers and to a token budget for Anthropic/Gemini.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThinkingConfig {
     pub effort: Effort,
     /// Whether to receive the reasoning trace in the stream.
@@ -266,6 +268,7 @@ struct ReasoningEffortParams {
 
 /// Configuration for connecting to an MCP server.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
     /// MCP server endpoint URL (e.g., "http://localhost:3001/mcp").
     pub url: String,

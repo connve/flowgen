@@ -60,6 +60,7 @@ export const navigation: NavSection[] = [
 			{ title: 'Retry', href: '/concepts/retry' },
 			{ title: 'Credentials', href: '/concepts/credentials' },
 			{ title: 'Authentication', href: '/concepts/auth' },
+			{ title: 'Authoring', href: '/concepts/authoring' },
 			{ title: 'Sandboxing', href: '/concepts/sandboxing' },
 			{ title: 'Telemetry', href: '/concepts/telemetry' },
 			{ title: 'Configuration', href: '/concepts/configuration' }
@@ -101,7 +102,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/git.svg',
 		items: [
 			{ title: 'Overview', href: '/git' },
-			{ title: 'Git Sync', href: '/git/sync' }
+			{ title: 'Git Sync', href: '/git/sync' },
+			{ title: 'Git Push', href: '/git/push' }
 		]
 	},
 	{
@@ -172,7 +174,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/oci.svg',
 		items: [
 			{ title: 'Overview', href: '/oci' },
-			{ title: 'OCI Sync', href: '/oci/sync' }
+			{ title: 'OCI Sync', href: '/oci/sync' },
+			{ title: 'OCI Push', href: '/oci/push' }
 		]
 	},
 	{

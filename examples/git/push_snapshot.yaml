@@ -1,0 +1,41 @@
+# Commits a daily snapshot of an API response to a Git repository, so the
+# repository history shows how the data changed. A day without changes
+# pushes nothing.
+#
+# Required:
+#   - SNAPSHOT_API_URL and GIT_REPOSITORY_URL env vars
+#   - /etc/git/credentials.json ({token, username?})
+flow:
+  labels:
+    display_name: "Daily API Snapshot To Git"
+    description: "Fetches an API response every day and commits it to a Git repository as a JSON file."
+    tags: ["git-push", "http", "example"]
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: daily
+        cron: "0 0 6 * * *"
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.SNAPSHOT_API_URL}}"
+        method: GET
+
+    # Wraps the response as the file to commit.
+    - script:
+        name: to_file
+        code: |
+          #{
+            files: [#{ path: "snapshots/latest.json", content: event.data.to_json() }],
+          }
+
+    - git_push:
+        name: commit
+        repository_url: "{{env.GIT_REPOSITORY_URL}}"
+        path: "data/"
+        credentials_path: /etc/git/credentials.json
+        author:
+          name: "Snapshot bot"
+          email: "snapshots@example.com"
+        message: "Update API snapshot"

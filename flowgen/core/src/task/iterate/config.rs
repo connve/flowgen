@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for loop processor tasks that iterate over JSON arrays.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task.
     pub name: String,

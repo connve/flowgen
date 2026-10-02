@@ -27,7 +27,7 @@ flow:
             if count >= 10 {
               ctx.meta.rate_limited = true;
               ctx.meta.reason = "exceeded_10_requests_per_minute";
-              return null;
+              return ();
             }
             ctx.cache.put(rate_limit_key, to_string(count + 1), 60);
           }

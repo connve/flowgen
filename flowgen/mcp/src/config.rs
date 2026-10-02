@@ -24,6 +24,7 @@ use std::path::PathBuf;
 ///       required: [user_id]
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique tool name. Combined with flow name for the full tool identifier:
     /// `{flow_name}.{name}` (e.g., `crm_welcome_flow.send_welcome`).

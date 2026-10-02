@@ -21,6 +21,7 @@ use std::path::PathBuf;
 ///     credentials_path: /etc/flowgen/credentials/registry.json
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Task name.
     pub name: String,
@@ -137,7 +138,7 @@ mod tests {
             "artifact": "ghcr.io/org/flows@sha256:abcd",
             "credentials_path": "/etc/flowgen/credentials/registry.json",
             "depends_on": ["trigger"],
-            "retry": { "max_retries": 2, "initial_interval": "500ms" }
+            "retry": { "max_attempts": 2, "initial_backoff": "500ms" }
         }"#;
         let config: Processor = serde_json::from_str(json).unwrap();
         assert_eq!(

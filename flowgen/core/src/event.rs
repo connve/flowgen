@@ -380,6 +380,26 @@ impl Event {
     pub fn is_error(&self) -> bool {
         self.error.is_some()
     }
+
+    /// Hands on an event whose task failed: downstream with `error` set when
+    /// there is a next task, otherwise to the source as a failed completion.
+    pub async fn forward_failure(
+        mut self,
+        tx: Option<&tokio::sync::mpsc::Sender<Event>>,
+        error: String,
+    ) {
+        match tx {
+            Some(tx) => {
+                self.error = Some(error);
+                tx.send(self).await.ok();
+            }
+            None => {
+                if let Some(arc) = self.completion_tx.as_ref() {
+                    arc.signal_completion_with_error(error);
+                }
+            }
+        }
+    }
 }
 
 /// Errors that can occur during event processing operations.

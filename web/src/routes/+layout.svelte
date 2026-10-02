@@ -73,7 +73,8 @@
 			if (response.status === 401 && !url.startsWith(authPrefix)) {
 				await authReady;
 				if (authEnabled) {
-					window.location.href = apiUrl('auth/login');
+					const here = window.location.pathname + window.location.search + window.location.hash;
+					window.location.href = `${apiUrl('auth/login')}?return_to=${encodeURIComponent(here)}`;
 				}
 			}
 			return response;
@@ -186,7 +187,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/monitor/logs', icon: 'tabler:activity', label: 'Monitor', match: (p: string) => p.startsWith(base + '/monitor') }] as item (item.href)}
+				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') || p.startsWith(base + '/changes') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/monitor/logs', icon: 'tabler:activity', label: 'Monitor', match: (p: string) => p.startsWith(base + '/monitor') }] as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"

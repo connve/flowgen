@@ -107,6 +107,7 @@ pub enum Payload {
 ///   end: "{{event.data.end_iso}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SObject {
     /// Unique task identifier.
     pub name: String,
@@ -187,6 +188,7 @@ pub enum CompositePayload {
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Composite {
     pub name: String,
     pub operation: CompositeOperation,
@@ -242,6 +244,7 @@ impl ConfigExt for Composite {}
 ///   query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name)"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Search {
     /// Unique task identifier.
     pub name: String,

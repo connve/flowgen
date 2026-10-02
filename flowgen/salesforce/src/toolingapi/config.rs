@@ -49,6 +49,7 @@ pub enum SubscriptionState {
 ///     error_recovery_replay: latest
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tooling {
     /// Unique task identifier.
     pub name: String,
@@ -77,6 +78,7 @@ pub struct Tooling {
 
 /// Metadata for a managed event subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagedEventSubscriptionMetadata {
     /// Human-readable label for the subscription.
     pub label: String,

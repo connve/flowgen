@@ -1,0 +1,25 @@
+# MCP tool for the flow operator agent: lists the deployed flows.
+#
+# Required:
+#   - mcp_server enabled in the app config
+#   - FLOWGEN_API_URL env var, the web API base, e.g. http://127.0.0.1:8080
+#   - /etc/flowgen/credentials/operator.json ({"bearer_auth": "<machine key>"})
+flow:
+  labels:
+    display_name: "Workspace Tool: List Flows"
+    description: "Lists the deployed flows with their status for the flow operator agent."
+    tags: ["mcp", "authoring", "example"]
+  tasks:
+
+    - mcp_tool:
+        name: list_flows
+        description: "List the deployed flows: identity, display name, status, task count."
+        input_schema:
+          type: object
+          properties: {}
+
+    - http_request:
+        name: fetch
+        endpoint: "{{env.FLOWGEN_API_URL}}/api/flows"
+        method: GET
+        credentials_path: /etc/flowgen/credentials/operator.json

@@ -622,7 +622,7 @@ impl EventHandler {
 /// the flowgen-native `{username, password}` shape or a Docker
 /// `config.json` with multiple registry entries. Returns anonymous if no
 /// path is configured.
-async fn load_auth(
+pub(crate) async fn load_auth(
     credentials_path: Option<&PathBuf>,
     registry_host: &str,
 ) -> Result<RegistryAuth, Error> {
@@ -653,6 +653,30 @@ async fn load_auth(
             source,
         })?;
     Ok(RegistryAuth::Basic(creds.username, creds.password))
+}
+
+/// Registry client for `reference`. Loopback hosts (local registries in
+/// tests) do not serve TLS; anything else stays on HTTPS.
+pub(crate) fn registry_client(reference: &Reference) -> Client {
+    let protocol = match is_loopback(reference.registry()) {
+        true => ClientProtocol::Http,
+        false => ClientProtocol::Https,
+    };
+    Client::new(ClientConfig {
+        protocol,
+        ..Default::default()
+    })
+}
+
+/// Whether `registry` (a host with an optional port) is this machine.
+fn is_loopback(registry: &str) -> bool {
+    let host = match registry.rsplit_once(':') {
+        Some((host, port)) if !host.ends_with(':') && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host
+        }
+        _ => registry,
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Picks the auth entry whose host matches the artifact's registry. Falls
@@ -746,23 +770,7 @@ impl flowgen_core::task::runner::Runner for Processor {
                 })?;
 
         let auth = load_auth(config.credentials_path.as_ref(), reference.registry()).await?;
-
-        // Loopback hosts (used by integration tests against a local
-        // registry container) do not serve TLS. Anything else stays on
-        // HTTPS, matching production registries.
-        let registry = reference.registry();
-        let protocol = if registry.starts_with("127.0.0.1")
-            || registry.starts_with("localhost")
-            || registry.starts_with("[::1]")
-        {
-            ClientProtocol::Http
-        } else {
-            ClientProtocol::Https
-        };
-        let client = Client::new(ClientConfig {
-            protocol,
-            ..Default::default()
-        });
+        let client = registry_client(&reference);
 
         Ok(EventHandler {
             config: Arc::new(config),
@@ -833,13 +841,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(err) = result {
                                 error!(error = %err, "OCI sync exhausted all retry attempts");
-                                let mut error_event = event_clone.clone();
-                                error_event.error = Some(err.to_string());
-                                if let Some(ref tx) = handler.tx {
-                                    tx.send(error_event).await.ok();
-                                } else if let Some(arc) = event_clone.completion_tx.as_ref() {
-                                    arc.signal_completion_with_error(err.to_string());
-                                }
+                                event_clone
+                                    .forward_failure(handler.tx.as_ref(), err.to_string())
+                                    .await;
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -1021,6 +1025,22 @@ mod tests {
         assert_eq!(value["content"], "name: test");
         assert_eq!(value["digest"], "sha256:abc");
         assert_eq!(value["artifact_digest"], "sha256:def");
+    }
+
+    #[test]
+    fn only_exact_loopback_hosts_use_plain_http() {
+        for local in [
+            "localhost",
+            "localhost:5000",
+            "127.0.0.1:5000",
+            "[::1]",
+            "[::1]:5000",
+        ] {
+            assert!(is_loopback(local), "{local}");
+        }
+        for remote in ["localhost.example.com", "127.0.0.1.nip.io:5000", "ghcr.io"] {
+            assert!(!is_loopback(remote), "{remote}");
+        }
     }
 
     #[test]

@@ -372,14 +372,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(e) = result {
                                 error!(error = %e, "Query failed after all retry attempts");
-                                // Emit error event downstream for error handling.
-                                let mut error_event = event.clone();
-                                error_event.error = Some(e.to_string());
-                                if let Some(ref tx) = event_handler.tx {
-                                    tx.send(error_event).await.ok();
-                                } else if let Some(arc) = event.completion_tx.as_ref() {
-                                    arc.signal_completion_with_error(e.to_string());
-                                }
+                                event
+                                    .forward_failure(event_handler.tx.as_ref(), e.to_string())
+                                    .await;
                             }
                         }
                         .instrument(tracing::Span::current()),

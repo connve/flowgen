@@ -36,7 +36,7 @@ flow:
 
           if already_processed != () {
             print("Skipping already processed file: " + file_name);
-            return null;
+            return ();
           }
 
           ctx.cache.put(cache_key, timestamp_now(), 604800);

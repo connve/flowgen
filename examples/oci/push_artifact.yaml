@@ -1,0 +1,26 @@
+# Publishes configuration files posted to a webhook as an OCI artifact,
+# tagged with the version from the request and `latest`, for any consumer
+# that pulls artifacts from the registry.
+#
+# Required:
+#   - http_server enabled in the app config
+#   - OCI_REPOSITORY env var, e.g. registry.example.com/team/configs
+#   - /etc/registry/credentials.json ({username, password} or a Docker config.json)
+flow:
+  labels:
+    display_name: "Publish Files As OCI Artifact"
+    description: "Receives {version, files} on a webhook and pushes the files to a registry as an artifact tagged with the version and latest."
+    tags: ["oci-push", "http", "example"]
+  tasks:
+
+    # Receives {version, files: [{path, content}]}.
+    - http_endpoint:
+        name: receive
+        endpoint: /configs/publish
+        method: POST
+
+    - oci_push:
+        name: release
+        repository: "{{env.OCI_REPOSITORY}}"
+        tags: ["{{event.data.version}}", "latest"]
+        credentials_path: /etc/registry/credentials.json

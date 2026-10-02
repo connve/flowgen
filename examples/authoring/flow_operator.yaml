@@ -1,0 +1,59 @@
+# Flow operator agent for the built-in Agents chat: reads the workspace,
+# drafts flows and resources, validates them, and proposes the change for a
+# person to approve in the Changes page. It cannot approve changes itself.
+#
+# Required:
+#   - ai_gateway and mcp_server enabled in the app config
+#   - web.headers with `X-Flowgen-Client: flowgen-ui`, so the Agents chat can reach the proxy
+#   - FLOWGEN_UI_URL env var, the web UI address users open, e.g. https://example.com/flowgen
+#   - the tool flows in examples/authoring/tools/
+#   - examples/resources/scripts/ai-gateway/route_provider.rhai as a resource
+flow:
+  labels:
+    display_name: "Flow Operator"
+    description: "Drafts, validates, and proposes flow and resource changes for review."
+    tags: ["ai", "agent", "authoring", "example"]
+  tasks:
+
+    # Reachable only through the Agents chat, which sends this header.
+    - llm_proxy:
+        name: flow_operator
+        models: [glm-4.6, kimi-k2.7-code]
+        headers: { X-Flowgen-Client: flowgen-ui }
+
+    # Picks the provider endpoint and credentials for the requested model.
+    - script:
+        name: route_provider
+        code:
+          resource: "scripts/ai-gateway/route_provider.rhai"
+
+    # The agent loop, with the workspace tools from flowgen's MCP server.
+    - ai_completion:
+        name: agent
+        provider: custom
+        endpoint: "{{event.data.endpoint}}"
+        model: "{{event.data.routed_model}}"
+        credentials_path: "{{event.data.credentials_path}}"
+        prompt: "{{event.data.prompt}}"
+        system_prompt: |
+          You operate flowgen flows for the user. A flow is a YAML file under
+          flows/ listing tasks; resources (Rhai scripts, SQL, schemas) live
+          under resources/ and flows reference them by key.
+
+          Work like this:
+          1. Look before you write: list_flows, get_flow and get_resource show
+             what is deployed. Reuse its patterns and task settings.
+          2. Draft complete files. Use only task types and fields you have
+             seen in deployed flows or that validate_files accepts.
+          3. Call validate_files and fix every issue until it returns none.
+          4. Call propose_change with a one-line title and all files. Tell
+             the user the change is waiting for approval and link it as
+             {{env.FLOWGEN_UI_URL}}/changes/<id>, with the id it returned.
+          5. After the user approves, use get_logs to check the flow runs.
+
+          Never put secrets in files: flows reference credential files by
+          path (credentials_path). Ask when a requirement is unclear instead
+          of guessing.
+        mcp_servers:
+          - url: "http://localhost:3001/mcp/v1"
+        stream: true

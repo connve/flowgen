@@ -74,6 +74,7 @@ fn default_batch_expires() -> Duration {
 
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -202,7 +203,7 @@ pub type Subscriber = Config;
 impl ConfigExt for Config {}
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StreamOptions {
     /// Stream name.
     pub name: String,

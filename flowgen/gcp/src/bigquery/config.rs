@@ -174,6 +174,7 @@ pub enum QueryParameterSource {
 ///     inline: "SELECT * FROM `data-project-id.dataset.table` LIMIT 100"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Query {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -360,6 +361,7 @@ pub enum JobOperation {
 ///   job_id: "{{event.data.job_id}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Job {
     /// Unique task identifier.
     pub name: String,
@@ -445,6 +447,7 @@ impl Job {
 
 /// BigQuery table reference.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableReference {
     /// GCP project ID containing the table.
     pub project_id: String,
@@ -542,6 +545,7 @@ impl From<FieldMode> for google_cloud_bigquery::http::table::TableFieldMode {
 
 /// Table field schema definition.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableField {
     /// Field name.
     pub name: String,
@@ -1073,6 +1077,7 @@ pub enum CompressionCodec {
 ///   table_id: large_table
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageRead {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -1189,8 +1194,7 @@ impl StorageRead {
 ///   table_id: webhook_events
 ///   retry:
 ///     max_attempts: 5
-///     initial_interval: 2s
-///     max_interval: 30s
+///     initial_backoff: 2s
 /// ```
 ///
 /// Write to custom stream:
@@ -1205,6 +1209,7 @@ impl StorageRead {
 ///   trace_id: "webhook-{{event.id}}"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageWrite {
     /// The unique name / identifier of the task.
     pub name: String,

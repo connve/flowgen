@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.144.0"
+version = "0.145.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -55,6 +55,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
 serde_yaml = { version = "0.9" }
+serde_ignored = { version = "0.1" }
+similar = { version = "2.7" }
 progenitor = { version = "0.13" }
 progenitor-client = { version = "0.13" }
 openapiv3 = { version = "2.2", default-features = false }

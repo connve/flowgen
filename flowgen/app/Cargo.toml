@@ -48,6 +48,13 @@ rustls = { workspace = true }
 atty = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
+serde_ignored = { workspace = true }
+rhai = { workspace = true }
+similar = { workspace = true }
+subtle = { workspace = true }
+sha2 = { workspace = true }
+tokio-retry = { workspace = true }
+uuid = { workspace = true }
 walkdir = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }

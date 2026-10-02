@@ -104,6 +104,7 @@ pub const DEFAULT_PUBSUB_PORT: &str = "443";
 /// }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Subscriber {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -166,6 +167,7 @@ pub struct Subscriber {
 /// }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Topic {
     /// Full topic name including namespace (e.g., "/event/Account_Change__e").
     pub name: String,
@@ -249,6 +251,7 @@ pub struct Topic {
 /// }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Publisher {
     /// The unique name / identifier of the task.
     pub name: String,
@@ -347,6 +350,7 @@ impl ReplayPreset {
 /// }
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DurableConsumerOptions {
     /// Whether to enable durable consumer functionality for reliable message processing.
     pub enabled: bool,

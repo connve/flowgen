@@ -15,8 +15,12 @@
 		type ResourceContent
 	} from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
+	import { authoringEnabled, pendingChanges, touchesResources } from '$lib/changes';
+	import type { ChangeSummary } from '$lib/api';
 
 	let resources = $state<Resource[]>([]);
+	let authoring = $state(false);
+	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let search = $state('');
@@ -50,6 +54,8 @@
 		}
 
 		try {
+			authoringEnabled().then((enabled) => (authoring = enabled));
+			pendingChanges().then((changes) => (pending = changes.filter(touchesResources)));
 			const response = await fetch(apiUrl('api/resources'));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			resources = await response.json();
@@ -299,7 +305,19 @@
 					<span class="text-xs opacity-50">· {visibleResources.length} {visibleResources.length === 1 ? 'item' : 'items'}</span>
 				</div>
 			{/if}
-			<div class="flex items-center justify-end">
+			<div class="flex items-center justify-end gap-2">
+				{#if pending.length > 0}
+					<a href="{base}/changes" class="btn btn-ghost btn-sm text-warning">
+						<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
+						{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
+					</a>
+				{/if}
+				{#if authoring}
+					<a href="{base}/edit?new=resource" class="btn btn-ghost btn-sm">
+						<Icon icon="tabler:plus" class="h-4 w-4" />
+						New resource
+					</a>
+				{/if}
 				<label
 					class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 				>

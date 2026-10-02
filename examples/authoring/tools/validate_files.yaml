@@ -1,0 +1,37 @@
+# MCP tool for the flow operator agent: validates draft files without running them.
+#
+# Required: as for list_flows.yaml.
+flow:
+  labels:
+    display_name: "Workspace Tool: Validate Files"
+    description: "Validates draft flow and resource files and returns every issue for the flow operator agent."
+    tags: ["mcp", "authoring", "example"]
+  tasks:
+
+    - mcp_tool:
+        name: validate_files
+        description: "Validate flow (flows/...) and resource (resources/...) files. Returns issues; an empty list means valid."
+        input_schema:
+          type: object
+          properties:
+            files:
+              type: array
+              items:
+                type: object
+                properties:
+                  path:
+                    type: string
+                    description: "Path from the workspace root, e.g. flows/orders/sync.yaml."
+                  content:
+                    type: string
+                required: [path, content]
+          required: [files]
+
+    - http_request:
+        name: validate
+        endpoint: "{{env.FLOWGEN_API_URL}}/api/workspace/validate"
+        method: POST
+        credentials_path: /etc/flowgen/credentials/operator.json
+        payload:
+          from_event: true
+          send_as: json

@@ -25,7 +25,7 @@ flow:
           retention: limits
           discard: old
         durable_name: cloudflare_email_forwarder_writer
-        max_messages: 100
+        max_messages_per_batch: 100
         delay: 1s
 
     - convert:

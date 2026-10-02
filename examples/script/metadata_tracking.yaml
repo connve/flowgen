@@ -24,7 +24,7 @@ flow:
 
           if event.data.amount == () {
             ctx.meta.validation_error = "missing_amount";
-            return null;
+            return ();
           }
 
           ctx.meta.validation_status = "passed";

@@ -186,6 +186,19 @@ http_server:
 #   # plain-HTTP deployment (local testing, or a proxy that already
 #   # terminates TLS and is trusted to keep the connection private).
 #   # cookie_secure: false
+#   # Machine keys accepted as `Authorization: Bearer` next to the login
+#   # session: {"api_keys": [{"name": "operator-agent", "key": "..."}]}.
+#   # Keys can read and propose changes, never approve them.
+#   # api_credentials_path: "/etc/flowgen/credentials/api.json"
+#   # Change proposals for flows and resources, approved in the web UI.
+#   # authoring:
+#   #   # http_endpoint path of the flow that publishes an approved change.
+#   #   publish_endpoint: /workspace/publish
+#   #   # Identity provider groups allowed to approve; empty allows everyone
+#   #   # signed in. Read from the `groups_claim` claim (default `groups`).
+#   #   approver_groups: ["flowgen-approvers"]
+#   #   # How long publishing may take before the change is recorded as failed.
+#   #   publish_timeout: 5m
 
 # Kubernetes liveness/readiness listener. Independent from the API
 # listeners so probes keep working regardless of which surfaces are

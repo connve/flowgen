@@ -7,6 +7,8 @@
 
 /// Application lifecycle and flow orchestration.
 pub mod app;
+/// Workspace change proposals and their publishing.
+pub mod authoring;
 /// Configuration structures and deserialization.
 pub mod config;
 /// Flow execution and task management.
@@ -15,6 +17,8 @@ pub mod flow;
 pub mod login;
 /// Hot-reload reconciler for cache-sourced flows.
 pub mod reconciler;
+/// Validation of flow and resource files without running them.
+pub mod validation;
 /// Hot-reload watcher for cache-sourced flows.
 pub mod watcher;
 /// Embedded web interface.

@@ -154,6 +154,7 @@ mod tests {
             "name": "n", "operation": "read", "credentials_path": "/c.json",
             "db_name": "d", "collection_name": "c", "bogus": 1
         }"#;
-        assert!(serde_json::from_str::<Collection>(json).is_err());
+        let err = serde_json::from_str::<Collection>(json).unwrap_err();
+        assert!(err.to_string().contains("bogus"));
     }
 }
