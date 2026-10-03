@@ -17,17 +17,19 @@ flow:
         name: daily
         cron: "0 0 6 * * *"
 
+    # Keeps the body as text, so the file holds the response as returned.
     - http_request:
         name: fetch
         endpoint: "{{env.SNAPSHOT_API_URL}}"
         method: GET
+        response_type: text
 
     # Wraps the response as the file to commit.
     - script:
         name: to_file
         code: |
           #{
-            files: [#{ path: "snapshots/latest.json", content: event.data.to_json() }],
+            files: [#{ path: "snapshots/latest.json", content: event.data }],
           }
 
     - git_push:

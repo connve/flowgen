@@ -2,15 +2,16 @@
 //!
 //! Each file found under the configured path is emitted as a separate event
 //! with `{path, content, commit}` data. Downstream tasks decide what to do
-//! with the files (parse as flows, write to cache, store in object store).
+//! with the files (parse, store, transform).
 
 use super::config::{Credentials, Processor as ProcessorConfig};
+use crate::remote::{check_url, load_credentials};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::task;
 use tracing::{error, info, Instrument};
 use walkdir::WalkDir;
 
@@ -35,11 +36,11 @@ pub struct FileEvent {
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Git clone failed for {url}: {source}")]
-    Clone {
-        url: String,
+    #[error("Failed to prepare the clone path {path}: {source}")]
+    PrepareClonePath {
+        path: PathBuf,
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: std::io::Error,
     },
     #[error("Failed to open existing repository at {path}: {source}")]
     OpenRepo {
@@ -54,20 +55,17 @@ pub enum Error {
     },
     #[error(transparent)]
     Remote(#[from] crate::remote::CloneError),
-    #[error("SSH URLs are not supported — use HTTPS with a token via credentials_path: {url}")]
-    SshUrl { url: String },
     #[error(transparent)]
-    Credentials(#[from] crate::remote::CredentialsError),
+    Url(#[from] crate::remote::UrlError),
+    #[error(transparent)]
+    Credentials(#[from] flowgen_core::credentials::Error),
     #[error("Invalid clone_path configuration: {source}")]
     InvalidClonePath {
         #[source]
         source: flowgen_core::validate::Error,
     },
-    #[error("Git operation panicked or was cancelled: {source}")]
-    JoinError {
-        #[source]
-        source: tokio::task::JoinError,
-    },
+    #[error(transparent)]
+    Blocking(#[from] crate::remote::BlockingError),
     #[error("Failed to read file '{path}': {source}")]
     FileRead {
         path: String,
@@ -294,13 +292,10 @@ async fn clone_or_pull(
     let clone_path = clone_path.to_path_buf();
     let branch = branch.to_string();
 
-    let span = tracing::Span::current();
-    task::spawn_blocking(move || {
-        let _enter = span.enter();
-        sync_blocking(&url, &branch, credentials.as_ref(), &clone_path)
+    crate::remote::run_blocking(None, move |interrupt| {
+        sync_blocking(&url, &branch, credentials.as_ref(), &clone_path, interrupt)
     })
-    .await
-    .map_err(|source| Error::JoinError { source })?
+    .await?
 }
 
 /// Synchronous core of the clone/pull pipeline. Runs on a blocking thread.
@@ -321,23 +316,22 @@ fn sync_blocking(
     branch: &str,
     credentials: Option<&Credentials>,
     path: &Path,
+    interrupt: &AtomicBool,
 ) -> Result<String, Error> {
+    let prepare_error = |source| Error::PrepareClonePath {
+        path: path.to_path_buf(),
+        source,
+    };
     if path.exists() {
-        std::fs::remove_dir_all(path).map_err(|e| Error::Clone {
-            url: url.to_string(),
-            source: Box::new(e),
-        })?;
+        std::fs::remove_dir_all(path).map_err(prepare_error)?;
     }
 
     // gix expects the clone target's parent to exist. The derived default
     // path includes per-flow and per-task segments that are not pre-created
     // by the volume mount, so ensure the full path exists up front.
-    std::fs::create_dir_all(path).map_err(|e| Error::Clone {
-        url: url.to_string(),
-        source: Box::new(e),
-    })?;
+    std::fs::create_dir_all(path).map_err(prepare_error)?;
 
-    crate::remote::shallow_clone(url, branch, path, credentials)?;
+    crate::remote::shallow_clone(url, branch, path, credentials, interrupt)?;
     head_commit(path)
 }
 
@@ -384,17 +378,8 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::RenderConfig { source })?;
 
-        if config.repository_url.starts_with("git@") || config.repository_url.starts_with("ssh://")
-        {
-            return Err(Error::SshUrl {
-                url: config.repository_url.clone(),
-            });
-        }
-
-        let credentials = match &config.credentials_path {
-            Some(path) => Some(Credentials::load(path).await?),
-            None => None,
-        };
+        let credentials = load_credentials(config.credentials_path.as_deref()).await?;
+        check_url(&config.repository_url, credentials.as_ref())?;
 
         let clone_path = match &config.clone_path {
             Some(path) => {
@@ -465,6 +450,9 @@ impl flowgen_core::task::runner::Runner for Processor {
 
                             if let Err(e) = result {
                                 error!(error = %e, "Git sync exhausted all retry attempts");
+                                event
+                                    .forward_failure(handler.tx.as_ref(), e.to_string())
+                                    .await;
                             }
                         }
                         .instrument(tracing::Span::current()),
@@ -588,14 +576,14 @@ mod tests {
     // ── Error Display ────────────────────────────────────────────────
 
     #[test]
-    fn error_display_clone() {
-        let err = Error::Clone {
-            url: "https://github.com/org/repo.git".to_string(),
-            source: "network timeout".into(),
+    fn error_display_prepare_clone_path() {
+        let err = Error::PrepareClonePath {
+            path: PathBuf::from("/tmp/repo"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
         };
         assert_eq!(
             err.to_string(),
-            "Git clone failed for https://github.com/org/repo.git: network timeout"
+            "Failed to prepare the clone path /tmp/repo: denied"
         );
     }
 
@@ -621,9 +609,9 @@ mod tests {
 
     #[test]
     fn error_display_ssh_url() {
-        let err = Error::SshUrl {
+        let err = Error::Url(crate::remote::UrlError::Ssh {
             url: "git@github.com:org/repo.git".to_string(),
-        };
+        });
         assert!(err.to_string().contains("SSH URLs are not supported"));
         assert!(err.to_string().contains("git@github.com:org/repo.git"));
     }
@@ -651,9 +639,9 @@ mod tests {
 
     #[test]
     fn error_display_retry_exhausted() {
-        let inner = Error::SshUrl {
+        let inner = Error::Url(crate::remote::UrlError::Ssh {
             url: "git@github.com:org/repo.git".to_string(),
-        };
+        });
         let err = Error::RetryExhausted {
             source: Box::new(inner),
         };
@@ -743,7 +731,10 @@ mod tests {
     fn credentials_deser() {
         let json = r#"{ "token": "ghp_abc123" }"#;
         let creds: Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.token, "ghp_abc123");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&creds.token),
+            "ghp_abc123"
+        );
     }
 
     // ── FileEvent ───────────────────────────────────────────────────

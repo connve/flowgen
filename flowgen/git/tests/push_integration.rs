@@ -1,17 +1,23 @@
-//! Integration tests for `push` against `git http-backend` served over HTTP.
+//! Integration tests for `push` against `git http-backend`, served over HTTP
+//! by an in-process server.
 //!
-//! Requires `git` in `PATH`, like the sync integration tests.
+//! Depends only on the `git` binary in `PATH`, so it is not `#[ignore]`d.
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Response, Uri};
 use flowgen_git::push::client::{Author, Error, Expected, FileChange, Push};
+use flowgen_git::remote::{BlockingError, Credentials, UrlError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// How long the server holds back a stalled fetch.
+const STALL: Duration = Duration::from_secs(3);
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -43,6 +49,8 @@ struct Server {
     root: PathBuf,
     /// Commits to the branch right before the next push lands, once.
     race: AtomicBool,
+    /// Holds back the next fetch for [`STALL`], once.
+    stall: AtomicBool,
 }
 
 /// Bridges one HTTP request to the `git http-backend` CGI program.
@@ -55,6 +63,11 @@ async fn backend(
 ) -> Response<Body> {
     if uri.path().ends_with("git-receive-pack") && server.race.swap(false, Ordering::SeqCst) {
         commit_directly(&server.root, "other.txt", "concurrent");
+    }
+    if uri.query().is_some_and(|q| q.contains("git-upload-pack"))
+        && server.stall.swap(false, Ordering::SeqCst)
+    {
+        tokio::time::sleep(STALL).await;
     }
     let content_type = headers
         .get("content-type")
@@ -141,6 +154,7 @@ impl Remote {
         let server = Arc::new(Server {
             root: root.clone(),
             race: AtomicBool::new(false),
+            stall: AtomicBool::new(false),
         });
         let app = axum::Router::new()
             .fallback(backend)
@@ -163,6 +177,7 @@ impl Remote {
             path: path.map(str::to_string),
             credentials: None,
             http: reqwest::Client::new(),
+            timeout: None,
         }
     }
 
@@ -381,4 +396,117 @@ async fn an_empty_path_and_a_missing_branch_are_rejected() {
         .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
         .await;
     assert!(matches!(missing, Err(Error::BranchMissing { branch }) if branch == "flowgen-changes"));
+}
+
+#[tokio::test]
+async fn a_file_where_a_directory_is_needed_is_a_conflict() {
+    let remote = Remote::new().await;
+    commit_directly(&remote.root, "a.yaml", "a");
+
+    let result = remote
+        .push(None)
+        .push(
+            vec![FileChange {
+                path: "a.yaml/b.yaml".to_string(),
+                content: Some(b"b".to_vec()),
+                expected: Expected::Missing,
+            }],
+            author(),
+            "Nest".to_string(),
+        )
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::Conflict { path }) if path == "a.yaml/b.yaml"),
+        "{result:?}"
+    );
+    assert_eq!(remote.read("a.yaml"), "a");
+}
+
+#[tokio::test]
+async fn a_path_prefix_that_names_a_file_is_a_conflict() {
+    let remote = Remote::new().await;
+    commit_directly(&remote.root, "a.yaml", "a");
+
+    let result = remote
+        .push(Some("a.yaml"))
+        .push(vec![write("b.yaml", "b")], author(), "Nest".to_string())
+        .await;
+
+    assert!(
+        matches!(&result, Err(Error::Conflict { path }) if path == "a.yaml/b.yaml"),
+        "{result:?}"
+    );
+    assert_eq!(remote.read("a.yaml"), "a");
+}
+
+#[tokio::test]
+async fn a_stalled_fetch_times_out_and_the_next_push_lands() {
+    let remote = Remote::new().await;
+    commit_directly(&remote.root, "README.md", "readme");
+    remote.server.stall.store(true, Ordering::SeqCst);
+    let mut push = remote.push(None);
+    push.timeout = Some(Duration::from_millis(500));
+
+    let started = Instant::now();
+    let stalled = push
+        .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
+        .await;
+    assert!(
+        matches!(
+            &stalled,
+            Err(Error::Blocking(BlockingError::Timeout { .. }))
+        ),
+        "{stalled:?}"
+    );
+    assert!(started.elapsed() < STALL);
+
+    push.timeout = None;
+    let pushed = push
+        .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
+        .await
+        .unwrap();
+    assert_eq!(remote.read("a.yaml"), "a");
+    assert_eq!(remote.head(), pushed.commit);
+}
+
+#[tokio::test]
+async fn ssh_urls_and_tokens_over_plain_http_are_rejected_before_any_request() {
+    let credentials: Credentials = serde_json::from_str(r#"{"token": "t"}"#).unwrap();
+    let push = |url: &str, credentials: Option<Credentials>| Push {
+        repository_url: url.to_string(),
+        branch: "main".to_string(),
+        path: None,
+        credentials,
+        http: reqwest::Client::new(),
+        timeout: None,
+    };
+
+    let ssh = push("git@git.example.invalid:a/b.git", None)
+        .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
+        .await;
+    assert!(
+        matches!(&ssh, Err(Error::Url(UrlError::Ssh { .. }))),
+        "{ssh:?}"
+    );
+
+    let plain = push(
+        "http://git.example.invalid/a.git",
+        Some(credentials.clone()),
+    )
+    .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
+    .await;
+    assert!(
+        matches!(&plain, Err(Error::Url(UrlError::Insecure { .. }))),
+        "{plain:?}"
+    );
+
+    let remote = Remote::new().await;
+    let mut loopback = remote.push(None);
+    loopback.credentials = Some(credentials);
+    loopback
+        .push(vec![write("a.yaml", "a")], author(), "Add a".to_string())
+        .await
+        .unwrap();
+    assert_eq!(remote.read("a.yaml"), "a");
 }

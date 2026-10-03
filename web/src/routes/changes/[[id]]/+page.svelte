@@ -61,32 +61,29 @@
 		else change = null;
 	});
 
-	// Mirrors the server: pending and failed changes can be published, and a
-	// change stuck in `publishing` once the server's publish timeout passed.
+	// Pending and failed changes can be published; one in `publishing` is
+	// refused by the server until its publish timeout passed, so it offers none.
 	let canApprove = $derived(
-		change != null &&
-			(change.status === 'pending' ||
-				change.status === 'failed' ||
-				change.status === 'publishing')
-	);
-	let canReject = $derived(
 		change != null && (change.status === 'pending' || change.status === 'failed')
 	);
+	let canReject = $derived(canApprove);
 
+	// A response for a change the user already left is dropped.
 	async function decide(action: 'approve' | 'reject') {
 		if (!change || change.id !== activeId) return;
+		const id = change.id;
 		deciding = true;
 		decideError = null;
 		try {
-			const res = await fetch(
-				apiUrl(`api/changes/${encodeURIComponent(change.id)}/${action}`),
-				{ method: 'POST' }
-			);
+			const res = await fetch(apiUrl(`api/changes/${encodeURIComponent(id)}/${action}`), {
+				method: 'POST'
+			});
 			if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-			change = await res.json();
+			const decided: Change = await res.json();
+			if (id === activeId) change = decided;
 			await loadList();
 		} catch (err) {
-			decideError = err instanceof Error ? err.message : 'Request failed';
+			if (id === activeId) decideError = err instanceof Error ? err.message : 'Request failed';
 		} finally {
 			deciding = false;
 		}

@@ -93,6 +93,35 @@ fn drive_event(subject: &str, data: serde_json::Value) -> flowgen_core::event::E
         .expect("build event")
 }
 
+async fn list_keys(url: String, bucket: &str, prefix: &str) -> Vec<String> {
+    let (tx, mut rx) = spawn_processor(KvConfig {
+        name: "kv_list".to_string(),
+        url,
+        bucket: bucket.to_string(),
+        operation: Operation::List,
+        key_prefix: Some(prefix.to_string()),
+        ..Default::default()
+    })
+    .await;
+    tx.send(drive_event("trigger", serde_json::json!({})))
+        .await
+        .expect("send list");
+    let result = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("list returns")
+        .expect("channel open")
+        .data_as_json()
+        .expect("json");
+    let mut keys: Vec<String> = result["keys"]
+        .as_array()
+        .expect("keys array")
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    keys.sort();
+    keys
+}
+
 #[tokio::test]
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn put_operation_writes_value_and_emits_put_result() {
@@ -348,7 +377,7 @@ async fn put_entries_writes_changes_and_prunes_the_rest_under_the_prefix() {
     let (_nats, url) = start_nats().await;
     let (tx, mut rx) = spawn_processor(KvConfig {
         name: "kv_mirror".to_string(),
-        url,
+        url: url.clone(),
         bucket: "kv_prune_bucket".to_string(),
         operation: Operation::Put,
         key_prefix: Some("flows.".to_string()),
@@ -401,9 +430,13 @@ async fn put_entries_writes_changes_and_prunes_the_rest_under_the_prefix() {
     assert_eq!(second["unchanged"], 1);
 
     put(serde_json::json!([])).await;
-    let empty = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
-    assert!(
-        !matches!(empty, Ok(Some(ref e)) if e.error.is_none()),
-        "An empty prune must not succeed: {empty:?}"
+    let empty = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("empty prune is not retried")
+        .expect("channel open");
+    assert!(empty.error.is_some(), "An empty prune must fail");
+    assert_eq!(
+        list_keys(url, "kv_prune_bucket", "flows.").await,
+        vec!["flows.a", "flows.b"]
     );
 }

@@ -237,10 +237,13 @@ pub enum Error {
 /// Invalid task wiring in a flow.
 #[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum DagError {
+    /// Two tasks in the flow share a name.
     #[error("Duplicate task name '{name}' in flow")]
     DuplicateTask { name: String },
+    /// A `depends_on` entry names no task in the flow.
     #[error("Task '{task}' depends on unknown task '{dependency}'")]
     UnknownDependency { task: String, dependency: String },
+    /// A `depends_on` entry names a task further down the list, which could form a cycle.
     #[error("Task '{task}' depends on '{dependency}' which appears later in the list")]
     LaterDependency { task: String, dependency: String },
 }
@@ -404,17 +407,6 @@ impl TaskRegistryBuilder {
         let mut task_descriptors = Vec::with_capacity(task_count);
 
         for (idx, task_type) in tasks_config.iter().enumerate() {
-            // Blocking setup tasks (webhooks, MCP registrations, LLM proxy).
-            let is_blocking = matches!(
-                task_type,
-                TaskType::http_endpoint(_)
-                    | TaskType::inproc_endpoint(_)
-                    | TaskType::mcp_tool(_)
-                    | TaskType::mcp_resource(_)
-                    | TaskType::mcp_prompt(_)
-                    | TaskType::llm_proxy(_)
-            );
-
             let input_rx = if idx > 0 {
                 channels
                     .get_mut(idx - 1)
@@ -434,7 +426,7 @@ impl TaskRegistryBuilder {
                 task_type: task_type.clone(),
                 input_rx,
                 output_tx,
-                is_blocking,
+                is_blocking: task_type.is_blocking(),
                 // Linear chains have a single terminal task, so every task
                 // sees exactly one leaf in its downstream subgraph.
                 downstream_leaves: 1,
@@ -564,21 +556,12 @@ impl TaskRegistryBuilder {
 
         let mut task_descriptors = Vec::with_capacity(task_count);
         for (idx, task_type) in tasks_config.iter().enumerate() {
-            let is_blocking = matches!(
-                task_type,
-                TaskType::http_endpoint(_)
-                    | TaskType::inproc_endpoint(_)
-                    | TaskType::mcp_tool(_)
-                    | TaskType::mcp_resource(_)
-                    | TaskType::mcp_prompt(_)
-                    | TaskType::llm_proxy(_)
-            );
             task_descriptors.push(TaskDescriptor {
                 id: idx,
                 task_type: task_type.clone(),
                 input_rx: child_rx[idx].take(),
                 output_tx: parent_tx[idx].take(),
-                is_blocking,
+                is_blocking: task_type.is_blocking(),
                 downstream_leaves: downstream_leaves[idx],
             });
         }
@@ -679,22 +662,12 @@ impl Flow {
     /// If a flow contains any webhook tasks, it will always be treated as
     /// non-leader-elected by disregarding the `required_leader_election` flag.
     fn is_leader_elected(&self) -> bool {
-        let has_blocking_tasks = self.config.flow.tasks.iter().any(|task| {
-            matches!(
-                task,
-                TaskType::http_endpoint(_)
-                    | TaskType::inproc_endpoint(_)
-                    | TaskType::mcp_tool(_)
-                    | TaskType::mcp_resource(_)
-                    | TaskType::mcp_prompt(_)
-                    | TaskType::llm_proxy(_)
-            )
-        });
+        let has_blocking_tasks = self.config.flow.tasks.iter().any(TaskType::is_blocking);
 
         if has_blocking_tasks {
             if self.config.flow.require_leader_election.unwrap_or(false) {
                 info!(
-                    "Flow {} contains a blocking task (webhook, MCP registration, or llm_proxy); `required_leader_election` flag will be ignored.",
+                    "Flow {} contains a blocking task (http_endpoint, inproc_endpoint, MCP registration, or llm_proxy); `require_leader_election` flag will be ignored.",
                     self.identity()
                 );
             }

@@ -10,10 +10,14 @@ use axum::{Extension, Json};
 use flowgen_client::types as api;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 /// Key prefix for changes in the system cache.
 const CHANGE_KEY_PREFIX: &str = "authoring.changes.";
+
+/// How long a diff searches for the smallest edit before settling for a larger one.
+const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Failure of a change request, with the status it answers.
 #[derive(thiserror::Error, Debug)]
@@ -22,8 +26,15 @@ pub enum Error {
     NotConfigured,
     #[error("No change with id '{id}'")]
     NotFound { id: String },
-    #[error("Invalid workspace path '{path}': files must be under flows/ or resources/")]
+    /// Segments are limited because flow identities and resource keys become cache keys.
+    #[error(
+        "Invalid workspace path '{path}': files must be under flows/ or resources/, with path segments of letters, digits, '.', '_' and '-'"
+    )]
     InvalidPath { path: String },
+    #[error("The change lists '{path}' more than once")]
+    DuplicatePath { path: String },
+    #[error("A change needs a title")]
+    MissingTitle,
     #[error("The change is {status}, which does not allow this")]
     NotPending { status: api::ChangeStatus },
     #[error("The change has invalid files")]
@@ -36,16 +47,23 @@ pub enum Error {
         "The files belong to the targets '{first}' and '{second}'; propose a change per target"
     )]
     MixedTargets { first: String, second: String },
-    #[error("The change's target '{target}' is no longer configured")]
+    #[error("The change's target '{target}' no longer covers its files")]
     TargetGone { target: String },
+    #[error("The change was proposed for the target '{stored}', but its files now belong to '{current}'")]
+    TargetChanged { stored: String, current: String },
     #[error("Only a signed-in user can approve or reject changes")]
     UserRequired,
     #[error("'{user}' is not allowed to approve or reject changes")]
     NotApprover { user: String },
     #[error("Publishing did not finish within {timeout:?}; it may still complete, approve again to retry")]
-    PublishTimeout { timeout: std::time::Duration },
+    PublishTimeout { timeout: Duration },
     #[error("Publishing stopped unexpectedly: {source}")]
     PublishAborted {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("Checking the files stopped unexpectedly: {source}")]
+    Worker {
         #[source]
         source: tokio::task::JoinError,
     },
@@ -82,35 +100,63 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to encode the change: {source}")]
+    Encode {
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let status = match &self {
-            Error::NotConfigured | Error::NotFound { .. } => StatusCode::NOT_FOUND,
+        let (status, fixed) = match &self {
+            Error::NotConfigured | Error::NotFound { .. } => (StatusCode::NOT_FOUND, None),
             Error::InvalidPath { .. }
+            | Error::DuplicatePath { .. }
+            | Error::MissingTitle
             | Error::NoFiles
             | Error::NoTarget { .. }
-            | Error::MixedTargets { .. } => StatusCode::BAD_REQUEST,
+            | Error::MixedTargets { .. } => (StatusCode::BAD_REQUEST, None),
             Error::NotPending { .. }
             | Error::Invalid
             | Error::Concurrent
-            | Error::TargetGone { .. } => StatusCode::CONFLICT,
-            Error::UserRequired | Error::NotApprover { .. } => StatusCode::FORBIDDEN,
-            Error::Store { .. }
-            | Error::Corrupt { .. }
-            | Error::Deployed { .. }
-            | Error::DeployedCache { .. }
-            | Error::RegistryUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            | Error::TargetGone { .. }
+            | Error::TargetChanged { .. } => (StatusCode::CONFLICT, None),
+            Error::UserRequired | Error::NotApprover { .. } => (StatusCode::FORBIDDEN, None),
+            Error::Store { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("Change store unavailable"),
+            ),
+            Error::Corrupt { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("Stored change is unreadable"),
+            ),
+            Error::Deployed { .. } | Error::DeployedCache { .. } | Error::RegistryUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("Deployed content unavailable"),
+            ),
             Error::PublishTimeout { .. }
             | Error::PublishAborted { .. }
             | Error::Call(_)
-            | Error::Serialize { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::Serialize { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, Some("Publishing failed"))
+            }
+            Error::Encode { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("Failed to encode the change"),
+            ),
+            Error::Worker { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("Failed to check the files"),
+            ),
         };
-        if status == StatusCode::SERVICE_UNAVAILABLE {
-            warn!(error = %self, "Change store request failed");
+        match fixed {
+            Some(message) => {
+                warn!(error = %self, "{message}");
+                (status, message).into_response()
+            }
+            None => (status, self.to_string()).into_response(),
         }
-        (status, self.to_string()).into_response()
     }
 }
 
@@ -123,14 +169,17 @@ enum Location<'a> {
     Resource { key: &'a str },
 }
 
-/// Splits a workspace path into its kind, rejecting paths that are empty,
-/// absolute, or step outside their directory.
+/// Splits a workspace path into its kind; segments are limited to
+/// `[A-Za-z0-9._-]` because flow identities and resource keys become cache keys.
 fn locate(path: &str) -> Option<Location<'_>> {
-    let safe = !path.starts_with('/')
-        && !path.contains('\\')
-        && path
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    let safe = path.split('/').all(|segment| {
+        segment != "."
+            && segment != ".."
+            && !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    });
     if !safe {
         return None;
     }
@@ -141,8 +190,44 @@ fn locate(path: &str) -> Option<Location<'_>> {
     }
 }
 
+/// Where each file of a proposal lives once deployed; the title becomes the
+/// commit message, so it may not be blank.
+fn check_proposal(proposal: &api::ChangeProposal) -> Result<Vec<Location<'_>>, Error> {
+    if proposal.title.trim().is_empty() {
+        return Err(Error::MissingTitle);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut locations = Vec::with_capacity(proposal.files.len());
+    for file in &proposal.files {
+        let location = match locate(&file.path) {
+            Some(location) => location,
+            None => {
+                return Err(Error::InvalidPath {
+                    path: file.path.clone(),
+                })
+            }
+        };
+        if !seen.insert(file.path.as_str()) {
+            return Err(Error::DuplicatePath {
+                path: file.path.clone(),
+            });
+        }
+        locations.push(location);
+    }
+    Ok(locations)
+}
+
+/// Validates on a blocking thread, as parsing and compiling large files takes a while.
+async fn validate_blocking(
+    files: Vec<api::WorkspaceFile>,
+) -> Result<Vec<api::ValidationIssue>, Error> {
+    tokio::task::spawn_blocking(move || validate_files(&files))
+        .await
+        .map_err(|source| Error::Worker { source })
+}
+
 /// Issues for every file that has content; deletions are not validated.
-pub fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::ValidationIssue> {
+fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::ValidationIssue> {
     let mut issues = Vec::new();
     for file in files {
         let found = match (locate(&file.path), &file.content) {
@@ -218,16 +303,21 @@ async fn deployed(
     }
 }
 
-/// The change with each file's diff filled in; diffs are not stored.
-fn with_diffs(mut change: api::Change) -> api::Change {
-    for file in &mut change.files {
-        file.diff = unified_diff(
-            &file.path,
-            file.previous.as_deref(),
-            file.content.as_deref(),
-        );
-    }
-    change
+/// The change with each file's diff filled in, on a blocking thread as large
+/// files take a while; diffs are not stored.
+async fn with_diffs(mut change: api::Change) -> Result<api::Change, Error> {
+    tokio::task::spawn_blocking(move || {
+        for file in &mut change.files {
+            file.diff = unified_diff(
+                &file.path,
+                file.previous.as_deref(),
+                file.content.as_deref(),
+            );
+        }
+        change
+    })
+    .await
+    .map_err(|source| Error::Worker { source })
 }
 
 /// The one target every path falls in.
@@ -237,7 +327,7 @@ fn target_for<'a, 'p>(
 ) -> Result<&'a crate::config::AuthoringTarget, Error> {
     let mut found: Option<&crate::config::AuthoringTarget> = None;
     for path in paths {
-        let target = match authoring.targets.iter().find(|target| target.covers(path)) {
+        let target = match authoring.target_of(path) {
             Some(target) => target,
             None => {
                 return Err(Error::NoTarget {
@@ -261,20 +351,29 @@ fn target_for<'a, 'p>(
     }
 }
 
-/// The configured target a stored change belongs to.
-fn target_named<'a>(
+/// The target a stored change still belongs to under the current configuration,
+/// so approver groups and the publish flow cannot come from a target that no
+/// longer owns its files.
+fn stored_target<'a>(
     authoring: &'a crate::config::AuthoringOptions,
-    name: &str,
+    change: &api::Change,
 ) -> Result<&'a crate::config::AuthoringTarget, Error> {
-    match authoring.targets.iter().find(|target| target.name == name) {
-        Some(target) => Ok(target),
-        None => Err(Error::TargetGone {
-            target: name.to_string(),
+    match target_for(
+        authoring,
+        change.files.iter().map(|file| file.path.as_str()),
+    ) {
+        Ok(current) if current.name == change.target => Ok(current),
+        Ok(current) => Err(Error::TargetChanged {
+            stored: change.target.clone(),
+            current: current.name.clone(),
+        }),
+        Err(_) => Err(Error::TargetGone {
+            target: change.target.clone(),
         }),
     }
 }
 
-/// Change ids are what [`propose_change`] generates: lowercase hex.
+/// Change ids are lowercase hex, as generated on proposal.
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -282,15 +381,17 @@ fn valid_id(id: &str) -> bool {
 /// Unified diff from `previous` to `content`, `/dev/null` standing for a
 /// missing side.
 fn unified_diff(path: &str, previous: Option<&str>, content: Option<&str>) -> String {
-    let old_header = match previous {
-        Some(_) => format!("a/{path}"),
-        None => "/dev/null".to_string(),
+    let (old_header, old) = match previous {
+        Some(text) => (format!("a/{path}"), text),
+        None => ("/dev/null".to_string(), ""),
     };
-    let new_header = match content {
-        Some(_) => format!("b/{path}"),
-        None => "/dev/null".to_string(),
+    let (new_header, new) = match content {
+        Some(text) => (format!("b/{path}"), text),
+        None => ("/dev/null".to_string(), ""),
     };
-    similar::TextDiff::from_lines(previous.unwrap_or_default(), content.unwrap_or_default())
+    similar::TextDiff::configure()
+        .timeout(DIFF_TIMEOUT)
+        .diff_lines(old, new)
         .unified_diff()
         .header(&old_header, &new_header)
         .to_string()
@@ -366,7 +467,7 @@ async fn load(state: &WebState, id: &str) -> Result<(api::Change, u64), Error> {
 fn encode(change: &api::Change) -> Result<bytes::Bytes, Error> {
     match serde_json::to_vec(change) {
         Ok(bytes) => Ok(bytes.into()),
-        Err(source) => Err(Error::Corrupt { source }),
+        Err(source) => Err(Error::Encode { source }),
     }
 }
 
@@ -378,14 +479,14 @@ async fn store(state: &WebState, change: &api::Change) -> Result<(), Error> {
         .map_err(|source| Error::Store { source })
 }
 
-/// Moves a change to `next` only if nobody wrote it since it was read at `revision`.
-async fn transition(state: &WebState, change: &api::Change, revision: u64) -> Result<(), Error> {
+/// Writes `change` only if nobody wrote it since `revision`, returning the new revision.
+async fn transition(state: &WebState, change: &api::Change, revision: u64) -> Result<u64, Error> {
     match state
         .conversation_cache
         .update(&change_key(&change.id), encode(change)?, revision, None)
         .await
     {
-        Ok(_) => Ok(()),
+        Ok(next) => Ok(next),
         Err(flowgen_core::cache::Error::RevisionMismatch { .. }) => Err(Error::Concurrent),
         Err(source) => Err(Error::Store { source }),
     }
@@ -401,10 +502,10 @@ fn require_authoring(state: &WebState) -> Result<&crate::config::AuthoringOption
 /// `POST /api/workspace/validate`.
 pub(crate) async fn validate_workspace(
     Json(body): Json<api::WorkspaceFiles>,
-) -> Json<api::WorkspaceValidation> {
-    Json(api::WorkspaceValidation {
-        issues: validate_files(&body.files),
-    })
+) -> Result<Json<api::WorkspaceValidation>, Error> {
+    Ok(Json(api::WorkspaceValidation {
+        issues: validate_blocking(body.files).await?,
+    }))
 }
 
 /// `GET /api/changes`.
@@ -450,6 +551,7 @@ pub(crate) async fn propose_change(
 ) -> Result<Response, Error> {
     let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
+    let locations = check_proposal(&proposal)?;
     let target = target_for(
         authoring,
         proposal.files.iter().map(|file| file.path.as_str()),
@@ -457,16 +559,8 @@ pub(crate) async fn propose_change(
     .name
     .clone();
     let mut files = Vec::with_capacity(proposal.files.len());
-    for file in &proposal.files {
-        let location = match locate(&file.path) {
-            Some(location) => location,
-            None => {
-                return Err(Error::InvalidPath {
-                    path: file.path.clone(),
-                })
-            }
-        };
-        let previous = deployed(&state, &file.path, &location).await?;
+    for (file, location) in proposal.files.iter().zip(&locations) {
+        let previous = deployed(&state, &file.path, location).await?;
         files.push(api::ChangeFile {
             diff: String::new(),
             path: file.path.clone(),
@@ -474,6 +568,7 @@ pub(crate) async fn propose_change(
             previous,
         });
     }
+    let issues = validate_blocking(proposal.files).await?;
     let change = api::Change {
         id: uuid::Uuid::now_v7().simple().to_string(),
         target,
@@ -484,13 +579,13 @@ pub(crate) async fn propose_change(
         created_at: now_ms(),
         decided_by: None,
         decided_at: None,
-        issues: validate_files(&proposal.files),
+        issues,
         files,
         result: Default::default(),
         error: None,
     };
     store(&state, &change).await?;
-    Ok((StatusCode::CREATED, Json(with_diffs(change))).into_response())
+    Ok((StatusCode::CREATED, Json(with_diffs(change).await?)).into_response())
 }
 
 /// `GET /api/changes/{id}`.
@@ -499,7 +594,7 @@ pub(crate) async fn get_change(
     Path(id): Path<String>,
 ) -> Result<Json<api::Change>, Error> {
     require_authoring(&state)?;
-    Ok(Json(with_diffs(load(&state, &id).await?.0)))
+    Ok(Json(with_diffs(load(&state, &id).await?.0).await?))
 }
 
 /// File sent to the publish flow; `previous` is always present, `null` for a new file.
@@ -559,11 +654,11 @@ pub(crate) async fn approve_change(
     caller: Option<Extension<Caller>>,
     Path(id): Path<String>,
 ) -> Result<Json<api::Change>, Error> {
-    let authoring = require_authoring(&state)?.clone();
+    let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
     let (mut change, revision) = load(&state, &id).await?;
-    let target = target_named(&authoring, &change.target)?.clone();
-    let user = decider(caller.as_ref(), &authoring, &target)?;
+    let target = stored_target(authoring, &change)?;
+    let user = decider(caller.as_ref(), authoring, target)?;
     if !can_publish(&change, authoring.publish_timeout) {
         return Err(Error::NotPending {
             status: change.status,
@@ -576,17 +671,18 @@ pub(crate) async fn approve_change(
     change.decided_by = Some(caller_label(caller.as_ref()));
     change.decided_at = Some(now_ms());
     change.error = None;
-    transition(&state, &change, revision).await?;
+    let revision = transition(&state, &change, revision).await?;
 
     let publishing = tokio::spawn(publish(
         Arc::clone(&state),
         authoring.publish_timeout,
-        target,
+        target.clone(),
         user,
         change,
+        revision,
     ));
     match publishing.await {
-        Ok(result) => result.map(|change| Json(with_diffs(change))),
+        Ok(result) => Ok(Json(with_diffs(result?).await?)),
         Err(source) => Err(Error::PublishAborted { source }),
     }
 }
@@ -645,14 +741,16 @@ async fn run_publish_flow(
     }
 }
 
-/// Runs the publish flow and records its outcome. Spawned, so a client that
-/// disconnects does not leave the change in `publishing`.
+/// Runs the publish flow and records its outcome over the record written at
+/// `revision`, leaving a record rewritten since then alone. Spawned, so a
+/// client that disconnects does not leave the change in `publishing`.
 async fn publish(
     state: Arc<WebState>,
-    publish_timeout: std::time::Duration,
+    publish_timeout: Duration,
     target: crate::config::AuthoringTarget,
     user: Option<flowgen_core::auth::UserContext>,
     mut change: api::Change,
+    revision: u64,
 ) -> Result<api::Change, Error> {
     match run_publish_flow(&state, publish_timeout, &target, user.as_ref(), &change).await {
         Ok(result) => {
@@ -669,14 +767,28 @@ async fn publish(
         }
     }
     let retry = flowgen_core::retry::RetryConfig::merge(&state.app_config.retry, &None);
-    tokio_retry::Retry::spawn(retry.strategy(), || async {
-        store(&state, &change).await.map_err(|error| {
-            warn!(change = %change.id, error = %error, "Failed to record the publish outcome");
-            tokio_retry::RetryError::transient(error)
-        })
+    let recorded = tokio_retry::Retry::spawn(retry.strategy(), || async {
+        match transition(&state, &change, revision).await {
+            Ok(_) => Ok(()),
+            Err(error @ Error::Store { .. }) => {
+                warn!(change = %change.id, error = %error, "Failed to record the publish outcome");
+                Err(tokio_retry::RetryError::transient(error))
+            }
+            Err(error) => Err(tokio_retry::RetryError::permanent(error)),
+        }
     })
-    .await?;
-    Ok(change)
+    .await;
+    match recorded {
+        Ok(()) => Ok(change),
+        Err(Error::Concurrent) => {
+            warn!(
+                change = %change.id,
+                "The change was rewritten while publishing, keeping the newer record"
+            );
+            Ok(change)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// `POST /api/changes/{id}/reject`.
@@ -691,7 +803,7 @@ pub(crate) async fn reject_change(
     decider(
         caller.as_ref(),
         authoring,
-        target_named(authoring, &change.target)?,
+        stored_target(authoring, &change)?,
     )?;
     let rejectable = matches!(
         change.status,
@@ -706,7 +818,7 @@ pub(crate) async fn reject_change(
     change.decided_by = Some(caller_label(caller.as_ref()));
     change.decided_at = Some(now_ms());
     transition(&state, &change, revision).await?;
-    Ok(Json(with_diffs(change)))
+    Ok(Json(with_diffs(change).await?))
 }
 
 #[cfg(test)]
@@ -725,6 +837,12 @@ mod tests {
                 key: "scripts/s.rhai"
             })
         );
+        assert_eq!(
+            locate("flows/team-a/sync_v1.2.yaml"),
+            Some(Location::Flow {
+                file: "team-a/sync_v1.2.yaml"
+            })
+        );
         for path in [
             "other/a",
             "flows",
@@ -732,6 +850,10 @@ mod tests {
             "flows/../a",
             "flows//a",
             "flows/a\\b",
+            "flows/a b.yaml",
+            "resources/a:b",
+            "resources/é.txt",
+            "resources/a*",
         ] {
             assert_eq!(locate(path), None, "{path}");
         }
@@ -756,6 +878,32 @@ mod tests {
         assert_eq!(
             paths,
             vec!["flows/a.yaml", "resources/s.rhai", "elsewhere.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn server_errors_answer_with_a_fixed_message_and_client_errors_with_the_reason() {
+        let body = |response: Response| async move {
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(bytes.to_vec()).unwrap())
+        };
+        let store = Error::Store {
+            source: flowgen_core::cache::Error::GetFailed("connection to 10.0.0.1 refused".into()),
+        };
+        let not_found = Error::NotFound {
+            id: "abc".to_string(),
+        };
+
+        assert_eq!(
+            body(store.into_response()).await,
+            (503, "Change store unavailable".to_string())
+        );
+        assert_eq!(
+            body(not_found.into_response()).await,
+            (404, "No change with id 'abc'".to_string())
         );
     }
 
@@ -850,9 +998,59 @@ mod tests {
             Err(Error::NoTarget { path }) if path == "flows/system/publish.yaml"
         ));
         assert!(matches!(target_for(&authoring, []), Err(Error::NoFiles)));
+    }
+
+    #[test]
+    fn a_stored_change_is_decided_only_under_the_target_that_owns_its_files_now() {
+        let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
+            name: name.to_string(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            publish_flow: "system/publish_workspace".to_string(),
+            approver_groups: Vec::new(),
+        };
+        let authoring = crate::config::AuthoringOptions {
+            enabled: true,
+            targets: vec![
+                target("workspace", &["flows/"]),
+                target("platform", &["flows/platform/"]),
+            ],
+            groups_claim: "groups".to_string(),
+            publish_timeout: Duration::from_secs(1),
+        };
+        let change = |target: &str, path: &str| api::Change {
+            id: "a".to_string(),
+            target: target.to_string(),
+            title: "t".to_string(),
+            description: None,
+            status: api::ChangeStatus::Pending,
+            proposed_by: "p".to_string(),
+            created_at: 0,
+            decided_by: None,
+            decided_at: None,
+            files: vec![api::ChangeFile {
+                path: path.to_string(),
+                content: None,
+                previous: None,
+                diff: String::new(),
+            }],
+            issues: Vec::new(),
+            result: Default::default(),
+            error: None,
+        };
+
+        assert_eq!(
+            stored_target(&authoring, &change("platform", "flows/platform/a.yaml"))
+                .unwrap()
+                .name,
+            "platform"
+        );
         assert!(matches!(
-            target_named(&authoring, "gone"),
-            Err(Error::TargetGone { .. })
+            stored_target(&authoring, &change("workspace", "flows/platform/a.yaml")),
+            Err(Error::TargetChanged { stored, current }) if stored == "workspace" && current == "platform"
+        ));
+        assert!(matches!(
+            stored_target(&authoring, &change("user", "resources/a.rhai")),
+            Err(Error::TargetGone { target }) if target == "user"
         ));
     }
 

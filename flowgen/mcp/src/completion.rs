@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 ///   resource: "completions/languages.txt"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, untagged)]
+#[serde(
+    deny_unknown_fields,
+    untagged,
+    expecting = "Expected `{values: [...]}` or `{resource: <path>}` with no other keys"
+)]
 pub enum Completion {
     /// Statically-declared list of candidate values.
     Values { values: Vec<String> },
@@ -70,6 +74,17 @@ mod tests {
             }
             other => panic!("expected Values, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_completion_with_an_extra_key_is_rejected_naming_the_accepted_shapes() {
+        let error = serde_json::from_str::<Completion>(r#"{"values": ["a"], "extra": 1}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("`{values: [...]}` or `{resource: <path>}`"),
+            "{error}"
+        );
     }
 
     #[test]

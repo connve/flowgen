@@ -35,7 +35,7 @@ Paths start at the workspace root and must be under `flows/` or `resources/`, al
 
 ## Targets
 
-`web.authoring.targets` splits the workspace into areas with their own approvers and publish flow. Each change belongs to exactly one target: every file must fall under one of its `paths`, a change touching two targets is rejected, and a path outside every target cannot be changed through the API at all.
+`web.authoring.targets` splits the workspace into areas with their own approvers and publish flow. A target's `paths` are folders matched on whole path segments: `flows/user` covers `flows/user/a.yaml` but not `flows/username/a.yaml`. A path covered by several targets belongs to the one with the most specific folder, so a target over `flows/system/` owns `flows/system/a.yaml` even when another covers `flows/`. All files of a change must belong to one target; a change spanning two is rejected, and a path outside every target cannot be changed through the API.
 
 A layout with three areas:
 
@@ -64,7 +64,7 @@ Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`]
 
 ## Approving
 
-`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's `groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never publish them. Approving moves the change to `publishing`, runs the publish flow, and records `published` with the flow's result, or `failed` with the error. Publishing runs to the end even when the browser disconnects, and is recorded as failed after `web.authoring.publish_timeout` (5 minutes by default).
+`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never publish them. Approving moves the change to `publishing`, runs the publish flow, and records `published` with the flow's result, or `failed` with the error. Publishing runs to the end even when the browser disconnects, and is recorded as failed after `web.authoring.publish_timeout` (5 minutes by default).
 
 A failed change can be approved again, as can one left in `publishing` past the timeout, for example after a restart. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so publishing again after a partial success does not conflict.
 
@@ -110,4 +110,4 @@ A machine key reaches only what an agent needs: reading flows, resources, logs a
 
 ## Operator agent
 
-[`examples/authoring/flow_operator.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/flow_operator.yaml) is an agent for the built-in Agents chat. Its tools — flows in [`examples/authoring/tools/`](https://github.com/connve/flowgen/tree/main/examples/authoring/tools) calling the web API with a machine key — list and read deployed flows and resources, validate drafts, propose changes, and read a flow's logs after it is deployed.
+[`examples/authoring/flow_operator.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/flow_operator.yaml) is an agent for the built-in Agents chat. Its tools are flows in `examples/authoring/tools/`, such as [`propose_change.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/tools/propose_change.yaml), that call the web API with a machine key to list and read deployed flows and resources, validate drafts, propose changes, and read a flow's logs after it is deployed.

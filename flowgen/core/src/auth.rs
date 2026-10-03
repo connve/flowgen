@@ -116,6 +116,7 @@ impl AuthConfig {
 
 /// Task-level auth configuration.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskAuthConfig {
     /// When true, reject requests without a valid auth token.
     #[serde(default)]
@@ -157,5 +158,13 @@ mod tests {
     fn test_task_auth_config_default() {
         let config = TaskAuthConfig::default();
         assert!(!config.required);
+    }
+
+    #[test]
+    fn a_misspelled_task_auth_field_is_rejected() {
+        let error = serde_json::from_str::<TaskAuthConfig>(r#"{"require": true}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `require`"), "{error}");
     }
 }

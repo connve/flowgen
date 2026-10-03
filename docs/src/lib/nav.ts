@@ -105,6 +105,12 @@ export const navigation: NavSection[] = [
 			{ title: 'Overview', href: '/git' },
 			{ title: 'Git Sync', href: '/git/sync' },
 			{ title: 'Git Push', href: '/git/push' }
+		],
+		subsections: [
+			{
+				title: 'Guides',
+				items: [{ title: 'Loading Flows', href: '/git/guides/loading-flows' }]
+			}
 		]
 	},
 	{
@@ -177,6 +183,12 @@ export const navigation: NavSection[] = [
 			{ title: 'Overview', href: '/oci' },
 			{ title: 'OCI Sync', href: '/oci/sync' },
 			{ title: 'OCI Push', href: '/oci/push' }
+		],
+		subsections: [
+			{
+				title: 'Guides',
+				items: [{ title: 'Loading Flows', href: '/oci/guides/loading-flows' }]
+			}
 		]
 	},
 	{

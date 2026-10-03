@@ -422,12 +422,19 @@ export interface paths {
         put?: never;
         /**
          * Approve a pending change and publish it, or publish a failed one again.
-         * @description Requires a signed-in user's session, and membership of one of
-         *     `web.authoring.approver_groups` when set; machine keys are refused.
-         *     Calls the flow `web.authoring.publish_flow` with
-         *     `{id, title, author, files}` and records its result. A `failed`
-         *     change, or one left `publishing` past `web.authoring.publish_timeout`,
-         *     can be approved again.
+         * @description With `web.auth` set, requires a signed-in user's session; machine
+         *     keys are refused. When the change's target sets
+         *     `web.authoring.targets[].approver_groups`, the user must be in one of
+         *     them. The change's files must still belong to the target it was
+         *     proposed for under the current `web.authoring.targets`.
+         *
+         *     Calls the target's `web.authoring.targets[].publish_flow` with
+         *     `{id, target, title, author: {name, email}, files: [{path, content, previous}]}`
+         *     and records its result. `author` comes from the approver's `name` and
+         *     `email` claims, else their user id; `content` null deletes the file
+         *     and `previous` null marks a new one. A `failed` change, or one left
+         *     `publishing` past `web.authoring.publish_timeout`, can be approved
+         *     again.
          */
         post: operations["approveChange"];
         delete?: never;
@@ -447,7 +454,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reject a pending or failed change. */
+        /**
+         * Reject a pending or failed change.
+         * @description Requires an approver, as approving does: with `web.auth` set, a
+         *     signed-in user's session (machine keys are refused) and membership of
+         *     one of the target's `web.authoring.targets[].approver_groups` when
+         *     set. The change's files must still belong to the target it was
+         *     proposed for.
+         */
         post: operations["rejectChange"];
         delete?: never;
         options?: never;
@@ -729,7 +743,11 @@ export interface components {
         };
         AuthoringTarget: {
             name: string;
-            /** @description Workspace path prefixes the target covers, e.g. `flows/user/`. */
+            /**
+             * @description Workspace folders the target covers, e.g. `flows/user/`, matched
+             *     on whole path segments. A path covered by several targets belongs
+             *     to the one with the most specific folder.
+             */
             paths: string[];
         };
         /** @description A resolved identity from the configured OIDC provider. */
@@ -750,7 +768,10 @@ export interface components {
         };
         /** @description A file in the workspace; `content` null deletes it. */
         WorkspaceFile: {
-            /** @description Path from the workspace root, under `flows/` or `resources/`. */
+            /**
+             * @description Path from the workspace root, under `flows/` or `resources/`, in
+             *     segments of letters, digits, `.`, `_` and `-`.
+             */
             path: string;
             content?: string | null;
         };
@@ -768,9 +789,10 @@ export interface components {
             issues: components["schemas"]["ValidationIssue"][];
         };
         ChangeProposal: {
-            /** @description One line, used as the commit message. */
+            /** @description One line, used as the commit message; may not be blank. */
             title: string;
             description?: string;
+            /** @description The files to change, each path at most once. */
             files: components["schemas"]["WorkspaceFile"][];
         };
         /** @enum {string} */
@@ -1443,6 +1465,13 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceValidation"];
                 };
             };
+            /** @description Validating the files stopped unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     listChanges: {
@@ -1504,8 +1533,11 @@ export interface operations {
                 };
             };
             /**
-             * @description A file path is outside `flows/` and `resources/`, outside every
-             *     `web.authoring.targets` entry, or the files span several targets.
+             * @description The title is blank, the change has no files, a path is listed
+             *     twice, a path is outside `flows/` and `resources/` or has a
+             *     segment with characters other than letters, digits, `.`, `_` and
+             *     `-`, a path is outside every `web.authoring.targets` entry, or the
+             *     files span several targets.
              */
             400: {
                 headers: {
@@ -1520,7 +1552,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The change store is unavailable. */
+            /** @description Validating or diffing the files stopped unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change store is unavailable, or the deployed content of a file cannot be read. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1556,6 +1595,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Diffing the files stopped unexpectedly. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description The change store is unavailable. */
             503: {
                 headers: {
@@ -1585,7 +1631,10 @@ export interface operations {
                     "application/json": components["schemas"]["Change"];
                 };
             };
-            /** @description The request does not carry a user session. */
+            /**
+             * @description The request does not carry a user session, or the user is in none
+             *     of the target's `approver_groups`.
+             */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1599,8 +1648,20 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The change cannot be published in its status, or has invalid files. */
+            /**
+             * @description The change cannot be published in its status (including
+             *     `publishing` before `web.authoring.publish_timeout` passed), has
+             *     invalid files, was decided by another request, or its files no
+             *     longer belong to the target it was proposed for.
+             */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Publishing stopped unexpectedly, or the change could not be encoded or diffed. */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1635,7 +1696,10 @@ export interface operations {
                     "application/json": components["schemas"]["Change"];
                 };
             };
-            /** @description The request does not carry a user session. */
+            /**
+             * @description The request does not carry a user session, or the user is in none
+             *     of the target's `approver_groups`.
+             */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1649,8 +1713,19 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description The change is not pending or failed. */
+            /**
+             * @description The change is not pending or failed, was decided by another
+             *     request, or its files no longer belong to the target it was
+             *     proposed for.
+             */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change could not be encoded or diffed. */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1667,7 +1742,15 @@ export interface operations {
     };
     authLogin: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Web UI page to return to after signing in, e.g.
+                 *     `/flowgen/changes/abc`. Ignored unless it is a path under
+                 *     `web.path` outside `/auth/`, without `.` or `..` segments; the
+                 *     callback then redirects to the web UI's root.
+                 */
+                return_to?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;

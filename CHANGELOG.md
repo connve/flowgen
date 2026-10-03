@@ -4,32 +4,41 @@
 
 ### Breaking
 
-- **Task configs reject unknown fields.** A flow with a misspelled or
-  unsupported task setting fails to load and names the field.
+- **Flow files, task configs and the app-level `retry` reject unknown
+  fields.** A flow with a misspelled or unsupported setting under `flow:` or
+  in a task fails to load and names the field, and an unknown field under
+  `retry` in the app config stops startup.
   `POST /api/workspace/validate` reports the same error.
 
 ### Features
 
 - `/api/changes`: propose flow and resource changes, then review the diff and
   validation issues and approve or reject them in the web UI, linked from the
-  Flows page. Enable with `web.authoring.enabled`. Approving calls the
+  Flows and Resources pages and from each flow and resource. Enable with
+  `web.authoring.enabled`. Approving calls the
   target's `publish_flow`, `system/publish_workspace` by default.
 - `web.authoring.targets`: areas of the workspace, such as `flows/platform/`
   and `flows/user/`, with their own `approver_groups` and `publish_flow`.
-  Paths outside every target cannot be changed through the API.
+  Targets match whole folders, and a path covered by several targets belongs
+  to the most specific one. Paths outside every target cannot be changed
+  through the API.
 - `inproc_endpoint` and `inproc_request` tasks: a flow calls another flow in
   the same process and gets its result, without HTTP or credentials. By
   default only flows in the same top-level folder may call; `callers` widens
-  it.
+  it, matching whole folders. A flow cannot call itself.
 - `nats_kv_store` `put` without `key` writes every entry of
   `event.data.entries` under `key_prefix`, skipping unchanged values.
-  `prune: true` deletes the keys under the prefix that are not listed.
+  `prune: true` deletes the keys under the prefix that are not listed, and
+  requires a `key_prefix` ending in `.` or `/`.
 - New and Edit in the web UI open an editor for flows and resources that
   validates the file and proposes it as a change.
 - `POST /api/workspace/validate` checks flow and resource files without
   running them, including unknown fields.
-- `git_push` task commits files to a branch and pushes them over HTTPS.
-- `oci_push` task pushes files as an artifact `oci_sync` reads.
+- `git_push` task commits files to a branch and pushes them over HTTPS. Each
+  file needs `content`; `null` deletes it. With credentials the repository
+  URL must be HTTPS.
+- `oci_push` task pushes files as an artifact `oci_sync` reads. Tags and file
+  paths are checked before anything is pushed.
 - `web.api_credentials_path`: machine keys for the web API. They can propose
   changes but not approve them.
 - Example operator agent and tools in `examples/authoring/`.
@@ -40,12 +49,17 @@
   `return_to`.
 - Without `POD_IP`, a pod advertises the address of its default route
   interface to other pods.
+- `git_sync` with `credentials_path` requires an HTTPS repository URL, or
+  HTTP to a loopback host.
+
 ### Fixed
 
 - Concurrent requests with an expired session refresh it once.
 - Examples with settings flowgen ignored or scripts that did not compile:
-  JetStream `max_messages` is `max_messages_per_batch`, `generate` takes
-  `payload`, and scripts drop an event with `()`.
+  JetStream `max_messages` is `max_messages_per_batch` and `max_ack_wait` is
+  `ack_timeout`, `generate` takes `payload`, `retry` has no `max_delay`,
+  `http_endpoint` has no `max_concurrent_requests`, and scripts drop an event
+  with `()`.
 
 ## 0.144.0
 

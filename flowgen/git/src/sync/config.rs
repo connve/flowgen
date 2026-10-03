@@ -18,11 +18,11 @@ fn default_branch() -> String {
 ///
 /// ```yaml
 /// - git_sync:
-///     name: sync_flows
-///     repository_url: "https://github.com/org/configs.git"
+///     name: sync_configs
+///     repository_url: "https://git.example.com/team/configs.git"
 ///     branch: main
-///     path: "flows/"
-///     credentials_path: /etc/flowgen/credentials/git.json
+///     path: "configs/"
+///     credentials_path: /etc/git/credentials.json
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

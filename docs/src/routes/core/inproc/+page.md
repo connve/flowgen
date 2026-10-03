@@ -20,9 +20,8 @@ A flow with an `inproc_endpoint` runs on every pod, like a flow with an `http_en
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `ack_timeout` | duration | | How long a call waits for the flow to finish. Unbounded when unset. |
-| `callers` | list | the flow's top-level folder | Identity prefixes of the flows allowed to call, e.g. `["user/", "platform/"]`. |
-| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+| `ack_timeout` | duration | | How long a call may take, from handing its event to the flow until the flow finishes. Unbounded when unset. |
+| `callers` | list | the flow's top-level folder | Flows allowed to call, e.g. `["user/", "platform/"]`. Each entry admits the flow of that identity and every flow in it as a folder; `""` admits every flow. |
 
 The caller's event data becomes this task's event data, and its `meta` is merged in, so `event.meta.auth` carries the caller's user.
 
@@ -48,7 +47,7 @@ By default a flow in a folder accepts calls only from flows in the same top-leve
 | `name` | string | required | Task name. |
 | `flow` | string | required | Identity of the flow to call. Supports templating. |
 | `depends_on` | list | | Upstream task names. |
-| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). A flow that ran and failed, exceeded its `ack_timeout`, or does not accept this caller is not called again. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). Only a call that never reached the flow, because it is not running or is restarting, is retried; a flow that received the call is not called again. |
 
 ### Output
 

@@ -175,7 +175,9 @@ http_server:
 #     # Must exactly match a redirect URI registered with the IdP, and
 #     # include the `path` prefix above (here, "/flowgen").
 #     redirect_uri: "https://example.com/flowgen/auth/callback"
-#     # extra_scopes: ["groups"]
+#     # Requested next to openid, profile and email. Most providers issue a
+#     # refresh token only with offline_access.
+#     # extra_scopes: ["offline_access", "groups"]
 #     # The IdP's logout URL, with its own return URL already embedded and
 #     # registered with the IdP. flowgen appends `id_token_hint`. Unset signs
 #     # out of flowgen only, leaving the IdP session intact.
@@ -200,8 +202,8 @@ http_server:
 #   #   targets:
 #   #     - name: platform
 #   #       paths: ["flows/platform/", "resources/platform/"]
-#   #       # Identity provider groups allowed to approve; empty allows everyone
-#   #       # signed in. Read from the `groups_claim` claim (default `groups`).
+#   #       # Identity provider groups allowed to approve, matched against the
+#   #       # claim named by groups_claim; empty allows everyone signed in.
 #   #       approver_groups: ["platform-engineers"]
 #   #     - name: user
 #   #       paths: ["flows/user/", "resources/user/"]
@@ -209,6 +211,8 @@ http_server:
 #   #       # Flow, starting with an inproc_endpoint, that publishes the
 #   #       # target's approved changes (default system/publish_workspace).
 #   #       publish_flow: system/publish_workspace
+#   #   # Claim of the signed-in user that lists their groups (default groups).
+#   #   # groups_claim: groups
 #   #   # How long publishing may take before the change is recorded as failed.
 #   #   publish_timeout: 5m
 

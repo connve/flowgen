@@ -10,10 +10,9 @@
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
-	import type { FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
+	import type { ChangeSummary, FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
 	import { authoringEnabled, pendingChanges, touchesFlows } from '$lib/changes';
-	import type { ChangeSummary } from '$lib/api';
 
 	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;

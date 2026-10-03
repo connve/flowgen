@@ -474,3 +474,16 @@ async fn git_sync_rejects_ssh_url_before_touching_the_network() {
         events.len(),
     );
 }
+
+#[tokio::test]
+async fn git_sync_forwards_a_failure_downstream_once_retries_run_out() {
+    let missing = tempfile::tempdir().expect("tempdir");
+    let clone_dir = tempfile::tempdir().expect("clone tempdir");
+    let url = format!("file://{}/missing", missing.path().display());
+    let config = Arc::new(base_config(&url, clone_dir.path().to_path_buf()));
+
+    let events = run_once(config, test_task_context()).await;
+
+    assert_eq!(events.len(), 1);
+    assert!(events[0].is_error());
+}

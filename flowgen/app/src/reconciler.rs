@@ -65,6 +65,35 @@ pub enum Error {
     },
 }
 
+/// How long stopping a flow may take before it is abandoned.
+pub const FLOW_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Shared servers that flows register their endpoints with.
+#[derive(Clone, Default)]
+pub struct FlowServers {
+    pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
+    pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
+}
+
+impl FlowServers {
+    /// Removes `flow` from every server. Each entry holds a sender into the
+    /// flow, so its tasks cannot drain and stop while it is registered.
+    pub fn deregister_flow(&self, flow: &str) {
+        if let Some(http_server) = &self.http_server {
+            http_server.deregister_flow(flow);
+        }
+        self.inproc.deregister_flow(flow);
+        if let Some(mcp_server) = &self.mcp_server {
+            flowgen_mcp::server::deregister_flow_all(mcp_server, flow);
+        }
+        if let Some(ai_gateway_server) = &self.ai_gateway_server {
+            ai_gateway_server.deregister_flow(flow);
+        }
+    }
+}
+
 /// All dependencies the reconciler needs to build and start replacement flows.
 pub struct ReconcilerContext {
     /// Flow cache. Watched for flow YAML changes and used for stale-entry
@@ -81,14 +110,11 @@ pub struct ReconcilerContext {
     pub runtime_cache: Arc<dyn Cache>,
     pub app_config: Arc<crate::config::AppConfig>,
     pub resource_loader: Option<flowgen_core::resource::ResourceLoader>,
-    pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
-    pub mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
-    pub ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Shared servers that flows register their endpoints with.
+    pub servers: FlowServers,
     pub filesystem_flow_paths: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
     pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
-    /// Flows callable in-process, shared by every flow.
-    pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
     /// This pod's holder identity, shared across every flow's Executor.
     pub holder_identity: String,
     /// Shared peer registry for flow distribution via consistent hashing.
@@ -446,29 +472,15 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     };
 
     old.cancellation_token.cancel();
+    ctx.servers.deregister_flow(flow_name);
 
-    // Deregister before awaiting: each server entry holds a sender into the
-    // flow, so the flow's tasks cannot drain and stop while it is registered.
-    if let Some(http_server) = &ctx.http_server {
-        http_server.deregister_flow(flow_name);
-    }
-    ctx.inproc.deregister_flow(flow_name);
-    if let Some(mcp_server) = &ctx.mcp_server {
-        // Bulk-clears tools, resources, and resource templates in one pass.
-        flowgen_mcp::server::deregister_flow_all(mcp_server, flow_name);
-    }
-    if let Some(ai_gateway_server) = &ctx.ai_gateway_server {
-        ai_gateway_server.deregister_flow(flow_name);
-    }
-
-    // Await with a timeout so a stuck flow does not block the reconciler indefinitely.
-    let timeout = Duration::from_secs(30);
-    match tokio::time::timeout(timeout, old.join_handle).await {
+    match tokio::time::timeout(FLOW_STOP_TIMEOUT, old.join_handle).await {
         Ok(Ok(())) => info!(flow = %flow_name, "Old flow stopped"),
         Ok(Err(e)) => warn!(flow = %flow_name, error = %e, "Old flow task panicked or was aborted"),
         Err(_) => warn!(
             flow = %flow_name,
-            "Flow did not stop within 30 seconds, proceeding with deregistration"
+            timeout = ?FLOW_STOP_TIMEOUT,
+            "Flow did not stop in time, proceeding with deregistration"
         ),
     }
 
@@ -550,13 +562,10 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         runtime_cache: Arc::clone(&shared),
         app_config: Arc::new(app_config),
         resource_loader: None,
-        http_server: None,
-        mcp_server: None,
-        ai_gateway_server: None,
+        servers: FlowServers::default(),
         filesystem_flow_paths: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
         client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
-        inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
         peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
             shared,
             holder_identity.clone(),
@@ -576,17 +585,17 @@ fn build_flow(
         .cache(Arc::clone(&ctx.runtime_cache))
         .system_cache(Arc::clone(&ctx.system_cache))
         .client_registry(Arc::clone(&ctx.client_registry))
-        .inproc(Arc::clone(&ctx.inproc))
+        .inproc(Arc::clone(&ctx.servers.inproc))
         .holder_identity(ctx.holder_identity.clone())
         .peer_registry(Arc::clone(&ctx.peer_registry));
 
-    if let Some(server) = &ctx.http_server {
+    if let Some(server) = &ctx.servers.http_server {
         builder = builder.http_server(Arc::clone(server));
     }
-    if let Some(server) = &ctx.mcp_server {
+    if let Some(server) = &ctx.servers.mcp_server {
         builder = builder.mcp_server(Arc::clone(server));
     }
-    if let Some(server) = &ctx.ai_gateway_server {
+    if let Some(server) = &ctx.servers.ai_gateway_server {
         builder = builder.ai_gateway_server(Arc::clone(server));
     }
     if let Some(retry) = ctx.app_config.retry.as_ref() {
@@ -659,13 +668,10 @@ mod tests {
             runtime_cache: Arc::clone(&shared),
             app_config: Arc::new(app_config),
             resource_loader: None,
-            http_server: None,
-            mcp_server: None,
-            ai_gateway_server: None,
+            servers: FlowServers::default(),
             filesystem_flow_paths: Arc::new(HashSet::new()),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
-            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
                 shared,
                 holder_identity.clone(),
@@ -794,13 +800,10 @@ flow:
             runtime_cache: Arc::clone(&shared),
             app_config: Arc::new(app_config),
             resource_loader: None,
-            http_server: None,
-            mcp_server: None,
-            ai_gateway_server: None,
+            servers: FlowServers::default(),
             filesystem_flow_paths: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
-            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
                 shared,
                 holder_identity.clone(),
@@ -1088,7 +1091,7 @@ flow:
         let server = Arc::new(flowgen_http::server::EndpointServer::new(
             "/api".to_string(),
         ));
-        ctx.http_server = Some(Arc::clone(&server));
+        ctx.servers.http_server = Some(Arc::clone(&server));
 
         reconcile_put("flows.hook", webhook_flow_yaml("info"), &ctx).await;
         let reload_started = std::time::Instant::now();

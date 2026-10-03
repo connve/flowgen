@@ -396,6 +396,8 @@ struct PendingLogin {
 
 #[derive(serde::Deserialize)]
 struct AuthLoginQuery {
+    /// Web UI page to come back to after signing in; dropped unless it is a
+    /// page under the UI's path outside the auth routes.
     return_to: Option<String>,
 }
 
@@ -727,14 +729,9 @@ async fn auth_middleware(
                 StatusCode::FORBIDDEN.into_response()
             }
             Some(key) => {
-                let caller = Caller::Key(key.name.clone());
                 request
                     .extensions_mut()
-                    .insert(flowgen_core::auth::UserContext {
-                        user_id: caller.label(),
-                        claims: Default::default(),
-                    });
-                request.extensions_mut().insert(caller);
+                    .insert(Caller::Key(key.name.clone()));
                 next.run(request).await
             }
             None => StatusCode::UNAUTHORIZED.into_response(),
@@ -2008,6 +2005,218 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.status(), 409);
+    }
+
+    fn authoring_target(name: &str, paths: &[&str]) -> crate::config::AuthoringTarget {
+        crate::config::AuthoringTarget {
+            name: name.to_string(),
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+            publish_flow: "system/publish_workspace".to_string(),
+            approver_groups: Vec::new(),
+        }
+    }
+
+    fn authoring_options(
+        targets: Vec<crate::config::AuthoringTarget>,
+    ) -> crate::config::AuthoringOptions {
+        crate::config::AuthoringOptions {
+            enabled: true,
+            targets,
+            groups_claim: "groups".to_string(),
+            publish_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    async fn propose(client: &reqwest::Client, base: &str, title: &str, paths: &[&str]) -> u16 {
+        client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: title.to_string(),
+                description: None,
+                files: paths
+                    .iter()
+                    .map(|path| api::WorkspaceFile {
+                        path: path.to_string(),
+                        content: Some("event".to_string()),
+                    })
+                    .collect(),
+            })
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    #[tokio::test]
+    async fn proposals_with_unsafe_paths_duplicate_files_or_no_title_are_refused() {
+        let mut state = test_state();
+        state.authoring = Some(authoring_options(vec![authoring_target(
+            "workspace",
+            &["flows/", "resources/"],
+        )]));
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+
+        assert_eq!(
+            propose(&client, &base, "Add", &["resources/a.rhai"]).await,
+            201
+        );
+        for path in [
+            "resources/a b.rhai",
+            "resources/a:b.rhai",
+            "resources/é.rhai",
+        ] {
+            assert_eq!(propose(&client, &base, "Add", &[path]).await, 400, "{path}");
+        }
+        assert_eq!(
+            propose(
+                &client,
+                &base,
+                "Add",
+                &["resources/a.rhai", "resources/a.rhai"]
+            )
+            .await,
+            400
+        );
+        assert_eq!(
+            propose(&client, &base, " \n", &["resources/a.rhai"]).await,
+            400
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_whose_files_moved_to_another_target_cannot_be_decided() {
+        let mut state = test_state();
+        state.authoring = Some(authoring_options(vec![
+            authoring_target("workspace", &["flows/", "resources/"]),
+            authoring_target("platform", &["flows/platform/"]),
+        ]));
+        let cache = Arc::clone(&state.conversation_cache);
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add a".to_string(),
+                description: None,
+                files: vec![api::WorkspaceFile {
+                    path: "flows/platform/a.yaml".to_string(),
+                    content: Some("flow:\n  tasks:\n    - log:\n        name: a\n".to_string()),
+                }],
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(proposed.target, "platform");
+        assert!(proposed.issues.is_empty(), "{:?}", proposed.issues);
+        let key = format!("authoring.changes.{}", proposed.id);
+        let mut stored: api::Change =
+            serde_json::from_slice(&cache.get(&key).await.unwrap().unwrap()).unwrap();
+        stored.target = "workspace".to_string();
+        cache
+            .put(&key, serde_json::to_vec(&stored).unwrap().into(), None)
+            .await
+            .unwrap();
+
+        for action in ["approve", "reject"] {
+            let decided = client
+                .post(format!(
+                    "{base}/flowgen/api/changes/{}/{action}",
+                    proposed.id
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(decided.status(), 409, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_change_rewritten_while_publishing_keeps_the_newer_record() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
+        let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
+        inproc.register(
+            "system/publish_workspace".to_string(),
+            flowgen_core::task::inproc::registry::Registration {
+                tx,
+                task_name: "on_publish".to_string(),
+                task_id: 0,
+                task_type: "inproc_endpoint",
+                leaf_count: 1,
+                ack_timeout: None,
+                callers: vec!["system/".to_string()],
+            },
+        );
+        let mut state = test_state();
+        state.authoring = Some(authoring_options(vec![authoring_target(
+            "workspace",
+            &["flows/", "resources/"],
+        )]));
+        state.inproc = inproc;
+        let cache = Arc::clone(&state.conversation_cache);
+        tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let id = event.data_as_json().unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let key = format!("authoring.changes.{id}");
+            let mut stored: api::Change =
+                serde_json::from_slice(&cache.get(&key).await.unwrap().unwrap()).unwrap();
+            stored.title = "Newer".to_string();
+            cache
+                .put(&key, serde_json::to_vec(&stored).unwrap().into(), None)
+                .await
+                .unwrap();
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(None);
+        });
+        let base = serve(router("/flowgen", state)).await;
+        let client = reqwest::Client::new();
+        let proposed: api::Change = client
+            .post(format!("{base}/flowgen/api/changes"))
+            .json(&api::ChangeProposal {
+                title: "Add script".to_string(),
+                description: None,
+                files: vec![api::WorkspaceFile {
+                    path: "resources/s.rhai".to_string(),
+                    content: Some("event".to_string()),
+                }],
+            })
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let approved = client
+            .post(format!(
+                "{base}/flowgen/api/changes/{}/approve",
+                proposed.id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), 200);
+        let stored: api::Change = client
+            .get(format!("{base}/flowgen/api/changes/{}", proposed.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(stored.title, "Newer");
+        assert_eq!(stored.status, api::ChangeStatus::Publishing);
     }
 
     #[tokio::test]

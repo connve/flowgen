@@ -8,6 +8,10 @@
 //! event per file layer, in order, with `completion_tx` attached to
 //! the final event so downstream buffers can detect end-of-batch.
 //!
+//! Also round-trips an `oci_push` release: the pushed artifact (empty
+//! config, workspace artifact type, one tar+gzip layer) is read back by
+//! `oci_sync` under every tag with the digest `oci_push` reported.
+//!
 //! Requires a running Docker daemon. Marked `#[ignore]` so a
 //! default `cargo test` skips it on developer machines without
 //! Docker; CI runs the ignored set explicitly.
@@ -1114,7 +1118,7 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
         repository: format!("{host}/flowgen/workspace"),
         credentials_path: None,
     };
-    let files = [
+    let files = vec![
         ArtifactFile {
             path: "flows/a.yaml".to_string(),
             content: b"name: a\n".to_vec(),
@@ -1126,10 +1130,31 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     ];
 
     let pushed = push
-        .push(&files, &["abc123".to_string(), "latest".to_string()])
+        .push(files, &["abc123".to_string(), "latest".to_string()])
         .await
         .expect("push workspace");
     assert!(pushed.digest.starts_with("sha256:"));
+
+    let reference: Reference = format!("{host}/flowgen/workspace:latest")
+        .parse()
+        .expect("reference");
+    let client = Client::new(ClientConfig {
+        protocol: ClientProtocol::Http,
+        ..Default::default()
+    });
+    let (manifest, digest) = client
+        .pull_image_manifest(&reference, &RegistryAuth::Anonymous)
+        .await
+        .expect("pull pushed manifest");
+    assert_eq!(digest, pushed.digest);
+    assert_eq!(
+        manifest.artifact_type.as_deref(),
+        Some(flowgen_oci::push::client::ARTIFACT_TYPE)
+    );
+    assert_eq!(
+        manifest.config.media_type,
+        flowgen_oci::push::client::EMPTY_MEDIA_TYPE
+    );
 
     for tag in ["abc123", "latest"] {
         let events = run_sync_and_collect(Arc::new(OciSyncConfig {
@@ -1142,6 +1167,7 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
             .iter()
             .map(|e| {
                 let data = e.data_as_json().unwrap();
+                assert_eq!(data["artifact_digest"], pushed.digest.as_str(), "tag {tag}");
                 (
                     data["path"].as_str().unwrap().to_string(),
                     data["content"].as_str().unwrap().to_string(),

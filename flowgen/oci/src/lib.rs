@@ -1,12 +1,14 @@
-//! OCI registry processing capabilities for flowgen workers.
+//! OCI registry tasks.
 //!
-//! Provides the `oci_sync` task: a pull-based loader for flow artifacts
-//! published to OCI registries (GHCR, ECR, GAR, Artifactory, Harbor, etc.).
-//! Each tick probes the artifact's manifest digest; on a change, the layers
-//! are pulled and emitted as one event per file, mirroring the shape of
-//! `git_sync` so bootstrap pipelines can swap one for the other.
+//! `oci_sync` pulls an artifact from an OCI registry (GHCR, ECR, GAR,
+//! Artifactory, Harbor, etc.) when its manifest digest changes and emits one
+//! event per file, in the same shape as `git_sync`.
+//!
+//! `oci_push` packs the files of an event into a single-layer tar+gzip
+//! artifact and pushes it to a registry under one or more tags, in the
+//! layout `oci_sync` reads back.
 
-/// OCI push — release files to a registry as an artifact.
+/// OCI push: push files to a registry as an artifact.
 pub mod push {
     /// Artifact packing and the registry push.
     pub mod client;
@@ -15,5 +17,12 @@ pub mod push {
     /// OCI push processor implementation.
     pub mod processor;
 }
-/// OCI registry artifact sync processor.
-pub mod sync;
+/// Registry credentials and client setup shared by both tasks.
+pub mod registry;
+/// OCI sync: pull an artifact from a registry and emit its files.
+pub mod sync {
+    /// Configuration for the OCI sync task.
+    pub mod config;
+    /// OCI sync processor implementation.
+    pub mod processor;
+}

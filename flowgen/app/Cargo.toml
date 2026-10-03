@@ -48,7 +48,6 @@ rustls = { workspace = true }
 atty = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
-serde_ignored = { workspace = true }
 rhai = { workspace = true }
 similar = { workspace = true }
 subtle = { workspace = true }

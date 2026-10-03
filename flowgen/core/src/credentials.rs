@@ -374,7 +374,9 @@ pub async fn load_web_credentials(path: &Path) -> Result<WebCredentials, Error> 
 /// { "api_keys": [{ "name": "operator-agent", "key": "a long random string" }] }
 /// ```
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiCredentials {
+    /// Keys accepted by the web API.
     #[serde(default)]
     pub api_keys: Vec<ApiKey>,
 }
@@ -382,7 +384,9 @@ pub struct ApiCredentials {
 /// A named machine key; the name identifies the caller in logs and audit.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ApiKey {
+    /// Caller name recorded in logs and audit entries.
     pub name: String,
+    /// Secret the caller presents.
     pub key: SecretString,
 }
 
@@ -396,7 +400,8 @@ pub async fn load_http_credentials(path: &Path) -> Result<HttpCredentials, Error
     load_credentials(path).await
 }
 
-async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Error> {
+/// Loads and parses any credentials type from a JSON file.
+pub async fn load_credentials<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Error> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|source| Error::ReadFile {
@@ -708,6 +713,15 @@ mod tests {
         };
         let result = creds.authorization_header_async().await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_credentials_reject_unknown_fields() {
+        let typo = serde_json::from_str::<ApiCredentials>(r#"{"api_key": []}"#);
+        assert!(typo.is_err());
+        let keys: ApiCredentials =
+            serde_json::from_str(r#"{"api_keys": [{"name": "a", "key": "k"}]}"#).unwrap();
+        assert_eq!(keys.api_keys[0].name, "a");
     }
 
     #[test]

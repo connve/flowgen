@@ -5,11 +5,8 @@
 	import Icon from '@iconify/svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { onMount, untrack } from 'svelte';
-	import { apiUrl, type AuthoringTarget } from '$lib/api';
+	import { apiUrl, type AuthoringTarget, type ValidationIssue as Issue } from '$lib/api';
 	import { authoringTargets, deployedContent, targetOf } from '$lib/changes';
-	import type { components } from '$lib/api/generated';
-
-	type Issue = components['schemas']['ValidationIssue'];
 
 	const NEW_FLOW = `flow:
   labels:
@@ -163,7 +160,7 @@
 		<StateMessage tone="oops" title="Failed to load the file" message={loadError} />
 	{:else}
 		<div class="grid gap-3 md:grid-cols-2">
-			<label class="form-control">
+			<div class="form-control">
 				<span class="label-text mb-1 flex items-center gap-2 text-xs opacity-70">
 					Path
 					{#if target}
@@ -176,6 +173,7 @@
 					{#if isNew && targets.length > 1}
 						<select
 							class="select select-sm border border-base-300"
+							aria-label="Authoring target"
 							value={target?.name ?? ''}
 							onchange={(e) => {
 								const chosen = targets.find((t) => t.name === e.currentTarget.value);
@@ -189,11 +187,12 @@
 					{/if}
 					<input
 						class="input input-sm flex-1 border border-base-300 font-mono"
+						aria-label="Path"
 						bind:value={path}
 						placeholder="flows/orders/sync.yaml"
 					/>
 				</div>
-			</label>
+			</div>
 			<label class="form-control">
 				<span class="label-text mb-1 text-xs opacity-70">Title</span>
 				<input
@@ -210,6 +209,7 @@
 
 		<textarea
 			class="textarea min-h-[24rem] flex-1 border border-base-300 font-mono text-xs leading-5"
+			aria-label="File content"
 			spellcheck="false"
 			bind:value={content}
 			oninput={() => (issues = null)}

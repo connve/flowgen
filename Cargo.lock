@@ -2119,7 +2119,6 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
- "serde_ignored",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
@@ -2305,6 +2304,7 @@ dependencies = [
  "gix",
  "humantime-serde",
  "reqwest 0.13.2",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",
@@ -2312,6 +2312,7 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tracing",
+ "url",
  "walkdir",
 ]
 
@@ -2528,10 +2529,12 @@ dependencies = [
  "flate2",
  "flowgen_core",
  "futures-util",
+ "http",
  "humantime-serde",
  "oci-client",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "testcontainers",
@@ -7743,16 +7746,6 @@ dependencies = [
  "indexmap 2.13.0",
  "itoa",
  "ryu",
- "serde_core",
-]
-
-[[package]]
-name = "serde_ignored"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
-dependencies = [
- "serde",
  "serde_core",
 ]
 

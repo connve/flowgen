@@ -11,12 +11,12 @@
 	import {
 		apiUrl,
 		encodePath,
+		type ChangeSummary,
 		type ResourceSummary as Resource,
 		type ResourceContent
 	} from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
 	import { authoringEnabled, pendingChanges, touchesResources } from '$lib/changes';
-	import type { ChangeSummary } from '$lib/api';
 
 	let resources = $state<Resource[]>([]);
 	let authoring = $state(false);

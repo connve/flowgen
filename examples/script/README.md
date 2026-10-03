@@ -30,7 +30,7 @@ Cache keys are automatically prefixed with the flow name to prevent collisions b
 // Actual key will be: flow_name.processed.{event.data.id}
 let cache_key = "processed." + event.data.id;
 if ctx.cache.get(cache_key) != () {
-    return null;  // Skip duplicate
+    return ();  // Skip duplicate
 }
 
 // Mark as processed (24 hour TTL)
@@ -78,7 +78,7 @@ Loading scripts from external files for reusability and version control.
 #### `cache_deduplication.yaml`
 **Use Case:** Prevent reprocessing duplicate events
 - Uses `ctx.cache` to track processed event IDs
-- Returns `null` to skip duplicates
+- Returns `()` to skip duplicates
 - Configurable TTL for cache expiration
 
 #### `incremental_processing.yaml`
@@ -134,7 +134,7 @@ Prevent duplicate processing using cache:
 let idempotency_key = "processed:" + event.data.id;
 
 if ctx.cache.get(idempotency_key) != () {
-    return null;  // Already processed
+    return ();  // Already processed
 }
 
 // Process event...
@@ -153,7 +153,7 @@ let count = ctx.cache.get(rate_key);
 if count == () {
     ctx.cache.put(rate_key, "1", 60);  // 60 second window
 } else if parse_int(count) >= 10 {
-    return null;  // Rate limit exceeded
+    return ();  // Rate limit exceeded
 } else {
     ctx.cache.put(rate_key, to_string(parse_int(count) + 1), 60);
 }
@@ -166,7 +166,7 @@ Track processed files by hash to enable incremental updates:
 let file_key = "file:" + event.data.name + ":" + event.data.md5Hash;
 
 if ctx.cache.get(file_key) != () {
-    return null;  // File already processed
+    return ();  // File already processed
 }
 
 // Process file...
@@ -217,7 +217,7 @@ Choose appropriate TTL values based on your use case:
 2. **Use descriptive cache keys** with namespaces (e.g., `"processed:file:123"`)
 3. **Include version in cache keys** when data format changes (e.g., `"v2:user:123"`)
 4. **Add metadata for observability** (timestamps, processing stages, etc.)
-5. **Return `null` to skip events** instead of throwing errors
+5. **Return `()` to skip events** instead of throwing errors
 6. **Use external files for complex scripts** (easier testing and version control)
 7. **Combine file hash with name** for incremental processing to detect changes
 

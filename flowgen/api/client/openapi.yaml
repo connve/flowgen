@@ -441,6 +441,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkspaceValidation"
+        "500":
+          description: Validating the files stopped unexpectedly.
 
   /api/changes:
     get:
@@ -487,12 +489,17 @@ paths:
                 $ref: "#/components/schemas/Change"
         "400":
           description: |
-            A file path is outside `flows/` and `resources/`, outside every
-            `web.authoring.targets` entry, or the files span several targets.
+            The title is blank, the change has no files, a path is listed
+            twice, a path is outside `flows/` and `resources/` or has a
+            segment with characters other than letters, digits, `.`, `_` and
+            `-`, a path is outside every `web.authoring.targets` entry, or the
+            files span several targets.
         "404":
           description: "`web.authoring` is not configured."
+        "500":
+          description: Validating or diffing the files stopped unexpectedly.
         "503":
-          description: The change store is unavailable.
+          description: The change store is unavailable, or the deployed content of a file cannot be read.
 
   /api/changes/{id}:
     parameters:
@@ -514,6 +521,8 @@ paths:
                 $ref: "#/components/schemas/Change"
         "404":
           description: No change with that id, or `web.authoring` is not configured.
+        "500":
+          description: Diffing the files stopped unexpectedly.
         "503":
           description: The change store is unavailable.
 
@@ -528,12 +537,19 @@ paths:
       operationId: approveChange
       summary: Approve a pending change and publish it, or publish a failed one again.
       description: |
-        Requires a signed-in user's session, and membership of one of
-        `web.authoring.approver_groups` when set; machine keys are refused.
-        Calls the flow `web.authoring.publish_flow` with
-        `{id, title, author, files}` and records its result. A `failed`
-        change, or one left `publishing` past `web.authoring.publish_timeout`,
-        can be approved again.
+        With `web.auth` set, requires a signed-in user's session; machine
+        keys are refused. When the change's target sets
+        `web.authoring.targets[].approver_groups`, the user must be in one of
+        them. The change's files must still belong to the target it was
+        proposed for under the current `web.authoring.targets`.
+
+        Calls the target's `web.authoring.targets[].publish_flow` with
+        `{id, target, title, author: {name, email}, files: [{path, content, previous}]}`
+        and records its result. `author` comes from the approver's `name` and
+        `email` claims, else their user id; `content` null deletes the file
+        and `previous` null marks a new one. A `failed` change, or one left
+        `publishing` past `web.authoring.publish_timeout`, can be approved
+        again.
       tags: [workspace]
       responses:
         "200":
@@ -543,11 +559,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/Change"
         "403":
-          description: The request does not carry a user session.
+          description: |
+            The request does not carry a user session, or the user is in none
+            of the target's `approver_groups`.
         "404":
           description: No change with that id, or `web.authoring` is not configured.
         "409":
-          description: The change cannot be published in its status, or has invalid files.
+          description: |
+            The change cannot be published in its status (including
+            `publishing` before `web.authoring.publish_timeout` passed), has
+            invalid files, was decided by another request, or its files no
+            longer belong to the target it was proposed for.
+        "500":
+          description: Publishing stopped unexpectedly, or the change could not be encoded or diffed.
         "503":
           description: The change store is unavailable.
 
@@ -561,6 +585,12 @@ paths:
     post:
       operationId: rejectChange
       summary: Reject a pending or failed change.
+      description: |
+        Requires an approver, as approving does: with `web.auth` set, a
+        signed-in user's session (machine keys are refused) and membership of
+        one of the target's `web.authoring.targets[].approver_groups` when
+        set. The change's files must still belong to the target it was
+        proposed for.
       tags: [workspace]
       responses:
         "200":
@@ -570,11 +600,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/Change"
         "403":
-          description: The request does not carry a user session.
+          description: |
+            The request does not carry a user session, or the user is in none
+            of the target's `approver_groups`.
         "404":
           description: No change with that id, or `web.authoring` is not configured.
         "409":
-          description: The change is not pending or failed.
+          description: |
+            The change is not pending or failed, was decided by another
+            request, or its files no longer belong to the target it was
+            proposed for.
+        "500":
+          description: The change could not be encoded or diffed.
         "503":
           description: The change store is unavailable.
 
@@ -586,6 +623,15 @@ paths:
         Redirects to the configured OIDC identity provider. 404 when
         `web.auth` is not configured.
       tags: [auth]
+      parameters:
+        - name: return_to
+          in: query
+          description: |
+            Web UI page to return to after signing in, e.g.
+            `/flowgen/changes/abc`. Ignored unless it is a path under
+            `web.path` outside `/auth/`, without `.` or `..` segments; the
+            callback then redirects to the web UI's root.
+          schema: { type: string }
       responses:
         "302":
           description: Redirect to the identity provider.
@@ -933,7 +979,10 @@ components:
           type: string
         paths:
           type: array
-          description: Workspace path prefixes the target covers, e.g. `flows/user/`.
+          description: |
+            Workspace folders the target covers, e.g. `flows/user/`, matched
+            on whole path segments. A path covered by several targets belongs
+            to the one with the most specific folder.
           items:
             type: string
 
@@ -969,7 +1018,9 @@ components:
       properties:
         path:
           type: string
-          description: Path from the workspace root, under `flows/` or `resources/`.
+          description: |
+            Path from the workspace root, under `flows/` or `resources/`, in
+            segments of letters, digits, `.`, `_` and `-`.
         content:
           type: string
           nullable: true
@@ -1011,11 +1062,12 @@ components:
       properties:
         title:
           type: string
-          description: One line, used as the commit message.
+          description: One line, used as the commit message; may not be blank.
         description:
           type: string
         files:
           type: array
+          description: The files to change, each path at most once.
           items:
             $ref: "#/components/schemas/WorkspaceFile"
 

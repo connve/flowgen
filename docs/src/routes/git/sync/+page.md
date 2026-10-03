@@ -10,12 +10,14 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 
 ```yaml
 - git_sync:
-    name: sync_flows
-    repository_url: "{{env.GIT_FLOWS_URL}}"
+    name: sync_configs
+    repository_url: "{{env.GIT_REPOSITORY_URL}}"
     branch: main
-    path: "flows/"
-    credentials_path: /etc/flowgen/credentials/git.json
+    path: "configs/"
+    credentials_path: /etc/git/credentials.json
 ```
+
+To load flowgen's own flows and resources from a repository, see [Loading flows from Git](/docs/flowgen/git/guides/loading-flows).
 
 ### Fields
 
@@ -31,37 +33,6 @@ Each event contains `{path, content, commit}` where `path` is relative to the sc
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
-## Example: Sync flows from Git to NATS KV
-
-```yaml
-flow:
-  tasks:
-    - generate:
-        name: trigger
-        interval: "5m"
-
-    - git_sync:
-        name: pull_repo
-        repository_url: "{{env.GIT_FLOWS_URL}}"
-        path: "flows/"
-        credentials_path: /etc/flowgen/credentials/git.json
-
-    - script:
-        name: normalize_key
-        code: |
-          let key = "flows." + event.data.path.replace("/", ".");
-          event.data.key = key;
-          event
-
-    - nats_kv_store:
-        name: save_to_kv
-        operation: put
-        bucket: flowgen_system
-        key: "{{event.data.key}}"
-        credentials_path: /etc/nats/credentials.json
-        url: "{{env.NATS_URL}}"
-```
-
 ## Output
 
 Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Each file emitted produces an event with `event.data` containing:
@@ -71,12 +42,6 @@ Format: [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html). Ea
 | `path` | string | Relative file path in the repository. |
 | `content` | string | Full file content. |
 | `commit` | string | HEAD commit hash. |
-
-## Bootstrap flow
-
-[`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml) reconciles a Git directory tree into the system cache end-to-end. One repo carries both `flows/` and `resources/` under the configured `path:`; the bootstrap routes each file by its top-level directory — `flows/*` are keyed by the file path with the `flows/` prefix and file extension stripped (matching the flow's path-based identity), `resources/*` are keyed by the path with the `resources/` prefix stripped, and any file outside those two prefixes (e.g. a `README.md`) is dropped. It ticks on an interval, lists existing cache entries under both prefixes, and emits one put per file and one delete per orphaned key.
-
-The flow skips the rest of its pipeline when the repo HEAD has not moved, so the only cost on a no-change tick is a `git fetch` plus a `list_keys` round-trip. See [Resources](/docs/flowgen/concepts/resources) for how the runtime `ResourceLoader` reads back from `resources.*`.
 
 ## Change detection
 

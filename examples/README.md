@@ -6,14 +6,16 @@ This directory contains example flows demonstrating various flowgen features and
 
 - **`ai-completion/`** - `ai_completion` task (RAG, resource-loaded prompts)
 - **`ai-gateway/`** - `llm_proxy` fronting OpenAI + Anthropic clients
+- **`authoring/`** - Publish and release flows for approved changes, operator agent and its tools
 - **`cloudflare/`** - Cloudflare integrations
 - **`data/`** - Synthetic test data used by examples
 - **`gcp/`** - Google Cloud Platform integrations (BigQuery, Pub/Sub, ...)
-- **`git/`** - `git` task (repo sync)
+- **`git/`** - `git_sync` and `git_push` tasks (pull a repository, commit and push files)
+- **`inproc/`** - `inproc_endpoint` and `inproc_request` tasks (one flow calling another in-process)
 - **`mcp/`** - MCP server tasks (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
 - **`mssql/`** - Microsoft SQL Server integrations
 - **`object-store/`** - Reading/writing files (local, S3, GCS)
-- **`oci/`** - OCI registry sync
+- **`oci/`** - `oci_sync` and `oci_push` tasks (pull and push workspace artifacts)
 - **`resources/`** - Shared resource files (SQL, templates, scripts, schemas)
 - **`salesforce/`** - Salesforce (CDC replication, data activation/export, sobject CRUD)
 - **`script/`** - `script` task patterns (inline, resource, cache, fan-in join)

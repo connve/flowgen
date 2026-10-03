@@ -70,6 +70,7 @@ flow:
         code: |
           #{ entries: event.data.flows }
 
+    # An empty flow list fails and deletes nothing.
     - nats_kv_store:
         name: apply_flows
         credentials_path: /etc/nats/credentials.json
@@ -78,7 +79,6 @@ flow:
         operation: put
         key_prefix: "flows."
         prune: true
-        allow_empty: true
 
     - script:
         name: resource_entries
@@ -86,6 +86,7 @@ flow:
           #{ entries: event.data.resources }
         depends_on: [to_entries]
 
+    # A workspace may hold no resources, so an empty list prunes them all.
     - nats_kv_store:
         name: apply_resources
         credentials_path: /etc/nats/credentials.json

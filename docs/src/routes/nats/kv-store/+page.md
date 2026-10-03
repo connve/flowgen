@@ -34,7 +34,7 @@ Read, write, list, and delete keys in a NATS JetStream Key-Value bucket.
 | `bucket` | string | required | KV bucket name. |
 | `key` | string | | Key for get, put, and delete. Supports templating. |
 | `key_prefix` | string | | Key prefix for `list`, and for the keys of `put` entries. Supports templating. |
-| `prune` | bool | `false` | For a `put` of entries: delete the keys under `key_prefix` that no entry names. |
+| `prune` | bool | `false` | For a `put` of entries: delete the keys under `key_prefix` that no entry names. Requires a `key_prefix` ending in `.` or `/`. |
 | `allow_empty` | bool | `false` | With `prune`: let an empty `entries` list delete every key under `key_prefix`. Otherwise it fails and deletes nothing. |
 | `include_values` | bool | `false` | For `list`: also return each key's value under `values`. |
 | `depends_on` | list | | Upstream task names. |

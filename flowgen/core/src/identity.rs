@@ -59,6 +59,16 @@ pub fn encode_key(identity: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(identity)
 }
 
+/// Whether `path` is `folder` or lies under it, compared on whole `/`
+/// segments; an empty `folder` contains every path.
+pub fn within(path: &str, folder: &str) -> bool {
+    let folder = folder.trim_end_matches('/');
+    match path.strip_prefix(folder) {
+        Some(rest) => folder.is_empty() || rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

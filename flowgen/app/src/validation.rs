@@ -8,6 +8,7 @@ use flowgen_core::task::script::config::RhaiLimits;
 pub struct Issue {
     /// Where in the file the problem is, e.g. `flow.tasks.2.http_request.uri`.
     pub location: Option<String>,
+    /// What is wrong, e.g. ``Task 'b' depends on unknown task 'a'``.
     pub message: String,
 }
 
@@ -16,8 +17,6 @@ pub struct Issue {
 pub enum Error {
     #[error("Failed to parse flow: {0}")]
     Parse(#[source] config::ConfigError),
-    #[error("Unknown field")]
-    UnknownField,
     #[error(transparent)]
     Name(#[from] flowgen_core::validate::Error),
     #[error(transparent)]
@@ -44,42 +43,44 @@ impl From<Error> for Issue {
 /// Validates a flow file. `path` is its path within the flows directory, e.g.
 /// `orders/sync.yaml`; an empty result means the flow is valid.
 pub fn validate_flow(path: &str, content: &str) -> Vec<Issue> {
-    let mut unknown = Vec::new();
-    let raw = match FlowConfigRaw::parse_reporting_unknown(path, content, |segments| {
-        unknown.push(segments)
-    }) {
+    let raw = match FlowConfigRaw::parse(path, content) {
         Ok(raw) => raw,
-        Err(source) => return vec![Error::Parse(source).into()],
+        Err(source) => return vec![parse_issue(source)],
     };
-    let mut issues: Vec<Issue> = unknown
-        .into_iter()
-        .map(|segments| Issue {
-            location: Some(unknown_field_location(segments, &raw.flow.tasks)),
-            message: Error::UnknownField.to_string(),
-        })
-        .collect();
 
     let identity = flow_identity(path).to_string();
     let config = match FlowConfig::from_path(raw, identity, None) {
         Ok(config) => config,
-        Err(source) => {
-            issues.push(Error::from(source).into());
-            return issues;
-        }
+        Err(source) => return vec![Error::from(source).into()],
     };
 
+    let mut issues = Vec::new();
     if let Err(source) = crate::flow::resolve_parents(&config.flow.tasks) {
         issues.push(Error::from(source).into());
     }
     for (index, task) in config.flow.tasks.iter().enumerate() {
         if let Err(error) = validate_task(task) {
             issues.push(Issue {
-                location: Some(format!("flow.tasks.{index}.{}", task.name())),
+                location: Some(format!("flow.tasks.{index}.{}", task.as_str())),
                 message: error.to_string(),
             });
         }
     }
     issues
+}
+
+/// Issue for a flow that does not parse, located at the key the parser names.
+fn parse_issue(source: config::ConfigError) -> Issue {
+    let location = match &source {
+        config::ConfigError::At { key: Some(key), .. }
+        | config::ConfigError::Type { key: Some(key), .. }
+        | config::ConfigError::NotFound(key) => Some(key.replace('[', ".").replace(']', "")),
+        _ => None,
+    };
+    Issue {
+        location,
+        message: Error::Parse(source).to_string(),
+    }
 }
 
 /// Validates a resource file by its extension: Rhai scripts must compile and
@@ -97,24 +98,6 @@ pub fn validate_resource(path: &str, content: &str) -> Vec<Issue> {
         Ok(()) => Vec::new(),
         Err(error) => vec![error.into()],
     }
-}
-
-/// Dotted location of an unknown field, naming the task type after a task's
-/// index as the file does: `flow.tasks.0.generate.intreval`.
-fn unknown_field_location(mut segments: Vec<String>, tasks: &[TaskType]) -> String {
-    let task = match segments.as_slice() {
-        [flow, list, index, ..] if flow == "flow" && list == "tasks" => {
-            match index.parse::<usize>() {
-                Ok(index) => tasks.get(index),
-                Err(_) => None,
-            }
-        }
-        _ => None,
-    };
-    if let Some(task) = task {
-        segments.insert(3, task.as_str().to_string());
-    }
-    segments.join(".")
 }
 
 /// Flow identity for a path in the flows directory: the path without its extension.
@@ -144,7 +127,7 @@ fn validate_task(task: &TaskType) -> Result<(), Error> {
 /// Compiles a script with the parse limits the script task applies.
 fn compile_script(code: &str, limits: &RhaiLimits) -> Result<(), Error> {
     let mut engine = rhai::Engine::new();
-    engine.set_max_expr_depths(limits.max_expr_depth, limits.max_function_expr_depth);
+    limits.apply(&mut engine);
     match engine.compile(code) {
         Ok(_) => Ok(()),
         Err(source) => Err(Error::Script(Box::new(source))),
@@ -180,6 +163,31 @@ flow:
                 && issues[0].message.contains("flow.tasks[0]"),
             "{issues:?}"
         );
+        assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.0"));
+    }
+
+    #[test]
+    fn an_unknown_flow_setting_is_reported() {
+        let content = VALID.replace("  tasks:", "  require_leader_elction: true\n  tasks:");
+        let issues = validate_flow("a.yaml", &content);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0]
+                .message
+                .contains("unknown field `require_leader_elction`"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn an_inline_script_over_the_string_size_limit_is_reported() {
+        let content = VALID.replace(
+            "    - log:\n        name: print",
+            "    - script:\n        name: transform\n        limits:\n          max_string_size: 4\n        code: 'let x = \"abcdefgh\";'",
+        );
+        let issues = validate_flow("a.yaml", &content);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].message.starts_with("Script does not compile"));
     }
 
     #[test]
@@ -213,7 +221,7 @@ flow:
         );
         let issues = validate_flow("a.yaml", &content);
         assert_eq!(issues.len(), 1, "{issues:?}");
-        assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.0.tick"));
+        assert_eq!(issues[0].location.as_deref(), Some("flow.tasks.0.generate"));
     }
 
     #[test]

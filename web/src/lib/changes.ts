@@ -1,34 +1,63 @@
-import { apiUrl, encodePath, type AuthoringTarget, type ChangeSummary } from '$lib/api';
+import {
+	apiUrl,
+	encodePath,
+	type AuthoringTarget,
+	type ChangeSummary,
+	type ConfigInfo
+} from '$lib/api';
+
+// The running config, fetched once per page load and shared by every caller.
+let configInfo: Promise<ConfigInfo | null> | null = null;
+
+function loadConfigInfo(): Promise<ConfigInfo | null> {
+	configInfo ??= fetch(apiUrl('api/config'))
+		.then((res) => (res.ok ? (res.json() as Promise<ConfigInfo>) : null))
+		.catch(() => null);
+	return configInfo;
+}
 
 // Where changes can be proposed; empty when `web.authoring` is off.
 export async function authoringTargets(): Promise<AuthoringTarget[]> {
-	try {
-		const res = await fetch(apiUrl('api/config'));
-		if (!res.ok) return [];
-		return (await res.json()).authoringTargets ?? [];
-	} catch {
-		return [];
-	}
+	return (await loadConfigInfo())?.authoringTargets ?? [];
 }
 
 // Whether `web.authoring` is set, so New can propose changes.
 export async function authoringEnabled(): Promise<boolean> {
-	return (await authoringTargets()).length > 0;
+	return (await loadConfigInfo())?.authoring ?? false;
 }
 
-// The target a workspace path falls in, if any.
+// Whether `path` is `folder` or lies under it, compared on whole segments.
+function within(path: string, folder: string): boolean {
+	if (!path.startsWith(folder)) return false;
+	const rest = path.slice(folder.length);
+	return folder === '' || rest === '' || rest.startsWith('/');
+}
+
+// The target owning a workspace path: of the targets covering it, the one with
+// the most specific folder, as the server decides.
 export function targetOf(targets: AuthoringTarget[], path: string): AuthoringTarget | undefined {
-	return targets.find((target) => target.paths.some((prefix) => path.startsWith(prefix)));
+	let owner: AuthoringTarget | undefined;
+	let ownerLength = -1;
+	for (const target of targets) {
+		for (const prefix of target.paths) {
+			const folder = prefix.replace(/\/+$/, '');
+			if (within(path, folder) && folder.length >= ownerLength) {
+				owner = target;
+				ownerLength = folder.length;
+			}
+		}
+	}
+	return owner;
+}
+
+// Workspace path of a deployed flow; the file extension is not known, so `.yaml`.
+export function flowFilePath(identity: string): string {
+	return `flows/${identity}.yaml`;
 }
 
 // Link to the editor for a workspace path.
 export function editUrl(base: string, path: string): string {
 	return `${base}/edit?path=${encodeURIComponent(path)}`;
-}
-
-// Workspace path of a deployed flow; flows are proposed as `.yaml`.
-export function flowFilePath(identity: string): string {
-	return `flows/${identity}.yaml`;
 }
 
 // The deployed content behind a workspace path, or null when it is new.

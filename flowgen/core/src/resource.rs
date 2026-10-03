@@ -39,7 +39,11 @@ use tokio::fs;
 ///   resource: "queries/get_orders.sql"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged, deny_unknown_fields)]
+#[serde(
+    untagged,
+    deny_unknown_fields,
+    expecting = "Expected inline content as a string, or a resource as `{resource: <path>}` with no other keys"
+)]
 pub enum Source {
     /// Resource key referencing an external file.
     /// Example: "queries/get_orders.sql" resolves to "{resource_path}/queries/get_orders.sql".
@@ -447,6 +451,20 @@ query:
             Source::Resource { resource } => assert_eq!(resource, "queries/orders.sql"),
             _ => panic!("Expected Resource variant"),
         }
+    }
+
+    #[test]
+    fn a_source_with_an_extra_key_is_rejected_naming_the_accepted_shapes() {
+        let error = serde_json::from_str::<Source>(r#"{"resource": "a.sql", "extra": 1}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`{resource: <path>}`"), "{error}");
+    }
+
+    #[test]
+    fn a_plain_string_source_is_inline_content() {
+        let source = serde_json::from_str::<Source>(r#""SELECT 1""#).unwrap();
+        assert_eq!(source, Source::Inline("SELECT 1".to_string()));
     }
 
     #[tokio::test]

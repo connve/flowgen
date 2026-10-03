@@ -44,6 +44,8 @@ const TASK_TO_MODULE: Record<string, string> = {
 	script: 'core',
 	buffer: 'core',
 	generate: 'core',
+	inproc_endpoint: 'core',
+	inproc_request: 'core',
 	// ai
 	ai_completion: 'ai',
 	mcp_tool: 'ai',

@@ -35,3 +35,4 @@ export type Change = Schemas['Change'];
 export type ChangeSummary = Schemas['ChangeSummary'];
 export type ChangeStatus = Schemas['ChangeStatus'];
 export type AuthoringTarget = Schemas['AuthoringTarget'];
+export type ValidationIssue = Schemas['ValidationIssue'];

@@ -2,7 +2,7 @@
 
 use super::client::{Author, Expected, FileChange, Push};
 use super::config::Processor as ProcessorConfig;
-use crate::remote::Credentials;
+use crate::remote::{load_credentials, Credentials};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -17,9 +17,7 @@ pub enum Error {
     #[error(transparent)]
     Push(#[from] super::client::Error),
     #[error(transparent)]
-    Credentials(#[from] crate::remote::CredentialsError),
-    #[error("SSH URLs are not supported — use HTTPS with a token via credentials_path: {url}")]
-    SshUrl { url: String },
+    Credentials(#[from] flowgen_core::credentials::Error),
     #[error("Event data must hold a `files` list of {{path, content}}: {source}")]
     Input {
         #[source]
@@ -80,23 +78,31 @@ impl Error {
                     | Push::Conflict { .. }
                     | Push::NothingToPush
                     | Push::BranchMissing { .. }
-                    | Push::CommandTooLong
+                    | Push::Url(_)
+                    | Push::CommandTooLong { .. }
+                    | Push::TooManyObjects { .. }
+                    | Push::InvalidPktLine { .. }
+                    | Push::TruncatedPktLine
+                    | Push::InvalidAdvertisement { .. }
+                    | Push::InvalidAdvertisedId { .. }
                     | Push::UnpackFailed { .. }
                     | Push::RefRejected { .. }
                     | Push::ServerError { .. }
             ),
-            Error::Input { .. }
-            | Error::NotJson { .. }
-            | Error::SshUrl { .. }
-            | Error::RenderConfig { .. } => true,
+            Error::Input { .. } | Error::NotJson { .. } | Error::RenderConfig { .. } => true,
             _ => false,
         }
     }
 }
 
+/// Deserializes a required field that may be `null`.
+fn nullable<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
 /// Deserializes a field that may be absent, `null`, or a value.
 fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(Some)
+    nullable(deserializer).map(Some)
 }
 
 /// A file in `event.data.files`.
@@ -104,6 +110,8 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<S
 #[serde(deny_unknown_fields)]
 struct InputFile {
     path: String,
+    /// Required, so that only an explicit `null` deletes the file.
+    #[serde(deserialize_with = "nullable")]
     content: Option<String>,
     /// Absent: no check. `null`: the file must not exist. A string: the
     /// file must hold exactly that.
@@ -136,7 +144,6 @@ pub struct EventHandler {
     config: Arc<ProcessorConfig>,
     credentials: Option<Credentials>,
     http: reqwest::Client,
-    /// Pushes one event at a time, so events land on the branch in order.
     pushing: tokio::sync::Mutex<()>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -161,10 +168,9 @@ impl EventHandler {
                 .config
                 .render(&event_value)
                 .map_err(|source| Error::RenderConfig { source })?;
-            let data = match event.data_as_json() {
-                Ok(data) => data,
-                Err(source) => return Err(Error::NotJson { source }),
-            };
+            let data = event
+                .data_as_json()
+                .map_err(|source| Error::NotJson { source })?;
             let input: Input =
                 serde_json::from_value(data).map_err(|source| Error::Input { source })?;
 
@@ -182,19 +188,20 @@ impl EventHandler {
                 })
                 .collect();
             let push = Push {
-                repository_url: config.repository_url.clone(),
-                branch: config.branch.clone(),
-                path: config.path.clone(),
+                repository_url: config.repository_url,
+                branch: config.branch,
+                path: config.path,
                 credentials: self.credentials.clone(),
                 http: self.http.clone(),
+                timeout: config.timeout,
             };
             let author = Author {
-                name: config.author.name.clone(),
-                email: config.author.email.clone(),
+                name: config.author.name,
+                email: config.author.email,
             };
             let pushed = {
                 let _pushing = self.pushing.lock().await;
-                push.push(changes, author, config.message.clone()).await?
+                push.push(changes, author, config.message).await?
             };
 
             let mut files = Vec::with_capacity(pushed.files.len());
@@ -261,14 +268,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
-        let url = &self.config.repository_url;
-        if url.starts_with("git@") || url.starts_with("ssh://") {
-            return Err(Error::SshUrl { url: url.clone() });
-        }
-        let credentials = match &self.config.credentials_path {
-            Some(path) => Some(Credentials::load(path).await?),
-            None => None,
-        };
+        let credentials = load_credentials(self.config.credentials_path.as_deref()).await?;
         let mut http = reqwest::Client::builder();
         if let Some(timeout) = self.config.timeout {
             http = http.timeout(timeout);
@@ -430,6 +430,30 @@ mod tests {
             vec![None, Some(None), Some(Some("old".to_string()))]
         );
         assert_eq!(input.files[2].content, None);
+    }
+
+    #[test]
+    fn a_missing_content_is_rejected_and_a_null_content_deletes() {
+        let missing = serde_json::from_str::<Input>(r#"{"files": [{"path": "a"}]}"#);
+        assert!(missing.is_err());
+
+        let deleted: Input =
+            serde_json::from_str(r#"{"files": [{"path": "a", "content": null}]}"#).unwrap();
+        assert_eq!(deleted.files[0].content, None);
+    }
+
+    #[test]
+    fn malformed_server_responses_are_not_retried() {
+        use super::super::client::Error as Push;
+        let framing = Error::Push(Push::InvalidPktLine {
+            source: gix::protocol::transport::packetline::decode::Error::DataIsEmpty,
+        });
+        let advertisement = Error::Push(Push::InvalidAdvertisement {
+            line: "x".to_string(),
+        });
+        assert!(framing.is_permanent());
+        assert!(Error::Push(Push::TruncatedPktLine).is_permanent());
+        assert!(advertisement.is_permanent());
     }
 
     #[test]

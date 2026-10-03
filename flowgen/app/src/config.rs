@@ -47,6 +47,7 @@ pub use flowgen_core::identity::FlowIdentity;
 /// supplies from the path. The loader wraps this into a `FlowConfig` via
 /// [`FlowConfig::from_path`].
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowConfigRaw {
     /// Flow definition (tasks and optional labels).
     pub flow: Flow,
@@ -55,47 +56,14 @@ pub struct FlowConfigRaw {
 impl FlowConfigRaw {
     /// Parses a flow file: JSON when `key` ends in `.json`, YAML otherwise.
     pub fn parse(key: &str, content: &str) -> Result<Self, config::ConfigError> {
-        Self::parse_reporting_unknown(key, content, |_| {})
-    }
-
-    /// Parses like [`FlowConfigRaw::parse`], calling `unknown` with the path
-    /// segments of every field no task or flow setting recognises.
-    pub fn parse_reporting_unknown(
-        key: &str,
-        content: &str,
-        mut unknown: impl FnMut(Vec<String>),
-    ) -> Result<Self, config::ConfigError> {
         let format = match key.ends_with(".json") {
             true => config::FileFormat::Json,
             false => config::FileFormat::Yaml,
         };
-        let source = config::Config::builder()
+        config::Config::builder()
             .add_source(config::File::from_str(content, format))
-            .build()?;
-        serde_ignored::deserialize(source, |path| {
-            let mut segments = Vec::new();
-            path_segments(&path, &mut segments);
-            unknown(segments)
-        })
-    }
-}
-
-/// Map keys and sequence indices of `path`, root first, without the
-/// `Option` and newtype wrappers that have no name in the file.
-fn path_segments(path: &serde_ignored::Path, segments: &mut Vec<String>) {
-    match path {
-        serde_ignored::Path::Root => {}
-        serde_ignored::Path::Seq { parent, index } => {
-            path_segments(parent, segments);
-            segments.push(index.to_string());
-        }
-        serde_ignored::Path::Map { parent, key } => {
-            path_segments(parent, segments);
-            segments.push(key.clone());
-        }
-        serde_ignored::Path::Some { parent }
-        | serde_ignored::Path::NewtypeStruct { parent }
-        | serde_ignored::Path::NewtypeVariant { parent } => path_segments(parent, segments),
+            .build()?
+            .try_deserialize()
     }
 }
 
@@ -183,6 +151,7 @@ fn default_parallel_instances() -> usize {
 /// path (see [`FlowIdentity`]); `name` is a pure display override and does
 /// not affect identity.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Flow {
     /// Optional display-name override for the UI and log fields. Does not
     /// affect identity — see [`FlowConfig::display_name`]. Accepted for
@@ -408,6 +377,20 @@ impl TaskType {
     /// the preceding task in the flow list.
     pub const fn has_pipeline_io(&self) -> bool {
         !matches!(self, TaskType::mcp_prompt(_) | TaskType::mcp_resource(_))
+    }
+
+    /// Whether this task registers its flow with a shared server, so the flow
+    /// must run on every pod and is never leader elected.
+    pub const fn is_blocking(&self) -> bool {
+        matches!(
+            self,
+            TaskType::http_endpoint(_)
+                | TaskType::inproc_endpoint(_)
+                | TaskType::mcp_tool(_)
+                | TaskType::mcp_resource(_)
+                | TaskType::mcp_prompt(_)
+                | TaskType::llm_proxy(_)
+        )
     }
 
     /// Returns the `depends_on` list if configured on the task.
@@ -918,8 +901,9 @@ pub struct AuthoringOptions {
 pub struct AuthoringTarget {
     /// Name shown on its changes, e.g. `user`.
     pub name: String,
-    /// Workspace path prefixes it covers, e.g. `flows/user/`. A change's files
-    /// must all fall in one target.
+    /// Workspace folders it covers, e.g. `flows/user/`. A path covered by several
+    /// targets belongs to the one with the most specific folder, and a change's
+    /// files must all belong to one target.
     pub paths: Vec<String>,
     /// Identity of the flow, starting with an `inproc_endpoint`, that publishes
     /// an approved change. It receives `{id, target, title, author, files}`.
@@ -932,12 +916,27 @@ pub struct AuthoringTarget {
     pub approver_groups: Vec<String>,
 }
 
+impl AuthoringOptions {
+    /// The target owning the workspace `path`: of the targets covering it, the
+    /// one with the most specific path, so `flows/system/` wins over `flows/`.
+    pub fn target_of(&self, path: &str) -> Option<&AuthoringTarget> {
+        self.targets
+            .iter()
+            .filter_map(|target| target.matched_len(path).map(|len| (len, target)))
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, target)| target)
+    }
+}
+
 impl AuthoringTarget {
-    /// Whether the workspace `path` falls in this target.
-    pub fn covers(&self, path: &str) -> bool {
+    /// Length of the longest of its paths that `path` falls under.
+    fn matched_len(&self, path: &str) -> Option<usize> {
         self.paths
             .iter()
-            .any(|prefix| path.starts_with(prefix.as_str()))
+            .map(|folder| folder.trim_end_matches('/'))
+            .filter(|folder| flowgen_core::identity::within(path, folder))
+            .map(str::len)
+            .max()
     }
 }
 
@@ -1198,8 +1197,40 @@ mod tests {
         assert_eq!(authoring.targets.len(), 1);
         let workspace = &authoring.targets[0];
         assert_eq!(workspace.publish_flow, "system/publish_workspace");
-        assert!(workspace.covers("flows/user/a.yaml") && workspace.covers("resources/s.rhai"));
+        assert_eq!(
+            authoring
+                .target_of("resources/s.rhai")
+                .map(|t| t.name.as_str()),
+            Some("workspace")
+        );
         assert_eq!(authoring.groups_claim, "groups");
+    }
+
+    #[test]
+    fn a_path_belongs_to_the_most_specific_target_on_whole_folders() {
+        let target = |name: &str, path: &str| AuthoringTarget {
+            name: name.to_string(),
+            paths: vec![path.to_string()],
+            publish_flow: default_publish_flow(),
+            approver_groups: Vec::new(),
+        };
+        let authoring = AuthoringOptions {
+            enabled: true,
+            targets: vec![
+                target("all", "flows/"),
+                target("system", "flows/system"),
+                target("user", "flows/user/"),
+            ],
+            groups_claim: default_groups_claim(),
+            publish_timeout: default_publish_timeout(),
+        };
+        let owner = |path: &str| authoring.target_of(path).map(|t| t.name.as_str());
+
+        assert_eq!(owner("flows/system/a.yaml"), Some("system"));
+        assert_eq!(owner("flows/user/a.yaml"), Some("user"));
+        assert_eq!(owner("flows/username/a.yaml"), Some("all"));
+        assert_eq!(owner("flows/systems.yaml"), Some("all"));
+        assert_eq!(owner("resources/a.rhai"), None);
     }
 
     #[test]

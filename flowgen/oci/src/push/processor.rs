@@ -1,6 +1,6 @@
 //! OCI push processor: releases the files of each event as an artifact.
 
-use super::client::{ArtifactFile, Push};
+use super::client::{ArtifactFile, Push, Pushed};
 use super::config::Processor as ProcessorConfig;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
@@ -15,6 +15,12 @@ use tracing::{error, Instrument};
 pub enum Error {
     #[error(transparent)]
     Push(#[from] super::client::Error),
+    #[error("No tags configured: `tags` must list at least one tag")]
+    NoTags,
+    #[error("Event data must be a JSON object")]
+    NotObject,
+    #[error("Event data has no `files` list")]
+    MissingFiles,
     #[error("Event data must hold a `files` list of {{path, content}}: {source}")]
     Input {
         #[source]
@@ -53,11 +59,13 @@ impl Error {
     /// Whether retrying the same event cannot succeed.
     fn is_permanent(&self) -> bool {
         match self {
-            Error::Push(source) => matches!(
-                source,
-                super::client::Error::NoTags | super::client::Error::InvalidReference { .. }
-            ),
-            Error::Input { .. } | Error::NotJson { .. } | Error::RenderConfig { .. } => true,
+            Error::Push(source) => source.is_permanent(),
+            Error::NoTags
+            | Error::NotObject
+            | Error::MissingFiles
+            | Error::Input { .. }
+            | Error::NotJson { .. }
+            | Error::RenderConfig { .. } => true,
             _ => false,
         }
     }
@@ -69,14 +77,10 @@ struct InputFile {
     content: String,
 }
 
-#[derive(Deserialize)]
-struct Input {
-    files: Vec<InputFile>,
-}
-
 /// Event handler for OCI push operations.
 pub struct EventHandler {
     config: Arc<ProcessorConfig>,
+    pushing: tokio::sync::Mutex<()>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -96,38 +100,46 @@ impl EventHandler {
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
             let event_value = serde_json::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
-            let config: ProcessorConfig = self
+            let ProcessorConfig {
+                repository,
+                tags,
+                credentials_path,
+                ..
+            } = self
                 .config
                 .render(&event_value)
                 .map_err(|source| Error::RenderConfig { source })?;
-            let mut data = match event.data_as_json() {
-                Ok(data) => data,
+            let mut fields = match event.data_as_json() {
+                Ok(serde_json::Value::Object(fields)) => fields,
+                Ok(_) => return Err(Error::NotObject),
                 Err(source) => return Err(Error::NotJson { source }),
             };
-            let input: Input =
-                serde_json::from_value(data.clone()).map_err(|source| Error::Input { source })?;
-
-            let files: Vec<ArtifactFile> = input
-                .files
+            let files = match fields.remove("files") {
+                Some(files) => files,
+                None => return Err(Error::MissingFiles),
+            };
+            let files: Vec<InputFile> =
+                serde_json::from_value(files).map_err(|source| Error::Input { source })?;
+            let files: Vec<ArtifactFile> = files
                 .into_iter()
-                .map(|file| ArtifactFile {
-                    path: file.path,
-                    content: file.content.into_bytes(),
+                .map(|InputFile { path, content }| ArtifactFile {
+                    path,
+                    content: content.into_bytes(),
                 })
                 .collect();
             let push = Push {
-                repository: config.repository.clone(),
-                credentials_path: config.credentials_path.clone(),
+                repository,
+                credentials_path,
             };
-            let pushed = push.push(&files, &config.tags).await?;
+            let Pushed { digest, references } = {
+                let _pushing = self.pushing.lock().await;
+                push.push(files, &tags).await?
+            };
 
-            if let Some(fields) = data.as_object_mut() {
-                fields.remove("files");
-                fields.insert("digest".to_string(), pushed.digest.clone().into());
-                fields.insert("references".to_string(), pushed.references.clone().into());
-            }
+            fields.insert("digest".to_string(), digest.clone().into());
+            fields.insert("references".to_string(), references.into());
             let mut e = EventBuilder::new()
-                .data(EventData::Json(data))
+                .data(EventData::Json(serde_json::Value::Object(fields)))
                 .subject(self.config.name.clone())
                 .task_id(self.task_id)
                 .task_type(self.task_type)
@@ -142,7 +154,7 @@ impl EventHandler {
                 Some(_) => e.completion_tx = completion_tx.clone(),
             }
             e.send_with_logging(self.tx.as_ref())
-                .context("digest", &pushed.digest)
+                .context("digest", digest)
                 .await
                 .map_err(|source| Error::SendMessage { source })
         })
@@ -167,8 +179,12 @@ impl flowgen_core::task::runner::Runner for Processor {
     type EventHandler = EventHandler;
 
     async fn init(&self) -> Result<EventHandler, Error> {
+        if self.config.tags.is_empty() {
+            return Err(Error::NoTags);
+        }
         Ok(EventHandler {
             config: Arc::clone(&self.config),
+            pushing: tokio::sync::Mutex::new(()),
             tx: self.tx.clone(),
             task_id: self.task_id,
             task_type: self.task_type,
@@ -281,5 +297,149 @@ impl ProcessorBuilder {
                 .task_type
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flowgen_core::task::runner::Runner;
+
+    fn task_context() -> Arc<flowgen_core::task::context::TaskContext> {
+        let task_manager = Arc::new(
+            flowgen_core::task::manager::TaskManagerBuilder::new()
+                .build()
+                .unwrap(),
+        );
+        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
+            as Arc<dyn flowgen_core::cache::Cache>;
+        Arc::new(
+            flowgen_core::task::context::TaskContextBuilder::new()
+                .flow_name("a".to_string())
+                .task_manager(task_manager)
+                .cache(cache)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn config(tags: &[&str]) -> ProcessorConfig {
+        ProcessorConfig {
+            name: "release".to_string(),
+            repository: "127.0.0.1:9/a".to_string(),
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            credentials_path: None,
+            depends_on: None,
+            retry: None,
+        }
+    }
+
+    async fn processor(tags: &[&str]) -> Processor {
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        ProcessorBuilder::new()
+            .config(Arc::new(config(tags)))
+            .receiver(rx)
+            .task_type("oci_push")
+            .task_context(task_context())
+            .build()
+            .await
+            .unwrap()
+    }
+
+    fn event(data: EventData) -> Event {
+        EventBuilder::new()
+            .data(data)
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("a")
+            .build()
+            .unwrap()
+    }
+
+    fn json(data: &str) -> Event {
+        event(EventData::Json(serde_json::from_str(data).unwrap()))
+    }
+
+    async fn handle(data: Event) -> Error {
+        let handler = processor(&["ok"]).await.init().await.unwrap();
+        handler.handle(data).await.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn a_config_without_tags_is_rejected_at_init_as_permanent() {
+        let result = processor(&[]).await.init().await;
+        let error = result.err().unwrap();
+        assert!(matches!(error, Error::NoTags));
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn event_data_that_is_not_an_object_is_rejected_as_permanent() {
+        for data in [
+            json(r#"[[{"path": "a.txt", "content": "a"}]]"#),
+            json(r#""a""#),
+            event(EventData::Bytes(bytes::Bytes::from_static(b"a"))),
+        ] {
+            let error = handle(data).await;
+            assert!(matches!(error, Error::NotObject), "{error}");
+            assert!(error.is_permanent());
+        }
+    }
+
+    #[tokio::test]
+    async fn event_data_without_files_is_rejected_as_permanent() {
+        let error = handle(json(r#"{"commit": "a"}"#)).await;
+        assert!(matches!(error, Error::MissingFiles), "{error}");
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn files_that_are_not_path_and_content_pairs_are_rejected_as_permanent() {
+        let error = handle(json(r#"{"files": [{"path": "a.txt"}]}"#)).await;
+        assert!(matches!(error, Error::Input { .. }), "{error}");
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn invalid_file_paths_are_rejected_before_any_push_as_permanent() {
+        let error = handle(json(r#"{"files": [{"path": "../a.txt", "content": "a"}]}"#)).await;
+        assert!(
+            matches!(
+                error,
+                Error::Push(super::super::client::Error::InvalidPath { .. })
+            ),
+            "{error}"
+        );
+        assert!(error.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn a_tag_that_renders_invalid_is_rejected_before_any_push_as_permanent() {
+        let (_, rx) = tokio::sync::mpsc::channel(1);
+        let handler = ProcessorBuilder::new()
+            .config(Arc::new(config(&["ok", "{{event.data.version}}"])))
+            .receiver(rx)
+            .task_type("oci_push")
+            .task_context(task_context())
+            .build()
+            .await
+            .unwrap()
+            .init()
+            .await
+            .unwrap();
+        let error = handler
+            .handle(json(
+                r#"{"version": "not valid!", "files": [{"path": "a.txt", "content": "a"}]}"#,
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Push(super::super::client::Error::InvalidReference { .. })
+            ),
+            "{error}"
+        );
+        assert!(error.is_permanent());
     }
 }

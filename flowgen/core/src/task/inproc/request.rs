@@ -23,6 +23,11 @@ pub enum Error {
         #[source]
         source: crate::config::Error,
     },
+    #[error("Failed to serialize event: {source}")]
+    SerializeEvent {
+        #[source]
+        source: crate::event::Error,
+    },
     #[error("Error building event: {source}")]
     EventBuilder {
         #[source]
@@ -35,22 +40,15 @@ pub enum Error {
     },
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
 }
 
 impl Error {
-    /// Whether calling again cannot help: the flow ran and failed, or may still be running.
+    /// Whether calling again cannot help. Only a call whose event never reached
+    /// the flow is retried, since any other retry would run the flow again.
     fn is_permanent(&self) -> bool {
-        matches!(
+        !matches!(
             self,
-            Error::Call(
-                CallError::Failed { .. } | CallError::Timeout { .. } | CallError::NotAllowed { .. }
-            ) | Error::NotJson { .. }
-                | Error::RenderConfig { .. }
+            Error::Call(CallError::NotFound { .. } | CallError::Closed { .. })
         )
     }
 }
@@ -70,8 +68,8 @@ impl EventHandler {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
-        let event_value =
-            serde_json::Value::try_from(&event).map_err(|source| Error::EventBuilder { source })?;
+        let event_value = serde_json::Value::try_from(&event)
+            .map_err(|source| Error::SerializeEvent { source })?;
         let config = self
             .config
             .render(&event_value)
@@ -255,5 +253,49 @@ impl ProcessorBuilder {
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event_error() -> crate::event::Error {
+        crate::event::Error::MissingBuilderAttribute("data".to_string())
+    }
+
+    #[test]
+    fn only_a_call_that_never_reached_the_flow_is_retried() {
+        let flow = || "a/b".to_string();
+        let retried = [
+            Error::Call(CallError::NotFound { flow: flow() }),
+            Error::Call(CallError::Closed { flow: flow() }),
+        ];
+        let permanent = [
+            Error::Call(CallError::Dropped),
+            Error::Call(CallError::Recursive { flow: flow() }),
+            Error::Call(CallError::Failed {
+                reason: "conflict".to_string(),
+            }),
+            Error::Call(CallError::Timeout {
+                timeout: std::time::Duration::from_secs(1),
+            }),
+            Error::SendMessage {
+                source: event_error(),
+            },
+            Error::EventBuilder {
+                source: event_error(),
+            },
+            Error::SerializeEvent {
+                source: event_error(),
+            },
+        ];
+
+        for error in &retried {
+            assert!(!error.is_permanent(), "{error}");
+        }
+        for error in &permanent {
+            assert!(error.is_permanent(), "{error}");
+        }
     }
 }

@@ -154,6 +154,18 @@ impl Default for RhaiLimits {
     }
 }
 
+impl RhaiLimits {
+    /// Sets these limits on `engine`; several are also enforced when it compiles a script.
+    pub fn apply(&self, engine: &mut rhai::Engine) {
+        engine.set_max_operations(self.max_operations);
+        engine.set_max_call_levels(self.max_call_depth);
+        engine.set_max_string_size(self.max_string_size);
+        engine.set_max_array_size(self.max_array_size);
+        engine.set_max_map_size(self.max_map_size);
+        engine.set_max_expr_depths(self.max_expr_depth, self.max_function_expr_depth);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -382,22 +382,25 @@ impl Event {
     }
 
     /// Hands on an event whose task failed: downstream with `error` set when
-    /// there is a next task, otherwise to the source as a failed completion.
+    /// there is a next task that still accepts events, otherwise to the source
+    /// as a failed completion.
     pub async fn forward_failure(
         mut self,
         tx: Option<&tokio::sync::mpsc::Sender<Event>>,
         error: String,
     ) {
-        match tx {
+        let event = match tx {
             Some(tx) => {
-                self.error = Some(error);
-                tx.send(self).await.ok();
-            }
-            None => {
-                if let Some(arc) = self.completion_tx.as_ref() {
-                    arc.signal_completion_with_error(error);
+                self.error = Some(error.clone());
+                match tx.send(self).await {
+                    Ok(()) => return,
+                    Err(tokio::sync::mpsc::error::SendError(event)) => event,
                 }
             }
+            None => self,
+        };
+        if let Some(arc) = event.completion_tx.as_ref() {
+            arc.signal_completion_with_error(error);
         }
     }
 }
@@ -1020,5 +1023,58 @@ mod tests {
             }
             _ => panic!("Expected Arrow RecordBatch"),
         }
+    }
+
+    fn event_with_completion() -> (Event, CompletionRx) {
+        let (completion_tx, completion_rx) = new_completion_channel(1);
+        let event = EventBuilder::new()
+            .data(EventData::Json(json!({})))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .completion_tx(completion_tx)
+            .build()
+            .unwrap();
+        (event, completion_rx)
+    }
+
+    async fn failure_message(completion_rx: CompletionRx) -> String {
+        match completion_rx.await {
+            Ok(Err(error)) => error.to_string(),
+            other => panic!("Expected a failed completion, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_with_a_next_task_goes_downstream_with_its_error() {
+        let (event, mut completion_rx) = event_with_completion();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        event.forward_failure(Some(&tx), "boom".to_string()).await;
+
+        let forwarded = rx.recv().await.unwrap();
+        assert_eq!(forwarded.error.as_deref(), Some("boom"));
+        assert!(forwarded.completion_tx.is_some());
+        assert!(completion_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failure_at_a_leaf_fails_the_completion() {
+        let (event, completion_rx) = event_with_completion();
+
+        event.forward_failure(None, "boom".to_string()).await;
+
+        assert_eq!(failure_message(completion_rx).await, "boom");
+    }
+
+    #[tokio::test]
+    async fn a_failure_whose_next_task_stopped_fails_the_completion() {
+        let (event, completion_rx) = event_with_completion();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        event.forward_failure(Some(&tx), "boom".to_string()).await;
+
+        assert_eq!(failure_message(completion_rx).await, "boom");
     }
 }

@@ -452,16 +452,7 @@ impl crate::task::runner::Runner for Processor {
 
         let mut engine = Engine::new();
 
-        // Bound script CPU and memory so a runaway or hostile script
-        // cannot stall the worker. Limits come from the task config and
-        // are individually overridable in flow YAML.
-        let limits = &self.config.limits;
-        engine.set_max_operations(limits.max_operations);
-        engine.set_max_call_levels(limits.max_call_depth);
-        engine.set_max_string_size(limits.max_string_size);
-        engine.set_max_array_size(limits.max_array_size);
-        engine.set_max_map_size(limits.max_map_size);
-        engine.set_max_expr_depths(limits.max_expr_depth, limits.max_function_expr_depth);
+        self.config.limits.apply(&mut engine);
 
         // Route Rhai print() and debug() through tracing so output inherits
         // the current span context (flow, task, task_id, task_type).

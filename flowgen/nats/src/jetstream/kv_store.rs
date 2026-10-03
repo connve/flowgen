@@ -7,7 +7,9 @@
 use flowgen_core::client::Client as FlowgenClientTrait;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -32,6 +34,14 @@ fn default_nats_url() -> String {
 ///     bucket: flowgen_system
 ///     operation: put
 ///     key: "flows.{{event.data.path}}"
+///
+/// - nats_kv_store:
+///     name: mirror_flows
+///     url: "{{env.NATS_URL}}"
+///     bucket: flowgen_system
+///     operation: put
+///     key_prefix: "flows."
+///     prune: true
 /// ```
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -51,9 +61,12 @@ pub struct Config {
     pub operation: Operation,
     /// Key for get, put, and delete operations (supports templating). A `put`
     /// without `key` writes every entry in `event.data.entries`.
+    #[serde(default)]
     pub key: Option<String>,
     /// Key prefix for list operations, and for the keys of `put` entries
-    /// (supports templating).
+    /// (supports templating). With `prune`, the rendered prefix must end in
+    /// `.` or `/`, so `flows` cannot also prune `flows_archive.*`.
+    #[serde(default)]
     pub key_prefix: Option<String>,
     /// For a `put` of entries: also delete the keys under `key_prefix` that
     /// are not among the entries.
@@ -198,6 +211,11 @@ pub enum Error {
         #[source]
         source: async_nats::error::Error<async_nats::jetstream::kv::WatchErrorKind>,
     },
+    #[error("KV keys stream error: {source}")]
+    KvKeyStream {
+        #[source]
+        source: async_nats::jetstream::kv::WatcherError,
+    },
     #[error("KV delete error: {source}")]
     KvDelete {
         #[source]
@@ -209,6 +227,11 @@ pub enum Error {
     MissingKey { operation: String },
     #[error("Missing content in event data for put operation.")]
     MissingContent,
+    #[error("Event data is not JSON: {source}")]
+    NotJson {
+        #[source]
+        source: flowgen_core::event::Error,
+    },
     #[error("A put without key needs `entries` in the event data: {source}")]
     InvalidEntries {
         #[source]
@@ -218,6 +241,10 @@ pub enum Error {
     MissingKeyPrefix,
     #[error("No entries to put under '{prefix}'; prune would delete every key there, set allow_empty to allow it")]
     EmptyPrune { prefix: String },
+    #[error("Prune needs a key_prefix ending in '.' or '/', got '{prefix}'")]
+    UnsafePrunePrefix { prefix: String },
+    #[error("Invalid entry key '{key}': KV keys use only letters, digits and '-/_=.' and cannot start or end with '.'")]
+    InvalidEntryKey { key: String },
     #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]
@@ -251,6 +278,99 @@ pub enum Error {
     ClientRegistryMismatch,
 }
 
+impl Error {
+    /// Whether retrying the same event cannot succeed.
+    fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Error::MissingKey { .. }
+                | Error::MissingContent
+                | Error::NotJson { .. }
+                | Error::InvalidEntries { .. }
+                | Error::MissingKeyPrefix
+                | Error::EmptyPrune { .. }
+                | Error::UnsafePrunePrefix { .. }
+                | Error::InvalidEntryKey { .. }
+                | Error::ConfigRender { .. }
+                | Error::EventBuilder { .. }
+                | Error::SerdeJson { .. }
+        )
+    }
+}
+
+/// A validated put of entries: the key prefix and the full key and value of each entry.
+#[derive(Debug)]
+struct PreparedEntries<'a> {
+    prefix: &'a str,
+    entries: Vec<(String, String)>,
+}
+
+/// Validates a put of entries before it touches the bucket.
+fn prepare_entries(
+    config: &Config,
+    event_data: serde_json::Value,
+) -> Result<PreparedEntries<'_>, Error> {
+    let prefix = match config.key_prefix.as_deref() {
+        Some(prefix) => prefix,
+        None => return Err(Error::MissingKeyPrefix),
+    };
+    if config.prune && !prefix.ends_with(['.', '/']) {
+        return Err(Error::UnsafePrunePrefix {
+            prefix: prefix.to_string(),
+        });
+    }
+    let Entries { entries } =
+        serde_json::from_value(event_data).map_err(|source| Error::InvalidEntries { source })?;
+    if config.prune && entries.is_empty() && !config.allow_empty {
+        return Err(Error::EmptyPrune {
+            prefix: prefix.to_string(),
+        });
+    }
+    let mut prepared = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = format!("{prefix}{}", entry.key);
+        if !is_valid_key(&key) {
+            return Err(Error::InvalidEntryKey { key });
+        }
+        let value = match entry.value {
+            serde_json::Value::String(value) => value,
+            other => other.to_string(),
+        };
+        prepared.push((key, value));
+    }
+    Ok(PreparedEntries {
+        prefix,
+        entries: prepared,
+    })
+}
+
+/// Same rule the client enforces per write, checked up front so a bad entry
+/// fails before anything is written.
+fn is_valid_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('.')
+        && !key.ends_with('.')
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | '_' | '=' | '.'))
+}
+
+/// Collects the keys under `prefix`, failing on the first stream error so no
+/// caller acts on a partial listing.
+async fn collect_keys<S>(mut key_stream: S, prefix: &str) -> Result<Vec<String>, Error>
+where
+    S: futures_util::Stream<Item = Result<String, async_nats::jetstream::kv::WatcherError>> + Unpin,
+{
+    let mut keys = Vec::new();
+    while let Some(key) = key_stream.next().await {
+        let key = key.map_err(|source| Error::KvKeyStream { source })?;
+        if key.starts_with(prefix) {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
 // --- Event Handler ---
 
 /// Event handler for KV store operations.
@@ -261,6 +381,9 @@ pub struct EventHandler {
     task_id: usize,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// Serializes pruning puts so two events cannot interleave their listing,
+    /// writes and deletes.
+    prune_lock: tokio::sync::Mutex<()>,
 }
 
 impl EventHandler {
@@ -274,8 +397,6 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            // Render templates against the wrapped event so `{{event.data.x}}`
-            // and `{{event.meta.x}}` resolve as in every other processor.
             let event_value = serde_json::Value::try_from(event.as_ref())
                 .map_err(|source| Error::EventBuilder { source })?;
             let rendered = self
@@ -283,14 +404,16 @@ impl EventHandler {
                 .render(&event_value)
                 .map_err(|source| Error::ConfigRender { source })?;
 
-            // Unwrapped data, used by `handle_put` to read `content`.
-            let event_data = event.data_as_json().unwrap_or_default();
-
             let result = match rendered.operation {
-                Operation::Put => match rendered.key {
-                    Some(_) => self.handle_put(&rendered, &event_data).await?,
-                    None => self.handle_put_entries(&rendered, event_data).await?,
-                },
+                Operation::Put => {
+                    let event_data = event
+                        .data_as_json()
+                        .map_err(|source| Error::NotJson { source })?;
+                    match rendered.key.as_deref() {
+                        Some(key) => self.handle_put(key, &event_data).await?,
+                        None => self.handle_put_entries(&rendered, event_data).await?,
+                    }
+                }
                 Operation::Get => self.handle_get(&rendered).await?,
                 Operation::List => self.handle_list(&rendered).await?,
                 Operation::Delete => self.handle_delete(&rendered).await?,
@@ -306,7 +429,6 @@ impl EventHandler {
 
             match self.tx {
                 None => {
-                    // Leaf task: signal completion.
                     if let Some(arc) = completion_tx_arc.as_ref() {
                         arc.signal_completion(e.data_as_json().ok());
                     }
@@ -327,13 +449,9 @@ impl EventHandler {
 
     async fn handle_put(
         &self,
-        config: &Config,
+        key: &str,
         event_data: &serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        let key = config.key.as_deref().ok_or_else(|| Error::MissingKey {
-            operation: "put".to_string(),
-        })?;
-
         let value = match event_data.get("content").and_then(|c| c.as_str()) {
             Some(content) => bytes::Bytes::from(content.to_string()),
             None => return Err(Error::MissingContent),
@@ -359,28 +477,25 @@ impl EventHandler {
         config: &Config,
         event_data: serde_json::Value,
     ) -> Result<serde_json::Value, Error> {
-        let prefix = match config.key_prefix.as_deref() {
-            Some(prefix) => prefix,
-            None => return Err(Error::MissingKeyPrefix),
+        let PreparedEntries { prefix, entries } = prepare_entries(config, event_data)?;
+        let _prune_guard = match config.prune {
+            true => Some(self.prune_lock.lock().await),
+            false => None,
         };
-        let Entries { entries } = serde_json::from_value(event_data)
-            .map_err(|source| Error::InvalidEntries { source })?;
-        if config.prune && entries.is_empty() && !config.allow_empty {
-            return Err(Error::EmptyPrune {
-                prefix: prefix.to_string(),
-            });
-        }
 
-        let existing = self.values_under(prefix).await?;
+        let existing: HashSet<String> = self.keys_under(prefix).await?.into_iter().collect();
         let mut result = PutEntriesResult::default();
-        let mut wanted = std::collections::HashSet::with_capacity(entries.len());
-        for entry in entries {
-            let key = format!("{prefix}{}", entry.key);
-            let value = match entry.value {
-                serde_json::Value::String(value) => value,
-                other => other.to_string(),
+        let mut wanted = HashSet::with_capacity(entries.len());
+        for (key, value) in entries {
+            let current = match existing.contains(&key) {
+                true => self
+                    .store
+                    .get(&key)
+                    .await
+                    .map_err(|source| Error::KvEntry { source })?,
+                false => None,
             };
-            match existing.get(&key) {
+            match current {
                 Some(current) if current.as_ref() == value.as_bytes() => result.unchanged += 1,
                 _ => {
                     self.store
@@ -394,48 +509,29 @@ impl EventHandler {
         }
 
         if config.prune {
-            let mut stale: Vec<&String> = existing
-                .keys()
-                .filter(|key| !wanted.contains(*key))
+            let mut stale: Vec<String> = existing
+                .into_iter()
+                .filter(|key| !wanted.contains(key))
                 .collect();
             stale.sort();
             for key in stale {
                 self.store
-                    .delete(key)
+                    .delete(&key)
                     .await
                     .map_err(|source| Error::KvDelete { source })?;
-                result.deleted.push(key.clone());
+                result.deleted.push(key);
             }
         }
         serde_json::to_value(&result).map_err(|source| Error::SerdeJson { source })
     }
 
-    /// Current values of the keys under `prefix`.
-    async fn values_under(
-        &self,
-        prefix: &str,
-    ) -> Result<std::collections::HashMap<String, bytes::Bytes>, Error> {
-        use futures_util::StreamExt;
-        let mut key_stream = self
+    async fn keys_under(&self, prefix: &str) -> Result<Vec<String>, Error> {
+        let key_stream = self
             .store
             .keys()
             .await
             .map_err(|source| Error::KvKeys { source })?;
-        let mut values = std::collections::HashMap::new();
-        while let Some(Ok(key)) = key_stream.next().await {
-            if !key.starts_with(prefix) {
-                continue;
-            }
-            if let Some(value) = self
-                .store
-                .get(&key)
-                .await
-                .map_err(|source| Error::KvEntry { source })?
-            {
-                values.insert(key, value);
-            }
-        }
-        Ok(values)
+        collect_keys(key_stream, prefix).await
     }
 
     async fn handle_get(&self, config: &Config) -> Result<serde_json::Value, Error> {
@@ -466,26 +562,8 @@ impl EventHandler {
 
     async fn handle_list(&self, config: &Config) -> Result<serde_json::Value, Error> {
         let prefix = config.key_prefix.as_deref().unwrap_or("");
+        let keys = self.keys_under(prefix).await?;
 
-        use futures_util::StreamExt;
-        let mut keys = Vec::new();
-        let mut key_stream = self
-            .store
-            .keys()
-            .await
-            .map_err(|source| Error::KvKeys { source })?;
-
-        while let Some(Ok(key)) = key_stream.next().await {
-            if key.starts_with(prefix) {
-                keys.push(key);
-            }
-        }
-
-        // When include_values is set, fetch each key's current value so
-        // downstream scripts can diff against new content without firing
-        // a separate `get` per key. One round-trip per key still — NATS
-        // KV has no native multi-get — but stays inside this processor
-        // instead of forcing the caller to fan out N tasks.
         let values = if config.include_values {
             let mut map = std::collections::HashMap::with_capacity(keys.len());
             for key in &keys {
@@ -549,10 +627,12 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
+    /// Opens the bucket when it exists and creates it only when missing, so a
+    /// bucket created elsewhere keeps its settings.
     async fn init(&self) -> Result<EventHandler, Error> {
         let config = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Value::Object(serde_json::Map::new()))
             .map_err(|source| Error::ConfigRender { source })?;
 
         let nats_key = flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
@@ -588,10 +668,6 @@ impl flowgen_core::task::runner::Runner for Processor {
 
         let jetstream = (*jetstream_ctx).clone();
 
-        // Open the bucket if it exists; only create it when missing.
-        // Avoids configuration collisions when another component (the
-        // worker's system cache, another flow, or `nats` CLI) created the
-        // bucket with different settings.
         let store = match jetstream.get_key_value(&config.bucket).await {
             Ok(store) => store,
             Err(_) => jetstream
@@ -610,6 +686,7 @@ impl flowgen_core::task::runner::Runner for Processor {
             task_id: self.task_id,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
+            prune_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -643,19 +720,25 @@ impl flowgen_core::task::runner::Runner for Processor {
                     let handler = Arc::clone(&event_handler);
                     let retry_strategy = retry_config.strategy();
                     let handle = tokio::spawn(async move {
+                        if let Some(error) = event.error.clone() {
+                            event.forward_failure(handler.tx.as_ref(), error).await;
+                            return;
+                        }
                         let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                            match handler.handle(event.clone()).await {
-                                Ok(()) => Ok(()),
-                                Err(e) => {
-                                    error!(error = %e, "KV store operation failed");
-                                    Err(tokio_retry::RetryError::transient(e))
+                            handler.handle(event.clone()).await.map_err(|e| {
+                                error!(error = %e, "KV store operation failed");
+                                match e.is_permanent() {
+                                    true => tokio_retry::RetryError::permanent(e),
+                                    false => tokio_retry::RetryError::transient(e),
                                 }
-                            }
+                            })
                         })
                         .await;
 
                         if let Err(e) = result {
-                            error!(error = %e, "KV store operation exhausted all retry attempts");
+                            event
+                                .forward_failure(handler.tx.as_ref(), e.to_string())
+                                .await;
                         }
                     });
                     handlers.push(handle);
@@ -973,5 +1056,224 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["key"], "old.key");
+    }
+
+    fn entries_config(key_prefix: Option<&str>, prune: bool) -> Config {
+        Config {
+            name: "kv".to_string(),
+            bucket: "b".to_string(),
+            operation: Operation::Put,
+            key_prefix: key_prefix.map(str::to_string),
+            prune,
+            ..Default::default()
+        }
+    }
+
+    fn entries(pairs: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let entries = pairs
+            .iter()
+            .map(|(key, value)| serde_json::json!({"key": key, "value": value}))
+            .collect::<Vec<_>>();
+        serde_json::json!({ "entries": entries })
+    }
+
+    #[test]
+    fn prune_rejects_an_empty_key_prefix() {
+        let config = entries_config(Some(""), true);
+        let result = prepare_entries(&config, entries(&[("a", "1".into())]));
+        assert!(matches!(
+            result,
+            Err(Error::UnsafePrunePrefix { ref prefix }) if prefix.is_empty()
+        ));
+    }
+
+    #[test]
+    fn prune_rejects_a_key_prefix_without_a_trailing_separator() {
+        let config = entries_config(Some("flows"), true);
+        let result = prepare_entries(&config, entries(&[("a", "1".into())]));
+        assert!(matches!(
+            result,
+            Err(Error::UnsafePrunePrefix { ref prefix }) if prefix == "flows"
+        ));
+    }
+
+    #[test]
+    fn prune_rejects_a_key_prefix_template_that_renders_empty() {
+        let config = entries_config(Some("{{event.data.missing}}"), true);
+        let rendered = config
+            .render(&serde_json::json!({"event": {"data": {}}}))
+            .unwrap();
+        let result = prepare_entries(&rendered, entries(&[("a", "1".into())]));
+        assert!(matches!(result, Err(Error::UnsafePrunePrefix { .. })));
+    }
+
+    #[test]
+    fn prune_rejects_an_unsafe_key_prefix_before_reading_the_entries() {
+        let config = entries_config(Some("flows"), true);
+        let result = prepare_entries(&config, serde_json::json!({"unrelated": true}));
+        assert!(matches!(result, Err(Error::UnsafePrunePrefix { .. })));
+    }
+
+    #[test]
+    fn prune_accepts_key_prefixes_ending_in_a_dot_or_a_slash() {
+        for prefix in ["flows.", "flows/"] {
+            let config = entries_config(Some(prefix), true);
+            let prepared = prepare_entries(&config, entries(&[("a", "1".into())])).unwrap();
+            assert_eq!(
+                prepared.entries,
+                vec![(format!("{prefix}a"), "1".to_string())]
+            );
+        }
+    }
+
+    #[test]
+    fn put_entries_without_prune_accepts_a_prefix_without_a_separator() {
+        let config = entries_config(Some("flows"), false);
+        let prepared = prepare_entries(&config, entries(&[("a", "1".into())])).unwrap();
+        assert_eq!(prepared.prefix, "flows");
+        assert_eq!(
+            prepared.entries,
+            vec![("flowsa".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn put_entries_stores_non_string_values_as_json() {
+        let config = entries_config(Some("p."), false);
+        let prepared = prepare_entries(
+            &config,
+            entries(&[
+                ("n", serde_json::json!(1)),
+                ("o", serde_json::json!({"x": true})),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.entries,
+            vec![
+                ("p.n".to_string(), "1".to_string()),
+                ("p.o".to_string(), r#"{"x":true}"#.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn put_entries_rejects_a_missing_key_prefix() {
+        let config = entries_config(None, false);
+        let result = prepare_entries(&config, entries(&[("a", "1".into())]));
+        assert!(matches!(result, Err(Error::MissingKeyPrefix)));
+    }
+
+    #[test]
+    fn put_entries_rejects_an_empty_list_with_prune_unless_allow_empty() {
+        let mut config = entries_config(Some("p."), true);
+        let result = prepare_entries(&config, entries(&[]));
+        assert!(matches!(result, Err(Error::EmptyPrune { .. })));
+
+        config.allow_empty = true;
+        let prepared = prepare_entries(&config, entries(&[])).unwrap();
+        assert!(prepared.entries.is_empty());
+    }
+
+    #[test]
+    fn put_entries_rejects_the_whole_list_when_one_composed_key_is_invalid() {
+        let config = entries_config(Some("p."), false);
+        let result = prepare_entries(
+            &config,
+            entries(&[("a", "1".into()), ("bad key", "2".into())]),
+        );
+        assert!(matches!(
+            result,
+            Err(Error::InvalidEntryKey { ref key }) if key == "p.bad key"
+        ));
+    }
+
+    #[test]
+    fn put_entries_rejects_an_empty_entry_key_that_leaves_a_trailing_dot() {
+        let config = entries_config(Some("p."), false);
+        let result = prepare_entries(&config, entries(&[("", "1".into())]));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidEntryKey { ref key }) if key == "p."
+        ));
+    }
+
+    #[test]
+    fn is_valid_key_accepts_kv_key_characters_and_rejects_the_rest() {
+        for key in ["a", "a.b", "a/b", "A-b_c=d.0"] {
+            assert!(is_valid_key(key), "{key} should be valid");
+        }
+        for key in ["", ".a", "a.", "a b", "a*", "a.>", "a:b", "ä"] {
+            assert!(!is_valid_key(key), "{key} should be invalid");
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_keys_returns_only_keys_under_the_prefix() {
+        let stream = futures_util::stream::iter(vec![
+            Ok("p.a".to_string()),
+            Ok("q.b".to_string()),
+            Ok("p.c".to_string()),
+        ]);
+        let keys = collect_keys(stream, "p.").await.unwrap();
+        assert_eq!(keys, vec!["p.a".to_string(), "p.c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn collect_keys_fails_on_a_stream_error_instead_of_returning_a_partial_listing() {
+        let stream = futures_util::stream::iter(vec![
+            Ok("p.a".to_string()),
+            Err(async_nats::jetstream::kv::WatcherError::new(
+                async_nats::jetstream::kv::WatcherErrorKind::Other,
+            )),
+            Ok("p.b".to_string()),
+        ]);
+        let result = collect_keys(stream, "p.").await;
+        assert!(matches!(result, Err(Error::KvKeyStream { .. })));
+    }
+
+    #[test]
+    fn errors_that_cannot_succeed_on_retry_are_permanent() {
+        let permanent = [
+            Error::MissingKey {
+                operation: "get".to_string(),
+            },
+            Error::MissingContent,
+            Error::MissingKeyPrefix,
+            Error::EmptyPrune {
+                prefix: "p.".to_string(),
+            },
+            Error::UnsafePrunePrefix {
+                prefix: String::new(),
+            },
+            Error::InvalidEntryKey {
+                key: "p.".to_string(),
+            },
+            Error::InvalidEntries {
+                source: serde_json::from_str::<Entries>("{}").unwrap_err(),
+            },
+        ];
+        for error in permanent {
+            assert!(error.is_permanent(), "{error} should be permanent");
+        }
+    }
+
+    #[test]
+    fn transport_errors_are_retried() {
+        let transient = [
+            Error::KvPut {
+                source: async_nats::jetstream::kv::PutError::new(
+                    async_nats::jetstream::kv::PutErrorKind::Publish,
+                ),
+            },
+            Error::KvKeyStream {
+                source: async_nats::jetstream::kv::WatcherError::new(
+                    async_nats::jetstream::kv::WatcherErrorKind::Consumer,
+                ),
+            },
+        ];
+        for error in transient {
+            assert!(!error.is_permanent(), "{error} should be retried");
+        }
     }
 }

@@ -2,8 +2,8 @@
 # workspace repository. Releasing the commit is up to the deployment: its CI,
 # or examples/authoring/release_workspace.yaml where there is none.
 #
-# Deploy it as `system/publish_workspace.yaml`, the default
-# `web.authoring.publish_flow`. Approvals call it in-process; it has no HTTP route.
+# Deploy it as `system/publish_workspace.yaml`, the default `publish_flow` of a
+# `web.authoring.targets` entry. Approvals call it in-process; it has no HTTP route.
 #
 # Required:
 #   - GIT_WORKSPACE_URL env var
@@ -15,7 +15,7 @@ flow:
     tags: ["system", "git-push", "authoring", "example"]
   tasks:
 
-    # Receives {id, title, author, files} from an approved change.
+    # Receives {id, target, title, author: {name, email}, files: [{path, content, previous}]}.
     - inproc_endpoint:
         name: on_approve
         ack_timeout: 120s

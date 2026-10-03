@@ -16,19 +16,19 @@ use std::path::PathBuf;
 ///
 /// ```yaml
 /// - oci_sync:
-///     name: pull_flows
-///     artifact: "ghcr.io/connve/flows-tenant-connve:prod"
-///     credentials_path: /etc/flowgen/credentials/registry.json
+///     name: pull_configs
+///     artifact: "registry.example.com/team/configs:prod"
+///     credentials_path: /etc/registry/credentials.json
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Task name.
     pub name: String,
-    /// Full OCI reference, e.g. `ghcr.io/org/flows:prod` or `…@sha256:…`.
+    /// Full OCI reference, e.g. `registry.example.com/team/configs:prod` or `…@sha256:…`.
     pub artifact: String,
     /// Optional path to a credentials file. Two formats are auto-detected:
-    /// the flowgen-native `{ "username", "password" }` shape, or the
+    /// a `{ "username", "password" }` JSON file, or the
     /// standard Docker `config.json` (`kubernetes.io/dockerconfigjson`
     /// Secret payload) with multiple `auths` entries keyed by registry
     /// host. For the latter, the entry matching the artifact's registry
@@ -80,16 +80,6 @@ impl Default for Processor {
 }
 
 impl ConfigExt for Processor {}
-
-/// Registry credentials loaded from the credentials JSON file.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Credentials {
-    /// Registry username. For GHCR with a Personal Access Token, this is
-    /// the GitHub username; with a GitHub Actions token, it's the actor.
-    pub username: String,
-    /// Registry password or token.
-    pub password: String,
-}
 
 #[cfg(test)]
 mod tests {
@@ -150,14 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn credentials_deser() {
-        let json = r#"{ "username": "robot", "password": "tok123" }"#;
-        let creds: Credentials = serde_json::from_str(json).unwrap();
-        assert_eq!(creds.username, "robot");
-        assert_eq!(creds.password, "tok123");
-    }
-
-    #[test]
     fn config_deser_missing_name_fails() {
         let json = r#"{ "artifact": "ghcr.io/org/flows:prod" }"#;
         let result = serde_json::from_str::<Processor>(json);
@@ -182,12 +164,5 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
         let deserialized: Processor = serde_json::from_str(&serialized).unwrap();
         assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn credentials_default_values() {
-        let creds = Credentials::default();
-        assert_eq!(creds.username, "");
-        assert_eq!(creds.password, "");
     }
 }

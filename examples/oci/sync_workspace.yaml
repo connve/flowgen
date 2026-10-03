@@ -1,9 +1,9 @@
 # Bootstrap flow: keeps the system NATS KV cache equal to the flows and
-# resources of an OCI artifact. Each tick pulls the artifact and mirrors
-# `flows/` into `flows.` keys (`flows/demo/foo.yaml` becomes `flows.demo/foo`,
-# so the folder is the flow's identity) and `resources/` into `resources.`
-# keys. Unchanged keys are not rewritten, keys no longer in the artifact are
-# deleted, and other files in the artifact are ignored.
+# resources of an OCI artifact. When the artifact's digest changes, pulls it
+# and mirrors `flows/` into `flows.` keys (`flows/demo/foo.yaml` becomes
+# `flows.demo/foo`, so the folder is the flow's identity) and `resources/`
+# into `resources.` keys. Unchanged keys are not rewritten, keys no longer in
+# the artifact are deleted, and other files in the artifact are ignored.
 #
 # The artifact must be built with `FROM scratch` so its final layer contains
 # only `flows/` and `resources/` — a base image (busybox, alpine) drops
@@ -20,7 +20,7 @@
 flow:
   labels:
     display_name: "Sync Workspace From OCI"
-    description: "Mirrors the flows and resources of an OCI artifact into the system NATS KV cache each tick, deleting what the artifact no longer holds."
+    description: "Mirrors the flows and resources of an OCI artifact into the system NATS KV cache when its digest changes, deleting what the artifact no longer holds."
     tags: ["system", "oci-sync", "nats-kv", "example"]
   require_leader_election: true
   tasks:
@@ -64,6 +64,7 @@ flow:
         code: |
           #{ entries: event.data.flows }
 
+    # An empty flow list fails and deletes nothing.
     - nats_kv_store:
         name: apply_flows
         credentials_path: /etc/nats/credentials.json
@@ -72,7 +73,6 @@ flow:
         operation: put
         key_prefix: "flows."
         prune: true
-        allow_empty: true
 
     - script:
         name: resource_entries
@@ -80,6 +80,7 @@ flow:
           #{ entries: event.data.resources }
         depends_on: [to_entries]
 
+    # A workspace may hold no resources, so an empty list prunes them all.
     - nats_kv_store:
         name: apply_resources
         credentials_path: /etc/nats/credentials.json

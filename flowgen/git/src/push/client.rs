@@ -1,7 +1,7 @@
 //! Commits file changes on top of a remote branch and pushes them over smart
 //! HTTP (`git-receive-pack`), without a git binary.
 //!
-//! The commit is built with gix in a temporary shallow clone; the pack and the
+//! The commit is built with gix in a temporary bare shallow fetch; the pack and the
 //! receive-pack exchange are written here because gix has no push support.
 
 use crate::remote::{CloneError, Credentials};
@@ -9,8 +9,10 @@ use gix::objs::tree::EntryKind;
 use gix::odb::pack::data::entry::Header as PackEntryHeader;
 use gix::protocol::transport::packetline;
 use gix::ObjectId;
+use secrecy::ExposeSecret;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
 
 /// Failure to commit or push.
 #[derive(thiserror::Error, Debug)]
@@ -25,10 +27,40 @@ pub enum Error {
     BranchMissing { branch: String },
     #[error(transparent)]
     Clone(#[from] CloneError),
-    #[error("Git object operation failed: {source}")]
-    Object {
+    #[error(transparent)]
+    Url(#[from] crate::remote::UrlError),
+    #[error(transparent)]
+    Blocking(#[from] crate::remote::BlockingError),
+    #[error("Failed to initialize an empty repository: {source}")]
+    InitRepository {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to read from the fetched repository: {source}")]
+    ReadRepository {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to write the commit: {source}")]
+    WriteRepository {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to encode the pack: {source}")]
+    EncodePack {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("A pack holds at most {} objects, the commit needs {count}", u32::MAX)]
+    TooManyObjects {
+        count: usize,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("Failed to encode the receive-pack request: {source}")]
+    EncodeRequest {
+        #[source]
+        source: std::io::Error,
     },
     #[error("Request to {url} failed: {source}")]
     Http {
@@ -41,12 +73,26 @@ pub enum Error {
         url: String,
         status: reqwest::StatusCode,
     },
-    #[error("The git server sent malformed pkt-line framing")]
-    InvalidPktLine,
-    #[error("The git server sent a malformed ref advertisement")]
-    InvalidAdvertisement,
-    #[error("The ref update command does not fit in one pkt-line")]
-    CommandTooLong,
+    #[error("The git server sent malformed pkt-line framing: {source}")]
+    InvalidPktLine {
+        #[source]
+        source: packetline::decode::Error,
+    },
+    #[error("The git server response ends inside a pkt-line")]
+    TruncatedPktLine,
+    #[error("The git server sent a malformed ref advertisement line: {line}")]
+    InvalidAdvertisement { line: String },
+    #[error("The git server advertised an invalid object id '{id}': {source}")]
+    InvalidAdvertisedId {
+        id: String,
+        #[source]
+        source: gix::hash::decode::Error,
+    },
+    #[error("The ref update command does not fit in one pkt-line: {source}")]
+    CommandTooLong {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("The git server did not report the update of '{branch}'")]
     MissingUpdateReport { branch: String },
     #[error("The git server failed to unpack the pushed objects: {status}")]
@@ -62,15 +108,16 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    #[error("Git operation panicked or was cancelled: {source}")]
-    Join {
-        #[source]
-        source: tokio::task::JoinError,
-    },
 }
 
-fn object_error(source: impl std::error::Error + Send + Sync + 'static) -> Error {
-    Error::Object {
+fn read_error(source: impl std::error::Error + Send + Sync + 'static) -> Error {
+    Error::ReadRepository {
+        source: Box::new(source),
+    }
+}
+
+fn write_error(source: impl std::error::Error + Send + Sync + 'static) -> Error {
+    Error::WriteRepository {
         source: Box::new(source),
     }
 }
@@ -89,16 +136,20 @@ pub enum Expected {
 /// One file to write or delete, relative to the push's `path`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileChange {
+    /// Path relative to the push's `path`, with `/` separators.
     pub path: String,
     /// New content; `None` deletes the file.
     pub content: Option<Vec<u8>>,
+    /// What the file must hold on the branch for the change to apply.
     pub expected: Expected,
 }
 
 /// Commit author.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Author {
+    /// Author name recorded on the commit.
     pub name: String,
+    /// Author email recorded on the commit.
     pub email: String,
 }
 
@@ -107,6 +158,7 @@ pub struct Author {
 pub struct CommittedFile {
     /// Path relative to the push's `path`.
     pub path: String,
+    /// File content at the commit.
     pub content: Vec<u8>,
 }
 
@@ -126,12 +178,17 @@ pub struct Pushed {
 pub struct Push {
     /// HTTPS repository URL.
     pub repository_url: String,
+    /// Branch the commit lands on.
     pub branch: String,
     /// Directory within the repository the changes are relative to.
     pub path: Option<String>,
+    /// Token sent with every request to the git server.
     pub credentials: Option<Credentials>,
     /// Client for the receive-pack exchange, with the caller's timeouts.
     pub http: reqwest::Client,
+    /// Time budget for fetching the branch and building the commit; `None`
+    /// waits indefinitely.
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// What the server advertises for the push.
@@ -158,6 +215,7 @@ impl Push {
         author: Author,
         message: String,
     ) -> Result<Pushed, Error> {
+        crate::remote::check_url(&self.repository_url, self.credentials.as_ref())?;
         let prefix = match &self.path {
             Some(path) => normalize_path(path)?,
             None => Vec::new(),
@@ -183,11 +241,17 @@ impl Push {
         let built = {
             let push = self.clone();
             let prefix = prefix.join("/");
-            tokio::task::spawn_blocking(move || {
-                push.build(tip.is_some(), &full_paths, &author, &message, &prefix)
+            crate::remote::run_blocking(self.timeout, move |interrupt| {
+                push.build(
+                    tip.is_some(),
+                    &full_paths,
+                    &author,
+                    &message,
+                    &prefix,
+                    interrupt,
+                )
             })
-            .await
-            .map_err(|source| Error::Join { source })??
+            .await??
         };
         let pack = match built.pack {
             Some(pack) => pack,
@@ -230,9 +294,10 @@ impl Push {
             format!("git/{}", gix::env::agent()),
         );
         match &self.credentials {
-            Some(credentials) => {
-                request.basic_auth(credentials.username(), Some(&credentials.token))
-            }
+            Some(credentials) => request.basic_auth(
+                credentials.username(),
+                Some(credentials.token.expose_secret()),
+            ),
             None => request,
         }
     }
@@ -261,8 +326,9 @@ impl Push {
         );
         let mut body = Vec::new();
         packetline::blocking_io::encode::data_to_write(command.as_bytes(), &mut body)
-            .map_err(|_| Error::CommandTooLong)?;
-        packetline::blocking_io::encode::flush_to_write(&mut body).map_err(object_error)?;
+            .map_err(|source| Error::CommandTooLong { source })?;
+        packetline::blocking_io::encode::flush_to_write(&mut body)
+            .map_err(|source| Error::EncodeRequest { source })?;
         body.extend(pack);
 
         let url = self.url("git-receive-pack");
@@ -297,7 +363,8 @@ impl Push {
         Ok(response.bytes().await.map_err(http_error)?.to_vec())
     }
 
-    /// Builds the commit in a temporary clone. Runs on a blocking thread.
+    /// Builds the commit in a temporary bare repository. Runs on a blocking
+    /// thread and stops fetching once `interrupt` is set.
     fn build(
         &self,
         branch_exists: bool,
@@ -305,31 +372,32 @@ impl Push {
         author: &Author,
         message: &str,
         prefix: &str,
+        interrupt: &AtomicBool,
     ) -> Result<Built, Error> {
         let dir = tempfile::TempDir::new().map_err(|source| Error::TempDir { source })?;
         let repo = match branch_exists {
-            true => {
-                crate::remote::shallow_clone(
-                    &self.repository_url,
-                    &self.branch,
-                    dir.path(),
-                    self.credentials.as_ref(),
-                )?;
-                gix::open(dir.path()).map_err(object_error)?
-            }
-            false => gix::init_bare(dir.path()).map_err(object_error)?,
+            true => crate::remote::shallow_fetch_bare(
+                &self.repository_url,
+                &self.branch,
+                dir.path(),
+                self.credentials.as_ref(),
+                interrupt,
+            )?,
+            false => gix::init_bare(dir.path()).map_err(|e| Error::InitRepository {
+                source: Box::new(e),
+            })?,
         };
 
         let parent = match branch_exists {
-            true => Some(repo.head_id().map_err(object_error)?.detach()),
+            true => Some(repo.head_id().map_err(read_error)?.detach()),
             false => None,
         };
         let base_tree = match parent {
             Some(parent) => repo
                 .find_commit(parent)
-                .map_err(object_error)?
+                .map_err(read_error)?
                 .tree_id()
-                .map_err(object_error)?
+                .map_err(read_error)?
                 .detach(),
             None => ObjectId::empty_tree(repo.object_hash()),
         };
@@ -344,21 +412,21 @@ impl Push {
             });
         }
 
-        let mut editor = repo.edit_tree(base_tree).map_err(object_error)?;
+        let mut editor = repo.edit_tree(base_tree).map_err(read_error)?;
         for ((path, change), kind) in changes.iter().zip(kinds) {
             match &change.content {
                 Some(content) => {
-                    let blob = repo.write_blob(content).map_err(object_error)?;
+                    let blob = repo.write_blob(content).map_err(write_error)?;
                     editor
                         .upsert(path.as_str(), kind, blob)
-                        .map_err(object_error)?;
+                        .map_err(write_error)?;
                 }
                 None => {
-                    editor.remove(path.as_str()).map_err(object_error)?;
+                    editor.remove(path.as_str()).map_err(write_error)?;
                 }
             }
         }
-        let tree = editor.write().map_err(object_error)?.detach();
+        let tree = editor.write().map_err(write_error)?.detach();
 
         if tree == base_tree {
             let commit = match parent {
@@ -382,7 +450,7 @@ impl Push {
         let signature = signature.to_ref(&mut time);
         let commit = repo
             .new_commit_as(signature, signature, message, tree, parent)
-            .map_err(object_error)?
+            .map_err(write_error)?
             .id;
 
         let mut objects = vec![object_entry(&repo, commit)?];
@@ -392,7 +460,7 @@ impl Push {
         Ok(Built {
             commit: commit.to_string(),
             parent: parent.map(|p| p.to_string()),
-            pack: Some(write_pack(&objects).map_err(object_error)?),
+            pack: Some(write_pack(&objects)?),
             files: files_under(&repo, tree, prefix)?,
         })
     }
@@ -406,10 +474,15 @@ fn normalize_path(path: &str) -> Result<Vec<String>, Error> {
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
         .collect();
+    let options = gix::validate::path::component::Options {
+        protect_windows: false,
+        protect_hfs: true,
+        protect_ntfs: true,
+    };
     let invalid = path.starts_with('/')
         || path.contains(['\\', '\0'])
         || segments.iter().any(|segment| {
-            segment == "." || segment == ".." || segment.trim_end().eq_ignore_ascii_case(".git")
+            gix::validate::path::component(gix::bstr::BStr::new(segment), None, options).is_err()
         });
     match invalid {
         true => Err(Error::InvalidPath {
@@ -429,23 +502,45 @@ enum Current {
     Other,
 }
 
+/// What `path` holds in `tree`; an ancestor that is not a directory makes
+/// it [`Current::Other`], since writing below it would replace it.
 fn entry_at(repo: &gix::Repository, tree: ObjectId, path: &str) -> Result<Option<Current>, Error> {
-    let tree = repo.find_tree(tree).map_err(object_error)?;
-    let entry = match tree.lookup_entry_by_path(path).map_err(object_error)? {
-        Some(entry) => entry,
-        None => return Ok(None),
-    };
-    let kind = entry.mode().kind();
-    match kind {
-        EntryKind::Blob | EntryKind::BlobExecutable => {
-            let object = entry.object().map_err(object_error)?;
-            Ok(Some(Current::File {
-                kind,
-                content: object.data.clone(),
-            }))
+    let mut tree = read_tree(repo, tree)?;
+    let mut segments = path.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        let (kind, id) = match find_entry(&tree, segment)? {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+        match (kind, segments.peek().is_some()) {
+            (EntryKind::Tree, true) => tree = read_tree(repo, id)?,
+            (EntryKind::Blob | EntryKind::BlobExecutable, false) => {
+                let content = read_object(repo, id)?.detach().data;
+                return Ok(Some(Current::File { kind, content }));
+            }
+            _ => return Ok(Some(Current::Other)),
         }
-        _ => Ok(Some(Current::Other)),
     }
+    Ok(None)
+}
+
+/// The kind and id of the entry named `name` directly in `tree`.
+fn find_entry(tree: &gix::Tree<'_>, name: &str) -> Result<Option<(EntryKind, ObjectId)>, Error> {
+    for entry in tree.iter() {
+        let entry = entry.map_err(read_error)?;
+        if entry.filename() == name {
+            return Ok(Some((entry.mode().kind(), entry.object_id())));
+        }
+    }
+    Ok(None)
+}
+
+fn read_tree(repo: &gix::Repository, id: ObjectId) -> Result<gix::Tree<'_>, Error> {
+    repo.find_tree(id).map_err(read_error)
+}
+
+fn read_object(repo: &gix::Repository, id: ObjectId) -> Result<gix::Object<'_>, Error> {
+    repo.find_object(id).map_err(read_error)
 }
 
 /// A change applies when the branch holds what it was prepared against, or
@@ -475,14 +570,14 @@ fn check_expected(path: &str, change: &FileChange, current: &Option<Current>) ->
 }
 
 fn object_entry(repo: &gix::Repository, id: ObjectId) -> Result<(PackEntryHeader, Vec<u8>), Error> {
-    let object = repo.find_object(id).map_err(object_error)?;
+    let object = read_object(repo, id)?;
     let header = match object.kind {
         gix::object::Kind::Commit => PackEntryHeader::Commit,
         gix::object::Kind::Tree => PackEntryHeader::Tree,
         gix::object::Kind::Blob => PackEntryHeader::Blob,
         gix::object::Kind::Tag => PackEntryHeader::Tag,
     };
-    Ok((header, object.data.clone()))
+    Ok((header, object.detach().data))
 }
 
 /// Ids of every tree and blob reachable from `tree`.
@@ -493,9 +588,9 @@ fn reachable(repo: &gix::Repository, tree: ObjectId) -> Result<HashSet<ObjectId>
         if !seen.insert(id) {
             continue;
         }
-        let tree = repo.find_tree(id).map_err(object_error)?;
+        let tree = read_tree(repo, id)?;
         for entry in tree.iter() {
-            let entry = entry.map_err(object_error)?;
+            let entry = entry.map_err(read_error)?;
             match entry.mode().is_tree() {
                 true => pending.push(entry.oid().to_owned()),
                 false => {
@@ -519,13 +614,17 @@ fn new_objects(
         return Ok(());
     }
     objects.push(object_entry(repo, tree)?);
-    for entry in repo.find_tree(tree).map_err(object_error)?.iter() {
-        let entry = entry.map_err(object_error)?;
-        let id = entry.oid().to_owned();
-        if entry.mode().is_tree() {
-            new_objects(repo, id, known, objects)?;
-        } else if !entry.mode().is_commit() && known.insert(id) {
-            objects.push(object_entry(repo, id)?);
+    for entry in read_tree(repo, tree)?.iter() {
+        let entry = entry.map_err(read_error)?;
+        let id = entry.object_id();
+        match entry.mode().kind() {
+            EntryKind::Tree => new_objects(repo, id, known, objects)?,
+            EntryKind::Commit => {}
+            EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => {
+                if known.insert(id) {
+                    objects.push(object_entry(repo, id)?);
+                }
+            }
         }
     }
     Ok(())
@@ -540,8 +639,10 @@ fn files_under(
     let root = match prefix.is_empty() {
         true => Some(tree),
         false => {
-            let tree = repo.find_tree(tree).map_err(object_error)?;
-            match tree.lookup_entry_by_path(prefix).map_err(object_error)? {
+            let lookup = read_tree(repo, tree)?
+                .lookup_entry_by_path(prefix)
+                .map_err(read_error)?;
+            match lookup {
                 Some(entry) if entry.mode().is_tree() => Some(entry.object_id()),
                 _ => None,
             }
@@ -560,42 +661,48 @@ fn collect_files(
     base: &str,
     files: &mut Vec<CommittedFile>,
 ) -> Result<(), Error> {
-    for entry in repo.find_tree(tree).map_err(object_error)?.iter() {
-        let entry = entry.map_err(object_error)?;
+    for entry in read_tree(repo, tree)?.iter() {
+        let entry = entry.map_err(read_error)?;
         let path = match base.is_empty() {
             true => entry.filename().to_string(),
             false => format!("{base}/{}", entry.filename()),
         };
-        if entry.mode().is_tree() {
-            collect_files(repo, entry.oid().to_owned(), &path, files)?;
-        } else if entry.mode().is_blob() {
-            let object = repo.find_object(entry.oid()).map_err(object_error)?;
-            files.push(CommittedFile {
+        let id = entry.object_id();
+        match entry.mode().kind() {
+            EntryKind::Tree => collect_files(repo, id, &path, files)?,
+            EntryKind::Blob | EntryKind::BlobExecutable => files.push(CommittedFile {
                 path,
-                content: object.data.clone(),
-            });
+                content: read_object(repo, id)?.detach().data,
+            }),
+            EntryKind::Link | EntryKind::Commit => {}
         }
     }
     Ok(())
 }
 
 /// Encodes a pack of whole (undeltified) objects.
-fn write_pack(objects: &[(PackEntryHeader, Vec<u8>)]) -> Result<Vec<u8>, std::io::Error> {
-    let mut pack = gix::odb::pack::data::header::encode(
-        gix::odb::pack::data::Version::V2,
-        objects.len() as u32,
-    )
-    .to_vec();
+fn write_pack(objects: &[(PackEntryHeader, Vec<u8>)]) -> Result<Vec<u8>, Error> {
+    let count = u32::try_from(objects.len()).map_err(|source| Error::TooManyObjects {
+        count: objects.len(),
+        source,
+    })?;
+    let encode = |source| Error::EncodePack { source };
+    let mut pack =
+        gix::odb::pack::data::header::encode(gix::odb::pack::data::Version::V2, count).to_vec();
     for (header, data) in objects {
-        header.write_to(data.len() as u64, &mut pack)?;
+        header
+            .write_to(data.len() as u64, &mut pack)
+            .map_err(encode)?;
         let mut encoder =
             flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(data)?;
-        pack.extend(encoder.finish()?);
+        encoder.write_all(data).map_err(encode)?;
+        pack.extend(encoder.finish().map_err(encode)?);
     }
     let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
     hasher.update(&pack);
-    let digest = hasher.try_finalize().map_err(std::io::Error::other)?;
+    let digest = hasher
+        .try_finalize()
+        .map_err(|e| encode(std::io::Error::other(e)))?;
     pack.extend_from_slice(digest.as_bytes());
     Ok(pack)
 }
@@ -614,7 +721,10 @@ fn pkt_lines(mut body: &[u8]) -> Result<Vec<&[u8]>, Error> {
                 }
                 body = &body[bytes_consumed..];
             }
-            _ => return Err(Error::InvalidPktLine),
+            Ok(packetline::decode::Stream::Incomplete { .. }) => {
+                return Err(Error::TruncatedPktLine)
+            }
+            Err(source) => return Err(Error::InvalidPktLine { source }),
         }
     }
     Ok(lines)
@@ -637,13 +747,21 @@ fn advertised_refs(body: &[u8]) -> Result<HashMap<String, String>, Error> {
                 })
             }
             Some((id, name)) => {
-                let id =
-                    ObjectId::from_hex(id.as_bytes()).map_err(|_| Error::InvalidAdvertisement)?;
+                let id = ObjectId::from_hex(id.as_bytes()).map_err(|source| {
+                    Error::InvalidAdvertisedId {
+                        id: id.to_string(),
+                        source,
+                    }
+                })?;
                 if !id.is_null() {
                     refs.insert(name.to_string(), id.to_string());
                 }
             }
-            None => return Err(Error::InvalidAdvertisement),
+            None => {
+                return Err(Error::InvalidAdvertisement {
+                    line: line.trim_end().to_string(),
+                })
+            }
         }
     }
     Ok(refs)
@@ -835,6 +953,24 @@ mod tests {
             normalize_path("flows/a.yaml").unwrap(),
             vec!["flows", "a.yaml"]
         );
+    }
+
+    #[test]
+    fn names_that_ntfs_or_hfs_resolve_to_dot_git_are_rejected() {
+        for path in [
+            ".git.",
+            "a/.git./b",
+            ".git::$INDEX_ALLOCATION/config",
+            "git~1/config",
+            "GIT~1/config",
+            ".g\u{200c}it/config",
+            "a/.\u{feff}GIT/b",
+        ] {
+            assert!(normalize_path(path).is_err(), "{path:?}");
+        }
+        for path in [".github/ci.yaml", ".gitignore", "git/a.yaml", "a.git/b"] {
+            assert!(normalize_path(path).is_ok(), "{path:?}");
+        }
     }
 
     #[test]

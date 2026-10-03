@@ -9,16 +9,16 @@ use std::time::Duration;
 pub struct Endpoint {
     /// The unique name of the task.
     pub name: String,
-    /// How long a call waits for the flow to finish. Unbounded when unset.
+    /// How long a call may take, from handing its event to the flow until the
+    /// flow finishes. Unbounded when unset.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<Duration>,
-    /// Identity prefixes of the flows allowed to call, e.g. `["user/", "platform/"]`.
-    /// Defaults to the flow's own top-level folder; flowgen itself may always call.
+    /// Flows allowed to call, e.g. `["user/", "platform/"]`: each entry admits the
+    /// flow of that identity and every flow in it as a folder, and `""` admits
+    /// every flow. Defaults to the flow's own top-level folder; flowgen itself may
+    /// always call.
     #[serde(default)]
     pub callers: Option<Vec<String>>,
-    /// Optional retry configuration for initialization.
-    #[serde(default)]
-    pub retry: Option<crate::retry::RetryConfig>,
 }
 
 /// Processor that calls a flow with an `inproc_endpoint` and emits its result.

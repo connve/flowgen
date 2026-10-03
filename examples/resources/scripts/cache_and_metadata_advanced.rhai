@@ -15,7 +15,7 @@ if ctx.cache.get(idempotency_key) != () {
     // Set metadata for observability
     ctx.meta.status = "duplicate";
     ctx.meta.reason = "already_processed";
-    return null;
+    return ();
 }
 
 // ============================================
