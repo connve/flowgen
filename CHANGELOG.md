@@ -47,6 +47,8 @@
 
 - Web UI returns to the current page after sign-in. `/auth/login` accepts
   `return_to`.
+- An open flow or resource preview shows its details page URL, so the link
+  can be shared, and Back closes the preview.
 - Without `POD_IP`, a pod advertises the address of its default route
   interface to other pods.
 - `git_sync` with `credentials_path` requires an HTTPS repository URL, or

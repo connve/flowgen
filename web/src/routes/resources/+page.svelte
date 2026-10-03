@@ -2,7 +2,8 @@
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import { base } from '$app/paths';
-	import { goto } from '$app/navigation';
+	import { goto, pushState } from '$app/navigation';
+	import { page } from '$app/state';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
@@ -113,6 +114,7 @@
 
 	async function openResource(key: string) {
 		pendingResource = key;
+		pushState(`${base}/resources/${encodePath(key)}`, { resource: key });
 		const cached = contentCache.get(key);
 		if (cached) {
 			selected = key;
@@ -141,6 +143,18 @@
 	}
 
 	function closeResource() {
+		if (page.state.resource) history.back();
+		else clearResource();
+	}
+
+	// Back closes the preview: the shallow history entry it pushed is gone.
+	$effect(() => {
+		if (!page.state.resource && (selected || selectedLoading)) clearResource();
+	});
+
+	function clearResource() {
+		pendingResource = null;
+		selectedLoading = false;
 		selected = null;
 		selectedContent = null;
 		selectedError = null;

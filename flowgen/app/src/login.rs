@@ -34,7 +34,7 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
-/// How long a refresh result answers requests still carrying the refresh token it replaced.
+/// How long one session refresh is shared with in-flight requests still sending the old refresh token.
 const REFRESH_REUSE_WINDOW: Duration = Duration::from_secs(30);
 
 /// Errors from the interactive login flow. Separate from

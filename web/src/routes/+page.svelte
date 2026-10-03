@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { goto } from '$app/navigation';
+	import { goto, pushState } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
@@ -162,6 +163,7 @@
 
 	async function openFlow(path: string) {
 		pendingFlow = path;
+		pushState(`${base}/flows/${encodePath(path)}`, { flow: path });
 		const cached = flowCache.get(path);
 		if (cached) {
 			selected = path;
@@ -190,6 +192,18 @@
 	}
 
 	function closeFlow() {
+		if (page.state.flow) history.back();
+		else clearFlow();
+	}
+
+	// Back closes the preview: the shallow history entry it pushed is gone.
+	$effect(() => {
+		if (!page.state.flow && (selected || selectedLoading)) clearFlow();
+	});
+
+	function clearFlow() {
+		pendingFlow = null;
+		selectedLoading = false;
 		selected = null;
 		selectedDetail = null;
 		selectedError = null;

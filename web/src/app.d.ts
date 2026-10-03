@@ -5,6 +5,10 @@ declare global {
 		interface Error {}
 		interface Locals {}
 		interface PageData {}
+		interface PageState {
+			flow?: string;
+			resource?: string;
+		}
 		interface Platform {}
 	}
 }
