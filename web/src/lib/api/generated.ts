@@ -424,7 +424,7 @@ export interface paths {
          * Approve a pending change and publish it, or publish a failed one again.
          * @description Requires a signed-in user's session, and membership of one of
          *     `web.authoring.approver_groups` when set; machine keys are refused.
-         *     Runs the flow behind `web.authoring.publish_endpoint` with
+         *     Calls the flow `web.authoring.publish_flow` with
          *     `{id, title, author, files}` and records its result. A `failed`
          *     change, or one left `publishing` past `web.authoring.publish_timeout`,
          *     can be approved again.
@@ -724,6 +724,13 @@ export interface components {
             yaml: string;
             /** @description Whether `web.authoring` is set, so changes can be proposed. */
             authoring: boolean;
+            /** @description Where changes can be proposed; empty when authoring is off. */
+            authoringTargets: components["schemas"]["AuthoringTarget"][];
+        };
+        AuthoringTarget: {
+            name: string;
+            /** @description Workspace path prefixes the target covers, e.g. `flows/user/`. */
+            paths: string[];
         };
         /** @description A resolved identity from the configured OIDC provider. */
         UserContext: {
@@ -779,6 +786,8 @@ export interface components {
         };
         Change: {
             id: string;
+            /** @description The `web.authoring.targets` entry every file of the change falls in. */
+            target: string;
             title: string;
             description?: string;
             status: components["schemas"]["ChangeStatus"];
@@ -806,6 +815,7 @@ export interface components {
             /** @description Workspace paths the change touches. */
             paths: string[];
             id: string;
+            target: string;
             title: string;
             status: components["schemas"]["ChangeStatus"];
             proposedBy: string;
@@ -1493,7 +1503,10 @@ export interface operations {
                     "application/json": components["schemas"]["Change"];
                 };
             };
-            /** @description A file path is outside `flows/` and `resources/`. */
+            /**
+             * @description A file path is outside `flows/` and `resources/`, outside every
+             *     `web.authoring.targets` entry, or the files span several targets.
+             */
             400: {
                 headers: {
                     [name: string]: unknown;

@@ -194,8 +194,12 @@ Embedded web dashboard and JSON API.
 | `path` | string | `/` | Path prefix for both the UI and the API. |
 | `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
 | `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
-| `authoring.publish_endpoint` | string | | Enables change proposals; the `http_endpoint` path of the flow that publishes approved changes. See [Authoring](/docs/flowgen/concepts/authoring). |
-| `authoring.approver_groups` | list of string | `[]` | Identity provider groups whose members may approve and reject. Empty allows every signed-in user. |
+| `authoring.enabled` | bool | | Enables change proposals. See [Authoring](/docs/flowgen/concepts/authoring). |
+| `authoring.targets` | list | one `workspace` target over `flows/` and `resources/` | Where changes can be proposed. See [Targets](/docs/flowgen/concepts/authoring#targets). |
+| `authoring.targets[].name` | string | required | Name shown on the target's changes. |
+| `authoring.targets[].paths` | list of string | required | Workspace path prefixes the target covers, e.g. `flows/user/`. |
+| `authoring.targets[].publish_flow` | string | `system/publish_workspace` | Identity of the flow, starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc), that publishes the target's approved changes. |
+| `authoring.targets[].approver_groups` | list of string | `[]` | Identity provider groups whose members may approve and reject the target's changes. Empty allows every signed-in user. |
 | `authoring.groups_claim` | string | `groups` | Claim of the signed-in user that lists their groups. |
 | `authoring.publish_timeout` | duration | `5m` | How long publishing may take before the change is recorded as failed. |
 

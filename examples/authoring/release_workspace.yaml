@@ -1,0 +1,52 @@
+# Releases the workspace as an OCI artifact whenever the branch moves, for
+# deployments without a CI pipeline of their own. Commits from the web UI and
+# from people go through the same release; the `oci_sync` bootstrap
+# (examples/oci/sync_workspace.yaml) deploys it. Skip it when CI already
+# publishes the artifact.
+#
+# Required:
+#   - GIT_WORKSPACE_URL and OCI_WORKSPACE_REPOSITORY env vars
+#   - /etc/flowgen/credentials/git.json ({token, username?})
+#   - /etc/flowgen/credentials/registry.json ({username, password} or a Docker config.json)
+flow:
+  labels:
+    display_name: "Release Workspace"
+    description: "Pushes the workspace files at each new commit as an OCI artifact tagged with the commit and latest."
+    tags: ["system", "git-sync", "oci-push", "authoring", "example"]
+  require_leader_election: true
+  tasks:
+
+    - generate:
+        name: tick
+        interval: "30s"
+
+    # Emits every file under workspace/ when the branch has a new commit.
+    - git_sync:
+        name: pull_repo
+        repository_url: "{{env.GIT_WORKSPACE_URL}}"
+        branch: main
+        path: "workspace/"
+        credentials_path: /etc/flowgen/credentials/git.json
+
+    - buffer:
+        name: collect_files
+        size: 10000
+        timeout: "5m"
+        flush_on_completion: true
+
+    # Releases only a complete pull; one cut short by the timeout is skipped.
+    - script:
+        name: to_release
+        code: |
+          if event.data.flush_reason != "completion" { return (); }
+          let files = [];
+          for file in event.data.batch {
+              files.push(#{ path: file.path, content: file.content });
+          }
+          #{ commit: event.data.batch[0].commit, files: files }
+
+    - oci_push:
+        name: release
+        repository: "{{env.OCI_WORKSPACE_REPOSITORY}}"
+        tags: ["{{event.data.commit}}", "latest"]
+        credentials_path: /etc/flowgen/credentials/registry.json

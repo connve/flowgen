@@ -6,11 +6,22 @@
 	import CopyButton from '$lib/CopyButton.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
-	import { apiUrl, type ChangeSummary, type ResourceContent } from '$lib/api';
-	import { authoringEnabled, editUrl, pendingChanges, touchesResource } from '$lib/changes';
+	import {
+		apiUrl,
+		type AuthoringTarget,
+		type ChangeSummary,
+		type ResourceContent
+	} from '$lib/api';
+	import {
+		authoringTargets,
+		editUrl,
+		pendingChanges,
+		targetOf,
+		touchesResource
+	} from '$lib/changes';
 
 	let content = $state<ResourceContent | null>(null);
-	let authoring = $state(false);
+	let targets = $state<AuthoringTarget[]>([]);
 	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -19,6 +30,7 @@
 	let keySegments = $derived(resourceKey.split('/'));
 	let folderSegments = $derived(keySegments.slice(0, -1));
 	let leafName = $derived(keySegments[keySegments.length - 1] ?? '');
+	let editable = $derived(targetOf(targets, `resources/${resourceKey}`) !== undefined);
 
 	$effect(() => {
 		const key = resourceKey;
@@ -28,7 +40,7 @@
 	});
 
 	onMount(async () => {
-		authoringEnabled().then((enabled) => (authoring = enabled));
+		authoringTargets().then((found) => (targets = found));
 		try {
 			const response = await fetch(apiUrl(`api/resources/${resourceKey}`));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -58,11 +70,20 @@
 		</div>
 		<div class="flex items-center justify-between gap-2">
 			<h1 class="text-lg font-medium">{leafName}</h1>
-			{#if authoring && content}
-				<a href={editUrl(base, `resources/${resourceKey}`)} class="btn btn-ghost btn-sm">
-					<Icon icon="tabler:pencil" class="h-4 w-4" />
-					Edit
-				</a>
+			{#if targets.length > 0 && content}
+				{#if editable}
+					<a href={editUrl(base, `resources/${resourceKey}`)} class="btn btn-ghost btn-sm">
+						<Icon icon="tabler:pencil" class="h-4 w-4" />
+						Edit
+					</a>
+				{:else}
+					<div class="tooltip tooltip-left" data-tip="Managed in the repository">
+						<button type="button" class="btn btn-ghost btn-sm" disabled>
+							<Icon icon="tabler:pencil" class="h-4 w-4" />
+							Edit
+						</button>
+					</div>
+				{/if}
 			{/if}
 		</div>
 	</div>

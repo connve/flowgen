@@ -247,6 +247,7 @@ mod tests {
             leaf_count: 1,
             startup_delay: None,
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
         })
     }
 

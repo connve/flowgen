@@ -18,6 +18,10 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::sync::mpsc;
 
+/// Bound on one step, including the processor's first connect; generous so
+/// containers started in parallel do not time it out.
+const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn start_nats() -> (ContainerAsync<GenericImage>, String) {
     let container = GenericImage::new("nats", "2.11.8-alpine")
         .with_exposed_port(4222.tcp())
@@ -110,7 +114,7 @@ async fn put_operation_writes_value_and_emits_put_result() {
     .await
     .expect("send event");
 
-    let result_event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    let result_event = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
         .await
         .expect("put emits result")
         .expect("channel open");
@@ -142,9 +146,10 @@ async fn get_operation_retrieves_previously_put_value() {
         ))
         .await
         .expect("send put");
-    let _ = tokio::time::timeout(Duration::from_secs(5), put_rx.recv())
+    tokio::time::timeout(STEP_TIMEOUT, put_rx.recv())
         .await
-        .expect("put ack");
+        .expect("put ack")
+        .expect("channel open");
 
     let (get_tx, mut get_rx) = spawn_processor(KvConfig {
         name: "kv_get".to_string(),
@@ -160,7 +165,7 @@ async fn get_operation_retrieves_previously_put_value() {
         .await
         .expect("send get");
 
-    let result = tokio::time::timeout(Duration::from_secs(5), get_rx.recv())
+    let result = tokio::time::timeout(STEP_TIMEOUT, get_rx.recv())
         .await
         .expect("get returns")
         .expect("channel open")
@@ -191,7 +196,7 @@ async fn get_operation_reports_missing_key_as_not_found() {
         .await
         .expect("send event");
 
-    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+    let result = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
         .await
         .expect("get returns")
         .expect("channel open")
@@ -226,7 +231,10 @@ async fn list_operation_returns_all_keys_under_prefix() {
             ))
             .await
             .expect("send put");
-        let _ = tokio::time::timeout(Duration::from_secs(5), put_rx.recv()).await;
+        tokio::time::timeout(STEP_TIMEOUT, put_rx.recv())
+            .await
+            .expect("seed put returns")
+            .expect("channel open");
     }
 
     let (list_tx, mut list_rx) = spawn_processor(KvConfig {
@@ -243,7 +251,7 @@ async fn list_operation_returns_all_keys_under_prefix() {
         .await
         .expect("send list");
 
-    let result = tokio::time::timeout(Duration::from_secs(5), list_rx.recv())
+    let result = tokio::time::timeout(STEP_TIMEOUT, list_rx.recv())
         .await
         .expect("list returns")
         .expect("channel open")
@@ -282,7 +290,10 @@ async fn delete_operation_removes_key_from_bucket() {
         ))
         .await
         .expect("send put");
-    let _ = tokio::time::timeout(Duration::from_secs(5), put_rx.recv()).await;
+    tokio::time::timeout(STEP_TIMEOUT, put_rx.recv())
+        .await
+        .expect("put ack")
+        .expect("channel open");
 
     let (del_tx, mut del_rx) = spawn_processor(KvConfig {
         name: "kv_delete".to_string(),
@@ -297,7 +308,7 @@ async fn delete_operation_removes_key_from_bucket() {
         .send(drive_event("trigger", serde_json::json!({})))
         .await
         .expect("send delete");
-    let delete_result = tokio::time::timeout(Duration::from_secs(5), del_rx.recv())
+    let delete_result = tokio::time::timeout(STEP_TIMEOUT, del_rx.recv())
         .await
         .expect("delete returns")
         .expect("channel open")
@@ -322,11 +333,77 @@ async fn delete_operation_removes_key_from_bucket() {
         .send(drive_event("trigger", serde_json::json!({})))
         .await
         .expect("send get");
-    let after = tokio::time::timeout(Duration::from_secs(5), get_rx.recv())
+    let after = tokio::time::timeout(STEP_TIMEOUT, get_rx.recv())
         .await
         .expect("get returns")
         .expect("channel open")
         .data_as_json()
         .expect("json");
     assert_eq!(after.get("found").and_then(|f| f.as_bool()), Some(false));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn put_entries_writes_changes_and_prunes_the_rest_under_the_prefix() {
+    let (_nats, url) = start_nats().await;
+    let (tx, mut rx) = spawn_processor(KvConfig {
+        name: "kv_mirror".to_string(),
+        url,
+        bucket: "kv_prune_bucket".to_string(),
+        operation: Operation::Put,
+        key_prefix: Some("flows.".to_string()),
+        prune: true,
+        ..Default::default()
+    })
+    .await;
+    let put = |entries: serde_json::Value| {
+        let tx = tx.clone();
+        async move {
+            tx.send(drive_event(
+                "trigger",
+                serde_json::json!({ "entries": entries }),
+            ))
+            .await
+            .expect("send put");
+        }
+    };
+
+    put(serde_json::json!([
+        {"key": "a", "value": "1"},
+        {"key": "b", "value": "2"},
+        {"key": "c", "value": "3"}
+    ]))
+    .await;
+    let first = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("put returns")
+        .expect("channel open")
+        .data_as_json()
+        .expect("json");
+    assert_eq!(
+        first["put"],
+        serde_json::json!(["flows.a", "flows.b", "flows.c"])
+    );
+
+    put(serde_json::json!([
+        {"key": "a", "value": "1"},
+        {"key": "b", "value": "changed"}
+    ]))
+    .await;
+    let second = tokio::time::timeout(STEP_TIMEOUT, rx.recv())
+        .await
+        .expect("put returns")
+        .expect("channel open")
+        .data_as_json()
+        .expect("json");
+    assert_eq!(second["put"], serde_json::json!(["flows.b"]));
+    assert_eq!(second["deleted"], serde_json::json!(["flows.c"]));
+    assert_eq!(second["unchanged"], 1);
+
+    put(serde_json::json!([])).await;
+    let empty = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+    assert!(
+        !matches!(empty, Ok(Some(ref e)) if e.error.is_none()),
+        "An empty prune must not succeed: {empty:?}"
+    );
 }

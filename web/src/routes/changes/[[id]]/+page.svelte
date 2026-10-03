@@ -151,7 +151,7 @@
 								<Badge variant={statusVariant(change.status)}>{change.status}</Badge>
 							</div>
 							<div class="text-xs opacity-60">
-								Proposed by {change.proposedBy} · {formatAbsolute(change.createdAt)}
+								{change.target} · proposed by {change.proposedBy} · {formatAbsolute(change.createdAt)}
 								{#if change.decidedBy && change.decidedAt}
 									· {change.status === 'rejected' ? 'rejected' : 'approved'} by {change.decidedBy}
 									{formatRelative(change.decidedAt)}
@@ -265,6 +265,7 @@
 					<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
 						<tr>
 							<th>Title</th>
+							<th>Target</th>
 							<th>Status</th>
 							<th>Proposed by</th>
 							<th class="text-right">Files</th>
@@ -285,6 +286,7 @@
 										{item.title}
 									</a>
 								</td>
+								<td class="font-mono text-xs opacity-70">{item.target}</td>
 								<td><Badge variant={statusVariant(item.status)}>{item.status}</Badge></td>
 								<td class="font-mono text-xs opacity-70">{item.proposedBy}</td>
 								<td class="text-right text-sm opacity-70">{item.fileCount}</td>

@@ -192,11 +192,23 @@ http_server:
 #   # api_credentials_path: "/etc/flowgen/credentials/api.json"
 #   # Change proposals for flows and resources, approved in the web UI.
 #   # authoring:
-#   #   # http_endpoint path of the flow that publishes an approved change.
-#   #   publish_endpoint: /workspace/publish
-#   #   # Identity provider groups allowed to approve; empty allows everyone
-#   #   # signed in. Read from the `groups_claim` claim (default `groups`).
-#   #   approver_groups: ["flowgen-approvers"]
+#   #   enabled: true
+#   #   # Where changes can be proposed; a change's files must all fall in one
+#   #   # target. Paths outside every target (here flows/system/) are edited
+#   #   # in the repository only. Defaults to one target over flows/ and
+#   #   # resources/.
+#   #   targets:
+#   #     - name: platform
+#   #       paths: ["flows/platform/", "resources/platform/"]
+#   #       # Identity provider groups allowed to approve; empty allows everyone
+#   #       # signed in. Read from the `groups_claim` claim (default `groups`).
+#   #       approver_groups: ["platform-engineers"]
+#   #     - name: user
+#   #       paths: ["flows/user/", "resources/user/"]
+#   #       approver_groups: ["business-leads"]
+#   #       # Flow, starting with an inproc_endpoint, that publishes the
+#   #       # target's approved changes (default system/publish_workspace).
+#   #       publish_flow: system/publish_workspace
 #   #   # How long publishing may take before the change is recorded as failed.
 #   #   publish_timeout: 5m
 

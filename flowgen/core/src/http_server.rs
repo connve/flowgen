@@ -267,14 +267,6 @@ impl<D: Dispatcher> HttpServer<D> {
         self.table.insert(key, registration);
     }
 
-    /// The registration under `key`, if any.
-    pub fn lookup(&self, key: &str) -> Option<D::Registration>
-    where
-        D::Registration: Clone,
-    {
-        self.table.get(key).map(|entry| entry.value().clone())
-    }
-
     /// Inserts a registration only if `key` is not already present.
     ///
     /// Returns the rejected registration unchanged when the key is taken so

@@ -1,0 +1,25 @@
+# Calls the Mask Contact sub-flow (examples/inproc/mask_contact.yaml) every
+# minute and logs the masked contact it returns.
+#
+# Required: mask_contact.yaml deployed as `inproc/mask_contact`.
+flow:
+  labels:
+    display_name: "Call Mask Contact"
+    description: "Sends a contact to the Mask Contact sub-flow and logs the result."
+    tags: ["inproc", "example"]
+  tasks:
+
+    - generate:
+        name: tick
+        interval: 1m
+        payload:
+          name: "Ada"
+          email: "ada@example.com"
+          phone: "+44 20 7946 0000"
+
+    - inproc_request:
+        name: mask
+        flow: inproc/mask_contact
+
+    - log:
+        name: print

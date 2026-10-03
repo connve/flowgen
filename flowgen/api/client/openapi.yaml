@@ -486,7 +486,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Change"
         "400":
-          description: A file path is outside `flows/` and `resources/`.
+          description: |
+            A file path is outside `flows/` and `resources/`, outside every
+            `web.authoring.targets` entry, or the files span several targets.
         "404":
           description: "`web.authoring` is not configured."
         "503":
@@ -528,7 +530,7 @@ paths:
       description: |
         Requires a signed-in user's session, and membership of one of
         `web.authoring.approver_groups` when set; machine keys are refused.
-        Runs the flow behind `web.authoring.publish_endpoint` with
+        Calls the flow `web.authoring.publish_flow` with
         `{id, title, author, files}` and records its result. A `failed`
         change, or one left `publishing` past `web.authoring.publish_timeout`,
         can be approved again.
@@ -907,7 +909,7 @@ components:
 
     ConfigInfo:
       type: object
-      required: [yaml, authoring]
+      required: [yaml, authoring, authoringTargets]
       properties:
         yaml:
           type: string
@@ -917,6 +919,23 @@ components:
         authoring:
           type: boolean
           description: Whether `web.authoring` is set, so changes can be proposed.
+        authoringTargets:
+          type: array
+          description: Where changes can be proposed; empty when authoring is off.
+          items:
+            $ref: "#/components/schemas/AuthoringTarget"
+
+    AuthoringTarget:
+      type: object
+      required: [name, paths]
+      properties:
+        name:
+          type: string
+        paths:
+          type: array
+          description: Workspace path prefixes the target covers, e.g. `flows/user/`.
+          items:
+            type: string
 
     UserContext:
       type: object
@@ -1024,10 +1043,13 @@ components:
 
     Change:
       type: object
-      required: [id, title, status, proposedBy, createdAt, files, issues]
+      required: [id, target, title, status, proposedBy, createdAt, files, issues]
       properties:
         id:
           type: string
+        target:
+          type: string
+          description: The `web.authoring.targets` entry every file of the change falls in.
         title:
           type: string
         description:
@@ -1065,7 +1087,7 @@ components:
 
     ChangeSummary:
       type: object
-      required: [id, title, status, proposedBy, createdAt, fileCount, paths]
+      required: [id, target, title, status, proposedBy, createdAt, fileCount, paths]
       properties:
         paths:
           type: array
@@ -1073,6 +1095,8 @@ components:
           items:
             type: string
         id:
+          type: string
+        target:
           type: string
         title:
           type: string

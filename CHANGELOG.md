@@ -12,7 +12,18 @@
 
 - `/api/changes`: propose flow and resource changes, then review the diff and
   validation issues and approve or reject them in the web UI, linked from the
-  Flows page. Approving runs the flow set in `web.authoring.publish_endpoint`.
+  Flows page. Enable with `web.authoring.enabled`. Approving calls the
+  target's `publish_flow`, `system/publish_workspace` by default.
+- `web.authoring.targets`: areas of the workspace, such as `flows/platform/`
+  and `flows/user/`, with their own `approver_groups` and `publish_flow`.
+  Paths outside every target cannot be changed through the API.
+- `inproc_endpoint` and `inproc_request` tasks: a flow calls another flow in
+  the same process and gets its result, without HTTP or credentials. By
+  default only flows in the same top-level folder may call; `callers` widens
+  it.
+- `nats_kv_store` `put` without `key` writes every entry of
+  `event.data.entries` under `key_prefix`, skipping unchanged values.
+  `prune: true` deletes the keys under the prefix that are not listed.
 - New and Edit in the web UI open an editor for flows and resources that
   validates the file and proposes it as a change.
 - `POST /api/workspace/validate` checks flow and resource files without
@@ -29,7 +40,6 @@
   `return_to`.
 - Without `POD_IP`, a pod advertises the address of its default route
   interface to other pods.
-
 ### Fixed
 
 - Concurrent requests with an expired session refresh it once.

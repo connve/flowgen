@@ -4,8 +4,9 @@
 	import { page } from '$app/state';
 	import Icon from '@iconify/svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl } from '$lib/api';
-	import { deployedContent } from '$lib/changes';
+	import { onMount, untrack } from 'svelte';
+	import { apiUrl, type AuthoringTarget } from '$lib/api';
+	import { authoringTargets, deployedContent, targetOf } from '$lib/changes';
 	import type { components } from '$lib/api/generated';
 
 	type Issue = components['schemas']['ValidationIssue'];
@@ -41,40 +42,60 @@
 
 	let isNew = $derived(initialPath === null || previous === null);
 	let unchanged = $derived(!isNew && content === previous);
+	let targets = $state<AuthoringTarget[]>([]);
+	let target = $derived(targetOf(targets, path));
+
+	onMount(() => {
+		authoringTargets().then((found) => {
+			targets = found;
+			if (initialPath === null && (path === 'flows/' || path === 'resources/')) {
+				const first = found[0];
+				if (first) path = startPath(first, path);
+			}
+		});
+	});
+
+	// Where a new file starts in `target`: its first prefix of the same kind.
+	function startPath(target: AuthoringTarget, current: string): string {
+		const dir = current.startsWith('resources/') ? 'resources/' : 'flows/';
+		return target.paths.find((prefix) => prefix.startsWith(dir)) ?? target.paths[0] ?? current;
+	}
 
 	// Resets the form whenever the URL names another file; a response for a
 	// file the user already left is dropped.
 	$effect(() => {
-		const target = initialPath;
+		const file = initialPath;
 		const newKind = kind;
 		previous = null;
 		issues = null;
 		loadError = null;
 		proposeError = null;
 		description = '';
-		if (target === null) {
-			path = newKind === 'resource' ? 'resources/' : 'flows/';
+		if (file === null) {
+			const dir = newKind === 'resource' ? 'resources/' : 'flows/';
+			const first = untrack(() => targets)[0];
+			path = first ? startPath(first, dir) : dir;
 			content = newKind === 'resource' ? '' : NEW_FLOW;
 			title = '';
 			loading = false;
 			return;
 		}
-		path = target;
+		path = file;
 		content = '';
 		loading = true;
-		deployedContent(target)
+		deployedContent(file)
 			.then((deployed) => {
-				if (target !== initialPath) return;
+				if (file !== initialPath) return;
 				previous = deployed;
 				content = deployed ?? '';
-				title = deployed === null ? `Add ${target}` : `Update ${target}`;
+				title = deployed === null ? `Add ${file}` : `Update ${file}`;
 			})
 			.catch((err) => {
-				if (target === initialPath)
+				if (file === initialPath)
 					loadError = err instanceof Error ? err.message : 'Failed to load the file';
 			})
 			.finally(() => {
-				if (target === initialPath) loading = false;
+				if (file === initialPath) loading = false;
 			});
 	});
 
@@ -143,12 +164,35 @@
 	{:else}
 		<div class="grid gap-3 md:grid-cols-2">
 			<label class="form-control">
-				<span class="label-text mb-1 text-xs opacity-70">Path</span>
-				<input
-					class="input input-sm border border-base-300 font-mono"
-					bind:value={path}
-					placeholder="flows/orders/sync.yaml"
-				/>
+				<span class="label-text mb-1 flex items-center gap-2 text-xs opacity-70">
+					Path
+					{#if target}
+						<span class="badge badge-ghost badge-xs">{target.name}</span>
+					{:else if targets.length > 0}
+						<span class="text-error">not in any authoring target</span>
+					{/if}
+				</span>
+				<div class="flex gap-1">
+					{#if isNew && targets.length > 1}
+						<select
+							class="select select-sm border border-base-300"
+							value={target?.name ?? ''}
+							onchange={(e) => {
+								const chosen = targets.find((t) => t.name === e.currentTarget.value);
+								if (chosen) path = startPath(chosen, path);
+							}}
+						>
+							{#each targets as option (option.name)}
+								<option value={option.name}>{option.name}</option>
+							{/each}
+						</select>
+					{/if}
+					<input
+						class="input input-sm flex-1 border border-base-300 font-mono"
+						bind:value={path}
+						placeholder="flows/orders/sync.yaml"
+					/>
+				</div>
 			</label>
 			<label class="form-control">
 				<span class="label-text mb-1 text-xs opacity-70">Title</span>
@@ -198,7 +242,7 @@
 				<button
 					type="button"
 					class="btn btn-ghost btn-sm text-error"
-					disabled={proposing}
+					disabled={proposing || !target}
 					onclick={() => propose(true)}
 				>
 					<Icon icon="tabler:trash" class="h-4 w-4" />
@@ -217,7 +261,7 @@
 			<button
 				type="button"
 				class="btn btn-primary btn-sm"
-				disabled={proposing || unchanged || content.trim() === ''}
+				disabled={proposing || unchanged || content.trim() === '' || !target}
 				onclick={() => propose(false)}
 			>
 				{#if proposing}

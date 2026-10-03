@@ -28,12 +28,20 @@ pub enum Error {
     NotPending { status: api::ChangeStatus },
     #[error("The change has invalid files")]
     Invalid,
+    #[error("A change needs at least one file")]
+    NoFiles,
+    #[error("'{path}' is not in any web.authoring.targets entry, so it cannot be changed here")]
+    NoTarget { path: String },
+    #[error(
+        "The files belong to the targets '{first}' and '{second}'; propose a change per target"
+    )]
+    MixedTargets { first: String, second: String },
+    #[error("The change's target '{target}' is no longer configured")]
+    TargetGone { target: String },
     #[error("Only a signed-in user can approve or reject changes")]
     UserRequired,
     #[error("'{user}' is not allowed to approve or reject changes")]
     NotApprover { user: String },
-    #[error("http_server is not enabled, so the publish flow cannot run")]
-    NoHttpServer,
     #[error("Publishing did not finish within {timeout:?}; it may still complete, approve again to retry")]
     PublishTimeout { timeout: std::time::Duration },
     #[error("Publishing stopped unexpectedly: {source}")]
@@ -42,7 +50,7 @@ pub enum Error {
         source: tokio::task::JoinError,
     },
     #[error(transparent)]
-    Invoke(#[from] flowgen_http::endpoint::InvokeError),
+    Call(#[from] flowgen_core::task::inproc::registry::CallError),
     #[error("Failed to serialize the publish request: {source}")]
     Serialize {
         #[source]
@@ -80,18 +88,23 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
             Error::NotConfigured | Error::NotFound { .. } => StatusCode::NOT_FOUND,
-            Error::InvalidPath { .. } => StatusCode::BAD_REQUEST,
-            Error::NotPending { .. } | Error::Invalid | Error::Concurrent => StatusCode::CONFLICT,
+            Error::InvalidPath { .. }
+            | Error::NoFiles
+            | Error::NoTarget { .. }
+            | Error::MixedTargets { .. } => StatusCode::BAD_REQUEST,
+            Error::NotPending { .. }
+            | Error::Invalid
+            | Error::Concurrent
+            | Error::TargetGone { .. } => StatusCode::CONFLICT,
             Error::UserRequired | Error::NotApprover { .. } => StatusCode::FORBIDDEN,
             Error::Store { .. }
             | Error::Corrupt { .. }
             | Error::Deployed { .. }
             | Error::DeployedCache { .. }
             | Error::RegistryUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Error::NoHttpServer
-            | Error::PublishTimeout { .. }
+            Error::PublishTimeout { .. }
             | Error::PublishAborted { .. }
-            | Error::Invoke(_)
+            | Error::Call(_)
             | Error::Serialize { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::SERVICE_UNAVAILABLE {
@@ -217,6 +230,50 @@ fn with_diffs(mut change: api::Change) -> api::Change {
     change
 }
 
+/// The one target every path falls in.
+fn target_for<'a, 'p>(
+    authoring: &'a crate::config::AuthoringOptions,
+    paths: impl IntoIterator<Item = &'p str>,
+) -> Result<&'a crate::config::AuthoringTarget, Error> {
+    let mut found: Option<&crate::config::AuthoringTarget> = None;
+    for path in paths {
+        let target = match authoring.targets.iter().find(|target| target.covers(path)) {
+            Some(target) => target,
+            None => {
+                return Err(Error::NoTarget {
+                    path: path.to_string(),
+                })
+            }
+        };
+        match found {
+            Some(first) if first.name != target.name => {
+                return Err(Error::MixedTargets {
+                    first: first.name.clone(),
+                    second: target.name.clone(),
+                })
+            }
+            _ => found = Some(target),
+        }
+    }
+    match found {
+        Some(target) => Ok(target),
+        None => Err(Error::NoFiles),
+    }
+}
+
+/// The configured target a stored change belongs to.
+fn target_named<'a>(
+    authoring: &'a crate::config::AuthoringOptions,
+    name: &str,
+) -> Result<&'a crate::config::AuthoringTarget, Error> {
+    match authoring.targets.iter().find(|target| target.name == name) {
+        Some(target) => Ok(target),
+        None => Err(Error::TargetGone {
+            target: name.to_string(),
+        }),
+    }
+}
+
 /// Change ids are what [`propose_change`] generates: lowercase hex.
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -254,12 +311,13 @@ fn caller_label(caller: Option<&Caller>) -> String {
     }
 }
 
-/// Approving and rejecting is for people, and for members of
+/// Approving and rejecting is for people, and for members of the target's
 /// `approver_groups` when set: a machine key is refused. Without `web.auth`
 /// there is no caller and everyone may decide.
 fn decider(
     caller: Option<&Caller>,
     authoring: &crate::config::AuthoringOptions,
+    target: &crate::config::AuthoringTarget,
 ) -> Result<Option<flowgen_core::auth::UserContext>, Error> {
     let user = match caller {
         Some(Caller::User(user)) => user,
@@ -274,8 +332,8 @@ fn decider(
         Some(serde_json::Value::String(group)) => vec![group.as_str()],
         _ => Vec::new(),
     };
-    let allowed = authoring.approver_groups.is_empty()
-        || authoring
+    let allowed = target.approver_groups.is_empty()
+        || target
             .approver_groups
             .iter()
             .any(|group| groups.contains(&group.as_str()));
@@ -364,6 +422,7 @@ pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<R
             Ok((change, _)) => changes.push(api::ChangeSummary {
                 paths: change.files.iter().map(|file| file.path.clone()).collect(),
                 id: change.id,
+                target: change.target,
                 title: change.title,
                 status: change.status,
                 proposed_by: change.proposed_by,
@@ -389,8 +448,14 @@ pub(crate) async fn propose_change(
     caller: Option<Extension<Caller>>,
     Json(proposal): Json<api::ChangeProposal>,
 ) -> Result<Response, Error> {
-    require_authoring(&state)?;
+    let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
+    let target = target_for(
+        authoring,
+        proposal.files.iter().map(|file| file.path.as_str()),
+    )?
+    .name
+    .clone();
     let mut files = Vec::with_capacity(proposal.files.len());
     for file in &proposal.files {
         let location = match locate(&file.path) {
@@ -411,6 +476,7 @@ pub(crate) async fn propose_change(
     }
     let change = api::Change {
         id: uuid::Uuid::now_v7().simple().to_string(),
+        target,
         title: proposal.title,
         description: proposal.description,
         status: api::ChangeStatus::Pending,
@@ -454,6 +520,7 @@ struct PublishAuthor {
 #[derive(Serialize)]
 struct Publish<'a> {
     id: &'a str,
+    target: &'a str,
     title: &'a str,
     author: PublishAuthor,
     files: Vec<PublishFile<'a>>,
@@ -494,8 +561,9 @@ pub(crate) async fn approve_change(
 ) -> Result<Json<api::Change>, Error> {
     let authoring = require_authoring(&state)?.clone();
     let caller = caller.map(|Extension(caller)| caller);
-    let user = decider(caller.as_ref(), &authoring)?;
     let (mut change, revision) = load(&state, &id).await?;
+    let target = target_named(&authoring, &change.target)?.clone();
+    let user = decider(caller.as_ref(), &authoring, &target)?;
     if !can_publish(&change, authoring.publish_timeout) {
         return Err(Error::NotPending {
             status: change.status,
@@ -510,7 +578,13 @@ pub(crate) async fn approve_change(
     change.error = None;
     transition(&state, &change, revision).await?;
 
-    let publishing = tokio::spawn(publish(Arc::clone(&state), authoring, user, change));
+    let publishing = tokio::spawn(publish(
+        Arc::clone(&state),
+        authoring.publish_timeout,
+        target,
+        user,
+        change,
+    ));
     match publishing.await {
         Ok(result) => result.map(|change| Json(with_diffs(change))),
         Err(source) => Err(Error::PublishAborted { source }),
@@ -536,16 +610,14 @@ fn can_publish(change: &api::Change, timeout: std::time::Duration) -> bool {
 /// Runs the publish flow for `change` and returns its result.
 async fn run_publish_flow(
     state: &WebState,
-    authoring: &crate::config::AuthoringOptions,
+    publish_timeout: std::time::Duration,
+    target: &crate::config::AuthoringTarget,
     user: Option<&flowgen_core::auth::UserContext>,
     change: &api::Change,
 ) -> Result<Option<serde_json::Value>, Error> {
-    let server = match &state.http_server {
-        Some(server) => server,
-        None => return Err(Error::NoHttpServer),
-    };
     let publish = Publish {
         id: &change.id,
+        target: &target.name,
         title: &change.title,
         author: author(user),
         files: change
@@ -564,11 +636,11 @@ async fn run_publish_flow(
         let auth = serde_json::to_value(user).map_err(|source| Error::Serialize { source })?;
         meta.insert(flowgen_core::auth::AUTH.to_string(), auth);
     }
-    let invoked = flowgen_http::endpoint::invoke(server, &authoring.publish_endpoint, data, meta);
-    match tokio::time::timeout(authoring.publish_timeout, invoked).await {
+    let called = state.inproc.call(None, &target.publish_flow, data, meta);
+    match tokio::time::timeout(publish_timeout, called).await {
         Ok(result) => Ok(result?),
         Err(_) => Err(Error::PublishTimeout {
-            timeout: authoring.publish_timeout,
+            timeout: publish_timeout,
         }),
     }
 }
@@ -577,11 +649,12 @@ async fn run_publish_flow(
 /// disconnects does not leave the change in `publishing`.
 async fn publish(
     state: Arc<WebState>,
-    authoring: crate::config::AuthoringOptions,
+    publish_timeout: std::time::Duration,
+    target: crate::config::AuthoringTarget,
     user: Option<flowgen_core::auth::UserContext>,
     mut change: api::Change,
 ) -> Result<api::Change, Error> {
-    match run_publish_flow(&state, &authoring, user.as_ref(), &change).await {
+    match run_publish_flow(&state, publish_timeout, &target, user.as_ref(), &change).await {
         Ok(result) => {
             change.status = api::ChangeStatus::Published;
             change.result = match result {
@@ -614,8 +687,12 @@ pub(crate) async fn reject_change(
 ) -> Result<Json<api::Change>, Error> {
     let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
-    decider(caller.as_ref(), authoring)?;
     let (mut change, revision) = load(&state, &id).await?;
+    decider(
+        caller.as_ref(),
+        authoring,
+        target_named(authoring, &change.target)?,
+    )?;
     let rejectable = matches!(
         change.status,
         api::ChangeStatus::Pending | api::ChangeStatus::Failed
@@ -702,6 +779,7 @@ mod tests {
     fn failed_and_stuck_changes_can_be_published_again() {
         let change = |status: api::ChangeStatus, decided_at: Option<i64>| api::Change {
             id: "a".to_string(),
+            target: "workspace".to_string(),
             title: "t".to_string(),
             description: None,
             status,
@@ -744,22 +822,62 @@ mod tests {
     }
 
     #[test]
-    fn machine_keys_cannot_decide_and_the_author_comes_from_claims() {
-        let options = |groups: &[&str], claim: &str| crate::config::AuthoringOptions {
-            publish_endpoint: "/p".to_string(),
-            approver_groups: groups.iter().map(|g| g.to_string()).collect(),
-            groups_claim: claim.to_string(),
+    fn a_change_belongs_to_exactly_one_target() {
+        let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
+            name: name.to_string(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            publish_flow: "system/publish_workspace".to_string(),
+            approver_groups: Vec::new(),
+        };
+        let authoring = crate::config::AuthoringOptions {
+            enabled: true,
+            targets: vec![
+                target("platform", &["flows/platform/", "resources/platform/"]),
+                target("user", &["flows/user/", "resources/user/"]),
+            ],
+            groups_claim: "groups".to_string(),
             publish_timeout: std::time::Duration::from_secs(1),
+        };
+
+        let user = target_for(&authoring, ["flows/user/a.yaml", "resources/user/s.rhai"]);
+        assert_eq!(user.unwrap().name, "user");
+        assert!(matches!(
+            target_for(&authoring, ["flows/user/a.yaml", "flows/platform/b.yaml"]),
+            Err(Error::MixedTargets { .. })
+        ));
+        assert!(matches!(
+            target_for(&authoring, ["flows/system/publish.yaml"]),
+            Err(Error::NoTarget { path }) if path == "flows/system/publish.yaml"
+        ));
+        assert!(matches!(target_for(&authoring, []), Err(Error::NoFiles)));
+        assert!(matches!(
+            target_named(&authoring, "gone"),
+            Err(Error::TargetGone { .. })
+        ));
+    }
+
+    #[test]
+    fn machine_keys_cannot_decide_and_the_author_comes_from_claims() {
+        let decide = |caller: Option<&Caller>, groups: &[&str], claim: &str| {
+            let options = crate::config::AuthoringOptions {
+                enabled: true,
+                targets: vec![crate::config::AuthoringTarget {
+                    name: "user".to_string(),
+                    paths: vec!["flows/user/".to_string()],
+                    publish_flow: "p".to_string(),
+                    approver_groups: groups.iter().map(|g| g.to_string()).collect(),
+                }],
+                groups_claim: claim.to_string(),
+                publish_timeout: std::time::Duration::from_secs(1),
+            };
+            decider(caller, &options, &options.targets[0])
         };
         let key = Caller::Key("agent".to_string());
         assert!(matches!(
-            decider(Some(&key), &options(&[], "groups")),
+            decide(Some(&key), &[], "groups"),
             Err(Error::UserRequired)
         ));
-        assert!(matches!(
-            decider(None, &options(&["a"], "groups")),
-            Ok(None)
-        ));
+        assert!(matches!(decide(None, &["a"], "groups"), Ok(None)));
 
         let user = flowgen_core::auth::UserContext {
             user_id: "u1".to_string(),
@@ -777,15 +895,15 @@ mod tests {
         };
         let signed_in = Caller::User(user.clone());
         let signed_in = Some(&signed_in);
-        assert!(decider(signed_in, &options(&[], "groups")).is_ok());
-        assert!(decider(signed_in, &options(&["flowgen-approvers"], "groups")).is_ok());
-        assert!(decider(signed_in, &options(&["admin"], "role")).is_ok());
+        assert!(decide(signed_in, &[], "groups").is_ok());
+        assert!(decide(signed_in, &["flowgen-approvers"], "groups").is_ok());
+        assert!(decide(signed_in, &["admin"], "role").is_ok());
         assert!(matches!(
-            decider(signed_in, &options(&["finance"], "groups")),
+            decide(signed_in, &["finance"], "groups"),
             Err(Error::NotApprover { .. })
         ));
         assert!(matches!(
-            decider(signed_in, &options(&["flowgen-approvers"], "missing")),
+            decide(signed_in, &["flowgen-approvers"], "missing"),
             Err(Error::NotApprover { .. })
         ));
         let from_claims = author(Some(&user));

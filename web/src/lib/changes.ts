@@ -1,14 +1,24 @@
-import { apiUrl, encodePath, type ChangeSummary } from '$lib/api';
+import { apiUrl, encodePath, type AuthoringTarget, type ChangeSummary } from '$lib/api';
 
-// Whether `web.authoring` is set, so New and Edit can propose changes.
-export async function authoringEnabled(): Promise<boolean> {
+// Where changes can be proposed; empty when `web.authoring` is off.
+export async function authoringTargets(): Promise<AuthoringTarget[]> {
 	try {
 		const res = await fetch(apiUrl('api/config'));
-		if (!res.ok) return false;
-		return (await res.json()).authoring === true;
+		if (!res.ok) return [];
+		return (await res.json()).authoringTargets ?? [];
 	} catch {
-		return false;
+		return [];
 	}
+}
+
+// Whether `web.authoring` is set, so New can propose changes.
+export async function authoringEnabled(): Promise<boolean> {
+	return (await authoringTargets()).length > 0;
+}
+
+// The target a workspace path falls in, if any.
+export function targetOf(targets: AuthoringTarget[], path: string): AuthoringTarget | undefined {
+	return targets.find((target) => target.paths.some((prefix) => path.startsWith(prefix)));
 }
 
 // Link to the editor for a workspace path.

@@ -100,6 +100,12 @@ pub enum Error {
     /// Error in generate subscriber task.
     #[error(transparent)]
     GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
+    /// Error in inproc endpoint task.
+    #[error(transparent)]
+    InprocEndpoint(#[from] flowgen_core::task::inproc::endpoint::Error),
+    /// Error in inproc request task.
+    #[error(transparent)]
+    InprocRequest(#[from] flowgen_core::task::inproc::request::Error),
     /// Error in cache operations.
     #[error(transparent)]
     Cache(#[from] flowgen_nats::cache::Error),
@@ -402,6 +408,7 @@ impl TaskRegistryBuilder {
             let is_blocking = matches!(
                 task_type,
                 TaskType::http_endpoint(_)
+                    | TaskType::inproc_endpoint(_)
                     | TaskType::mcp_tool(_)
                     | TaskType::mcp_resource(_)
                     | TaskType::mcp_prompt(_)
@@ -560,6 +567,7 @@ impl TaskRegistryBuilder {
             let is_blocking = matches!(
                 task_type,
                 TaskType::http_endpoint(_)
+                    | TaskType::inproc_endpoint(_)
                     | TaskType::mcp_tool(_)
                     | TaskType::mcp_resource(_)
                     | TaskType::mcp_prompt(_)
@@ -610,6 +618,8 @@ pub struct Flow {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for deduplicating connections to external services.
     client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
+    /// Flows callable in-process, shared by every flow.
+    inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
     /// This pod's holder identity, resolved once at the app level so every
     /// flow's Executor agrees on it. `None` falls back to per-flow
     /// resolution (tests).
@@ -673,6 +683,7 @@ impl Flow {
             matches!(
                 task,
                 TaskType::http_endpoint(_)
+                    | TaskType::inproc_endpoint(_)
                     | TaskType::mcp_tool(_)
                     | TaskType::mcp_resource(_)
                     | TaskType::mcp_prompt(_)
@@ -776,7 +787,8 @@ impl Flow {
             .response_registry(response_registry)
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token)
-            .client_registry(Arc::clone(&self.client_registry));
+            .client_registry(Arc::clone(&self.client_registry))
+            .inproc(Arc::clone(&self.inproc));
 
         if let Some(retry_config) = &self.retry {
             task_context_builder = task_context_builder.retry(retry_config.clone());
@@ -1342,6 +1354,45 @@ async fn spawn_task(
                             .task_id(task_id)
                             .task_type(task_type_str)
                             .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::inproc_endpoint(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_core::task::inproc::endpoint::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::inproc_request(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_core::task::inproc::request::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
@@ -2147,6 +2198,8 @@ pub struct FlowBuilder {
     resource_loader: Option<flowgen_core::resource::ResourceLoader>,
     /// Shared client registry for connection pooling.
     client_registry: Option<Arc<flowgen_core::client_registry::ClientRegistry>>,
+    /// Flows callable in-process.
+    inproc: Option<Arc<flowgen_core::task::inproc::registry::InprocRegistry>>,
     /// This pod's holder identity, shared across every flow's Executor.
     holder_identity: Option<String>,
     /// Shared peer registry for flow distribution via consistent hashing.
@@ -2232,6 +2285,15 @@ impl FlowBuilder {
         self
     }
 
+    /// Sets the registry of flows callable in-process.
+    pub fn inproc(
+        mut self,
+        inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
+    ) -> Self {
+        self.inproc = Some(inproc);
+        self
+    }
+
     /// Sets this pod's holder identity, shared across every flow's Executor.
     pub fn holder_identity(mut self, holder_identity: String) -> Self {
         self.holder_identity = Some(holder_identity);
@@ -2268,6 +2330,10 @@ impl FlowBuilder {
             client_registry: match self.client_registry {
                 Some(registry) => registry,
                 None => Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            },
+            inproc: match self.inproc {
+                Some(inproc) => inproc,
+                None => Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             },
             holder_identity: self.holder_identity,
             peer_registry: self.peer_registry,

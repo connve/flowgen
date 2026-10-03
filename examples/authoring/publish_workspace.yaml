@@ -1,30 +1,23 @@
-# Publishes an approved workspace change: commits the files to the workspace
-# repository, then releases the whole workspace as an OCI artifact that the
-# `oci_sync` bootstrap (examples/oci/sync_workspace.yaml) deploys.
+# Publishes an approved workspace change by committing its files to the
+# workspace repository. Releasing the commit is up to the deployment: its CI,
+# or examples/authoring/release_workspace.yaml where there is none.
 #
-# Point `web.authoring.publish_endpoint` at this flow's endpoint.
+# Deploy it as `system/publish_workspace.yaml`, the default
+# `web.authoring.publish_flow`. Approvals call it in-process; it has no HTTP route.
 #
 # Required:
-#   - http_server enabled in the app config
-#   - GIT_WORKSPACE_URL and OCI_WORKSPACE_REPOSITORY env vars
+#   - GIT_WORKSPACE_URL env var
 #   - /etc/flowgen/credentials/git.json ({token, username?})
-#   - /etc/flowgen/credentials/registry.json ({username, password} or a Docker config.json)
-#   - /etc/flowgen/credentials/publish.json ({"bearer_auth": "<long random string>"}),
-#     so the endpoint is not open on http_server; approvals reach it in-process
-#     without the token
 flow:
   labels:
     display_name: "Publish Workspace"
-    description: "Commits an approved change to the workspace repository and releases the workspace as an OCI artifact tagged with the commit."
-    tags: ["system", "git-push", "oci-push", "authoring", "example"]
+    description: "Commits an approved change to the workspace repository."
+    tags: ["system", "git-push", "authoring", "example"]
   tasks:
 
     # Receives {id, title, author, files} from an approved change.
-    - http_endpoint:
+    - inproc_endpoint:
         name: on_approve
-        endpoint: /workspace/publish
-        method: POST
-        credentials_path: /etc/flowgen/credentials/publish.json
         ack_timeout: 120s
 
     # Commits the files under workspace/; fails on a conflict with `previous`.
@@ -38,9 +31,8 @@ flow:
           email: "{{event.data.author.email}}"
         message: "{{event.data.title}}"
 
-    # Releases every workspace file under the commit SHA and the moving tag.
-    - oci_push:
-        name: release
-        repository: "{{env.OCI_WORKSPACE_REPOSITORY}}"
-        tags: ["{{event.data.commit}}", "latest"]
-        credentials_path: /etc/flowgen/credentials/registry.json
+    # Recorded on the change as its result.
+    - script:
+        name: result
+        code: |
+          #{ commit: event.data.commit, changed: event.data.changed }

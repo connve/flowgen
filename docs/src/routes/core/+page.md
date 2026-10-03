@@ -8,3 +8,4 @@ Built-in tasks for data transformation, scripting, and flow control.
 - [Buffer](/docs/flowgen/core/buffer) — batch events by count or time window.
 - [Generate](/docs/flowgen/core/generate) — emit events on a cron schedule.
 - [Log](/docs/flowgen/core/log) — log events for debugging.
+- [In-Process Calls](/docs/flowgen/core/inproc) — call another flow and use its result.

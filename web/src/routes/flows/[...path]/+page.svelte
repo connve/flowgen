@@ -5,23 +5,25 @@
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
-	import { apiUrl, type ChangeSummary, type FlowDetail } from '$lib/api';
+	import { apiUrl, type AuthoringTarget, type ChangeSummary, type FlowDetail } from '$lib/api';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
-		authoringEnabled,
+		authoringTargets,
 		editUrl,
 		flowFilePath,
 		pendingChanges,
+		targetOf,
 		touchesFlow
 	} from '$lib/changes';
 
 	let detail = $state<FlowDetail | null>(null);
 	let pending = $state<ChangeSummary[]>([]);
-	let authoring = $state(false);
+	let targets = $state<AuthoringTarget[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
 	let flowPath = $derived(page.params.path ?? '');
+	let editable = $derived(targetOf(targets, flowFilePath(flowPath)) !== undefined);
 	let activities = $derived(activitiesFor(flowPath));
 	// Split path into (folder segments, leaf) so the breadcrumb can render
 	// folder segments as visual context and the leaf as the current page.
@@ -37,7 +39,7 @@
 	});
 
 	onMount(() => {
-		authoringEnabled().then((enabled) => (authoring = enabled));
+		authoringTargets().then((found) => (targets = found));
 		fetch(apiUrl(`api/flows/${flowPath.split('/').map(encodeURIComponent).join('/')}`))
 			.then((r) => {
 				if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -75,11 +77,20 @@
 	</div>
 	<div class="mb-4 flex items-center justify-between gap-2">
 		<h1 class="text-lg font-medium">{detail?.display_name ?? leafName}</h1>
-		{#if authoring && detail}
-			<a href={editUrl(base, flowFilePath(flowPath))} class="btn btn-ghost btn-sm">
-				<Icon icon="tabler:pencil" class="h-4 w-4" />
-				Edit
-			</a>
+		{#if targets.length > 0 && detail}
+			{#if editable}
+				<a href={editUrl(base, flowFilePath(flowPath))} class="btn btn-ghost btn-sm">
+					<Icon icon="tabler:pencil" class="h-4 w-4" />
+					Edit
+				</a>
+			{:else}
+				<div class="tooltip tooltip-left" data-tip="Managed in the repository">
+					<button type="button" class="btn btn-ghost btn-sm" disabled>
+						<Icon icon="tabler:pencil" class="h-4 w-4" />
+						Edit
+					</button>
+				</div>
+			{/if}
 		{/if}
 	</div>
 

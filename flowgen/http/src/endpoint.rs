@@ -527,57 +527,6 @@ async fn inject_event(
     Ok(completion_rx)
 }
 
-/// Failure of an in-process endpoint call.
-#[derive(thiserror::Error, Debug)]
-pub enum InvokeError {
-    #[error("No http_endpoint is registered at '{endpoint}'")]
-    NotFound { endpoint: String },
-    #[error(transparent)]
-    Inject(#[from] Error),
-    #[error("The flow failed: {reason}")]
-    Failed { reason: String },
-    #[error("The flow did not finish within {timeout:?}")]
-    Timeout { timeout: std::time::Duration },
-    #[error("The flow stopped before finishing")]
-    Dropped,
-}
-
-/// Runs the flow behind `endpoint` in-process, with `data` as the event and
-/// `meta` merged into its meta, and returns the result of its last task.
-///
-/// The endpoint's own credentials and auth are not checked: the caller has
-/// authenticated the request already.
-pub async fn invoke(
-    server: &crate::server::EndpointServer,
-    endpoint: &str,
-    data: Value,
-    meta: Map<String, Value>,
-) -> Result<Option<Value>, InvokeError> {
-    let registration = match server.lookup(endpoint) {
-        Some(registration) => registration,
-        None => {
-            return Err(InvokeError::NotFound {
-                endpoint: endpoint.to_string(),
-            })
-        }
-    };
-    let completion_rx = inject_event(&registration, data, meta).await?;
-    let outcome = match registration.config.ack_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
-            Ok(outcome) => outcome,
-            Err(_) => return Err(InvokeError::Timeout { timeout }),
-        },
-        None => completion_rx.await,
-    };
-    match outcome {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(reason)) => Err(InvokeError::Failed {
-            reason: reason.to_string(),
-        }),
-        Err(_) => Err(InvokeError::Dropped),
-    }
-}
-
 /// Non-streaming dispatch: parses the request, injects an event, awaits flow
 /// completion (bounded by `ack_timeout` if configured), and returns
 /// `200 OK` on success or `500` on completion failure.
@@ -928,70 +877,5 @@ mod tests {
             validate_basic_auth(&auth, b"user:password"),
             Err(Error::InvalidCredentials)
         ));
-    }
-
-    /// A server with a flow registered at `/publish` whose single leaf answers
-    /// every event with `answer`.
-    fn server_answering(
-        answer: Result<Value, &'static str>,
-    ) -> (Arc<crate::server::EndpointServer>, mpsc::Receiver<Event>) {
-        let (tx, rx) = mpsc::channel(1);
-        let server = Arc::new(crate::server::EndpointServer::new("/".to_string()));
-        server.register(
-            "/publish".to_string(),
-            crate::server::EndpointRegistration {
-                flow_name: "f".to_string(),
-                config: Arc::new(crate::config::Processor {
-                    name: "publish".to_string(),
-                    ..Default::default()
-                }),
-                credentials: None,
-                auth_provider: None,
-                tx,
-                task_id: 0,
-                task_type: "http_endpoint",
-                response_registry: Arc::new(ResponseRegistry::new()),
-                leaf_count: 1,
-                cancellation_token: tokio_util::sync::CancellationToken::new(),
-            },
-        );
-        let (leaf_tx, leaf_rx) = mpsc::channel(1);
-        let mut events = rx;
-        tokio::spawn(async move {
-            let event = events.recv().await.expect("event");
-            let completion = event.completion_tx.clone().expect("completion");
-            match &answer {
-                Ok(value) => completion.signal_completion(Some(value.clone())),
-                Err(reason) => completion.signal_completion_with_error(reason.to_string()),
-            }
-            leaf_tx.send(event).await.ok();
-        });
-        (server, leaf_rx)
-    }
-
-    #[tokio::test]
-    async fn invoke_returns_the_flow_result_and_passes_data_and_meta() {
-        let (server, mut seen) = server_answering(Ok(json!({"commit": "abc"})));
-        let mut meta = Map::new();
-        meta.insert("auth".to_string(), json!({"user_id": "u"}));
-
-        let result = invoke(&server, "/publish", json!({"files": []}), meta)
-            .await
-            .unwrap();
-
-        assert_eq!(result, Some(json!({"commit": "abc"})));
-        let event = seen.recv().await.unwrap();
-        assert_eq!(event.data_as_json().unwrap(), json!({"files": []}));
-        assert_eq!(event.meta.unwrap()["auth"]["user_id"], "u");
-    }
-
-    #[tokio::test]
-    async fn invoke_reports_a_failed_flow_and_an_unknown_endpoint() {
-        let (server, _seen) = server_answering(Err("conflict"));
-        let failed = invoke(&server, "/publish", json!({}), Map::new()).await;
-        assert!(matches!(failed, Err(InvokeError::Failed { reason }) if reason == "conflict"));
-
-        let missing = invoke(&server, "/other", json!({}), Map::new()).await;
-        assert!(matches!(missing, Err(InvokeError::NotFound { endpoint }) if endpoint == "/other"));
     }
 }

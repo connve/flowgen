@@ -49,10 +49,20 @@ pub struct Config {
     pub bucket: String,
     /// KV operation to perform.
     pub operation: Operation,
-    /// Key for get, put, and delete operations (supports templating).
+    /// Key for get, put, and delete operations (supports templating). A `put`
+    /// without `key` writes every entry in `event.data.entries`.
     pub key: Option<String>,
-    /// Key prefix for list operations (supports templating).
+    /// Key prefix for list operations, and for the keys of `put` entries
+    /// (supports templating).
     pub key_prefix: Option<String>,
+    /// For a `put` of entries: also delete the keys under `key_prefix` that
+    /// are not among the entries.
+    #[serde(default)]
+    pub prune: bool,
+    /// With `prune`: allow an empty `entries` list to delete every key under
+    /// `key_prefix`. Off by default, so an empty source deletes nothing.
+    #[serde(default)]
+    pub allow_empty: bool,
     /// For `list` operations: also include each key's current value in
     /// the output under `values`. Defaults to false to keep list cheap.
     /// Use when downstream needs to compare existing content against new
@@ -76,7 +86,8 @@ impl ConfigExt for Config {}
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
-    /// Write a value. Uses `event.data.content` if present, otherwise full event data.
+    /// Write `event.data.content` to `key`, or, without `key`, every entry of
+    /// `event.data.entries` under `key_prefix`.
     #[default]
     Put,
     /// Read a value by key.
@@ -105,6 +116,32 @@ pub struct PutResult {
     pub key: String,
     /// Revision number after the write.
     pub revision: u64,
+}
+
+/// One key to write in a `put` of entries.
+#[derive(Debug, Deserialize)]
+pub struct Entry {
+    /// Key relative to `key_prefix`.
+    pub key: String,
+    /// Value to store; non-string values are stored as JSON.
+    pub value: serde_json::Value,
+}
+
+/// Input of a `put` of entries.
+#[derive(Debug, Deserialize)]
+struct Entries {
+    entries: Vec<Entry>,
+}
+
+/// Result of a `put` of entries.
+#[derive(Debug, Default, Serialize)]
+pub struct PutEntriesResult {
+    /// Keys written because they were new or changed.
+    pub put: Vec<String>,
+    /// Keys deleted by `prune`.
+    pub deleted: Vec<String>,
+    /// Number of entries that already held their value.
+    pub unchanged: usize,
 }
 
 /// Result of a KV list operation.
@@ -172,6 +209,15 @@ pub enum Error {
     MissingKey { operation: String },
     #[error("Missing content in event data for put operation.")]
     MissingContent,
+    #[error("A put without key needs `entries` in the event data: {source}")]
+    InvalidEntries {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("A put of entries needs key_prefix")]
+    MissingKeyPrefix,
+    #[error("No entries to put under '{prefix}'; prune would delete every key there, set allow_empty to allow it")]
+    EmptyPrune { prefix: String },
     #[error("JSON serialization error: {source}")]
     SerdeJson {
         #[source]
@@ -241,7 +287,10 @@ impl EventHandler {
             let event_data = event.data_as_json().unwrap_or_default();
 
             let result = match rendered.operation {
-                Operation::Put => self.handle_put(&rendered, &event_data).await?,
+                Operation::Put => match rendered.key {
+                    Some(_) => self.handle_put(&rendered, &event_data).await?,
+                    None => self.handle_put_entries(&rendered, event_data).await?,
+                },
                 Operation::Get => self.handle_get(&rendered).await?,
                 Operation::List => self.handle_list(&rendered).await?,
                 Operation::Delete => self.handle_delete(&rendered).await?,
@@ -301,6 +350,92 @@ impl EventHandler {
             revision,
         };
         serde_json::to_value(&result).map_err(|source| Error::SerdeJson { source })
+    }
+
+    /// Writes every entry under `key_prefix` whose value changed and, with
+    /// `prune`, deletes the keys under it that no entry names.
+    async fn handle_put_entries(
+        &self,
+        config: &Config,
+        event_data: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        let prefix = match config.key_prefix.as_deref() {
+            Some(prefix) => prefix,
+            None => return Err(Error::MissingKeyPrefix),
+        };
+        let Entries { entries } = serde_json::from_value(event_data)
+            .map_err(|source| Error::InvalidEntries { source })?;
+        if config.prune && entries.is_empty() && !config.allow_empty {
+            return Err(Error::EmptyPrune {
+                prefix: prefix.to_string(),
+            });
+        }
+
+        let existing = self.values_under(prefix).await?;
+        let mut result = PutEntriesResult::default();
+        let mut wanted = std::collections::HashSet::with_capacity(entries.len());
+        for entry in entries {
+            let key = format!("{prefix}{}", entry.key);
+            let value = match entry.value {
+                serde_json::Value::String(value) => value,
+                other => other.to_string(),
+            };
+            match existing.get(&key) {
+                Some(current) if current.as_ref() == value.as_bytes() => result.unchanged += 1,
+                _ => {
+                    self.store
+                        .put(key.as_str(), bytes::Bytes::from(value))
+                        .await
+                        .map_err(|source| Error::KvPut { source })?;
+                    result.put.push(key.clone());
+                }
+            }
+            wanted.insert(key);
+        }
+
+        if config.prune {
+            let mut stale: Vec<&String> = existing
+                .keys()
+                .filter(|key| !wanted.contains(*key))
+                .collect();
+            stale.sort();
+            for key in stale {
+                self.store
+                    .delete(key)
+                    .await
+                    .map_err(|source| Error::KvDelete { source })?;
+                result.deleted.push(key.clone());
+            }
+        }
+        serde_json::to_value(&result).map_err(|source| Error::SerdeJson { source })
+    }
+
+    /// Current values of the keys under `prefix`.
+    async fn values_under(
+        &self,
+        prefix: &str,
+    ) -> Result<std::collections::HashMap<String, bytes::Bytes>, Error> {
+        use futures_util::StreamExt;
+        let mut key_stream = self
+            .store
+            .keys()
+            .await
+            .map_err(|source| Error::KvKeys { source })?;
+        let mut values = std::collections::HashMap::new();
+        while let Some(Ok(key)) = key_stream.next().await {
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            if let Some(value) = self
+                .store
+                .get(&key)
+                .await
+                .map_err(|source| Error::KvEntry { source })?
+            {
+                values.insert(key, value);
+            }
+        }
+        Ok(values)
     }
 
     async fn handle_get(&self, config: &Config) -> Result<serde_json::Value, Error> {
@@ -713,6 +848,8 @@ mod tests {
             operation: Operation::Put,
             key: Some("k".to_string()),
             key_prefix: None,
+            prune: false,
+            allow_empty: false,
             include_values: false,
             depends_on: Some(vec!["a".to_string()]),
             retry: None,

@@ -108,4 +108,15 @@ pub mod task {
         /// Processor implementation for event buffering.
         pub mod processor;
     }
+    /// In-process flow calls: `inproc_endpoint` and `inproc_request`.
+    pub mod inproc {
+        /// Configuration for both inproc tasks.
+        pub mod config;
+        /// Source that makes a flow callable at its identity.
+        pub mod endpoint;
+        /// Registry of callable flows.
+        pub mod registry;
+        /// Processor that calls a flow and emits its result.
+        pub mod request;
+    }
 }

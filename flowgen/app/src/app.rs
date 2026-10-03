@@ -995,6 +995,7 @@ impl App {
         // Created once at the worker level and shared across all flows so tasks with
         // identical credentials (e.g. same Salesforce org) reuse the same client.
         let client_registry = Arc::new(flowgen_core::client_registry::ClientRegistry::new());
+        let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
 
         // Leases and peer keys go to the system bucket, out of reach of
         // `ctx.cache`. It is absent only when the cache is disabled, which
@@ -1091,6 +1092,7 @@ impl App {
                 .cache(Arc::clone(&cache))
                 .system_cache(Arc::clone(&executor_cache))
                 .client_registry(Arc::clone(&client_registry))
+                .inproc(Arc::clone(&inproc))
                 .holder_identity(holder_identity.clone())
                 .peer_registry(Arc::clone(&peer_registry));
 
@@ -1396,8 +1398,11 @@ impl App {
                     cookie_key,
                     cookie_secure: web_config.cookie_secure,
                     api_keys,
-                    authoring: web_config.authoring.clone(),
-                    http_server: http_server.clone(),
+                    authoring: match &web_config.authoring {
+                        Some(authoring) if authoring.enabled => Some(authoring.clone()),
+                        _ => None,
+                    },
+                    inproc: Arc::clone(&inproc),
                     flows_cache: match &flow_cache {
                         Some((cache, _)) => {
                             Some(Arc::clone(cache) as Arc<dyn flowgen_core::cache::Cache>)
@@ -1465,6 +1470,7 @@ impl App {
                 filesystem_flow_paths: Arc::new(filesystem_flow_paths.clone()),
                 flow_registry: Arc::clone(&flow_registry),
                 client_registry: Arc::clone(&client_registry),
+                inproc: Arc::clone(&inproc),
                 holder_identity: holder_identity.clone(),
                 peer_registry: Arc::clone(&peer_registry),
             };

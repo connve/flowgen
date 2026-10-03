@@ -295,6 +295,10 @@ pub enum TaskType {
     kafka_produce(flowgen_kafka::config::Produce),
     /// Kafka subscribe task.
     kafka_subscribe(flowgen_kafka::config::Subscribe),
+    /// Source that makes the flow callable in-process at its identity.
+    inproc_endpoint(flowgen_core::task::inproc::config::Endpoint),
+    /// Calls a flow with an `inproc_endpoint` and emits its result.
+    inproc_request(flowgen_core::task::inproc::config::Request),
 }
 
 impl TaskType {
@@ -341,6 +345,8 @@ impl TaskType {
             TaskType::mongodb_change_stream(_) => "mongodb_change_stream",
             TaskType::kafka_produce(_) => "kafka_produce",
             TaskType::kafka_subscribe(_) => "kafka_subscribe",
+            TaskType::inproc_endpoint(_) => "inproc_endpoint",
+            TaskType::inproc_request(_) => "inproc_request",
         }
     }
 
@@ -387,6 +393,8 @@ impl TaskType {
             TaskType::mongodb_change_stream(c) => &c.name,
             TaskType::kafka_produce(c) => &c.name,
             TaskType::kafka_subscribe(c) => &c.name,
+            TaskType::inproc_endpoint(c) => &c.name,
+            TaskType::inproc_request(c) => &c.name,
         }
     }
 
@@ -445,6 +453,8 @@ impl TaskType {
             TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
             TaskType::kafka_produce(c) => c.depends_on.as_ref(),
             TaskType::kafka_subscribe(c) => c.depends_on.as_ref(),
+            TaskType::inproc_endpoint(_) => None,
+            TaskType::inproc_request(c) => c.depends_on.as_ref(),
         }
     }
 }
@@ -887,13 +897,12 @@ impl PartialEq for WebOptions {
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoringOptions {
-    /// `http_endpoint` path of the flow that publishes an approved change,
-    /// e.g. `/workspace/publish`. It receives `{id, title, author, files}`.
-    pub publish_endpoint: String,
-    /// Identity provider groups whose members may approve and reject. Empty
-    /// allows every signed-in user.
-    #[serde(default)]
-    pub approver_groups: Vec<String>,
+    /// Whether change proposals are enabled.
+    pub enabled: bool,
+    /// Where changes can be proposed. Defaults to one `workspace` target
+    /// covering `flows/` and `resources/`.
+    #[serde(default = "default_targets")]
+    pub targets: Vec<AuthoringTarget>,
     /// Claim of the signed-in user that lists their groups. Defaults to `groups`.
     #[serde(default = "default_groups_claim")]
     pub groups_claim: String,
@@ -901,6 +910,48 @@ pub struct AuthoringOptions {
     /// Defaults to 5 minutes.
     #[serde(default = "default_publish_timeout", with = "humantime_serde")]
     pub publish_timeout: Duration,
+}
+
+/// Workspace paths changed, approved, and published together.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoringTarget {
+    /// Name shown on its changes, e.g. `user`.
+    pub name: String,
+    /// Workspace path prefixes it covers, e.g. `flows/user/`. A change's files
+    /// must all fall in one target.
+    pub paths: Vec<String>,
+    /// Identity of the flow, starting with an `inproc_endpoint`, that publishes
+    /// an approved change. It receives `{id, target, title, author, files}`.
+    /// Defaults to `system/publish_workspace`.
+    #[serde(default = "default_publish_flow")]
+    pub publish_flow: String,
+    /// Identity provider groups whose members may approve and reject. Empty
+    /// allows every signed-in user.
+    #[serde(default)]
+    pub approver_groups: Vec<String>,
+}
+
+impl AuthoringTarget {
+    /// Whether the workspace `path` falls in this target.
+    pub fn covers(&self, path: &str) -> bool {
+        self.paths
+            .iter()
+            .any(|prefix| path.starts_with(prefix.as_str()))
+    }
+}
+
+fn default_targets() -> Vec<AuthoringTarget> {
+    vec![AuthoringTarget {
+        name: "workspace".to_string(),
+        paths: vec!["flows/".to_string(), "resources/".to_string()],
+        publish_flow: default_publish_flow(),
+        approver_groups: Vec::new(),
+    }]
+}
+
+fn default_publish_flow() -> String {
+    "system/publish_workspace".to_string()
 }
 
 fn default_groups_claim() -> String {
@@ -1132,6 +1183,23 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+    }
+
+    #[test]
+    fn test_authoring_enabled_uses_defaults() {
+        let yaml = "flows: {}\nweb:\n  enabled: true\n  authoring:\n    enabled: true\n";
+        let config: AppConfig = config::Config::builder()
+            .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let authoring = config.web.unwrap().authoring.unwrap();
+        assert_eq!(authoring.targets.len(), 1);
+        let workspace = &authoring.targets[0];
+        assert_eq!(workspace.publish_flow, "system/publish_workspace");
+        assert!(workspace.covers("flows/user/a.yaml") && workspace.covers("resources/s.rhai"));
+        assert_eq!(authoring.groups_claim, "groups");
     }
 
     #[test]

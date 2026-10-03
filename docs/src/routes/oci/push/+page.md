@@ -39,4 +39,4 @@ The input data, with `files` replaced by:
 ## Examples
 
 - [`examples/oci/push_artifact.yaml`](https://github.com/connve/flowgen/blob/main/examples/oci/push_artifact.yaml) publishes files posted to a webhook.
-- [`examples/authoring/publish_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/publish_workspace.yaml) releases the files of an approved [authoring](/docs/flowgen/concepts/authoring) change after Git Push.
+- [`examples/authoring/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/release_workspace.yaml) releases a workspace repository at each new commit, for deployments without CI.

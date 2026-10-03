@@ -87,6 +87,8 @@ pub struct ReconcilerContext {
     pub filesystem_flow_paths: Arc<HashSet<String>>,
     pub flow_registry: Arc<RwLock<HashMap<String, FlowHandle>>>,
     pub client_registry: Arc<flowgen_core::client_registry::ClientRegistry>,
+    /// Flows callable in-process, shared by every flow.
+    pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
     /// This pod's holder identity, shared across every flow's Executor.
     pub holder_identity: String,
     /// Shared peer registry for flow distribution via consistent hashing.
@@ -450,6 +452,7 @@ async fn stop_and_deregister(flow_name: &str, ctx: &ReconcilerContext) {
     if let Some(http_server) = &ctx.http_server {
         http_server.deregister_flow(flow_name);
     }
+    ctx.inproc.deregister_flow(flow_name);
     if let Some(mcp_server) = &ctx.mcp_server {
         // Bulk-clears tools, resources, and resource templates in one pass.
         flowgen_mcp::server::deregister_flow_all(mcp_server, flow_name);
@@ -553,6 +556,7 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         filesystem_flow_paths: Arc::new(HashSet::new()),
         flow_registry: Arc::new(RwLock::new(HashMap::new())),
         client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+        inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
         peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
             shared,
             holder_identity.clone(),
@@ -572,6 +576,7 @@ fn build_flow(
         .cache(Arc::clone(&ctx.runtime_cache))
         .system_cache(Arc::clone(&ctx.system_cache))
         .client_registry(Arc::clone(&ctx.client_registry))
+        .inproc(Arc::clone(&ctx.inproc))
         .holder_identity(ctx.holder_identity.clone())
         .peer_registry(Arc::clone(&ctx.peer_registry));
 
@@ -660,6 +665,7 @@ mod tests {
             filesystem_flow_paths: Arc::new(HashSet::new()),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
                 shared,
                 holder_identity.clone(),
@@ -794,6 +800,7 @@ flow:
             filesystem_flow_paths: Arc::new(fs_flows),
             flow_registry: Arc::new(RwLock::new(HashMap::new())),
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
+            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             peer_registry: Arc::new(flowgen_core::peer::PeerRegistry::new(
                 shared,
                 holder_identity.clone(),

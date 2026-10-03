@@ -62,4 +62,4 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
 ## Examples
 
 - [`examples/git/push_snapshot.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/push_snapshot.yaml) commits a daily API snapshot.
-- [`examples/authoring/publish_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/publish_workspace.yaml) commits approved [authoring](/docs/flowgen/concepts/authoring) changes and releases them with OCI Push.
+- [`examples/authoring/publish_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/publish_workspace.yaml) commits approved [authoring](/docs/flowgen/concepts/authoring) changes.

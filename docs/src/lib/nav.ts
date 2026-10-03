@@ -76,7 +76,8 @@ export const navigation: NavSection[] = [
 			{ title: 'Iterate', href: '/core/iterate' },
 			{ title: 'Buffer', href: '/core/buffer' },
 			{ title: 'Generate', href: '/core/generate' },
-			{ title: 'Log', href: '/core/log' }
+			{ title: 'Log', href: '/core/log' },
+			{ title: 'In-Process Calls', href: '/core/inproc' }
 		]
 	},
 	{

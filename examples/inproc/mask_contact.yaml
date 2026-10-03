@@ -1,0 +1,20 @@
+# Sub-flow other flows call with `inproc_request`: masks the email and phone of
+# the contact it receives and returns it. Callable at its identity, e.g.
+# `inproc/mask_contact`; it has no HTTP route.
+flow:
+  labels:
+    display_name: "Mask Contact"
+    description: "Callable sub-flow that masks a contact's email and phone."
+    tags: ["inproc", "script", "example"]
+  tasks:
+
+    - inproc_endpoint:
+        name: on_call
+
+    - script:
+        name: mask
+        code: |
+          let contact = event.data;
+          contact.email = "***";
+          contact.phone = "***";
+          contact

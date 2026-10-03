@@ -81,6 +81,8 @@ pub struct TaskContext {
     /// Tasks with identical credentials automatically share the same authenticated
     /// client, avoiding redundant login/auth calls that can hit rate limits.
     pub client_registry: std::sync::Arc<crate::client_registry::ClientRegistry>,
+    /// Flows callable in-process, shared by every flow in the process.
+    pub inproc: std::sync::Arc<crate::task::inproc::registry::InprocRegistry>,
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -130,6 +132,8 @@ pub struct TaskContextBuilder {
     leaf_count: Option<usize>,
     /// Shared client registry for connection pooling.
     client_registry: Option<std::sync::Arc<crate::client_registry::ClientRegistry>>,
+    /// Flows callable in-process.
+    inproc: Option<std::sync::Arc<crate::task::inproc::registry::InprocRegistry>>,
 }
 
 impl TaskContextBuilder {
@@ -246,6 +250,15 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the registry of flows callable in-process.
+    pub fn inproc(
+        mut self,
+        inproc: std::sync::Arc<crate::task::inproc::registry::InprocRegistry>,
+    ) -> Self {
+        self.inproc = Some(inproc);
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -277,6 +290,10 @@ impl TaskContextBuilder {
             client_registry: match self.client_registry {
                 Some(registry) => registry,
                 None => std::sync::Arc::new(crate::client_registry::ClientRegistry::new()),
+            },
+            inproc: match self.inproc {
+                Some(inproc) => inproc,
+                None => std::sync::Arc::new(crate::task::inproc::registry::InprocRegistry::new()),
             },
         })
     }

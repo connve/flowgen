@@ -121,8 +121,8 @@ pub struct WebState {
     pub api_keys: Vec<flowgen_core::credentials::ApiKey>,
     /// From `web.authoring`; `None` disables `/api/changes`.
     pub authoring: Option<crate::config::AuthoringOptions>,
-    /// Endpoint server whose flows approved changes are published through.
-    pub http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
+    /// Flows callable in-process; approved changes are published through one.
+    pub inproc: Arc<flowgen_core::task::inproc::registry::InprocRegistry>,
     /// Bucket the synced flow sources are read from, when flows load from the
     /// cache (`flows.cache`).
     pub flows_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
@@ -1219,9 +1219,21 @@ async fn get_config(State(state): State<Arc<WebState>>) -> Json<api::ConfigInfo>
             String::new()
         }
     };
+    let authoring_targets = match &state.authoring {
+        Some(authoring) => authoring
+            .targets
+            .iter()
+            .map(|target| api::AuthoringTarget {
+                name: target.name.clone(),
+                paths: target.paths.clone(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     Json(api::ConfigInfo {
         yaml,
         authoring: state.authoring.is_some(),
+        authoring_targets,
     })
 }
 
@@ -1649,7 +1661,7 @@ mod tests {
             cookie_secure: true,
             api_keys: Vec::new(),
             authoring: None,
-            http_server: None,
+            inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),
             flows_cache: None,
         }
     }
@@ -1841,8 +1853,13 @@ mod tests {
             },
         ];
         state.authoring = Some(crate::config::AuthoringOptions {
-            publish_endpoint: "/workspace/publish".to_string(),
-            approver_groups: Vec::new(),
+            enabled: true,
+            targets: vec![crate::config::AuthoringTarget {
+                name: "workspace".to_string(),
+                paths: vec!["flows/".to_string(), "resources/".to_string()],
+                publish_flow: "system/publish_workspace".to_string(),
+                approver_groups: Vec::new(),
+            }],
             groups_claim: "groups".to_string(),
             publish_timeout: std::time::Duration::from_secs(5),
         });
@@ -1906,23 +1923,17 @@ mod tests {
     #[tokio::test]
     async fn approving_a_change_runs_the_publish_flow_and_records_its_result() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<flowgen_core::event::Event>(1);
-        let server = Arc::new(flowgen_http::server::EndpointServer::new("/".to_string()));
-        server.register(
-            "/workspace/publish".to_string(),
-            flowgen_http::server::EndpointRegistration {
-                flow_name: "publish".to_string(),
-                config: Arc::new(flowgen_http::config::Processor {
-                    name: "publish".to_string(),
-                    ..Default::default()
-                }),
-                credentials: None,
-                auth_provider: None,
+        let inproc = Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new());
+        inproc.register(
+            "system/publish_workspace".to_string(),
+            flowgen_core::task::inproc::registry::Registration {
                 tx,
+                task_name: "on_publish".to_string(),
                 task_id: 0,
-                task_type: "http_endpoint",
-                response_registry: Arc::new(flowgen_core::registry::ResponseRegistry::new()),
+                task_type: "inproc_endpoint",
                 leaf_count: 1,
-                cancellation_token: tokio_util::sync::CancellationToken::new(),
+                ack_timeout: None,
+                callers: vec!["system/".to_string()],
             },
         );
         let published = tokio::spawn(async move {
@@ -1937,12 +1948,17 @@ mod tests {
         });
         let mut state = test_state();
         state.authoring = Some(crate::config::AuthoringOptions {
-            publish_endpoint: "/workspace/publish".to_string(),
-            approver_groups: Vec::new(),
+            enabled: true,
+            targets: vec![crate::config::AuthoringTarget {
+                name: "workspace".to_string(),
+                paths: vec!["flows/".to_string(), "resources/".to_string()],
+                publish_flow: "system/publish_workspace".to_string(),
+                approver_groups: Vec::new(),
+            }],
             groups_claim: "groups".to_string(),
             publish_timeout: std::time::Duration::from_secs(5),
         });
-        state.http_server = Some(server);
+        state.inproc = inproc;
         let base = serve(router("/flowgen", state)).await;
         let client = reqwest::Client::new();
 
