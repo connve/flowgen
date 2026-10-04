@@ -37,7 +37,7 @@
 			class="level-mark invisible inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white"
 		>
 			<Icon icon="tabler:check" class="level-icon-info h-3 w-3" />
-			<Icon icon="tabler:exclamation-mark" class="level-icon-warning h-3 w-3" />
+			<Icon icon="tabler:exclamation-mark" class="level-icon-warn h-3 w-3" />
 			<Icon icon="tabler:x" class="level-icon-error h-3 w-3" />
 		</span>
 		<span
@@ -57,7 +57,7 @@
 	}
 
 	:global(.level-icon-info),
-	:global(.level-icon-warning),
+	:global(.level-icon-warn),
 	:global(.level-icon-error) {
 		display: none;
 	}
@@ -69,10 +69,10 @@
 		display: inline-block;
 	}
 
-	:global([data-task][data-level='warning']) .level-mark {
+	:global([data-task][data-level='warn']) .level-mark {
 		background-color: var(--color-warning);
 	}
-	:global([data-task][data-level='warning']) :global(.level-icon-warning) {
+	:global([data-task][data-level='warn']) :global(.level-icon-warn) {
 		display: inline-block;
 	}
 

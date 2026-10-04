@@ -1,13 +1,14 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import Badge from '$lib/Badge.svelte';
 	import {
 		activityLevels,
 		getFlowActivityLimit,
 		resetActivityLevels,
 		setFlowActivityLimit,
 	} from '$lib/activityStore.svelte';
-	import { levelBadgeColor, levelChipClass, levelDotClass, levelLabel } from '$lib/logRecord';
+	import { levelChipClass, levelLabel, levelVariant } from '$lib/logRecord';
 	import type { ActivityLevel } from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
 	import { formatAbsolute, formatRelative } from '$lib/time';
@@ -82,7 +83,7 @@
 	let counts = $derived.by(() => {
 		const c: Record<ActivityLevel, number> = {
 			info: 0,
-			warning: 0,
+			warn: 0,
 			error: 0,
 			debug: 0,
 			trace: 0,
@@ -95,7 +96,7 @@
 
 	let anyFilterActive = $derived(
 		!levelFilter.info ||
-			!levelFilter.warning ||
+			!levelFilter.warn ||
 			!levelFilter.error ||
 			levelFilter.debug ||
 			levelFilter.trace ||
@@ -222,7 +223,7 @@
 				<span class="chip-sm chip-warn">
 					<span>Warn</span>
 					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
-						>{counts.warning}</span
+						>{counts.warn}</span
 					>
 				</span>
 				<span class="chip-sm chip-error">
@@ -251,7 +252,7 @@
 		     header and the column head so filters visually own the list below. -->
 		<div class="flex h-10 items-center gap-3 border-b border-base-200 bg-base-100 px-4">
 			<span class="flex items-center gap-1">
-				{#each ['info', 'warning', 'error', 'debug', 'trace'] as const as level (level)}
+				{#each ['info', 'warn', 'error', 'debug', 'trace'] as const as level (level)}
 					<button
 						type="button"
 						class="chip-sm {levelChipClass(level, levelFilter[level])}"
@@ -349,7 +350,7 @@
 			<!-- Column headers rendered outside the virtualized list so they stay
 			     visible without an intra-list sticky header (which fights virtualization). -->
 			<div
-				class="grid h-8 items-center border-b border-base-200 bg-base-100 px-2 text-xs uppercase tracking-wide opacity-60"
+				class="grid h-8 items-center border-b border-base-200 bg-base-100 px-3 text-xs font-semibold uppercase tracking-wide opacity-60"
 				style="grid-template-columns: 5.5rem 5rem 11rem 9rem 9rem 5rem 9rem 1fr; gap: 0.75rem"
 			>
 				<span>Status</span>
@@ -372,29 +373,14 @@
 				{#each visible as event, i (event.ts_ms + '-' + (event.task ?? '_') + '-' + (startIdx + i))}
 					<button
 						type="button"
-						class="grid w-full cursor-pointer items-center px-2 text-left text-xs hover:bg-base-200"
+						class="grid w-full cursor-pointer items-center border-b border-base-200 px-3 text-left text-xs transition-colors hover:bg-base-200"
 						style="grid-template-columns: 5.5rem 5rem 11rem 9rem 9rem 5rem 9rem 1fr; gap: 0.75rem; height: {ROW_HEIGHT}px"
 						onclick={() => {
 							selected = event;
 							if (event.task) onRowClick(event.task);
 						}}
 					>
-						<span class="flex items-center gap-1.5">
-							<span
-								class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white {levelDotClass(
-									event.level,
-								)}"
-							>
-								{#if event.level === 'info'}
-									<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-								{:else if event.level === 'warning'}
-									<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-								{:else if event.level === 'error'}
-									<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-								{/if}
-							</span>
-							<span class="uppercase opacity-70">{levelLabel(event.level)}</span>
-						</span>
+						<span><Badge variant={levelVariant(event.level)}>{levelLabel(event.level)}</Badge></span>
 						<span class="whitespace-nowrap opacity-60" title={formatAbsolute(event.ts_ms)}>
 							{formatRelative(event.ts_ms)}
 						</span>
@@ -427,20 +413,7 @@
 	>
 		<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
 			<div class="flex items-center gap-2 text-xs">
-				<span
-					class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white {levelDotClass(
-						selected.level,
-					)}"
-				>
-					{#if selected.level === 'info'}
-						<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-					{:else if selected.level === 'warning'}
-						<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-					{:else if selected.level === 'error'}
-						<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-					{/if}
-				</span>
-				<span class="uppercase opacity-70">{levelLabel(selected.level)}</span>
+				<Badge variant={levelVariant(selected.level)}>{levelLabel(selected.level)}</Badge>
 				<span class="opacity-40">•</span>
 				<span class="font-mono opacity-70">{selected.task_type ?? '—'}</span>
 				<span class="opacity-40">•</span>

@@ -15,6 +15,8 @@ pub struct Issue {
 /// Why a workspace file is invalid.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("Flow files need a .yaml, .yml or .json extension")]
+    Extension,
     #[error("Failed to parse flow: {0}")]
     Parse(#[source] config::ConfigError),
     #[error(transparent)]
@@ -43,6 +45,10 @@ impl From<Error> for Issue {
 /// Validates a flow file. `path` is its path within the flows directory, e.g.
 /// `orders/sync.yaml`; an empty result means the flow is valid.
 pub fn validate_flow(path: &str, content: &str) -> Vec<Issue> {
+    match path.rsplit_once('.') {
+        Some((_, extension)) if crate::config::FLOW_CONFIG_EXTENSIONS.contains(&extension) => {}
+        _ => return vec![Error::Extension.into()],
+    }
     let raw = match FlowConfigRaw::parse(path, content) {
         Ok(raw) => raw,
         Err(source) => return vec![parse_issue(source)],
@@ -188,6 +194,16 @@ flow:
         let issues = validate_flow("a.yaml", &content);
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].message.starts_with("Script does not compile"));
+    }
+
+    #[test]
+    fn a_flow_file_without_a_flow_extension_is_reported() {
+        assert_eq!(validate_flow("a.yml", VALID), Vec::new());
+        for path in ["a", "a.pl", "a.yaml.bak"] {
+            let issues = validate_flow(path, VALID);
+            assert_eq!(issues.len(), 1, "{path}: {issues:?}");
+            assert!(issues[0].message.starts_with("Flow files need"));
+        }
     }
 
     #[test]

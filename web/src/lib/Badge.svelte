@@ -17,7 +17,7 @@
 			case 'error':
 				return 'border-transparent bg-error/10 text-error';
 			case 'warning':
-				return 'border-transparent bg-warning/10 text-warning';
+				return 'border-transparent bg-warning/10 text-attention';
 			default:
 				return 'border-current opacity-60';
 		}

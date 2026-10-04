@@ -3,12 +3,17 @@
 	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
+	import Badge from '$lib/Badge.svelte';
+	import StateMessage from '$lib/StateMessage.svelte';
 	import { apiUrl, encodePath, type LogRecord } from '$lib/api';
 	import { formatRelative } from '$lib/time';
 	import { rafBatch } from '$lib/rafBatch';
 	import {
 		extractFieldSummary,
 		extractSpanSummary,
+		levelChipClass,
+		levelLabel,
+		levelVariant,
 		nonHoistedSpans,
 		timestampMs,
 	} from '$lib/logRecord';
@@ -278,49 +283,6 @@
 		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
 		return `${(ms / 60_000).toFixed(1)}m`;
 	}
-
-	function levelClasses(level: Level, active: boolean): string {
-		if (!active) return 'chip chip-inactive';
-		switch (level) {
-			case 'error':
-				return 'chip chip-error';
-			case 'warn':
-				return 'chip chip-warn';
-			case 'info':
-				return 'chip chip-info';
-			default:
-				return 'chip chip-neutral';
-		}
-	}
-
-	function levelBadgeColor(level: Level): string {
-		switch (level) {
-			case 'error':
-				return 'text-error';
-			case 'warn':
-				return 'text-warning';
-			case 'debug':
-			case 'trace':
-				return 'text-base-content/50';
-			default:
-				return 'text-primary';
-		}
-	}
-
-	function levelLabel(level: Level): string {
-		switch (level) {
-			case 'warn':
-				return 'Warn';
-			case 'error':
-				return 'Error';
-			case 'debug':
-				return 'Debug';
-			case 'trace':
-				return 'Trace';
-			default:
-				return 'Info';
-		}
-	}
 </script>
 
 <section class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -336,7 +298,7 @@
 				] as { key, label } (key)}
 					<button
 						type="button"
-						class={levelClasses(key, levelFilter[key])}
+						class="chip {levelChipClass(key, levelFilter[key])}"
 						aria-pressed={levelFilter[key]}
 						onclick={() => toggleLevel(key)}
 					>
@@ -435,75 +397,66 @@
 		</div>
 	</div>
 
-	{#if filtered.length === 0}
-		<div class="flex flex-1 items-center justify-center text-sm text-base-content/50">
-			No log records match the current filters.
-		</div>
-	{:else}
-		<!-- Column headers rendered outside the virtualized scroll area so they
-		     stay visible without a sticky header fighting the spacer math. -->
-		<div
-			class="grid shrink-0 items-center border-b border-base-300 bg-base-100 px-6 py-1.5 text-xs uppercase tracking-wide text-base-content/60"
-			style="grid-template-columns: 6rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem"
-		>
-			<span>Status</span>
-			<span>When</span>
-			<span>Timestamp</span>
-			<span>Target</span>
-			<span>Message</span>
-		</div>
-		<div
-			bind:this={scrollPane}
-			bind:clientHeight={viewportHeight}
-			onscroll={onScroll}
-			class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-base-100 text-xs"
-		>
-			<div style="height: {topPad}px"></div>
-			{#each visible as row (row.id)}
-				{@const record = row.record}
-				{@const isSelected = selected === record}
-				{@const tsMs = timestampMs(record)}
-				<button
-					type="button"
-					class="grid w-full items-center px-6 text-left transition-colors hover:bg-base-200 focus:outline-none focus-visible:bg-base-200 {isSelected
-						? 'bg-base-200'
-						: ''}"
-					style="grid-template-columns: 6rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem; height: {ROW_HEIGHT}px"
-					onclick={() => (selected = record)}
+	<div class="flex min-h-0 flex-1 flex-col p-6">
+		{#if filtered.length === 0}
+			<StateMessage
+				tone="notice"
+				title="No log records"
+				message="Nothing matches the current filters yet."
+			/>
+		{:else}
+			<div
+				class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100"
+			>
+				<!-- Column headers rendered outside the virtualized scroll area so they
+				     stay visible without a sticky header fighting the spacer math. -->
+				<div
+					class="grid shrink-0 items-center border-b border-base-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
+					style="grid-template-columns: 5rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem"
 				>
-					<span class="flex items-center gap-1.5">
-						<span
-							class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white"
-							class:bg-primary={record.level === 'info'}
-							class:bg-warning={record.level === 'warn'}
-							class:bg-error={record.level === 'error'}
-							class:bg-base-300={record.level === 'debug' || record.level === 'trace'}
+					<span>Status</span>
+					<span>When</span>
+					<span>Timestamp</span>
+					<span>Target</span>
+					<span>Message</span>
+				</div>
+				<div
+					bind:this={scrollPane}
+					bind:clientHeight={viewportHeight}
+					onscroll={onScroll}
+					class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden text-xs"
+				>
+					<div style="height: {topPad}px"></div>
+					{#each visible as row (row.id)}
+						{@const record = row.record}
+						{@const isSelected = selected === record}
+						{@const tsMs = timestampMs(record)}
+						<button
+							type="button"
+							class="grid w-full items-center border-b border-base-200 px-3 text-left transition-colors hover:bg-base-200 focus:outline-none focus-visible:bg-base-200 {isSelected
+								? 'bg-base-200'
+								: ''}"
+							style="grid-template-columns: 5rem 5rem 7rem 18rem minmax(0, 1fr); gap: 0.75rem; height: {ROW_HEIGHT}px"
+							onclick={() => (selected = record)}
 						>
-							{#if record.level === 'info'}
-								<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-							{:else if record.level === 'warn'}
-								<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-							{:else if record.level === 'error'}
-								<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-							{/if}
-						</span>
-						<span class="uppercase opacity-70">{levelLabel(record.level)}</span>
-					</span>
-					<span class="whitespace-nowrap opacity-60" title={formatAbsolute(record.timestamp)}>
-						{tsMs !== null ? formatRelative(tsMs) : '—'}
-					</span>
-					<span class="whitespace-nowrap font-mono opacity-60">
-						{formatTs(record.timestamp) || '—'}
-					</span>
-					<span class="truncate font-mono text-base-content/70">
-						{record.target}
-					</span>
-					<span class="truncate font-mono" title={record.body}>{record.body}</span>
-				</button>
-			{/each}
-			<div style="height: {bottomPad}px"></div>
-		</div>
-	{/if}
+							<span><Badge variant={levelVariant(record.level)}>{levelLabel(record.level)}</Badge></span>
+							<span class="whitespace-nowrap opacity-70" title={formatAbsolute(record.timestamp)}>
+								{tsMs !== null ? formatRelative(tsMs) : '—'}
+							</span>
+							<span class="whitespace-nowrap font-mono opacity-70">
+								{formatTs(record.timestamp) || '—'}
+							</span>
+							<span class="truncate font-mono opacity-70">
+								{record.target}
+							</span>
+							<span class="truncate font-mono" title={record.body}>{record.body}</span>
+						</button>
+					{/each}
+					<div style="height: {bottomPad}px"></div>
+				</div>
+			</div>
+		{/if}
+	</div>
 </section>
 
 <svelte:window on:keydown={onKeydown} />
@@ -517,22 +470,7 @@
 	>
 		<div class="flex items-center justify-between border-b border-base-300 px-4 py-2">
 			<div class="flex items-center gap-2 text-xs">
-				<span
-					class="inline-flex h-3 w-3 items-center justify-center rounded-full text-white"
-					class:bg-primary={selected.level === 'info'}
-					class:bg-warning={selected.level === 'warn'}
-					class:bg-error={selected.level === 'error'}
-					class:bg-base-300={selected.level === 'debug' || selected.level === 'trace'}
-				>
-					{#if selected.level === 'info'}
-						<Icon icon="tabler:check" class="h-2.5 w-2.5" />
-					{:else if selected.level === 'warn'}
-						<Icon icon="tabler:exclamation-mark" class="h-2.5 w-2.5" />
-					{:else if selected.level === 'error'}
-						<Icon icon="tabler:x" class="h-2.5 w-2.5" />
-					{/if}
-				</span>
-				<span class="uppercase opacity-70">{levelLabel(selected.level)}</span>
+				<Badge variant={levelVariant(selected.level)}>{levelLabel(selected.level)}</Badge>
 				{#if selectedSummary?.task_type}
 					<span class="opacity-40">•</span>
 					<span class="font-mono opacity-70">{selectedSummary.task_type}</span>

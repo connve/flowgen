@@ -1,14 +1,6 @@
 <script lang="ts">
 	import { marked } from 'marked';
-	import Prism from 'prismjs';
-	import 'prismjs/components/prism-sql';
-	import 'prismjs/components/prism-yaml';
-	import 'prismjs/components/prism-json';
-	import 'prismjs/components/prism-bash';
-	import 'prismjs/components/prism-python';
-	import 'prismjs/components/prism-typescript';
-	import 'prismjs/components/prism-javascript';
-	import 'prismjs/components/prism-markdown';
+	import { highlight, prismLanguage } from '$lib/highlight';
 
 	interface Props {
 		content: string;
@@ -24,38 +16,11 @@
 
 	let { content, extension, onResourceClick, anchorTaskNames }: Props = $props();
 
-	// Map file extension → Prism language grammar. `.rhai` shares Rust-like
-	// syntax; we fall back to a Rust-flavoured highlight since Prism has no
-	// dedicated Rhai grammar and Rust matches the constructs users see (let,
-	// if/else, ==, string literals).
-	function extensionToPrismLang(ext: string | null): string | null {
-		if (!ext) return null;
-		const map: Record<string, string> = {
-			sql: 'sql',
-			yaml: 'yaml',
-			yml: 'yaml',
-			json: 'json',
-			sh: 'bash',
-			bash: 'bash',
-			py: 'python',
-			ts: 'typescript',
-			js: 'javascript',
-			mjs: 'javascript',
-			md: 'markdown',
-			rhai: 'javascript'
-		};
-		return map[ext.toLowerCase()] ?? null;
-	}
-
 	let isMarkdown = $derived(extension?.toLowerCase() === 'md');
 	let renderedMarkdown = $derived(isMarkdown ? (marked.parse(content) as string) : '');
 
-	let lang = $derived(extensionToPrismLang(extension));
-	let rawHighlighted = $derived(
-		!isMarkdown && lang && Prism.languages[lang]
-			? Prism.highlight(content, Prism.languages[lang], lang)
-			: null
-	);
+	let lang = $derived(prismLanguage(extension));
+	let rawHighlighted = $derived(isMarkdown ? null : highlight(content, extension));
 
 	// Post-process Prism output to wrap `resource: "path"` string values in a
 	// clickable anchor. Only applies to YAML views that opted in via

@@ -20,7 +20,6 @@ import { apiUrl, type FlowStatus, type LogRecord } from '$lib/api';
 import { LOGS_LIMIT_DEFAULT } from '$lib/logsLimit';
 import { rafBatch } from '$lib/rafBatch';
 import {
-	activityLevel,
 	extractFieldSummary,
 	extractSpanSummary,
 	isTaskScoped,
@@ -66,7 +65,7 @@ function recordToActivity(record: LogRecord): FlowActivity | null {
 		flow: span.flow,
 		task: span.task,
 		task_type: span.task_type,
-		level: activityLevel(record),
+		level: record.level,
 		ts_ms,
 		message: record.body,
 	};
@@ -107,7 +106,7 @@ export function getFlowActivityLimit(): number {
 // default.
 const DEFAULT_ACTIVITY_LEVELS: Record<ActivityLevel, boolean> = {
 	info: true,
-	warning: true,
+	warn: true,
 	error: true,
 	debug: false,
 	trace: false,
@@ -145,7 +144,7 @@ function ensureMetricsSubscription() {
 const API_LEVELS = ['info', 'warn', 'error', 'debug', 'trace'] as const;
 
 function trimPerLevel(list: FlowActivity[], limit: number): FlowActivity[] {
-	const kept: Record<ActivityLevel, number> = { info: 0, warning: 0, error: 0, debug: 0, trace: 0 };
+	const kept: Record<ActivityLevel, number> = { info: 0, warn: 0, error: 0, debug: 0, trace: 0 };
 	const out: FlowActivity[] = [];
 	for (let i = list.length - 1; i >= 0; i--) {
 		if (kept[list[i].level]++ < limit) out.push(list[i]);
@@ -179,7 +178,7 @@ async function refetchFlowHistory(flow: string) {
 			.filter((a): a is FlowActivity => a !== null);
 		const newest: Record<ActivityLevel, number> = {
 			info: -Infinity,
-			warning: -Infinity,
+			warn: -Infinity,
 			error: -Infinity,
 			debug: -Infinity,
 			trace: -Infinity,

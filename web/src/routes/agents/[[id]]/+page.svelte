@@ -767,18 +767,18 @@
 				<div class="tooltip tooltip-top shrink-0" data-tip="Stop (Esc)">
 					<button
 						type="button"
-						class="btn btn-circle btn-sm flex h-8 min-h-8 w-8 items-center justify-center"
+						class="btn btn-ghost btn-sm btn-circle"
 						onclick={stopGenerating}
 						aria-label="Stop generating"
 					>
-						<Icon icon="tabler:player-stop-filled" class="h-4 w-4" />
+						<Icon icon="tabler:player-stop-filled" class="h-5 w-5" />
 					</button>
 				</div>
 			{:else}
 				<div class="tooltip tooltip-top shrink-0" data-tip="Send">
 					<button
 						type="button"
-						class="btn btn-primary btn-circle btn-sm flex h-8 min-h-8 w-8 items-center justify-center"
+						class="btn btn-ghost btn-sm btn-circle text-primary"
 						onclick={send}
 						disabled={!model || input.trim().length === 0}
 						aria-label="Send"

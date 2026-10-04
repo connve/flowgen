@@ -12,15 +12,24 @@
 	import {
 		apiUrl,
 		encodePath,
+		type AuthoringTarget,
 		type ChangeSummary,
 		type ResourceSummary as Resource,
 		type ResourceContent
 	} from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
-	import { authoringEnabled, pendingChanges, touchesResources } from '$lib/changes';
+	import EditButton from '$lib/EditButton.svelte';
+	import {
+		authoringEnabled,
+		authoringTargets,
+		editUrl,
+		pendingChanges,
+		targetOf
+	} from '$lib/changes';
 
 	let resources = $state<Resource[]>([]);
 	let authoring = $state(false);
+	let targets = $state<AuthoringTarget[]>([]);
 	let pending = $state<ChangeSummary[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -54,9 +63,11 @@
 			}
 		}
 
+		authoringEnabled().then((enabled) => (authoring = enabled));
+		authoringTargets().then((found) => (targets = found));
+		pendingChanges().then((changes) => (pending = changes));
+
 		try {
-			authoringEnabled().then((enabled) => (authoring = enabled));
-			pendingChanges().then((changes) => (pending = changes.filter(touchesResources)));
 			const response = await fetch(apiUrl('api/resources'));
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			resources = await response.json();
@@ -320,16 +331,20 @@
 				</div>
 			{/if}
 			<div class="flex items-center justify-end gap-2">
-				{#if pending.length > 0}
-					<a href="{base}/changes" class="btn btn-ghost btn-sm text-warning">
+				{#if authoring}
+					<a
+						href="{base}/changes"
+						class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
+					>
 						<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
 						{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
 					</a>
-				{/if}
-				{#if authoring}
-					<a href="{base}/edit?new=resource" class="btn btn-ghost btn-sm">
+					<a
+						href="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+						class="btn btn-primary btn-sm gap-1.5"
+					>
 						<Icon icon="tabler:plus" class="h-4 w-4" />
-						New resource
+						New
 					</a>
 				{/if}
 				<label
@@ -362,7 +377,7 @@
 			</div>
 		</div>
 
-		<div class="min-h-0 flex-1 overflow-y-auto p-6">
+		<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
 		{#if loading}
 			<div class="flex justify-center py-12">
 				<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -376,9 +391,9 @@
 				message={searchActive ? `Nothing matches "${search}".` : 'Nothing registered yet.'}
 			/>
 		{:else}
-			<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+			<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 				<table class="table table-sm w-full bg-base-100">
-					<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
+					<thead class="bg-base-100 text-xs uppercase tracking-wide">
 						<tr>
 							<th>Key</th>
 							<th>Type</th>
@@ -450,6 +465,9 @@
 				</div>
 				<div class="flex items-center gap-1">
 					{#if selected}
+						{#if targetOf(targets, `resources/${selected}`)}
+							<EditButton href={editUrl(base, `resources/${selected}`)} tooltip="left" />
+						{/if}
 						<div class="tooltip tooltip-left" data-tip="Open full page">
 							<a
 								href="{base}/resources/{encodePath(selected)}"

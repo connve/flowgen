@@ -8,7 +8,7 @@
 	<title>Pods | Flowgen</title>
 </svelte:head>
 
-<div class="min-h-0 flex-1 overflow-y-auto p-6">
+<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
 	{#if !cluster.loaded}
 		<div class="flex justify-center py-12">
 			<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -16,9 +16,9 @@
 	{:else if !cluster.status}
 		<StateMessage tone="oops" title="Failed to load pods" message="GET /api/cluster did not answer." />
 	{:else}
-		<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+		<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
-				<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
+				<thead class="bg-base-100 text-xs uppercase tracking-wide">
 					<tr>
 						<th>Pod</th>
 						<th>Status</th>

@@ -1,3 +1,4 @@
+import { error } from '@sveltejs/kit';
 import {
 	apiUrl,
 	encodePath,
@@ -9,21 +10,20 @@ import {
 // The running config, fetched once per page load and shared by every caller.
 let configInfo: Promise<ConfigInfo | null> | null = null;
 
-function loadConfigInfo(): Promise<ConfigInfo | null> {
-	configInfo ??= fetch(apiUrl('api/config'))
+function loadConfigInfo(fetcher: typeof fetch): Promise<ConfigInfo | null> {
+	configInfo ??= fetcher(apiUrl('api/config'))
 		.then((res) => (res.ok ? (res.json() as Promise<ConfigInfo>) : null))
 		.catch(() => null);
 	return configInfo;
 }
 
 // Where changes can be proposed; empty when `web.authoring` is off.
-export async function authoringTargets(): Promise<AuthoringTarget[]> {
-	return (await loadConfigInfo())?.authoringTargets ?? [];
+export async function authoringTargets(fetcher: typeof fetch = fetch): Promise<AuthoringTarget[]> {
+	return (await loadConfigInfo(fetcher))?.authoringTargets ?? [];
 }
 
-// Whether `web.authoring` is set, so New can propose changes.
-export async function authoringEnabled(): Promise<boolean> {
-	return (await loadConfigInfo())?.authoring ?? false;
+export async function authoringEnabled(fetcher: typeof fetch = fetch): Promise<boolean> {
+	return (await loadConfigInfo(fetcher))?.authoring ?? false;
 }
 
 // Whether `path` is `folder` or lies under it, compared on whole segments.
@@ -55,31 +55,44 @@ export function flowFilePath(identity: string): string {
 	return `flows/${identity}.yaml`;
 }
 
-// Link to the editor for a workspace path.
+export function stripFlowExtension(path: string): string {
+	return path.replace(/\.(ya?ml|json)$/, '');
+}
+
 export function editUrl(base: string, path: string): string {
-	return `${base}/edit?path=${encodeURIComponent(path)}`;
+	return `${base}/edit/${encodePath(path)}`;
 }
 
 // The deployed content behind a workspace path, or null when it is new.
-export async function deployedContent(path: string): Promise<string | null> {
+export async function deployedContent(
+	path: string,
+	fetcher: typeof fetch = fetch
+): Promise<string | null> {
 	const [dir, ...rest] = path.split('/');
 	const tail = rest.join('/');
 	let url: string;
-	if (dir === 'flows') url = `api/flows/${encodePath(tail.replace(/\.(ya?ml|json)$/, ''))}`;
-	else if (dir === 'resources') url = `api/resources/${encodePath(tail)}`;
-	else return null;
-	const res = await fetch(apiUrl(url));
+	switch (dir) {
+		case 'flows':
+			url = `api/flows/${encodePath(stripFlowExtension(tail))}`;
+			break;
+		case 'resources':
+			url = `api/resources/${encodePath(tail)}`;
+			break;
+		default:
+			return null;
+	}
+	const res = await fetcher(apiUrl(url));
 	if (res.status === 404) return null;
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) error(res.status, `Failed to load ${path}`);
 	const body = await res.json();
 	return dir === 'flows' ? (body.yaml ?? null) : (body.content ?? null);
 }
 
 // Pending workspace changes, or none when authoring is not configured or the
 // store is unreachable — callers only decorate pages with them.
-export async function pendingChanges(): Promise<ChangeSummary[]> {
+export async function pendingChanges(fetcher: typeof fetch = fetch): Promise<ChangeSummary[]> {
 	try {
-		const res = await fetch(apiUrl('api/changes'));
+		const res = await fetcher(apiUrl('api/changes'));
 		if (!res.ok) return [];
 		const changes: ChangeSummary[] = (await res.json()).changes ?? [];
 		return changes.filter((change) => change.status === 'pending');
@@ -88,22 +101,11 @@ export async function pendingChanges(): Promise<ChangeSummary[]> {
 	}
 }
 
-// Whether `change` touches a flow.
-export function touchesFlows(change: ChangeSummary): boolean {
-	return change.paths.some((path) => path.startsWith('flows/'));
-}
-
-// Whether `change` touches a resource.
-export function touchesResources(change: ChangeSummary): boolean {
-	return change.paths.some((path) => path.startsWith('resources/'));
-}
-
-// Whether `change` touches the resource with `key`.
 export function touchesResource(change: ChangeSummary, key: string): boolean {
 	return change.paths.includes(`resources/${key}`);
 }
 
-// Whether `change` touches the flow file for `identity` (any flow extension).
+// Whether `change` touches the flow file for `identity`, whatever its extension.
 export function touchesFlow(change: ChangeSummary, identity: string): boolean {
 	return change.paths.some((path) =>
 		['yaml', 'yml', 'json'].some((ext) => path === `flows/${identity}.${ext}`)

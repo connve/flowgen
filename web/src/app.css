@@ -34,6 +34,13 @@
 	@apply border-error/50 bg-error/10;
 	color: color-mix(in oklab, var(--color-error) 65%, var(--color-base-content));
 }
+/* Warning hue readable as text: pending changes and warning badges. */
+@utility text-attention {
+	color: color-mix(in oklab, var(--color-warning) 60%, var(--color-base-content));
+}
+:root[data-theme='mydark'] .text-attention {
+	color: var(--color-warning);
+}
 :root[data-theme='mydark'] .chip-info,
 :root[data-theme='mydark'] .chip-warn,
 :root[data-theme='mydark'] .chip-error {

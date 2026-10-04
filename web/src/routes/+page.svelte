@@ -11,9 +11,23 @@
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
-	import type { ChangeSummary, FlowStatus, FlowSummary as Flow, FlowDetail } from '$lib/api';
+	import type {
+		AuthoringTarget,
+		ChangeSummary,
+		FlowStatus,
+		FlowSummary as Flow,
+		FlowDetail
+	} from '$lib/api';
 	import { buildTree, type TreeNode } from '$lib/tree';
-	import { authoringEnabled, pendingChanges, touchesFlows } from '$lib/changes';
+	import EditButton from '$lib/EditButton.svelte';
+	import {
+		authoringEnabled,
+		authoringTargets,
+		editUrl,
+		flowFilePath,
+		pendingChanges,
+		targetOf
+	} from '$lib/changes';
 
 	function label(flow: { name: string; display_name?: string | null }): string {
 		return flow.display_name ?? flow.name;
@@ -22,6 +36,7 @@
 	let flows = $state<Flow[]>([]);
 	let pending = $state<ChangeSummary[]>([]);
 	let authoring = $state(false);
+	let targets = $state<AuthoringTarget[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let nowTick = $state(Date.now());
@@ -122,8 +137,9 @@
 			}
 		}
 
-		pendingChanges().then((changes) => (pending = changes.filter(touchesFlows)));
+		pendingChanges().then((changes) => (pending = changes));
 		authoringEnabled().then((enabled) => (authoring = enabled));
+		authoringTargets().then((found) => (targets = found));
 
 		const url = apiUrl('api/flows');
 		fetch(url)
@@ -475,7 +491,9 @@
 				onclick={() => toggleStatus('idle')}
 			>
 				<span>Idle</span>
-				<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
+				{#if statusFilter.idle}
+					<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
+				{/if}
 			</button>
 			<button
 				type="button"
@@ -484,7 +502,9 @@
 				onclick={() => toggleStatus('ok')}
 			>
 				<span>Ok</span>
-				<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
+				{#if statusFilter.ok}
+					<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
+				{/if}
 			</button>
 			<button
 				type="button"
@@ -493,7 +513,9 @@
 				onclick={() => toggleStatus('warn')}
 			>
 				<span>Warn</span>
-				<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
+				{#if statusFilter.warn}
+					<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
+				{/if}
 			</button>
 			<button
 				type="button"
@@ -502,7 +524,9 @@
 				onclick={() => toggleStatus('error')}
 			>
 				<span>Error</span>
-				<span class="tabular-nums opacity-60">{statusCounts.error}</span>
+				{#if statusFilter.error}
+					<span class="tabular-nums opacity-60">{statusCounts.error}</span>
+				{/if}
 			</button>
 		</div>
 		{#if allTags.length > 0}
@@ -576,16 +600,20 @@
 			{/if}
 		{/if}
 		<div class="flex-1"></div>
-		{#if pending.length > 0}
-			<a href="{base}/changes" class="btn btn-ghost btn-sm text-warning">
+		{#if authoring}
+			<a
+				href="{base}/changes"
+				class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
+			>
 				<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
 				{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
 			</a>
-		{/if}
-		{#if authoring}
-			<a href="{base}/edit?new=flow" class="btn btn-ghost btn-sm">
+			<a
+				href="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+				class="btn btn-primary btn-sm gap-1.5"
+			>
 				<Icon icon="tabler:plus" class="h-4 w-4" />
-				New flow
+				New
 			</a>
 		{/if}
 		<label
@@ -618,7 +646,7 @@
 	</div>
 	</div>
 
-	<div class="min-h-0 flex-1 overflow-y-auto p-6">
+	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
 	{#if loading}
 		<div class="flex justify-center py-12">
 			<span class="loading loading-spinner loading-lg text-primary"></span>
@@ -628,9 +656,9 @@
 	{:else if filtered.length === 0}
 		<StateMessage tone="notice" title="No flows found" message="Nothing matches the current filters yet." />
 	{:else}
-		<div class="overflow-x-auto rounded-lg border border-base-300 bg-base-100">
+		<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
-				<thead class="bg-base-100 text-xs uppercase tracking-wide opacity-60">
+				<thead class="bg-base-100 text-xs uppercase tracking-wide">
 					<tr>
 						<th>
 							<button
@@ -789,6 +817,9 @@
 					</div>
 				</div>
 				<div class="flex items-center gap-1">
+					{#if targetOf(targets, flowFilePath(selected))}
+						<EditButton href={editUrl(base, flowFilePath(selected))} tooltip="left" />
+					{/if}
 					<div class="tooltip tooltip-left" data-tip="Open full page">
 						<a
 							href="{base}/flows/{encodePath(selected)}"

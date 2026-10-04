@@ -1,7 +1,10 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { untrack } from 'svelte';
+	import { load } from 'js-yaml';
 	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
+	import CodeEditor from '$lib/CodeEditor.svelte';
 	import FlowDag from '$lib/dag/FlowDag.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import CopyButton from '$lib/CopyButton.svelte';
@@ -23,9 +26,33 @@
 	interface Props {
 		yaml: string;
 		activities?: Activity[];
+		// Config becomes an editor bound to `yaml`, and the graph follows it.
+		editable?: boolean;
 	}
 
-	let { yaml, activities = [] }: Props = $props();
+	let { yaml = $bindable(), activities = [], editable = false }: Props = $props();
+
+	// While editing, the graph keeps the last YAML that parsed, so it does not
+	// blank out mid-keystroke.
+	let parsedYaml = $state(untrack(() => yaml));
+	$effect(() => {
+		if (!editable) return;
+		const next = yaml;
+		const timer = setTimeout(() => {
+			if (parses(next)) parsedYaml = next;
+		}, 300);
+		return () => clearTimeout(timer);
+	});
+
+	function parses(source: string): boolean {
+		try {
+			load(source);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	let graphYaml = $derived(editable ? parsedYaml : yaml);
 
 	interface ResourcePreview {
 		key: string;
@@ -52,11 +79,11 @@
 	// Latest-per-task snapshot: level for the status pill, duration for the
 	// inline badge. Both feed the DAG so the user sees "just processed, took Xms".
 	// The badge is an operational health signal, not a log viewer, so it
-	// only ever reflects info/warning/error — a debug/trace event landing
+	// only ever reflects info/warn/error — a debug/trace event landing
 	// after a task's last info!() must not blank out that "just succeeded"
 	// signal, so those levels are skipped entirely when picking "latest".
 	interface NodeState {
-		level: 'info' | 'warning' | 'error';
+		level: 'info' | 'warn' | 'error';
 		ts_ms: number;
 		duration_ms?: number;
 	}
@@ -64,7 +91,7 @@
 		const map = new Map<string, NodeState>();
 		for (const a of activities) {
 			if (!a.task) continue;
-			if (a.level !== 'info' && a.level !== 'warning' && a.level !== 'error') continue;
+			if (a.level !== 'info' && a.level !== 'warn' && a.level !== 'error') continue;
 			const prev = map.get(a.task);
 			if (!prev || a.ts_ms >= prev.ts_ms) {
 				map.set(a.task, { level: a.level, ts_ms: a.ts_ms, duration_ms: a.duration_ms });
@@ -174,7 +201,7 @@
 				Graph
 			</div>
 			<div bind:this={dagPane} class="min-h-0 flex-1">
-				<FlowDag {yaml} onNodeClick={onNodeClick} />
+				<FlowDag yaml={graphYaml} onNodeClick={onNodeClick} />
 			</div>
 		</div>
 		<div class="flex min-h-0 flex-col">
@@ -182,23 +209,29 @@
 				<span class="text-xs font-medium opacity-70">Config</span>
 				<CopyButton text={yaml} label="Copy YAML" />
 			</div>
-			<div bind:this={yamlPane} class="min-h-0 flex-1 overflow-auto bg-base-200">
-				<ResourceViewer
-					content={yaml}
-					extension="yaml"
-					onResourceClick={openResource}
-					anchorTaskNames
-				/>
+			<div bind:this={yamlPane} class="flex min-h-0 flex-1 flex-col overflow-auto bg-base-200">
+				{#if editable}
+					<CodeEditor bind:value={yaml} extension="yaml" label="Flow config" />
+				{:else}
+					<ResourceViewer
+						content={yaml}
+						extension="yaml"
+						onResourceClick={openResource}
+						anchorTaskNames
+					/>
+				{/if}
 			</div>
 		</div>
 	</div>
-	<ActivityPanel
-		bind:this={activityPanel}
-		{activities}
-		expanded={activityExpanded}
-		onToggle={() => (activityExpanded = !activityExpanded)}
-		onRowClick={onActivityRowClick}
-	/>
+	{#if !editable}
+		<ActivityPanel
+			bind:this={activityPanel}
+			{activities}
+			expanded={activityExpanded}
+			onToggle={() => (activityExpanded = !activityExpanded)}
+			onRowClick={onActivityRowClick}
+		/>
+	{/if}
 </div>
 
 {#if previewKey}

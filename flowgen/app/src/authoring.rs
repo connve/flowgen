@@ -26,11 +26,12 @@ pub enum Error {
     NotConfigured,
     #[error("No change with id '{id}'")]
     NotFound { id: String },
-    /// Segments are limited because flow identities and resource keys become cache keys.
-    #[error(
-        "Invalid workspace path '{path}': files must be under flows/ or resources/, with path segments of letters, digits, '.', '_' and '-'"
-    )]
-    InvalidPath { path: String },
+    #[error("Invalid path '{path}': {reason}")]
+    InvalidPath {
+        path: String,
+        #[source]
+        reason: PathError,
+    },
     #[error("The change lists '{path}' more than once")]
     DuplicatePath { path: String },
     #[error("A change needs a title")]
@@ -169,25 +170,46 @@ enum Location<'a> {
     Resource { key: &'a str },
 }
 
+/// Why a path cannot hold a flow or resource.
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq)]
+pub enum PathError {
+    #[error("it must start with flows/ or resources/")]
+    Root,
+    #[error("it needs a file name")]
+    NoFileName,
+    #[error("it has an empty folder name")]
+    EmptySegment,
+    #[error("'.' and '..' are not allowed")]
+    Relative,
+    #[error("names can only use letters, digits, '.', '_' and '-'")]
+    Characters,
+}
+
 /// Splits a workspace path into its kind; segments are limited to
 /// `[A-Za-z0-9._-]` because flow identities and resource keys become cache keys.
-fn locate(path: &str) -> Option<Location<'_>> {
-    let safe = path.split('/').all(|segment| {
-        segment != "."
-            && segment != ".."
-            && !segment.is_empty()
-            && segment
+fn locate(path: &str) -> Result<Location<'_>, PathError> {
+    let (location, rest) = match path.split_once('/') {
+        Some(("flows", file)) => (Location::Flow { file }, file),
+        Some(("resources", key)) => (Location::Resource { key }, key),
+        _ => return Err(PathError::Root),
+    };
+    if rest.is_empty() || rest.ends_with('/') {
+        return Err(PathError::NoFileName);
+    }
+    for segment in rest.split('/') {
+        match segment {
+            "" => return Err(PathError::EmptySegment),
+            "." | ".." => return Err(PathError::Relative),
+            _ if !segment
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    });
-    if !safe {
-        return None;
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) =>
+            {
+                return Err(PathError::Characters)
+            }
+            _ => {}
+        }
     }
-    match path.split_once('/') {
-        Some(("flows", file)) => Some(Location::Flow { file }),
-        Some(("resources", key)) => Some(Location::Resource { key }),
-        _ => None,
-    }
+    Ok(location)
 }
 
 /// Where each file of a proposal lives once deployed; the title becomes the
@@ -200,10 +222,11 @@ fn check_proposal(proposal: &api::ChangeProposal) -> Result<Vec<Location<'_>>, E
     let mut locations = Vec::with_capacity(proposal.files.len());
     for file in &proposal.files {
         let location = match locate(&file.path) {
-            Some(location) => location,
-            None => {
+            Ok(location) => location,
+            Err(reason) => {
                 return Err(Error::InvalidPath {
                     path: file.path.clone(),
+                    reason,
                 })
             }
         };
@@ -231,18 +254,19 @@ fn validate_files(files: &[api::WorkspaceFile]) -> Vec<api::ValidationIssue> {
     let mut issues = Vec::new();
     for file in files {
         let found = match (locate(&file.path), &file.content) {
-            (None, _) => vec![crate::validation::Issue {
+            (Err(reason), _) => vec![crate::validation::Issue {
                 location: None,
                 message: Error::InvalidPath {
                     path: file.path.clone(),
+                    reason,
                 }
                 .to_string(),
             }],
-            (Some(_), None) => Vec::new(),
-            (Some(Location::Flow { file: name }), Some(content)) => {
+            (Ok(_), None) => Vec::new(),
+            (Ok(Location::Flow { file: name }), Some(content)) => {
                 crate::validation::validate_flow(name, content)
             }
-            (Some(Location::Resource { key }), Some(content)) => {
+            (Ok(Location::Resource { key }), Some(content)) => {
                 crate::validation::validate_resource(key, content)
             }
         };
@@ -829,33 +853,35 @@ mod tests {
     fn workspace_paths_are_located_under_flows_and_resources_only() {
         assert_eq!(
             locate("flows/a/b.yaml"),
-            Some(Location::Flow { file: "a/b.yaml" })
+            Ok(Location::Flow { file: "a/b.yaml" })
         );
         assert_eq!(
             locate("resources/scripts/s.rhai"),
-            Some(Location::Resource {
+            Ok(Location::Resource {
                 key: "scripts/s.rhai"
             })
         );
         assert_eq!(
             locate("flows/team-a/sync_v1.2.yaml"),
-            Some(Location::Flow {
+            Ok(Location::Flow {
                 file: "team-a/sync_v1.2.yaml"
             })
         );
-        for path in [
-            "other/a",
-            "flows",
-            "/flows/a",
-            "flows/../a",
-            "flows//a",
-            "flows/a\\b",
-            "flows/a b.yaml",
-            "resources/a:b",
-            "resources/é.txt",
-            "resources/a*",
+        for (path, reason) in [
+            ("other/a", PathError::Root),
+            ("flows", PathError::Root),
+            ("/flows/a", PathError::Root),
+            ("flows/", PathError::NoFileName),
+            ("resources/a/b/", PathError::NoFileName),
+            ("flows//a", PathError::EmptySegment),
+            ("flows/../a", PathError::Relative),
+            ("flows/a\\b", PathError::Characters),
+            ("flows/a b.yaml", PathError::Characters),
+            ("resources/a:b", PathError::Characters),
+            ("resources/é.txt", PathError::Characters),
+            ("resources/a*", PathError::Characters),
         ] {
-            assert_eq!(locate(path), None, "{path}");
+            assert_eq!(locate(path), Err(reason), "{path}");
         }
         assert_eq!(flow_identity("a/b.yaml"), "a/b");
         assert_eq!(flow_identity("a/b.txt"), "a/b.txt");
