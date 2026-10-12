@@ -367,6 +367,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspace/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The version of a file a change to it is based on.
+         * @description What the instance runs, with every published change that is not
+         *     deployed yet applied on top, so an edit made right after an approval
+         *     builds on that commit. `content` is null when the file does not exist.
+         */
+        get: operations["getWorkspaceFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/changes": {
         parameters: {
             query?: never;
@@ -406,12 +428,45 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
+        /**
+         * Edit the title or description of a pending change.
+         * @description Only its proposer may edit it; without `web.auth`, anyone. Fields left
+         *     out stay as they are.
+         */
+        patch: operations["editChange"];
+        trace?: never;
+    };
+    "/api/changes/{id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add files to a pending change, or replace files it already has.
+         * @description Only its proposer may add files; without `web.auth`, anyone. Every
+         *     file must belong to the change's target. A replaced file keeps the
+         *     deployed content recorded when it was first added, so publishing
+         *     fails when the file changed since. All files are validated again.
+         */
+        post: operations["addChangeFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
         patch?: never;
         trace?: never;
     };
     "/api/changes/{id}/approve": {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The change's `updatedAt` as reviewed; approving fails when it was edited since. */
+                updatedAt?: number;
+            };
             header?: never;
             path: {
                 id: string;
@@ -433,8 +488,8 @@ export interface paths {
          *     and records its result. `author` comes from the approver's `name` and
          *     `email` claims, else their user id; `content` null deletes the file
          *     and `previous` null marks a new one. A `failed` change, or one left
-         *     `publishing` past `web.authoring.publish_timeout`, can be approved
-         *     again.
+         *     `publishing` past the `ack_timeout` of the publish flow's
+         *     `inproc_endpoint`, can be approved again.
          */
         post: operations["approveChange"];
         delete?: never;
@@ -736,6 +791,8 @@ export interface components {
              *     redacted to `"***"`.
              */
             yaml: string;
+            /** @description Whether `web.agents` is enabled, so the Agents chat is available. */
+            agents: boolean;
             /** @description Whether `web.authoring` is set, so changes can be proposed. */
             authoring: boolean;
             /** @description Where changes can be proposed; empty when authoring is off. */
@@ -795,8 +852,21 @@ export interface components {
             /** @description The files to change, each path at most once. */
             files: components["schemas"]["WorkspaceFile"][];
         };
+        ChangeEdit: {
+            /** @description One line, used as the commit message; may not be blank. */
+            title?: string;
+            description?: string;
+        };
         /** @enum {string} */
         ChangeStatus: "pending" | "rejected" | "publishing" | "published" | "failed";
+        /**
+         * @description A published change against what this instance runs: `waiting` while a
+         *     file still runs as before, `deployed` otherwise, including when a file
+         *     has changed again since. Set only on a `published` change whose
+         *     target has `track_deployment` on.
+         * @enum {string}
+         */
+        ChangeDeployment: "waiting" | "deployed";
         ChangeFile: {
             path: string;
             /** @description Proposed content; null deletes the file. */
@@ -820,6 +890,11 @@ export interface components {
              * @description Epoch milliseconds.
              */
             createdAt: number;
+            /**
+             * Format: int64
+             * @description When the change was proposed or last edited, epoch milliseconds.
+             */
+            updatedAt?: number;
             /** @description The user who approved or rejected the change. */
             decidedBy?: string;
             /** Format: int64 */
@@ -832,6 +907,9 @@ export interface components {
             };
             /** @description Why publishing failed. */
             error?: string;
+            deployment?: components["schemas"]["ChangeDeployment"];
+            /** @description Publishing ran past the `ack_timeout` of the publish flow's `inproc_endpoint`, so approving the change again retries it. */
+            stalled?: boolean;
         };
         ChangeSummary: {
             /** @description Workspace paths the change touches. */
@@ -843,7 +921,10 @@ export interface components {
             proposedBy: string;
             /** Format: int64 */
             createdAt: number;
+            /** Format: int64 */
+            updatedAt?: number;
             fileCount: number;
+            deployment?: components["schemas"]["ChangeDeployment"];
         };
         /** @description One message in an Agents chat conversation. */
         ConversationMessage: {
@@ -1244,6 +1325,13 @@ export interface operations {
                     };
                 };
             };
+            /** @description `web.agents` is not enabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description The AI gateway could not be reached. */
             502: {
                 headers: {
@@ -1280,6 +1368,13 @@ export interface operations {
                     };
                 };
             };
+            /** @description `web.agents` is not enabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description The AI gateway could not be reached. */
             502: {
                 headers: {
@@ -1315,6 +1410,13 @@ export interface operations {
                         conversations: components["schemas"]["ConversationSummary"][];
                     };
                 };
+            };
+            /** @description `web.agents` is not enabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description The conversation store is unavailable. */
             503: {
@@ -1353,7 +1455,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description No conversation with that id. */
+            /** @description No conversation with that id, or `web.agents` is not enabled. */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1399,6 +1501,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `web.agents` is not enabled. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description The conversation store is unavailable. */
             503: {
                 headers: {
@@ -1429,6 +1538,13 @@ export interface operations {
             };
             /** @description The conversation id is invalid. */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `web.agents` is not enabled. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1467,6 +1583,50 @@ export interface operations {
             };
             /** @description Validating the files stopped unexpectedly. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getWorkspaceFile: {
+        parameters: {
+            query: {
+                /** @description Path from the workspace root, under `flows/` or `resources/`. */
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFile"];
+                };
+            };
+            /** @description The path is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `web.authoring` is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change store or the deployed content is unavailable. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1611,9 +1771,134 @@ export interface operations {
             };
         };
     };
-    approveChange: {
+    editChange: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeEdit"];
+            };
+        };
+        responses: {
+            /** @description The edited change. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Change"];
+                };
+            };
+            /** @description The title is blank. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller did not propose the change. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No change with that id, or `web.authoring` is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change is no longer pending, or was edited by another request. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change store is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    addChangeFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceFiles"];
+            };
+        };
+        responses: {
+            /** @description The change with the files added. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Change"];
+                };
+            };
+            /** @description A path is invalid, listed twice, or outside the change's target. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller did not propose the change. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No change with that id, or `web.authoring` is not configured. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change is no longer pending, or was edited by another request. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change store or the deployed content is unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    approveChange: {
+        parameters: {
+            query?: {
+                /** @description The change's `updatedAt` as reviewed; approving fails when it was edited since. */
+                updatedAt?: number;
+            };
             header?: never;
             path: {
                 id: string;
@@ -1649,10 +1934,11 @@ export interface operations {
                 content?: never;
             };
             /**
-             * @description The change cannot be published in its status (including
-             *     `publishing` before `web.authoring.publish_timeout` passed), has
-             *     invalid files, was decided by another request, or its files no
-             *     longer belong to the target it was proposed for.
+             * @description The change cannot be approved in its status (including
+             *     `publishing` before the publish flow's `ack_timeout` passed), has
+             *     invalid files, was decided by another request, was edited after
+             *     `updatedAt`, or its files no longer belong to the target it was
+             *     proposed for.
              */
             409: {
                 headers: {
@@ -1779,6 +2065,7 @@ export interface operations {
                 code?: string;
                 state?: string;
                 error?: string;
+                error_description?: string;
             };
             header?: never;
             path?: never;
@@ -1786,22 +2073,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Login succeeded; redirects back into the web UI. */
+            /**
+             * @description Redirects back into the web UI once signed in, or to its login page
+             *     with `?error=` when signing in failed: `access_denied` when the
+             *     provider refused the user, `provider` for another provider error,
+             *     `expired` when the sign-in took too long, `failed` when the
+             *     response could not be verified.
+             */
             302: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing/invalid code or state, or the provider reported an error. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Code exchange or ID token validation failed. */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };

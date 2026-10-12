@@ -1117,6 +1117,10 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     let push = Push {
         repository: format!("{host}/flowgen/workspace"),
         credentials_path: None,
+        annotations: std::collections::BTreeMap::from([(
+            "org.opencontainers.image.revision".to_string(),
+            "abc123".to_string(),
+        )]),
     };
     let files = vec![
         ArtifactFile {
@@ -1154,6 +1158,14 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     assert_eq!(
         manifest.config.media_type,
         flowgen_oci::push::client::EMPTY_MEDIA_TYPE
+    );
+    assert_eq!(
+        manifest
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("org.opencontainers.image.revision"))
+            .map(String::as_str),
+        Some("abc123")
     );
 
     for tag in ["abc123", "latest"] {

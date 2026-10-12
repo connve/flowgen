@@ -1,0 +1,8 @@
+# Read by `cargo audit` in the pre-commit hook and in CI.
+[advisories]
+# RUSTSEC-2023-0071 (Marvin attack in `rsa`, no fixed release): `rsa` is an
+# optional dependency of `ssh-key`, built with only the `ed25519` feature, so
+# it is in Cargo.lock but never compiled
+# (`cargo tree -i rsa --all-features --target all` prints nothing).
+# Remove the entry if `cargo tree` ever shows `rsa`.
+ignore = ["RUSTSEC-2023-0071"]

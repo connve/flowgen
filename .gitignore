@@ -1,6 +1,7 @@
 /target
 .idea/
-.cargo/
+.cargo/*
+!.cargo/audit.toml
 .DS_Store
 .git
 /local
@@ -17,3 +18,5 @@
 /web/.env.*
 # Synced from docs/static/icons/ by npm predev/prebuild — docs owns the source.
 /web/static/icons
+# Compiled from web/messages/ by the Paraglide Vite plugin and `npm run check`.
+/web/src/lib/paraglide

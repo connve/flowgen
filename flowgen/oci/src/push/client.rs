@@ -102,6 +102,8 @@ pub struct Push {
     pub repository: String,
     /// Registry credentials: `{username, password}` or a Docker `config.json`.
     pub credentials_path: Option<PathBuf>,
+    /// Manifest annotations.
+    pub annotations: BTreeMap<String, String>,
 }
 
 impl Push {
@@ -127,7 +129,11 @@ impl Push {
         let layer = Bytes::from(layer);
         let layer_descriptor = descriptor(IMAGE_LAYER_GZIP_MEDIA_TYPE, &layer);
         let config_descriptor = descriptor(EMPTY_MEDIA_TYPE, EMPTY_CONTENT);
-        let manifest = manifest(config_descriptor.clone(), layer_descriptor.clone())?;
+        let manifest = manifest(
+            config_descriptor.clone(),
+            layer_descriptor.clone(),
+            &self.annotations,
+        )?;
         let digest = sha256_digest(&manifest);
 
         let client = crate::registry::client(first);
@@ -225,12 +231,21 @@ fn layer(files: BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, std::io::Error> {
 }
 
 /// The exact manifest bytes pushed under every tag.
-fn manifest(config: OciDescriptor, layer: OciDescriptor) -> Result<Bytes, Error> {
+fn manifest(
+    config: OciDescriptor,
+    layer: OciDescriptor,
+    annotations: &BTreeMap<String, String>,
+) -> Result<Bytes, Error> {
+    let annotations = match annotations.is_empty() {
+        true => None,
+        false => Some(annotations.clone()),
+    };
     let manifest = OciImageManifest {
         media_type: Some(OCI_IMAGE_MEDIA_TYPE.to_string()),
         artifact_type: Some(ARTIFACT_TYPE.to_string()),
         config,
         layers: vec![layer],
+        annotations,
         ..Default::default()
     };
     serde_json::to_vec(&manifest)
@@ -267,6 +282,7 @@ mod tests {
         Push {
             repository: "127.0.0.1:9/a".to_string(),
             credentials_path: None,
+            annotations: BTreeMap::new(),
         }
     }
 
@@ -345,9 +361,11 @@ mod tests {
         let bytes = manifest(
             descriptor(EMPTY_MEDIA_TYPE, EMPTY_CONTENT),
             layer_descriptor.clone(),
+            &BTreeMap::new(),
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.get("annotations").is_none());
         assert_eq!(value["schemaVersion"], 2);
         assert_eq!(value["mediaType"], OCI_IMAGE_MEDIA_TYPE);
         assert_eq!(value["artifactType"], ARTIFACT_TYPE);
@@ -362,6 +380,19 @@ mod tests {
             layer_descriptor.digest.as_str()
         );
         assert_eq!(value["layers"][0]["size"], 5);
+    }
+
+    #[test]
+    fn annotations_are_set_on_the_manifest() {
+        let annotations = BTreeMap::from([("a".to_string(), "1".to_string())]);
+        let bytes = manifest(
+            descriptor(EMPTY_MEDIA_TYPE, EMPTY_CONTENT),
+            descriptor(IMAGE_LAYER_GZIP_MEDIA_TYPE, b"layer"),
+            &annotations,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["annotations"]["a"], "1");
     }
 
     #[tokio::test]
@@ -407,6 +438,7 @@ mod tests {
         let push = Push {
             repository: "127.0.0.1:9/a".to_string(),
             credentials_path: Some(path),
+            annotations: BTreeMap::new(),
         };
         let error = push
             .push(vec![file("a.txt", "a")], &tags(&["ok"]))

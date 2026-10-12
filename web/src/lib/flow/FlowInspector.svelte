@@ -10,8 +10,9 @@
 	import CopyButton from '$lib/CopyButton.svelte';
 	import ActivityPanel from '$lib/flow/ActivityPanel.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl } from '$lib/api';
+	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
 	import type { ActivityLevel } from '$lib/logRecord';
+	import { m } from '$lib/paraglide/messages.js';
 
 	interface Activity {
 		flow: string;
@@ -66,7 +67,7 @@
 	let previewError = $state<string | null>(null);
 
 	function resourceHref(key: string): string {
-		return `${base}/resources/${key.split('/').map(encodeURIComponent).join('/')}`;
+		return `${base}/resources/${encodePath(key)}`;
 	}
 
 	let yamlPane = $state<HTMLElement | null>(null);
@@ -171,11 +172,11 @@
 		previewError = null;
 		previewLoading = true;
 		try {
-			const response = await fetch(apiUrl(`api/resources/${key}`));
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			const response = await fetch(apiUrl(`api/resources/${encodePath(key)}`));
+			if (!response.ok) throw await failure(response);
 			previewContent = await response.json();
 		} catch (err) {
-			previewError = err instanceof Error ? err.message : 'Failed to load resource';
+			previewError = errorMessage(err, m.flow_resource_load_failed({ key }));
 		} finally {
 			previewLoading = false;
 		}
@@ -198,7 +199,7 @@
 	<div class="grid min-h-0 flex-1 grid-cols-2 gap-0 divide-x divide-base-200">
 		<div class="flex min-h-0 flex-col">
 			<div class="flex h-10 shrink-0 items-center border-b border-base-200 bg-base-100 px-4 text-xs font-medium opacity-70">
-				Graph
+				{m.flow_graph_heading()}
 			</div>
 			<div bind:this={dagPane} class="min-h-0 flex-1">
 				<FlowDag yaml={graphYaml} onNodeClick={onNodeClick} />
@@ -206,12 +207,12 @@
 		</div>
 		<div class="flex min-h-0 flex-col">
 			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
-				<span class="text-xs font-medium opacity-70">Config</span>
-				<CopyButton text={yaml} label="Copy YAML" />
+				<span class="text-xs font-medium opacity-70">{m.flow_config_heading()}</span>
+				<CopyButton text={yaml} label={m.flow_copy_yaml()} />
 			</div>
 			<div bind:this={yamlPane} class="flex min-h-0 flex-1 flex-col overflow-auto bg-base-200">
 				{#if editable}
-					<CodeEditor bind:value={yaml} extension="yaml" label="Flow config" />
+					<CodeEditor bind:value={yaml} extension="yaml" label={m.flow_config_editor_label()} />
 				{:else}
 					<ResourceViewer
 						content={yaml}
@@ -239,7 +240,7 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Resource preview"
+		aria-label={m.flow_resource_preview_label()}
 		onclick={(e) => {
 			if (e.target === e.currentTarget) closeResource();
 		}}
@@ -259,20 +260,20 @@
 					{/if}
 				</div>
 				<div class="flex items-center gap-1">
-					<div class="tooltip tooltip-left" data-tip="Open full page">
+					<div class="tooltip tooltip-left" data-tip={m.flow_open_full_page()}>
 						<a
 							href={resourceHref(previewKey)}
 							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Open full page"
+							aria-label={m.flow_open_full_page()}
 						>
 							<Icon icon="tabler:external-link" class="h-5 w-5" />
 						</a>
 					</div>
-					<div class="tooltip tooltip-left" data-tip="Close">
+					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
 						<button
 							type="button"
 							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Close"
+							aria-label={m.common_close()}
 							onclick={closeResource}
 						>
 							<Icon icon="tabler:x" class="h-5 w-5" />
@@ -281,7 +282,7 @@
 				</div>
 			</div>
 			<div class="flex items-center justify-end border-b border-base-200 bg-base-100 px-4 py-1">
-				<CopyButton text={previewContent?.content} label="Copy" />
+				<CopyButton text={previewContent?.content} label={m.common_copy()} />
 			</div>
 			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
 				{#if previewLoading}
@@ -290,7 +291,7 @@
 					</div>
 				{:else if previewError}
 					<div class="flex-1">
-						<StateMessage tone="oops" title="Failed to load resource" message={previewError} />
+						<StateMessage tone="oops" title={m.flow_resource_load_failed_title()} message={previewError} />
 					</div>
 				{:else if previewContent}
 					<div class="min-h-0 flex-1 overflow-auto">

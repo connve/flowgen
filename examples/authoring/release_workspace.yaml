@@ -20,13 +20,14 @@ flow:
         name: tick
         interval: "30s"
 
-    # Emits every file under workspace/ when the branch has a new commit.
+    # Emits every file each tick, so a failed push is retried.
     - git_sync:
         name: pull_repo
         repository_url: "{{env.GIT_WORKSPACE_URL}}"
         branch: main
         path: "workspace/"
         credentials_path: /etc/flowgen/credentials/git.json
+        force_pull: true
 
     - buffer:
         name: collect_files
@@ -34,19 +35,30 @@ flow:
         timeout: "5m"
         flush_on_completion: true
 
-    # Releases only a complete pull; one cut short by the timeout is skipped.
+    # Releases a complete pull of a commit not released yet.
     - script:
         name: to_release
         code: |
           if event.data.flush_reason != "completion" { return (); }
+          let commit = event.data.batch[0].commit;
+          if ctx.cache.get("released_commit") == commit { return (); }
           let files = [];
           for file in event.data.batch {
               files.push(#{ path: file.path, content: file.content });
           }
-          #{ commit: event.data.batch[0].commit, files: files }
+          #{ commit: commit, files: files }
 
     - oci_push:
         name: release
         repository: "{{env.OCI_WORKSPACE_REPOSITORY}}"
         tags: ["{{event.data.commit}}", "latest"]
+        annotations:
+          org.opencontainers.image.source: "{{env.GIT_WORKSPACE_URL}}"
+          org.opencontainers.image.revision: "{{event.data.commit}}"
         credentials_path: /etc/flowgen/credentials/registry.json
+
+    - script:
+        name: record_release
+        code: |
+          ctx.cache.put("released_commit", event.data.commit);
+          event

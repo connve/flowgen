@@ -9,6 +9,8 @@
   in a task fails to load and names the field, and an unknown field under
   `retry` in the app config stops startup.
   `POST /api/workspace/validate` reports the same error.
+- **The Agents tab needs `web.agents.enabled: true`.** Without it the tab is
+  hidden and `/api/agents` answers 404.
 
 ### Features
 
@@ -17,6 +19,22 @@
   Flows and Resources pages and from each flow and resource. Enable with
   `web.authoring.enabled`. Approving calls the
   target's `publish_flow`, `system/publish_workspace` by default.
+- A pending change takes more files (`POST /api/changes/{id}/files`) and a
+  new title and description (`PATCH /api/changes/{id}`), from its proposer.
+  Saving in the editor adds the file to the user's latest pending change in
+  the same target, and a title the editor generated follows its files. The
+  Changes page edits the title and description. Approving with `?updatedAt=`
+  fails when the change was edited after review.
+- A change left publishing past its publish flow's `ack_timeout` has
+  `stalled` set, and the Changes page offers to retry it.
+- Changes record a signed-in user by their `email` claim, else their user id.
+- A change is based on the deployed files with published changes that are
+  not deployed yet applied on top, so editing a file right after an approval
+  does not conflict. `GET /api/workspace/file` returns that version, and the
+  editor opens files from it.
+- A published change shows whether it is deployed: the Changes page compares
+  its files with what the instance runs. Turn it off per target with
+  `track_deployment: false`.
 - `web.authoring.targets`: areas of the workspace, such as `flows/platform/`
   and `flows/user/`, with their own `approver_groups` and `publish_flow`.
   Targets match whole folders, and a path covered by several targets belongs
@@ -25,7 +43,8 @@
 - `inproc_endpoint` and `inproc_request` tasks: a flow calls another flow in
   the same process and gets its result, without HTTP or credentials. By
   default only flows in the same top-level folder may call; `callers` widens
-  it, matching whole folders. A flow cannot call itself.
+  it, matching whole folders. A flow cannot call itself. A call times out
+  after `ack_timeout`, 30 seconds by default.
 - `nats_kv_store` `put` without `key` writes every entry of
   `event.data.entries` under `key_prefix`, skipping unchanged values.
   `prune: true` deletes the keys under the prefix that are not listed, and
@@ -36,11 +55,14 @@
   running them, including unknown fields.
 - `git_push` task commits files to a branch and pushes them over HTTPS. Each
   file needs `content`; `null` deletes it. With credentials the repository
-  URL must be HTTPS.
+  URL must be HTTPS. `signing_key_path` signs commits with an SSH key, and
+  `committer` sets the identity that holds it. A rejected push reports the
+  git server's own message.
 - `oci_push` task pushes files as an artifact `oci_sync` reads. Tags and file
-  paths are checked before anything is pushed.
+  paths are checked before anything is pushed. `annotations` sets manifest
+  annotations, such as the source repository and commit.
 - `web.api_credentials_path`: machine keys for the web API. They can propose
-  changes but not approve them.
+  changes and extend their own pending ones, but not approve them.
 - Example operator agent and tools in `examples/authoring/`.
 
 ### Changed
@@ -53,10 +75,23 @@
   interface to other pods.
 - `git_sync` with `credentials_path` requires an HTTPS repository URL, or
   HTTP to a loopback host.
+- A `script` that throws a string fails with that string as its error. A
+  change whose publish flow fails records the flow's error message.
+- Web UI errors show the server's reason, a lost connection says so, and
+  empty states tell apart "nothing yet" from "filters hide everything". All
+  web UI text is in one message catalogue, `web/messages/en.json`.
 
 ### Fixed
 
 - Concurrent requests with an expired session refresh it once.
+- The Logs page reports a failed history load.
+- A failed sign-in opens a login page that says why, for example that the
+  user is not assigned to the application, with a button to sign in again.
+- A flow written to the cache with the content it already runs keeps running.
+- `generate` with `interval` keeps its schedule across restarts: a run is due
+  one interval after the previous attempt, or after the flow's first start, so
+  a flow restarted more often than its interval still runs, and never more
+  often.
 - Examples with settings flowgen ignored or scripts that did not compile:
   JetStream `max_messages` is `max_messages_per_batch` and `max_ack_wait` is
   `ack_timeout`, `generate` takes `payload`, `retry` has no `max_delay`,

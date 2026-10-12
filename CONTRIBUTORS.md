@@ -131,6 +131,18 @@ in a custom type. Only convert when the event pipeline needs a different
 shape — e.g. BigQuery's `QueryResponse` becomes an Arrow `RecordBatch` for
 `EventData`, but the query call itself uses the library's native response.
 
+### Web UI text
+
+- Every string a user reads in `web/` (labels, tooltips, `aria-label`s, empty
+  states, errors) lives in `web/messages/en.json` and is used as
+  `m.key()` from `$lib/paraglide/messages.js`. Keys are flat snake_case,
+  prefixed by area (`flows_`, `editor_`, `changes_`, `common_`); reuse
+  `common_*` before adding a key. Counts use the plural format.
+- Product names, config keys, paths and data from the API stay as they are.
+- An empty state says what is missing and the next step; an error says what
+  failed and what to do. Show the server's reason with `failure()` and
+  `errorMessage()` from `$lib/api` rather than a bare HTTP status.
+
 ## Architecture reference
 
 ### Retry strategy

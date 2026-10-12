@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 pub enum Error {
     #[error("Invalid file path '{path}': must be relative and name a file, without '.', '..' or '.git' segments")]
     InvalidPath { path: String },
-    #[error("'{path}' changed on the branch since the change was prepared")]
+    #[error("'{path}' changed in the repository. Please propose the change again.")]
     Conflict { path: String },
     #[error("Nothing to push to an empty repository")]
     NothingToPush,
@@ -45,6 +45,11 @@ pub enum Error {
     WriteRepository {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("Failed to sign the commit: {source}")]
+    Sign {
+        #[source]
+        source: ssh_key::Error,
     },
     #[error("Failed to encode the pack: {source}")]
     EncodePack {
@@ -144,12 +149,12 @@ pub struct FileChange {
     pub expected: Expected,
 }
 
-/// Commit author.
+/// Commit author or committer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Author {
-    /// Author name recorded on the commit.
+    /// Name recorded on the commit.
     pub name: String,
-    /// Author email recorded on the commit.
+    /// Email recorded on the commit.
     pub email: String,
 }
 
@@ -184,6 +189,10 @@ pub struct Push {
     pub path: Option<String>,
     /// Token sent with every request to the git server.
     pub credentials: Option<Credentials>,
+    /// Committer; `None` commits as the author.
+    pub committer: Option<Author>,
+    /// Key that signs the commit.
+    pub signing_key: Option<std::sync::Arc<ssh_key::PrivateKey>>,
     /// Client for the receive-pack exchange, with the caller's timeouts.
     pub http: reqwest::Client,
     /// Time budget for fetching the branch and building the commit; `None`
@@ -195,7 +204,19 @@ pub struct Push {
 struct Advertisement {
     tip: Option<String>,
     has_refs: bool,
+    capabilities: Vec<String>,
 }
+
+/// Refs and capabilities of a receive-pack advertisement.
+struct AdvertisedRefs {
+    refs: HashMap<String, String>,
+    capabilities: Vec<String>,
+}
+
+/// Capabilities requested with the ref update when the server offers them:
+/// messages on a side band, without progress output.
+const SIDE_BAND: &str = "side-band-64k";
+const QUIET: &str = "quiet";
 
 /// A commit built locally, ready to send.
 struct Built {
@@ -238,6 +259,7 @@ impl Push {
             });
         }
         let tip = advertised.tip;
+        let capabilities = advertised.capabilities;
         let built = {
             let push = self.clone();
             let prefix = prefix.join("/");
@@ -264,7 +286,7 @@ impl Push {
             }
         };
         match self
-            .send(built.parent.as_deref(), &built.commit, pack)
+            .send(built.parent.as_deref(), &built.commit, pack, &capabilities)
             .await
         {
             Ok(()) => Ok(Pushed {
@@ -308,21 +330,41 @@ impl Push {
         let body = self
             .fetch(self.authorized(self.http.get(&url)), &url)
             .await?;
-        let refs = advertised_refs(&body)?;
+        let advertised = advertised_refs(&body)?;
         Ok(Advertisement {
-            tip: refs.get(&format!("refs/heads/{}", self.branch)).cloned(),
-            has_refs: !refs.is_empty(),
+            tip: advertised
+                .refs
+                .get(&format!("refs/heads/{}", self.branch))
+                .cloned(),
+            has_refs: !advertised.refs.is_empty(),
+            capabilities: advertised.capabilities,
         })
     }
 
-    async fn send(&self, parent: Option<&str>, commit: &str, pack: Vec<u8>) -> Result<(), Error> {
+    async fn send(
+        &self,
+        parent: Option<&str>,
+        commit: &str,
+        pack: Vec<u8>,
+        capabilities: &[String],
+    ) -> Result<(), Error> {
         let parent = match parent {
             Some(parent) => parent.to_string(),
             None => ObjectId::null(gix::hash::Kind::Sha1).to_string(),
         };
+        let offered = |capability: &str| capabilities.iter().any(|c| c == capability);
+        let side_band = offered(SIDE_BAND);
+        let mut requested = vec!["report-status"];
+        if side_band {
+            requested.push(SIDE_BAND);
+        }
+        if offered(QUIET) {
+            requested.push(QUIET);
+        }
         let command = format!(
-            "{parent} {commit} refs/heads/{}\0report-status\n",
-            self.branch
+            "{parent} {commit} refs/heads/{}\0{}\n",
+            self.branch,
+            requested.join(" ")
         );
         let mut body = Vec::new();
         packetline::blocking_io::encode::data_to_write(command.as_bytes(), &mut body)
@@ -344,7 +386,13 @@ impl Push {
             )
             .body(body);
         let response = self.fetch(request, &url).await?;
-        check_report(&response, &self.branch)
+        match side_band {
+            true => {
+                let (report, messages) = demultiplex(&response)?;
+                check_report(&report, &self.branch).map_err(|error| explain(error, &messages))
+            }
+            false => check_report(&response, &self.branch),
+        }
     }
 
     async fn fetch(&self, request: reqwest::RequestBuilder, url: &str) -> Result<Vec<u8>, Error> {
@@ -441,17 +489,15 @@ impl Push {
             });
         }
 
-        let signature = gix::actor::Signature {
-            name: author.name.as_str().into(),
-            email: author.email.as_str().into(),
-            time: gix::date::Time::now_utc(),
-        };
-        let mut time = gix::date::parse::TimeBuf::default();
-        let signature = signature.to_ref(&mut time);
-        let commit = repo
-            .new_commit_as(signature, signature, message, tree, parent)
-            .map_err(write_error)?
-            .id;
+        let commit = write_commit(
+            &repo,
+            tree,
+            parent,
+            author,
+            self.committer.as_ref(),
+            message,
+            self.signing_key.as_deref(),
+        )?;
 
         let mut objects = vec![object_entry(&repo, commit)?];
         let mut known = reachable(&repo, base_tree)?;
@@ -567,6 +613,51 @@ fn check_expected(path: &str, change: &FileChange, current: &Option<Current>) ->
             path: path.to_string(),
         }),
     }
+}
+
+/// Writes the commit, signed with `signing_key` the way git signs with an SSH
+/// key: an SSHSIG over the unsigned commit in the `gpgsig` header.
+fn write_commit(
+    repo: &gix::Repository,
+    tree: ObjectId,
+    parent: Option<ObjectId>,
+    author: &Author,
+    committer: Option<&Author>,
+    message: &str,
+    signing_key: Option<&ssh_key::PrivateKey>,
+) -> Result<ObjectId, Error> {
+    let time = gix::date::Time::now_utc();
+    let signature = |identity: &Author| gix::actor::Signature {
+        name: identity.name.as_str().into(),
+        email: identity.email.as_str().into(),
+        time,
+    };
+    let mut commit = gix::objs::Commit {
+        tree,
+        parents: parent.into_iter().collect(),
+        author: signature(author),
+        committer: signature(match committer {
+            Some(committer) => committer,
+            None => author,
+        }),
+        encoding: None,
+        message: message.into(),
+        extra_headers: Vec::new(),
+    };
+    if let Some(key) = signing_key {
+        let mut unsigned = Vec::new();
+        gix::objs::WriteTo::write_to(&commit, &mut unsigned).map_err(write_error)?;
+        let sign_error = |source| Error::Sign { source };
+        let pem = key
+            .sign("git", ssh_key::HashAlg::Sha512, &unsigned)
+            .map_err(sign_error)?
+            .to_pem(ssh_key::LineEnding::LF)
+            .map_err(sign_error)?;
+        commit
+            .extra_headers
+            .push((gix::objs::commit::SIGNATURE_FIELD_NAME.into(), pem.into()));
+    }
+    Ok(repo.write_object(&commit).map_err(write_error)?.detach())
 }
 
 fn object_entry(repo: &gix::Repository, id: ObjectId) -> Result<(PackEntryHeader, Vec<u8>), Error> {
@@ -730,12 +821,22 @@ fn pkt_lines(mut body: &[u8]) -> Result<Vec<&[u8]>, Error> {
     Ok(lines)
 }
 
-/// Ref name to object id from a receive-pack advertisement.
-fn advertised_refs(body: &[u8]) -> Result<HashMap<String, String>, Error> {
+/// Ref name to object id from a receive-pack advertisement, and the
+/// capabilities after the first ref.
+fn advertised_refs(body: &[u8]) -> Result<AdvertisedRefs, Error> {
     let mut refs = HashMap::new();
+    let mut capabilities = Vec::new();
     for line in pkt_lines(body)? {
         let line = match line.iter().position(|&b| b == 0) {
-            Some(nul) => &line[..nul],
+            Some(nul) => {
+                if capabilities.is_empty() {
+                    capabilities = String::from_utf8_lossy(&line[nul + 1..])
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect();
+                }
+                &line[..nul]
+            }
             None => line,
         };
         let line = String::from_utf8_lossy(line);
@@ -764,7 +865,51 @@ fn advertised_refs(body: &[u8]) -> Result<HashMap<String, String>, Error> {
             }
         }
     }
-    Ok(refs)
+    Ok(AdvertisedRefs { refs, capabilities })
+}
+
+/// Splits a side-band response into the `report-status` stream (band 1) and
+/// the server's messages (band 2); a message on band 3 is a fatal error.
+fn demultiplex(body: &[u8]) -> Result<(Vec<u8>, String), Error> {
+    let mut report = Vec::new();
+    let mut messages = Vec::new();
+    for line in pkt_lines(body)? {
+        match line.split_first() {
+            Some((1, data)) => report.extend_from_slice(data),
+            Some((2, data)) => messages.extend(message_lines(data)),
+            Some((3, data)) => {
+                return Err(Error::ServerError {
+                    message: message_lines(data).join(" "),
+                })
+            }
+            _ => {}
+        }
+    }
+    Ok((report, messages.join(" ")))
+}
+
+/// The non-empty lines of a side-band message.
+fn message_lines(data: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(data)
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A rejection with the server's own explanation in front of its short reason.
+fn explain(error: Error, messages: &str) -> Error {
+    match error {
+        Error::RefRejected { branch, message } if !messages.is_empty() => Error::RefRejected {
+            branch,
+            message: format!("{messages} ({message})"),
+        },
+        Error::UnpackFailed { status } if !messages.is_empty() => Error::UnpackFailed {
+            status: format!("{messages} ({status})"),
+        },
+        error => error,
+    }
 }
 
 /// Checks a `report-status` response for the pushed branch.
@@ -893,16 +1038,21 @@ mod tests {
     #[test]
     fn advertisement_lists_branches_and_skips_an_empty_repository_marker() {
         let id = "1111111111111111111111111111111111111111";
-        let line = format!("{id} refs/heads/main\0report-status delete-refs\n");
+        let line = format!("{id} refs/heads/main\0report-status side-band-64k quiet\n");
         let body = stream(&[
             Some(b"# service=git-receive-pack\n"),
             None,
             Some(line.as_bytes()),
             None,
         ]);
+        let advertised = advertised_refs(&body).unwrap();
         assert_eq!(
-            advertised_refs(&body).unwrap().get("refs/heads/main"),
+            advertised.refs.get("refs/heads/main"),
             Some(&id.to_string())
+        );
+        assert_eq!(
+            advertised.capabilities,
+            vec!["report-status", "side-band-64k", "quiet"]
         );
 
         let null = ObjectId::null(gix::hash::Kind::Sha1);
@@ -913,7 +1063,55 @@ mod tests {
             Some(line.as_bytes()),
             None,
         ]);
-        assert!(advertised_refs(&empty).unwrap().is_empty());
+        assert!(advertised_refs(&empty).unwrap().refs.is_empty());
+    }
+
+    #[test]
+    fn side_band_messages_explain_a_rejection() {
+        let report = stream(&[
+            Some(b"unpack ok\n"),
+            Some(b"ng refs/heads/main Internal Server Error\n"),
+            None,
+        ]);
+        let band = |number: u8, data: &[u8]| [&[number][..], data].concat();
+        let body = stream(&[
+            Some(&band(
+                2,
+                b"error: GH013: Repository rule violations found.\n",
+            )),
+            Some(&band(
+                2,
+                b"\r- Changes must be made through a pull request.\n",
+            )),
+            Some(&band(1, &report)),
+            None,
+        ]);
+        let (report, messages) = demultiplex(&body).unwrap();
+        assert_eq!(
+            messages,
+            "error: GH013: Repository rule violations found. - Changes must be made through a pull request."
+        );
+        match check_report(&report, "main").map_err(|error| explain(error, &messages)) {
+            Err(Error::RefRejected { message, .. }) => {
+                assert_eq!(message, format!("{messages} (Internal Server Error)"))
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let fatal = stream(&[Some(&band(3, b"repository is archived\n")), None]);
+        assert!(matches!(
+            demultiplex(&fatal),
+            Err(Error::ServerError { message }) if message == "repository is archived"
+        ));
+        assert!(matches!(
+            explain(
+                Error::BranchMoved {
+                    branch: "main".to_string()
+                },
+                "x"
+            ),
+            Error::BranchMoved { .. }
+        ));
     }
 
     #[test]
@@ -971,6 +1169,56 @@ mod tests {
         for path in [".github/ci.yaml", ".gitignore", "git/a.yaml", "a.git/b"] {
             assert!(normalize_path(path).is_ok(), "{path:?}");
         }
+    }
+
+    #[test]
+    fn a_signed_commit_verifies_against_the_signing_key() {
+        let key = ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]));
+        let author = Author {
+            name: "a".to_string(),
+            email: "a@example.com".to_string(),
+        };
+        let committer = Author {
+            name: "b".to_string(),
+            email: "b@example.com".to_string(),
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = gix::init_bare(dir.path()).unwrap();
+        let tree = ObjectId::empty_tree(repo.object_hash());
+        let id = write_commit(
+            &repo,
+            tree,
+            None,
+            &author,
+            Some(&committer),
+            "m",
+            Some(&key),
+        )
+        .unwrap();
+
+        let commit = repo.find_commit(id).unwrap();
+        assert_eq!(commit.author().unwrap().email, "a@example.com");
+        assert_eq!(commit.committer().unwrap().email, "b@example.com");
+        let (signature, signed) =
+            gix::objs::CommitRefIter::signature(&commit.data, repo.object_hash())
+                .unwrap()
+                .unwrap();
+        let signature = ssh_key::SshSig::from_pem(&*signature).unwrap();
+        let signed = signed.to_bstring();
+        key.public_key().verify("git", &signed, &signature).unwrap();
+        assert!(key
+            .public_key()
+            .verify("git", b"other", &signature)
+            .is_err());
+
+        let unsigned = write_commit(&repo, tree, None, &author, None, "m", None).unwrap();
+        let unsigned = repo.find_commit(unsigned).unwrap();
+        assert_eq!(unsigned.committer().unwrap().email, "a@example.com");
+        assert!(
+            gix::objs::CommitRefIter::signature(&unsigned.data, repo.object_hash())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

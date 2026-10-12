@@ -1,10 +1,15 @@
 import { checkSession } from '$lib/auth.svelte';
+import { agentsEnabled } from '$lib/changes';
 import type { LayoutLoad } from './$types';
 
 // The UI is a single-page app: the backend serves the built files and pages
 // load their data from its API in the browser.
 export const ssr = false;
 
-export const load: LayoutLoad = async ({ fetch }) => {
+// The login page calls no API, since a 401 would send the browser back to the
+// identity provider it just returned from.
+export const load: LayoutLoad = async ({ fetch, route }) => {
+	if (route.id === '/login') return { agents: false, login: true };
 	await checkSession(fetch);
+	return { agents: await agentsEnabled(fetch), login: false };
 };

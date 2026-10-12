@@ -304,6 +304,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        "404":
+          description: "`web.agents` is not enabled."
         "502":
           description: The AI gateway could not be reached.
         "503":
@@ -326,6 +328,8 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        "404":
+          description: "`web.agents` is not enabled."
         "502":
           description: The AI gateway could not be reached.
         "503":
@@ -355,6 +359,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/ConversationSummary"
+        "404":
+          description: "`web.agents` is not enabled."
         "503":
           description: The conversation store is unavailable.
 
@@ -380,7 +386,7 @@ paths:
         "400":
           description: The conversation id is invalid.
         "404":
-          description: No conversation with that id.
+          description: No conversation with that id, or `web.agents` is not enabled.
         "503":
           description: The conversation store is unavailable.
     put:
@@ -403,6 +409,8 @@ paths:
           description: The conversation was stored.
         "400":
           description: The conversation id is invalid.
+        "404":
+          description: "`web.agents` is not enabled."
         "503":
           description: The conversation store is unavailable.
     delete:
@@ -415,6 +423,8 @@ paths:
           description: The conversation is gone.
         "400":
           description: The conversation id is invalid.
+        "404":
+          description: "`web.agents` is not enabled."
         "503":
           description: The conversation store is unavailable.
 
@@ -443,6 +453,36 @@ paths:
                 $ref: "#/components/schemas/WorkspaceValidation"
         "500":
           description: Validating the files stopped unexpectedly.
+
+  /api/workspace/file:
+    get:
+      operationId: getWorkspaceFile
+      summary: The version of a file a change to it is based on.
+      description: |
+        What the instance runs, with every published change that is not
+        deployed yet applied on top, so an edit made right after an approval
+        builds on that commit. `content` is null when the file does not exist.
+      tags: [workspace]
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Path from the workspace root, under `flows/` or `resources/`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceFile"
+        "400":
+          description: The path is invalid.
+        "404":
+          description: "`web.authoring` is not configured."
+        "503":
+          description: The change store or the deployed content is unavailable.
 
   /api/changes:
     get:
@@ -525,6 +565,76 @@ paths:
           description: Diffing the files stopped unexpectedly.
         "503":
           description: The change store is unavailable.
+    patch:
+      operationId: editChange
+      summary: Edit the title or description of a pending change.
+      description: |
+        Only its proposer may edit it; without `web.auth`, anyone. Fields left
+        out stay as they are.
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeEdit"
+      responses:
+        "200":
+          description: The edited change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "400":
+          description: The title is blank.
+        "403":
+          description: The caller did not propose the change.
+        "404":
+          description: No change with that id, or `web.authoring` is not configured.
+        "409":
+          description: The change is no longer pending, or was edited by another request.
+        "503":
+          description: The change store is unavailable.
+
+  /api/changes/{id}/files:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: addChangeFiles
+      summary: Add files to a pending change, or replace files it already has.
+      description: |
+        Only its proposer may add files; without `web.auth`, anyone. Every
+        file must belong to the change's target. A replaced file keeps the
+        deployed content recorded when it was first added, so publishing
+        fails when the file changed since. All files are validated again.
+      tags: [workspace]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspaceFiles"
+      responses:
+        "200":
+          description: The change with the files added.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Change"
+        "400":
+          description: A path is invalid, listed twice, or outside the change's target.
+        "403":
+          description: The caller did not propose the change.
+        "404":
+          description: No change with that id, or `web.authoring` is not configured.
+        "409":
+          description: The change is no longer pending, or was edited by another request.
+        "503":
+          description: The change store or the deployed content is unavailable.
 
   /api/changes/{id}/approve:
     parameters:
@@ -533,6 +643,13 @@ paths:
         required: true
         schema:
           type: string
+      - name: updatedAt
+        in: query
+        required: false
+        description: The change's `updatedAt` as reviewed; approving fails when it was edited since.
+        schema:
+          type: integer
+          format: int64
     post:
       operationId: approveChange
       summary: Approve a pending change and publish it, or publish a failed one again.
@@ -548,8 +665,8 @@ paths:
         and records its result. `author` comes from the approver's `name` and
         `email` claims, else their user id; `content` null deletes the file
         and `previous` null marks a new one. A `failed` change, or one left
-        `publishing` past `web.authoring.publish_timeout`, can be approved
-        again.
+        `publishing` past the `ack_timeout` of the publish flow's
+        `inproc_endpoint`, can be approved again.
       tags: [workspace]
       responses:
         "200":
@@ -566,10 +683,11 @@ paths:
           description: No change with that id, or `web.authoring` is not configured.
         "409":
           description: |
-            The change cannot be published in its status (including
-            `publishing` before `web.authoring.publish_timeout` passed), has
-            invalid files, was decided by another request, or its files no
-            longer belong to the target it was proposed for.
+            The change cannot be approved in its status (including
+            `publishing` before the publish flow's `ack_timeout` passed), has
+            invalid files, was decided by another request, was edited after
+            `updatedAt`, or its files no longer belong to the target it was
+            proposed for.
         "500":
           description: Publishing stopped unexpectedly, or the change could not be encoded or diffed.
         "503":
@@ -657,13 +775,17 @@ paths:
         - name: error
           in: query
           schema: { type: string }
+        - name: error_description
+          in: query
+          schema: { type: string }
       responses:
         "302":
-          description: Login succeeded; redirects back into the web UI.
-        "400":
-          description: Missing/invalid code or state, or the provider reported an error.
-        "401":
-          description: Code exchange or ID token validation failed.
+          description: |
+            Redirects back into the web UI once signed in, or to its login page
+            with `?error=` when signing in failed: `access_denied` when the
+            provider refused the user, `provider` for another provider error,
+            `expired` when the sign-in took too long, `failed` when the
+            response could not be verified.
         "404":
           description: OIDC login is not configured.
 
@@ -955,13 +1077,16 @@ components:
 
     ConfigInfo:
       type: object
-      required: [yaml, authoring, authoringTargets]
+      required: [yaml, agents, authoring, authoringTargets]
       properties:
         yaml:
           type: string
           description: |
             The running `AppConfig` serialized to YAML, with secrets
             redacted to `"***"`.
+        agents:
+          type: boolean
+          description: Whether `web.agents` is enabled, so the Agents chat is available.
         authoring:
           type: boolean
           description: Whether `web.authoring` is set, so changes can be proposed.
@@ -1071,9 +1196,27 @@ components:
           items:
             $ref: "#/components/schemas/WorkspaceFile"
 
+    ChangeEdit:
+      type: object
+      properties:
+        title:
+          type: string
+          description: One line, used as the commit message; may not be blank.
+        description:
+          type: string
+
     ChangeStatus:
       type: string
       enum: [pending, rejected, publishing, published, failed]
+
+    ChangeDeployment:
+      type: string
+      enum: [waiting, deployed]
+      description: |
+        A published change against what this instance runs: `waiting` while a
+        file still runs as before, `deployed` otherwise, including when a file
+        has changed again since. Set only on a `published` change whose
+        target has `track_deployment` on.
 
     ChangeFile:
       type: object
@@ -1115,6 +1258,10 @@ components:
           type: integer
           format: int64
           description: Epoch milliseconds.
+        updatedAt:
+          type: integer
+          format: int64
+          description: When the change was proposed or last edited, epoch milliseconds.
         decidedBy:
           type: string
           description: The user who approved or rejected the change.
@@ -1136,6 +1283,11 @@ components:
         error:
           type: string
           description: Why publishing failed.
+        deployment:
+          $ref: "#/components/schemas/ChangeDeployment"
+        stalled:
+          type: boolean
+          description: Publishing ran past the `ack_timeout` of the publish flow's `inproc_endpoint`, so approving the change again retries it.
 
     ChangeSummary:
       type: object
@@ -1159,8 +1311,13 @@ components:
         createdAt:
           type: integer
           format: int64
+        updatedAt:
+          type: integer
+          format: int64
         fileCount:
           type: integer
+        deployment:
+          $ref: "#/components/schemas/ChangeDeployment"
 
     ConversationMessage:
       type: object

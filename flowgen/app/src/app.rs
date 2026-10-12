@@ -1360,7 +1360,10 @@ impl App {
                     app_config: Arc::clone(&app_config),
                     conversation_cache: Arc::clone(&executor_cache),
                     system_bucket_present: system.cache.is_some(),
-                    conversation_history_ttl: web_config.agents.conversation_history_ttl,
+                    agents: match &web_config.agents {
+                        Some(agents) if agents.enabled => Some(agents.clone()),
+                        _ => None,
+                    },
                     login_client,
                     cookie_key,
                     cookie_secure: web_config.cookie_secure,

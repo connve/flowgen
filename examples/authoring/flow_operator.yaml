@@ -3,7 +3,7 @@
 # person to approve in the Changes page. It cannot approve changes itself.
 #
 # Required:
-#   - ai_gateway and mcp_server enabled in the app config
+#   - ai_gateway, mcp_server and web.agents enabled in the app config
 #   - web.headers with `X-Flowgen-Client: flowgen-ui`, so the Agents chat can reach the proxy
 #   - FLOWGEN_UI_URL env var, the web UI address users open, e.g. https://example.com/flowgen
 #   - the tool flows in examples/authoring/tools/

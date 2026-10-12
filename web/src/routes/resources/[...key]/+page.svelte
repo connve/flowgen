@@ -5,6 +5,7 @@
 	import EditButton from '$lib/EditButton.svelte';
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { editUrl, targetOf } from '$lib/changes';
+	import { m } from '$lib/paraglide/messages.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -25,7 +26,7 @@
 	<div class="mb-4">
 		<div class="flex min-h-8 items-center justify-between gap-2">
 			<div class="flex items-center gap-1.5 text-sm">
-				<a href="{base}/resources" class="text-primary hover:underline">Resources</a>
+				<a href="{base}/resources" class="text-primary hover:underline">{m.resources_breadcrumb()}</a>
 				{#each folderSegments as segment, i (i)}
 					<span class="opacity-40">/</span>
 					<span class="font-mono opacity-70">{segment}</span>
@@ -48,9 +49,9 @@
 	>
 		<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
 			<span class="text-xs font-medium uppercase opacity-70">
-				{data.resource.extension ?? 'File'}
+				{data.resource.extension ?? m.resource_file_type_fallback()}
 			</span>
-			<CopyButton text={data.resource.content} label="Copy" />
+			<CopyButton text={data.resource.content} label={m.common_copy()} />
 		</div>
 		<div class="min-h-0 flex-1 overflow-auto bg-base-200">
 			<ResourceViewer content={data.resource.content} extension={data.resource.extension} />

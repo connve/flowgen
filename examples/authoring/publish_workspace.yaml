@@ -8,6 +8,9 @@
 # Required:
 #   - GIT_WORKSPACE_URL env var
 #   - /etc/flowgen/credentials/git.json ({token, username?})
+#
+# Branches that require signed commits also need `signing_key_path` and
+# `committer` on `git_push` (see the Git Push docs).
 flow:
   labels:
     display_name: "Publish Workspace"
@@ -31,8 +34,9 @@ flow:
           email: "{{event.data.author.email}}"
         message: "{{event.data.title}}"
 
-    # Recorded on the change as its result.
+    # Recorded on the change as its result; a failed push fails the change.
     - script:
         name: result
         code: |
+          if event.error != () { throw event.error; }
           #{ commit: event.data.commit, changed: event.data.changed }

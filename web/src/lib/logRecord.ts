@@ -10,6 +10,7 @@
 // server as a dumb transport and gives us a single source of truth.
 
 import type { LogRecord, LogSpan } from '$lib/api';
+import { m } from '$lib/paraglide/messages.js';
 
 export type ActivityLevel = LogRecord['level'];
 
@@ -163,14 +164,14 @@ export function levelVariant(level: ActivityLevel): 'neutral' | 'success' | 'war
 export function levelLabel(level: ActivityLevel): string {
 	switch (level) {
 		case 'warn':
-			return 'Warn';
+			return m.level_warn();
 		case 'error':
-			return 'Error';
+			return m.level_error();
 		case 'debug':
-			return 'Debug';
+			return m.level_debug();
 		case 'trace':
-			return 'Trace';
+			return m.level_trace();
 		default:
-			return 'Info';
+			return m.level_info();
 	}
 }

@@ -81,6 +81,15 @@ impl InprocRegistry {
         self.table.insert(flow, Arc::new(registration));
     }
 
+    /// How long a call to `flow` may take; `None` when `flow` is not
+    /// registered here or its calls are unbounded.
+    pub fn ack_timeout(&self, flow: &str) -> Option<Duration> {
+        match self.table.get(flow) {
+            Some(entry) => entry.value().ack_timeout,
+            None => None,
+        }
+    }
+
     /// Removes `flow`'s registration when the flow stops.
     pub fn deregister_flow(&self, flow: &str) {
         self.table.remove(flow);

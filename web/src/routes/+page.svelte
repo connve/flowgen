@@ -7,10 +7,11 @@
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import Badge from '$lib/Badge.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
-	import { apiUrl, encodePath } from '$lib/api';
+	import { apiUrl, encodePath, errorMessage, failure } from '$lib/api';
 	import { formatRelative as fmtRelativeMs } from '$lib/time';
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
+	import { m } from '$lib/paraglide/messages.js';
 	import type {
 		AuthoringTarget,
 		ChangeSummary,
@@ -104,23 +105,23 @@
 	let liveMetrics = $derived(allMetrics());
 	let flowsView = $derived(
 		flows.map((f) => {
-			const m = liveMetrics[f.path];
-			if (!m) return f;
+			const metrics = liveMetrics[f.path];
+			if (!metrics) return f;
 			return {
 				...f,
-				events_total: m.events_total,
-				warnings_total: m.warnings_total,
-				errors_total: m.errors_total,
-				last_event_at: m.last_event_at_ms
-					? new Date(m.last_event_at_ms).toISOString()
+				events_total: metrics.events_total,
+				warnings_total: metrics.warnings_total,
+				errors_total: metrics.errors_total,
+				last_event_at: metrics.last_event_at_ms
+					? new Date(metrics.last_event_at_ms).toISOString()
 					: f.last_event_at,
-				last_warning_at: m.last_warning_at_ms
-					? new Date(m.last_warning_at_ms).toISOString()
+				last_warning_at: metrics.last_warning_at_ms
+					? new Date(metrics.last_warning_at_ms).toISOString()
 					: f.last_warning_at,
-				last_error_at: m.last_error_at_ms
-					? new Date(m.last_error_at_ms).toISOString()
+				last_error_at: metrics.last_error_at_ms
+					? new Date(metrics.last_error_at_ms).toISOString()
 					: f.last_error_at,
-				status: m.status
+				status: metrics.status
 			};
 		}),
 	);
@@ -141,21 +142,16 @@
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
 
-		const url = apiUrl('api/flows');
-		fetch(url)
-			.then((r) => {
-				if (!r.ok) throw new Error(`Server responded with HTTP ${r.status} ${r.statusText}`);
+		fetch(apiUrl('api/flows'))
+			.then(async (r) => {
+				if (!r.ok) throw await failure(r);
 				return r.json();
 			})
 			.then((data) => {
 				flows = data;
 			})
 			.catch((err) => {
-				if (err instanceof TypeError) {
-					error = `Cannot reach flowgen server at ${url}. Check that the backend is running.`;
-				} else {
-					error = err instanceof Error ? err.message : String(err);
-				}
+				error = errorMessage(err, m.flows_load_failed());
 			})
 			.finally(() => {
 				loading = false;
@@ -191,7 +187,8 @@
 		}
 		try {
 			const response = await fetch(apiUrl(`api/flows/${encodePath(path)}`));
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			if (response.status === 404) throw new Error(m.flow_not_found({ path }));
+			if (!response.ok) throw await failure(response);
 			const detail: FlowDetail = await response.json();
 			flowCache.set(path, detail);
 			if (pendingFlow !== path) return;
@@ -201,7 +198,7 @@
 		} catch (err) {
 			if (pendingFlow !== path) return;
 			selected = path;
-			selectedError = err instanceof Error ? err.message : 'Failed to load flow';
+			selectedError = errorMessage(err, m.flow_load_failed({ path }));
 		} finally {
 			if (pendingFlow === path) selectedLoading = false;
 		}
@@ -334,7 +331,7 @@
 </script>
 
 <svelte:head>
-	<title>Flows Overview | Flowgen</title>
+	<title>{m.flows_page_title()}</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />
@@ -347,10 +344,10 @@
 	>
 		{#if !foldersPaneOpen}
 			<div class="flex flex-1 flex-col items-center py-2">
-				<div class="tooltip tooltip-right" data-tip="Folders">
+				<div class="tooltip tooltip-right" data-tip={m.flows_folders()}>
 					<button
 						type="button"
-						aria-label="Expand folders"
+						aria-label={m.flows_folders_expand()}
 						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
 						onclick={toggleFoldersPane}
 					>
@@ -374,7 +371,7 @@
 							<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
 						{/if}
 						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
-						<span>All flows</span>
+						<span>{m.flows_all()}</span>
 						<span class="ml-auto text-xs opacity-50">{flows.length}</span>
 					</button>
 				</li>
@@ -390,7 +387,9 @@
 										<button
 											type="button"
 											class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
-											aria-label={isOpen ? 'Collapse' : 'Expand'}
+											aria-label={isOpen
+												? m.flows_folder_collapse({ folder: node.name })
+												: m.flows_folder_expand({ folder: node.name })}
 											onclick={() => toggleFolder(node.fullPath)}
 										>
 											<Icon
@@ -442,8 +441,8 @@
 		>
 			<button
 				type="button"
-				aria-label={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
-				data-tip={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
+				aria-label={foldersPaneOpen ? m.flows_folders_collapse() : m.flows_folders_expand()}
+				data-tip={foldersPaneOpen ? m.flows_folders_collapse() : m.flows_folders_expand()}
 				class="tooltip {foldersPaneOpen
 					? 'tooltip-top'
 					: 'tooltip-right'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
@@ -466,7 +465,7 @@
 				type="button"
 				class="text-primary hover:underline"
 				onclick={() => selectFolder(null)}
-			>All flows</button>
+			>{m.flows_all()}</button>
 			{#each segments as segment, i}
 				<span class="opacity-40">/</span>
 				{#if i < segments.length - 1}
@@ -479,7 +478,7 @@
 					<span class="font-mono">{segment}</span>
 				{/if}
 			{/each}
-			<span class="text-xs opacity-50">· {visibleFlows.length} {visibleFlows.length === 1 ? 'flow' : 'flows'}</span>
+			<span class="text-xs opacity-50">· {m.flows_count({ count: visibleFlows.length })}</span>
 		</div>
 	{/if}
 	<div class="flex flex-wrap items-center gap-2">
@@ -490,7 +489,7 @@
 				aria-pressed={statusFilter.idle}
 				onclick={() => toggleStatus('idle')}
 			>
-				<span>Idle</span>
+				<span>{m.flows_status_idle()}</span>
 				{#if statusFilter.idle}
 					<span class="tabular-nums opacity-60">{statusCounts.idle}</span>
 				{/if}
@@ -501,7 +500,7 @@
 				aria-pressed={statusFilter.ok}
 				onclick={() => toggleStatus('ok')}
 			>
-				<span>Ok</span>
+				<span>{m.flows_status_ok()}</span>
 				{#if statusFilter.ok}
 					<span class="tabular-nums opacity-60">{statusCounts.ok}</span>
 				{/if}
@@ -512,7 +511,7 @@
 				aria-pressed={statusFilter.warn}
 				onclick={() => toggleStatus('warn')}
 			>
-				<span>Warn</span>
+				<span>{m.flows_status_warn()}</span>
 				{#if statusFilter.warn}
 					<span class="tabular-nums opacity-60">{statusCounts.warn}</span>
 				{/if}
@@ -523,7 +522,7 @@
 				aria-pressed={statusFilter.error}
 				onclick={() => toggleStatus('error')}
 			>
-				<span>Error</span>
+				<span>{m.flows_status_error()}</span>
 				{#if statusFilter.error}
 					<span class="tabular-nums opacity-60">{statusCounts.error}</span>
 				{/if}
@@ -537,7 +536,7 @@
 					class="btn btn-sm border border-base-300 bg-base-100 font-normal hover:bg-base-200"
 				>
 					<Icon icon="tabler:tag" class="h-4 w-4 opacity-70" />
-					<span>Filter by tag</span>
+					<span>{m.flows_tag_filter()}</span>
 					{#if selectedTags.size > 0}
 						<span class="badge badge-sm bg-primary/20 text-primary">{selectedTags.size}</span>
 					{/if}
@@ -580,17 +579,17 @@
 							type="button"
 							class="flex items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5 text-xs"
 							onclick={() => toggleTag(tag)}
-							aria-label={`Remove ${tag} filter`}
+							aria-label={m.flows_tag_filter_remove({ tag })}
 						>
 							<span>{tag}</span>
 							<Icon icon="tabler:x" class="h-3 w-3 opacity-60" />
 						</button>
 					{/each}
-					<div class="tooltip tooltip-bottom" data-tip="Clear tag filters">
+					<div class="tooltip tooltip-bottom" data-tip={m.flows_tag_filters_clear()}>
 						<button
 							type="button"
 							class="btn btn-sm btn-ghost btn-circle"
-							aria-label="Clear tag filters"
+							aria-label={m.flows_tag_filters_clear()}
 							onclick={() => (selectedTags = new Set())}
 						>
 							<Icon icon="tabler:trash" class="h-5 w-5" />
@@ -606,14 +605,14 @@
 				class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
 			>
 				<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
-				{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
+				{m.flows_pending_changes({ count: pending.length })}
 			</a>
 			<a
 				href="{base}/edit?new=flow{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
 				class="btn btn-primary btn-sm gap-1.5"
 			>
 				<Icon icon="tabler:plus" class="h-4 w-4" />
-				New
+				{m.common_new()}
 			</a>
 		{/if}
 		<label
@@ -629,13 +628,13 @@
 				<circle cx="11" cy="11" r="8" />
 				<path d="M21 21l-4.35-4.35" />
 			</svg>
-			<input type="text" placeholder="Search flows..." bind:value={search} />
+			<input type="text" placeholder={m.flows_search_placeholder()} bind:value={search} />
 			{#if search}
-				<div class="tooltip tooltip-left" data-tip="Clear search">
+				<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
 					<button
 						type="button"
 						class="opacity-50 hover:opacity-100"
-						aria-label="Clear search"
+						aria-label={m.common_clear_search()}
 						onclick={() => (search = '')}
 					>
 						<Icon icon="tabler:x" class="h-5 w-5" />
@@ -652,9 +651,15 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if error}
-		<StateMessage tone="oops" title="Failed to load flows" message={error} />
-	{:else if filtered.length === 0}
-		<StateMessage tone="notice" title="No flows found" message="Nothing matches the current filters yet." />
+		<StateMessage tone="oops" title={m.flows_load_failed()} message={error} />
+	{:else if flows.length === 0}
+		<StateMessage
+			tone="notice"
+			title={m.flows_empty_title()}
+			message={authoring ? m.flows_empty_message_authoring() : m.flows_empty_message()}
+		/>
+	{:else if visibleFlows.length === 0}
+		<StateMessage tone="notice" title={m.flows_no_match_title()} message={m.flows_no_match_message()} />
 	{:else}
 		<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
@@ -665,9 +670,9 @@
 								type="button"
 								class="flex items-center gap-1 uppercase tracking-wide"
 								onclick={() => toggleSort('name')}
-								aria-label="Sort by name"
+								aria-label={m.flows_sort_by_name()}
 							>
-								<span>Name</span>
+								<span>{m.flows_column_name()}</span>
 								<Icon
 									icon={sortKey === 'name'
 										? sortDir === 'asc'
@@ -678,16 +683,16 @@
 								/>
 							</button>
 						</th>
-						<th>Description</th>
-						<th>Tags</th>
+						<th>{m.flows_column_description()}</th>
+						<th>{m.flows_column_tags()}</th>
 						<th>
 							<button
 								type="button"
 								class="flex items-center gap-1 uppercase tracking-wide"
 								onclick={() => toggleSort('status')}
-								aria-label="Sort by status"
+								aria-label={m.flows_sort_by_status()}
 							>
-								<span>Status</span>
+								<span>{m.flows_column_status()}</span>
 								<Icon
 									icon={sortKey === 'status'
 										? sortDir === 'asc'
@@ -703,9 +708,9 @@
 								type="button"
 								class="flex items-center gap-1 uppercase tracking-wide"
 								onclick={() => toggleSort('last_event')}
-								aria-label="Sort by last event"
+								aria-label={m.flows_sort_by_last_event()}
 							>
-								<span>Last event</span>
+								<span>{m.flows_column_last_event()}</span>
 								<Icon
 									icon={sortKey === 'last_event'
 										? sortDir === 'asc'
@@ -762,13 +767,13 @@
 							</td>
 							<td>
 								{#if flow.status === 'ok'}
-									<Badge variant="success">Ok</Badge>
+									<Badge variant="success">{m.flows_status_ok()}</Badge>
 								{:else if flow.status === 'warn'}
-									<Badge variant="warning">Warn</Badge>
+									<Badge variant="warning">{m.flows_status_warn()}</Badge>
 								{:else if flow.status === 'error'}
-									<Badge variant="error">Error</Badge>
+									<Badge variant="error">{m.flows_status_error()}</Badge>
 								{:else}
-									<Badge>Idle</Badge>
+									<Badge>{m.flows_status_idle()}</Badge>
 								{/if}
 							</td>
 							<td class="whitespace-nowrap text-sm opacity-70">
@@ -789,7 +794,7 @@
 		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Flow YAML viewer"
+		aria-label={m.flow_preview_label()}
 		onclick={(e) => {
 			if (e.target === e.currentTarget) closeFlow();
 		}}
@@ -804,7 +809,7 @@
 			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
 				<div class="min-w-0 flex-1">
 					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
-						<span class="opacity-60">Flows</span>
+						<span class="opacity-60">{m.flow_breadcrumb_flows()}</span>
 						{#each selectedFolders as segment}
 							<span class="opacity-40">/</span>
 							<span class="font-mono opacity-70">{segment}</span>
@@ -820,20 +825,20 @@
 					{#if targetOf(targets, flowFilePath(selected))}
 						<EditButton href={editUrl(base, flowFilePath(selected))} tooltip="left" />
 					{/if}
-					<div class="tooltip tooltip-left" data-tip="Open full page">
+					<div class="tooltip tooltip-left" data-tip={m.flow_open_full_page()}>
 						<a
 							href="{base}/flows/{encodePath(selected)}"
 							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Open full page"
+							aria-label={m.flow_open_full_page()}
 						>
 							<Icon icon="tabler:external-link" class="h-5 w-5" />
 						</a>
 					</div>
-					<div class="tooltip tooltip-left" data-tip="Close">
+					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
 						<button
 							type="button"
 							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Close"
+							aria-label={m.common_close()}
 							onclick={closeFlow}
 						>
 							<Icon icon="tabler:x" class="h-5 w-5" />
@@ -848,7 +853,7 @@
 					</div>
 				{:else if selectedError}
 					<div class="flex-1">
-						<StateMessage tone="oops" title="Failed to load flow" message={selectedError} />
+						<StateMessage tone="oops" title={m.flow_load_failed_title()} message={selectedError} />
 					</div>
 				{:else if selectedDetail}
 					<FlowInspector yaml={selectedDetail.yaml} activities={modalActivities} />

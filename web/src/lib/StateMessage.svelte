@@ -2,25 +2,29 @@
 	// Full-panel empty/error state with a brand glow. `notice` for "nothing
 	// here yet", `oops` for a failed load.
 	import Icon from '@iconify/svelte';
+	import type { Snippet } from 'svelte';
+	import { m } from '$lib/paraglide/messages.js';
 
 	let {
 		tone = 'notice',
 		title,
 		message,
-		icon
+		icon,
+		children
 	}: {
 		tone?: 'notice' | 'oops';
 		title?: string;
 		message: string;
 		icon?: string;
+		children?: Snippet;
 	} = $props();
 
 	const defaults = {
-		notice: { title: 'Nothing here yet', icon: 'tabler:sparkles' },
-		oops: { title: 'Oops, something went wrong', icon: 'tabler:mood-sad' }
+		notice: { title: m.state_notice_title, icon: 'tabler:sparkles' },
+		oops: { title: m.state_oops_title, icon: 'tabler:mood-sad' }
 	} as const;
 
-	let resolvedTitle = $derived(title ?? defaults[tone].title);
+	let resolvedTitle = $derived(title ?? defaults[tone].title());
 	let resolvedIcon = $derived(icon ?? defaults[tone].icon);
 </script>
 
@@ -39,6 +43,10 @@
 		<h2 class="state-title text-lg font-semibold">{resolvedTitle}</h2>
 		<p class="mt-1 max-w-md text-sm opacity-70">{message}</p>
 	</div>
+
+	{#if children}
+		<div class="relative mt-2">{@render children()}</div>
+	{/if}
 </div>
 
 <style>

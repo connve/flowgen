@@ -5,7 +5,9 @@ use super::config::Processor as ProcessorConfig;
 use crate::remote::{load_credentials, Credentials};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, warn, Instrument};
@@ -18,6 +20,22 @@ pub enum Error {
     Push(#[from] super::client::Error),
     #[error(transparent)]
     Credentials(#[from] flowgen_core::credentials::Error),
+    #[error("Failed to read the signing key {path}: {source}")]
+    ReadSigningKey {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("The signing key {path} is not an OpenSSH Ed25519 private key: {source}")]
+    InvalidSigningKey {
+        path: PathBuf,
+        #[source]
+        source: ssh_key::Error,
+    },
+    #[error("The signing key {path} is encrypted; use one without a passphrase")]
+    EncryptedSigningKey { path: PathBuf },
+    #[error("The signing key {path} is {algorithm}; only Ed25519 keys are supported")]
+    UnsupportedSigningKey { path: PathBuf, algorithm: String },
     #[error("Event data must hold a `files` list of {{path, content}}: {source}")]
     Input {
         #[source]
@@ -88,10 +106,40 @@ impl Error {
                     | Push::UnpackFailed { .. }
                     | Push::RefRejected { .. }
                     | Push::ServerError { .. }
+                    | Push::Sign { .. }
             ),
             Error::Input { .. } | Error::NotJson { .. } | Error::RenderConfig { .. } => true,
             _ => false,
         }
+    }
+}
+
+/// Reads an unencrypted OpenSSH Ed25519 private key.
+async fn load_signing_key(path: &Path) -> Result<ssh_key::PrivateKey, Error> {
+    let pem = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|source| Error::ReadSigningKey {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let pem = SecretString::from(pem);
+    let key = ssh_key::PrivateKey::from_openssh(pem.expose_secret()).map_err(|source| {
+        Error::InvalidSigningKey {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    if key.is_encrypted() {
+        return Err(Error::EncryptedSigningKey {
+            path: path.to_path_buf(),
+        });
+    }
+    match key.algorithm() {
+        ssh_key::Algorithm::Ed25519 => Ok(key),
+        algorithm => Err(Error::UnsupportedSigningKey {
+            path: path.to_path_buf(),
+            algorithm: algorithm.as_str().to_string(),
+        }),
     }
 }
 
@@ -143,6 +191,7 @@ struct Output {
 pub struct EventHandler {
     config: Arc<ProcessorConfig>,
     credentials: Option<Credentials>,
+    signing_key: Option<Arc<ssh_key::PrivateKey>>,
     http: reqwest::Client,
     pushing: tokio::sync::Mutex<()>,
     tx: Option<Sender<Event>>,
@@ -153,7 +202,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Commits and pushes the event's files, emitting every file under `path`.
-    #[tracing::instrument(skip(self, event), name = "task.handle")]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -192,6 +241,11 @@ impl EventHandler {
                 branch: config.branch,
                 path: config.path,
                 credentials: self.credentials.clone(),
+                committer: config.committer.map(|committer| Author {
+                    name: committer.name,
+                    email: committer.email,
+                }),
+                signing_key: self.signing_key.clone(),
                 http: self.http.clone(),
                 timeout: config.timeout,
             };
@@ -269,6 +323,10 @@ impl flowgen_core::task::runner::Runner for Processor {
 
     async fn init(&self) -> Result<EventHandler, Error> {
         let credentials = load_credentials(self.config.credentials_path.as_deref()).await?;
+        let signing_key = match &self.config.signing_key_path {
+            Some(path) => Some(Arc::new(load_signing_key(path).await?)),
+            None => None,
+        };
         let mut http = reqwest::Client::builder();
         if let Some(timeout) = self.config.timeout {
             http = http.timeout(timeout);
@@ -282,6 +340,7 @@ impl flowgen_core::task::runner::Runner for Processor {
         Ok(EventHandler {
             config: Arc::clone(&self.config),
             credentials,
+            signing_key,
             http,
             pushing: tokio::sync::Mutex::new(()),
             tx: self.tx.clone(),
@@ -440,6 +499,60 @@ mod tests {
         let deleted: Input =
             serde_json::from_str(r#"{"files": [{"path": "a", "content": null}]}"#).unwrap();
         assert_eq!(deleted.files[0].content, None);
+    }
+
+    /// Creates a key with `ssh-keygen`, which must be in `PATH`.
+    fn keygen(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
+        let path = dir.join(name);
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-C", "a@example.com", "-f"])
+            .arg(&path)
+            .args(args)
+            .status()
+            .expect("spawn ssh-keygen");
+        assert!(status.success(), "ssh-keygen {args:?} exited with {status}");
+        path
+    }
+
+    #[tokio::test]
+    async fn only_unencrypted_ed25519_openssh_keys_are_loaded() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let ed25519 = keygen(dir.path(), "ed25519", &["-t", "ed25519", "-N", ""]);
+        let public_key = std::fs::read_to_string(ed25519.with_extension("pub")).unwrap();
+        assert_eq!(
+            load_signing_key(&ed25519).await.unwrap().public_key(),
+            &ssh_key::PublicKey::from_openssh(&public_key).unwrap()
+        );
+
+        let encrypted = keygen(dir.path(), "encrypted", &["-t", "ed25519", "-N", "secret"]);
+        assert!(matches!(
+            load_signing_key(&encrypted).await,
+            Err(Error::EncryptedSigningKey { .. })
+        ));
+
+        let rsa = keygen(dir.path(), "rsa", &["-t", "rsa", "-b", "2048", "-N", ""]);
+        assert!(matches!(
+            load_signing_key(&rsa).await,
+            Err(Error::UnsupportedSigningKey { algorithm, .. }) if algorithm == "ssh-rsa"
+        ));
+
+        let ecdsa = keygen(dir.path(), "ecdsa", &["-t", "ecdsa", "-N", ""]);
+        assert!(matches!(
+            load_signing_key(&ecdsa).await,
+            Err(Error::InvalidSigningKey { .. })
+        ));
+
+        let garbage = dir.path().join("garbage");
+        std::fs::write(&garbage, "not a key").unwrap();
+        assert!(matches!(
+            load_signing_key(&garbage).await,
+            Err(Error::InvalidSigningKey { .. })
+        ));
+        assert!(matches!(
+            load_signing_key(&dir.path().join("missing")).await,
+            Err(Error::ReadSigningKey { .. })
+        ));
     }
 
     #[test]

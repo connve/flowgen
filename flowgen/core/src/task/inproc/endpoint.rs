@@ -48,7 +48,7 @@ impl crate::task::runner::Runner for Processor {
                 task_id: self.task_id,
                 task_type: self.task_type,
                 leaf_count: self.task_context.leaf_count,
-                ack_timeout: self.config.ack_timeout,
+                ack_timeout: Some(self.config.ack_timeout),
                 callers,
             },
         );

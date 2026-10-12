@@ -2,6 +2,7 @@
 
 use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// OCI push processor configuration.
@@ -42,6 +43,16 @@ pub struct Processor {
     /// tags: ["{{event.data.commit}}", "latest"]
     /// ```
     pub tags: Vec<String>,
+    /// Manifest annotations, rendered per event. They are part of the
+    /// manifest, so they change its digest.
+    ///
+    /// ```yaml
+    /// annotations:
+    ///   org.opencontainers.image.source: "https://git.example.com/team/configs"
+    ///   org.opencontainers.image.revision: "{{event.data.commit}}"
+    /// ```
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
     /// Registry credentials: `{username, password}` or a Docker `config.json`.
     ///
     /// ```yaml

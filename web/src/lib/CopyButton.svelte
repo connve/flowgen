@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Icon from '@iconify/svelte';
+	import { m } from '$lib/paraglide/messages.js';
 
 	interface Props {
 		text: string | null | undefined;
@@ -7,7 +8,7 @@
 		size?: 'xs' | 'sm';
 	}
 
-	let { text, label = 'Copy', size = 'sm' }: Props = $props();
+	let { text, label = m.common_copy(), size = 'sm' }: Props = $props();
 
 	let copied = $state(false);
 	let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -28,11 +29,11 @@
 	let iconSize = $derived(size === 'xs' ? 'h-4 w-4' : 'h-5 w-5');
 </script>
 
-<div class="tooltip tooltip-left" data-tip={copied ? 'Copied' : label}>
+<div class="tooltip tooltip-left" data-tip={copied ? m.common_copied() : label}>
 	<button
 		type="button"
 		class="btn btn-ghost btn-circle {btnSize}"
-		aria-label={copied ? 'Copied' : label}
+		aria-label={copied ? m.common_copied() : label}
 		{onclick}
 		disabled={!text}
 	>

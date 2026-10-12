@@ -144,7 +144,9 @@ http_server:
 #   # same-process AI gateway on loopback; set when the gateway runs in a
 #   # separate process or pod.
 #   ai_gateway_url: "http://127.0.0.1:3002/v1"
+#   # The Agents tab and /api/agents. Omit to hide the tab.
 #   agents:
+#     enabled: true
 #     # How long a chat conversation lives in the configured cache before it
 #     # expires, refreshed on every write. Defaults to 30 days; set to 0 to
 #     # persist indefinitely. Long-term history belongs in a database via a
@@ -211,10 +213,11 @@ http_server:
 #   #       # Flow, starting with an inproc_endpoint, that publishes the
 #   #       # target's approved changes (default system/publish_workspace).
 #   #       publish_flow: system/publish_workspace
+#   #       # Report when a published change runs here (default true); turn
+#   #       # off when this target is not deployed to this instance.
+#   #       track_deployment: true
 #   #   # Claim of the signed-in user that lists their groups (default groups).
 #   #   # groups_claim: groups
-#   #   # How long publishing may take before the change is recorded as failed.
-#   #   publish_timeout: 5m
 
 # Kubernetes liveness/readiness listener. Independent from the API
 # listeners so probes keep working regardless of which surfaces are

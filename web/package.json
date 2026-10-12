@@ -10,14 +10,18 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+		"i18n": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide",
+		"check": "npm run i18n && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
 	},
 	"devDependencies": {
+		"@inlang/paraglide-js": "^2.26.0",
+		"@inlang/plugin-message-format": "^4.4.5",
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.59.0",
 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
 		"@tailwindcss/typography": "^0.5.20",
 		"@tailwindcss/vite": "^4.2.1",
+		"@types/node": "^24.19.1",
 		"@types/prismjs": "^1.26.6",
 		"daisyui": "^5.5.19",
 		"openapi-typescript": "^7.4.0",

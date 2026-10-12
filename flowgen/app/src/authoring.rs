@@ -3,7 +3,7 @@
 
 use crate::validation::flow_identity;
 use crate::web::{Caller, WebState};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -36,13 +36,13 @@ pub enum Error {
     DuplicatePath { path: String },
     #[error("A change needs a title")]
     MissingTitle,
-    #[error("The change is {status}, which does not allow this")]
+    #[error("The change is already {status}")]
     NotPending { status: api::ChangeStatus },
     #[error("The change has invalid files")]
     Invalid,
     #[error("A change needs at least one file")]
     NoFiles,
-    #[error("'{path}' is not in any web.authoring.targets entry, so it cannot be changed here")]
+    #[error("'{path}' is outside every authoring target")]
     NoTarget { path: String },
     #[error(
         "The files belong to the targets '{first}' and '{second}'; propose a change per target"
@@ -50,13 +50,17 @@ pub enum Error {
     MixedTargets { first: String, second: String },
     #[error("The change's target '{target}' no longer covers its files")]
     TargetGone { target: String },
-    #[error("The change was proposed for the target '{stored}', but its files now belong to '{current}'")]
+    #[error("The change's files moved from target '{stored}' to '{current}'")]
     TargetChanged { stored: String, current: String },
     #[error("Only a signed-in user can approve or reject changes")]
     UserRequired,
+    #[error("Only the proposer can edit this change")]
+    NotProposer,
+    #[error("The change was edited. Please review it again.")]
+    EditedSinceReview,
     #[error("'{user}' is not allowed to approve or reject changes")]
     NotApprover { user: String },
-    #[error("Publishing did not finish within {timeout:?}; it may still complete, approve again to retry")]
+    #[error("Publishing timed out after {timeout:?}. Please try again.")]
     PublishTimeout { timeout: Duration },
     #[error("Publishing stopped unexpectedly: {source}")]
     PublishAborted {
@@ -89,7 +93,7 @@ pub enum Error {
         #[source]
         source: flowgen_core::cache::Error,
     },
-    #[error("The change was decided by another request")]
+    #[error("The change was updated. Please reload and try again.")]
     Concurrent,
     #[error("Change store unavailable: {source}")]
     Store {
@@ -121,9 +125,12 @@ impl IntoResponse for Error {
             Error::NotPending { .. }
             | Error::Invalid
             | Error::Concurrent
+            | Error::EditedSinceReview
             | Error::TargetGone { .. }
             | Error::TargetChanged { .. } => (StatusCode::CONFLICT, None),
-            Error::UserRequired | Error::NotApprover { .. } => (StatusCode::FORBIDDEN, None),
+            Error::UserRequired | Error::NotApprover { .. } | Error::NotProposer => {
+                (StatusCode::FORBIDDEN, None)
+            }
             Error::Store { .. } => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some("Change store unavailable"),
@@ -218,9 +225,14 @@ fn check_proposal(proposal: &api::ChangeProposal) -> Result<Vec<Location<'_>>, E
     if proposal.title.trim().is_empty() {
         return Err(Error::MissingTitle);
     }
+    check_paths(&proposal.files)
+}
+
+/// Where each file lives once deployed; each path may appear once.
+fn check_paths(files: &[api::WorkspaceFile]) -> Result<Vec<Location<'_>>, Error> {
     let mut seen = std::collections::HashSet::new();
-    let mut locations = Vec::with_capacity(proposal.files.len());
-    for file in &proposal.files {
+    let mut locations = Vec::with_capacity(files.len());
+    for file in files {
         let location = match locate(&file.path) {
             Ok(location) => location,
             Err(reason) => {
@@ -325,6 +337,145 @@ async fn deployed(
             None => Ok(None),
         },
     }
+}
+
+/// Whether two versions of a file match, ignoring trailing whitespace; `None`
+/// is a missing file.
+fn same_content(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.trim_end() == b.trim_end(),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Published versions of each path with the change that made them, oldest
+/// approval first.
+type Published = std::collections::HashMap<String, Vec<(String, api::ChangeFile)>>;
+
+fn index_published<'a>(changes: impl IntoIterator<Item = &'a api::Change>) -> Published {
+    let mut decided: Vec<_> = changes
+        .into_iter()
+        .filter(|change| change.status == api::ChangeStatus::Published)
+        .map(|change| match change.decided_at {
+            Some(decided_at) => (decided_at, change),
+            None => (change.created_at, change),
+        })
+        .collect();
+    decided.sort_by_key(|(decided_at, _)| *decided_at);
+    let mut published = Published::new();
+    for (_, change) in decided {
+        for file in &change.files {
+            published
+                .entry(file.path.clone())
+                .or_default()
+                .push((change.id.clone(), file.clone()));
+        }
+    }
+    published
+}
+
+async fn published_versions(state: &WebState) -> Result<Published, Error> {
+    let keys = state
+        .conversation_cache
+        .list_keys(CHANGE_KEY_PREFIX)
+        .await
+        .map_err(|source| Error::Store { source })?;
+    let mut changes = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Ok((change, _)) = load(state, key.trim_start_matches(CHANGE_KEY_PREFIX)).await {
+            changes.push(change);
+        }
+    }
+    Ok(index_published(&changes))
+}
+
+/// Applies the published versions of a file to what runs: from the newest
+/// version already running, each later one based on the content so far. Gives
+/// what the branch holds as far as flowgen knows, and the changes applied,
+/// which are not deployed yet.
+fn apply_published<'a>(
+    running: Option<&'a str>,
+    versions: &'a [(String, api::ChangeFile)],
+) -> (Option<&'a str>, Vec<&'a str>) {
+    let start = match versions
+        .iter()
+        .rposition(|(_, version)| same_content(running, version.content.as_deref()))
+    {
+        Some(deployed) => deployed + 1,
+        None => 0,
+    };
+    let mut content = running;
+    let mut pending = Vec::new();
+    for (id, version) in &versions[start..] {
+        if same_content(content, version.previous.as_deref()) {
+            content = version.content.as_deref();
+            pending.push(id.as_str());
+        }
+    }
+    (content, pending)
+}
+
+/// What `path` holds on the branch as far as flowgen knows.
+async fn base_content(
+    state: &WebState,
+    path: &str,
+    location: &Location<'_>,
+    published: &Published,
+) -> Result<Option<String>, Error> {
+    let running = deployed(state, path, location).await?;
+    let versions = match published.get(path) {
+        Some(versions) => versions.as_slice(),
+        None => &[],
+    };
+    Ok(apply_published(running.as_deref(), versions)
+        .0
+        .map(str::to_string))
+}
+
+/// Where a published change stands against what this instance runs; `None`
+/// for other changes, for targets without `track_deployment`, and when the
+/// running content cannot be read.
+async fn deployment(
+    state: &WebState,
+    change: &api::Change,
+    published: &Published,
+) -> Option<api::ChangeDeployment> {
+    let tracked = match (&change.status, &state.authoring) {
+        (api::ChangeStatus::Published, Some(authoring)) => authoring
+            .targets
+            .iter()
+            .any(|target| target.name == change.target && target.track_deployment),
+        _ => false,
+    };
+    if !tracked {
+        return None;
+    }
+    for file in &change.files {
+        let location = match locate(&file.path) {
+            Ok(location) => location,
+            Err(_) => return None,
+        };
+        let versions = match published.get(&file.path) {
+            Some(versions) => versions.as_slice(),
+            None => &[],
+        };
+        match deployed(state, &file.path, &location).await {
+            Ok(running)
+                if apply_published(running.as_deref(), versions)
+                    .1
+                    .contains(&change.id.as_str()) =>
+            {
+                return Some(api::ChangeDeployment::Waiting)
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(change = %change.id, error = %error, "Failed to check the deployment of a change");
+                return None;
+            }
+        }
+    }
+    Some(api::ChangeDeployment::Deployed)
 }
 
 /// The change with each file's diff filled in, on a blocking thread as large
@@ -532,6 +683,35 @@ pub(crate) async fn validate_workspace(
     }))
 }
 
+/// Query of `GET /api/workspace/file`.
+#[derive(serde::Deserialize)]
+pub(crate) struct FileQuery {
+    path: String,
+}
+
+/// `GET /api/workspace/file`: the version a change to `path` is based on.
+pub(crate) async fn workspace_file(
+    State(state): State<Arc<WebState>>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<api::WorkspaceFile>, Error> {
+    require_authoring(&state)?;
+    let location = match locate(&query.path) {
+        Ok(location) => location,
+        Err(reason) => {
+            return Err(Error::InvalidPath {
+                path: query.path.clone(),
+                reason,
+            })
+        }
+    };
+    let published = published_versions(&state).await?;
+    let content = base_content(&state, &query.path, &location, &published).await?;
+    Ok(Json(api::WorkspaceFile {
+        path: query.path,
+        content,
+    }))
+}
+
 /// `GET /api/changes`.
 pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<Response, Error> {
     require_authoring(&state)?;
@@ -540,22 +720,28 @@ pub(crate) async fn list_changes(State(state): State<Arc<WebState>>) -> Result<R
         .list_keys(CHANGE_KEY_PREFIX)
         .await
         .map_err(|source| Error::Store { source })?;
-    let mut changes = Vec::with_capacity(keys.len());
+    let mut loaded = Vec::with_capacity(keys.len());
     for key in keys {
-        let id = key.trim_start_matches(CHANGE_KEY_PREFIX);
-        match load(&state, id).await {
-            Ok((change, _)) => changes.push(api::ChangeSummary {
-                paths: change.files.iter().map(|file| file.path.clone()).collect(),
-                id: change.id,
-                target: change.target,
-                title: change.title,
-                status: change.status,
-                proposed_by: change.proposed_by,
-                created_at: change.created_at,
-                file_count: change.files.len() as i64,
-            }),
+        match load(&state, key.trim_start_matches(CHANGE_KEY_PREFIX)).await {
+            Ok((change, _)) => loaded.push(change),
             Err(error) => warn!(key = %key, error = %error, "Skipping unreadable change"),
         }
+    }
+    let published = index_published(&loaded);
+    let mut changes = Vec::with_capacity(loaded.len());
+    for change in loaded {
+        changes.push(api::ChangeSummary {
+            deployment: deployment(&state, &change, &published).await,
+            paths: change.files.iter().map(|file| file.path.clone()).collect(),
+            id: change.id,
+            target: change.target,
+            title: change.title,
+            status: change.status,
+            proposed_by: change.proposed_by,
+            created_at: change.created_at,
+            updated_at: change.updated_at,
+            file_count: change.files.len() as i64,
+        });
     }
     changes.sort_by_key(|change| std::cmp::Reverse(change.created_at));
     Ok(Json(ChangeList { changes }).into_response())
@@ -582,9 +768,10 @@ pub(crate) async fn propose_change(
     )?
     .name
     .clone();
+    let published = published_versions(&state).await?;
     let mut files = Vec::with_capacity(proposal.files.len());
     for (file, location) in proposal.files.iter().zip(&locations) {
-        let previous = deployed(&state, &file.path, location).await?;
+        let previous = base_content(&state, &file.path, location, &published).await?;
         files.push(api::ChangeFile {
             diff: String::new(),
             path: file.path.clone(),
@@ -593,6 +780,7 @@ pub(crate) async fn propose_change(
         });
     }
     let issues = validate_blocking(proposal.files).await?;
+    let created_at = now_ms();
     let change = api::Change {
         id: uuid::Uuid::now_v7().simple().to_string(),
         target,
@@ -600,13 +788,16 @@ pub(crate) async fn propose_change(
         description: proposal.description,
         status: api::ChangeStatus::Pending,
         proposed_by: caller_label(caller.as_ref()),
-        created_at: now_ms(),
+        created_at,
+        updated_at: Some(created_at),
         decided_by: None,
         decided_at: None,
         issues,
         files,
         result: Default::default(),
         error: None,
+        deployment: None,
+        stalled: None,
     };
     store(&state, &change).await?;
     Ok((StatusCode::CREATED, Json(with_diffs(change).await?)).into_response())
@@ -617,8 +808,132 @@ pub(crate) async fn get_change(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
 ) -> Result<Json<api::Change>, Error> {
+    let authoring = require_authoring(&state)?;
+    let (mut change, _) = load(&state, &id).await?;
+    change.stalled = Some(match stored_target(authoring, &change) {
+        Ok(target) => stalled(&change, publish_wait(&state, target)),
+        Err(_) => false,
+    });
+    change.deployment = match published_versions(&state).await {
+        Ok(published) => deployment(&state, &change, &published).await,
+        Err(error) => {
+            warn!(change = %change.id, error = %error, "Failed to check the deployment of a change");
+            None
+        }
+    };
+    Ok(Json(with_diffs(change).await?))
+}
+
+/// Marks the change edited, always later than its last edit so a review of the
+/// previous version never matches.
+fn touch(change: &mut api::Change) {
+    let previous = match change.updated_at {
+        Some(updated_at) => updated_at,
+        None => change.created_at,
+    };
+    change.updated_at = Some(now_ms().max(previous + 1));
+}
+
+/// A pending change the caller may edit: its proposer, or anyone without `web.auth`.
+async fn load_editable(
+    state: &WebState,
+    caller: Option<&Caller>,
+    id: &str,
+) -> Result<(api::Change, u64), Error> {
+    let (change, revision) = load(state, id).await?;
+    if change.status != api::ChangeStatus::Pending {
+        return Err(Error::NotPending {
+            status: change.status,
+        });
+    }
+    match caller {
+        Some(caller) if caller.label() != change.proposed_by => Err(Error::NotProposer),
+        _ => Ok((change, revision)),
+    }
+}
+
+/// `PATCH /api/changes/{id}`.
+pub(crate) async fn edit_change(
+    State(state): State<Arc<WebState>>,
+    caller: Option<Extension<Caller>>,
+    Path(id): Path<String>,
+    Json(edit): Json<api::ChangeEdit>,
+) -> Result<Json<api::Change>, Error> {
     require_authoring(&state)?;
-    Ok(Json(with_diffs(load(&state, &id).await?.0).await?))
+    let caller = caller.map(|Extension(caller)| caller);
+    let (mut change, revision) = load_editable(&state, caller.as_ref(), &id).await?;
+    match edit.title {
+        Some(title) if title.trim().is_empty() => return Err(Error::MissingTitle),
+        Some(title) => change.title = title,
+        None => {}
+    }
+    match edit.description {
+        Some(description) if description.trim().is_empty() => change.description = None,
+        Some(description) => change.description = Some(description),
+        None => {}
+    }
+    touch(&mut change);
+    transition(&state, &change, revision).await?;
+    Ok(Json(with_diffs(change).await?))
+}
+
+/// `POST /api/changes/{id}/files`: a file already in the change gets the new
+/// content and keeps the deployed content recorded when it was first added.
+pub(crate) async fn add_change_files(
+    State(state): State<Arc<WebState>>,
+    caller: Option<Extension<Caller>>,
+    Path(id): Path<String>,
+    Json(body): Json<api::WorkspaceFiles>,
+) -> Result<Json<api::Change>, Error> {
+    let authoring = require_authoring(&state)?;
+    let caller = caller.map(|Extension(caller)| caller);
+    let (mut change, revision) = load_editable(&state, caller.as_ref(), &id).await?;
+    let locations = check_paths(&body.files)?;
+    let target = target_for(
+        authoring,
+        change
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(body.files.iter().map(|file| file.path.as_str())),
+    )?;
+    if target.name != change.target {
+        return Err(Error::TargetChanged {
+            stored: change.target.clone(),
+            current: target.name.clone(),
+        });
+    }
+    let published = published_versions(&state).await?;
+    for (file, location) in body.files.iter().zip(&locations) {
+        match change
+            .files
+            .iter_mut()
+            .find(|known| known.path == file.path)
+        {
+            Some(known) => known.content = file.content.clone(),
+            None => {
+                let previous = base_content(&state, &file.path, location, &published).await?;
+                change.files.push(api::ChangeFile {
+                    diff: String::new(),
+                    path: file.path.clone(),
+                    content: file.content.clone(),
+                    previous,
+                });
+            }
+        }
+    }
+    let files = change
+        .files
+        .iter()
+        .map(|file| api::WorkspaceFile {
+            path: file.path.clone(),
+            content: file.content.clone(),
+        })
+        .collect();
+    change.issues = validate_blocking(files).await?;
+    touch(&mut change);
+    transition(&state, &change, revision).await?;
+    Ok(Json(with_diffs(change).await?))
 }
 
 /// File sent to the publish flow; `previous` is always present, `null` for a new file.
@@ -672,21 +987,36 @@ fn author(user: Option<&flowgen_core::auth::UserContext>) -> PublishAuthor {
     }
 }
 
+/// Query of `POST /api/changes/{id}/approve`.
+#[derive(serde::Deserialize)]
+pub(crate) struct Reviewed {
+    /// The change's `updatedAt` as the approver reviewed it.
+    #[serde(rename = "updatedAt")]
+    updated_at: Option<i64>,
+}
+
 /// `POST /api/changes/{id}/approve`.
 pub(crate) async fn approve_change(
     State(state): State<Arc<WebState>>,
     caller: Option<Extension<Caller>>,
     Path(id): Path<String>,
+    Query(reviewed): Query<Reviewed>,
 ) -> Result<Json<api::Change>, Error> {
     let authoring = require_authoring(&state)?;
     let caller = caller.map(|Extension(caller)| caller);
     let (mut change, revision) = load(&state, &id).await?;
     let target = stored_target(authoring, &change)?;
     let user = decider(caller.as_ref(), authoring, target)?;
-    if !can_publish(&change, authoring.publish_timeout) {
+    if !can_publish(&change, publish_wait(&state, target)) {
         return Err(Error::NotPending {
             status: change.status,
         });
+    }
+    match reviewed.updated_at {
+        Some(updated_at) if change.updated_at != Some(updated_at) => {
+            return Err(Error::EditedSinceReview)
+        }
+        _ => {}
     }
     if !change.issues.is_empty() {
         return Err(Error::Invalid);
@@ -699,7 +1029,6 @@ pub(crate) async fn approve_change(
 
     let publishing = tokio::spawn(publish(
         Arc::clone(&state),
-        authoring.publish_timeout,
         target.clone(),
         user,
         change,
@@ -712,14 +1041,18 @@ pub(crate) async fn approve_change(
 }
 
 /// Whether a change may be published: pending, failed (a retry), or stuck in
-/// `publishing` for longer than publishing may take.
-fn can_publish(change: &api::Change, timeout: std::time::Duration) -> bool {
+/// `publishing` for longer than `timeout`, how long publishing may take.
+/// Without a `timeout` a change in `publishing` may not be published again.
+fn can_publish(change: &api::Change, timeout: Option<Duration>) -> bool {
     match change.status {
         api::ChangeStatus::Pending | api::ChangeStatus::Failed => true,
         api::ChangeStatus::Publishing => {
-            match (change.decided_at, i64::try_from(timeout.as_millis())) {
-                (Some(decided_at), Ok(timeout_ms)) => now_ms() - decided_at > timeout_ms,
-                (Some(_), Err(_)) => false,
+            match (
+                change.decided_at,
+                timeout.map(|t| i64::try_from(t.as_millis())),
+            ) {
+                (Some(decided_at), Some(Ok(timeout_ms))) => now_ms() - decided_at > timeout_ms,
+                (Some(_), Some(Err(_)) | None) => false,
                 (None, _) => true,
             }
         }
@@ -727,10 +1060,21 @@ fn can_publish(change: &api::Change, timeout: std::time::Duration) -> bool {
     }
 }
 
+/// Whether publishing ran past `timeout`, so approving again retries it.
+fn stalled(change: &api::Change, timeout: Option<Duration>) -> bool {
+    matches!(change.status, api::ChangeStatus::Publishing) && can_publish(change, timeout)
+}
+
+/// How long publishing for `target` may take: the `ack_timeout` of its publish
+/// flow's `inproc_endpoint`. `None` when the flow does not run on this pod,
+/// which then cannot tell whether another pod is still publishing.
+fn publish_wait(state: &WebState, target: &crate::config::AuthoringTarget) -> Option<Duration> {
+    state.inproc.ack_timeout(&target.publish_flow)
+}
+
 /// Runs the publish flow for `change` and returns its result.
 async fn run_publish_flow(
     state: &WebState,
-    publish_timeout: std::time::Duration,
     target: &crate::config::AuthoringTarget,
     user: Option<&flowgen_core::auth::UserContext>,
     change: &api::Change,
@@ -756,12 +1100,16 @@ async fn run_publish_flow(
         let auth = serde_json::to_value(user).map_err(|source| Error::Serialize { source })?;
         meta.insert(flowgen_core::auth::AUTH.to_string(), auth);
     }
-    let called = state.inproc.call(None, &target.publish_flow, data, meta);
-    match tokio::time::timeout(publish_timeout, called).await {
-        Ok(result) => Ok(result?),
-        Err(_) => Err(Error::PublishTimeout {
-            timeout: publish_timeout,
-        }),
+    match state
+        .inproc
+        .call(None, &target.publish_flow, data, meta)
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(flowgen_core::task::inproc::registry::CallError::Timeout { timeout }) => {
+            Err(Error::PublishTimeout { timeout })
+        }
+        Err(error) => Err(Error::Call(error)),
     }
 }
 
@@ -770,13 +1118,12 @@ async fn run_publish_flow(
 /// client that disconnects does not leave the change in `publishing`.
 async fn publish(
     state: Arc<WebState>,
-    publish_timeout: Duration,
     target: crate::config::AuthoringTarget,
     user: Option<flowgen_core::auth::UserContext>,
     mut change: api::Change,
     revision: u64,
 ) -> Result<api::Change, Error> {
-    match run_publish_flow(&state, publish_timeout, &target, user.as_ref(), &change).await {
+    match run_publish_flow(&state, &target, user.as_ref(), &change).await {
         Ok(result) => {
             change.status = api::ChangeStatus::Published;
             change.result = match result {
@@ -787,7 +1134,12 @@ async fn publish(
         Err(error) => {
             warn!(change = %change.id, error = %error, "Publishing a change failed");
             change.status = api::ChangeStatus::Failed;
-            change.error = Some(error.to_string());
+            change.error = Some(match error {
+                Error::Call(flowgen_core::task::inproc::registry::CallError::Failed { reason }) => {
+                    reason
+                }
+                error => error.to_string(),
+            });
         }
     }
     let retry = flowgen_core::retry::RetryConfig::merge(&state.app_config.retry, &None);
@@ -959,14 +1311,17 @@ mod tests {
             status,
             proposed_by: "p".to_string(),
             created_at: 0,
+            updated_at: None,
             decided_by: None,
             decided_at,
             files: Vec::new(),
             issues: Vec::new(),
             result: Default::default(),
             error: None,
+            deployment: None,
+            stalled: None,
         };
-        let timeout = std::time::Duration::from_secs(60);
+        let timeout = Some(std::time::Duration::from_secs(60));
         assert!(can_publish(
             &change(api::ChangeStatus::Pending, None),
             timeout
@@ -975,13 +1330,26 @@ mod tests {
             &change(api::ChangeStatus::Failed, None),
             timeout
         ));
+        assert!(!stalled(&change(api::ChangeStatus::Failed, None), timeout));
         assert!(!can_publish(
+            &change(api::ChangeStatus::Publishing, Some(now_ms())),
+            timeout
+        ));
+        assert!(!stalled(
             &change(api::ChangeStatus::Publishing, Some(now_ms())),
             timeout
         ));
         assert!(can_publish(
             &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
             timeout
+        ));
+        assert!(stalled(
+            &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
+            timeout
+        ));
+        assert!(!stalled(
+            &change(api::ChangeStatus::Publishing, Some(now_ms() - 61_000)),
+            None
         ));
         assert!(!can_publish(
             &change(api::ChangeStatus::Published, None),
@@ -996,12 +1364,59 @@ mod tests {
     }
 
     #[test]
+    fn published_versions_apply_from_the_newest_one_already_running() {
+        let version = |id: &str, previous: Option<&str>, content: Option<&str>| {
+            (
+                id.to_string(),
+                api::ChangeFile {
+                    path: "resources/a.rhai".to_string(),
+                    content: content.map(str::to_string),
+                    previous: previous.map(str::to_string),
+                    diff: String::new(),
+                },
+            )
+        };
+        let chain = [
+            version("1", Some("s"), Some("t")),
+            version("2", Some("t"), Some("u")),
+        ];
+        assert_eq!(
+            apply_published(Some("s\n"), &chain),
+            (Some("u"), vec!["1", "2"])
+        );
+        assert_eq!(apply_published(Some("t"), &chain), (Some("u"), vec!["2"]));
+        assert_eq!(apply_published(Some("u"), &chain), (Some("u"), vec![]));
+        assert_eq!(
+            apply_published(Some("by hand"), &chain),
+            (Some("by hand"), vec![])
+        );
+
+        let toggled = [
+            version("1", Some("s"), Some("t")),
+            version("2", Some("t"), Some("s")),
+            version("3", Some("s"), Some("t")),
+            version("4", Some("t"), Some("s")),
+        ];
+        assert_eq!(apply_published(Some("t"), &toggled), (Some("s"), vec!["4"]));
+        assert_eq!(apply_published(Some("s"), &toggled), (Some("s"), vec![]));
+
+        let lifecycle = [version("1", None, Some("a")), version("2", Some("a"), None)];
+        assert_eq!(
+            apply_published(None, &lifecycle[..1]),
+            (Some("a"), vec!["1"])
+        );
+        assert_eq!(apply_published(Some("a"), &lifecycle), (None, vec!["2"]));
+        assert_eq!(apply_published(None, &lifecycle), (None, vec![]));
+    }
+
+    #[test]
     fn a_change_belongs_to_exactly_one_target() {
         let target = |name: &str, paths: &[&str]| crate::config::AuthoringTarget {
             name: name.to_string(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
             publish_flow: "system/publish_workspace".to_string(),
             approver_groups: Vec::new(),
+            track_deployment: true,
         };
         let authoring = crate::config::AuthoringOptions {
             enabled: true,
@@ -1010,7 +1425,6 @@ mod tests {
                 target("user", &["flows/user/", "resources/user/"]),
             ],
             groups_claim: "groups".to_string(),
-            publish_timeout: std::time::Duration::from_secs(1),
         };
 
         let user = target_for(&authoring, ["flows/user/a.yaml", "resources/user/s.rhai"]);
@@ -1033,6 +1447,7 @@ mod tests {
             paths: paths.iter().map(|p| p.to_string()).collect(),
             publish_flow: "system/publish_workspace".to_string(),
             approver_groups: Vec::new(),
+            track_deployment: true,
         };
         let authoring = crate::config::AuthoringOptions {
             enabled: true,
@@ -1041,7 +1456,6 @@ mod tests {
                 target("platform", &["flows/platform/"]),
             ],
             groups_claim: "groups".to_string(),
-            publish_timeout: Duration::from_secs(1),
         };
         let change = |target: &str, path: &str| api::Change {
             id: "a".to_string(),
@@ -1051,6 +1465,7 @@ mod tests {
             status: api::ChangeStatus::Pending,
             proposed_by: "p".to_string(),
             created_at: 0,
+            updated_at: None,
             decided_by: None,
             decided_at: None,
             files: vec![api::ChangeFile {
@@ -1062,6 +1477,8 @@ mod tests {
             issues: Vec::new(),
             result: Default::default(),
             error: None,
+            deployment: None,
+            stalled: None,
         };
 
         assert_eq!(
@@ -1090,9 +1507,9 @@ mod tests {
                     paths: vec!["flows/user/".to_string()],
                     publish_flow: "p".to_string(),
                     approver_groups: groups.iter().map(|g| g.to_string()).collect(),
+                    track_deployment: true,
                 }],
                 groups_claim: claim.to_string(),
-                publish_timeout: std::time::Duration::from_secs(1),
             };
             decider(caller, &options, &options.targets[0])
         };

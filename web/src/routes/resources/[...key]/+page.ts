@@ -1,6 +1,7 @@
 import { error } from '@sveltejs/kit';
-import { apiUrl, encodePath, type ResourceContent } from '$lib/api';
+import { apiUrl, encodePath, failure, type ResourceContent } from '$lib/api';
 import { authoringTargets, pendingChanges, touchesResource } from '$lib/changes';
+import { m } from '$lib/paraglide/messages.js';
 import type { PageLoad } from './$types';
 
 export const load: PageLoad = async ({ params, fetch }) => {
@@ -10,9 +11,8 @@ export const load: PageLoad = async ({ params, fetch }) => {
 		authoringTargets(fetch),
 		pendingChanges(fetch)
 	]);
-	if (!res.ok) {
-		error(res.status, res.status === 404 ? `No resource '${key}'` : `Failed to load resource '${key}'`);
-	}
+	if (res.status === 404) error(404, m.resource_not_found({ key }));
+	if (!res.ok) error(res.status, (await failure(res)).message);
 	const resource: ResourceContent = await res.json();
 	return {
 		key,

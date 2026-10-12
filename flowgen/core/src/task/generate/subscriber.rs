@@ -127,6 +127,14 @@ impl EventHandler {
         )
     }
 
+    fn last_attempt_key(&self) -> String {
+        format!(
+            "flow.{}.last_attempt.{}",
+            self.task_context.flow.id(),
+            self.config.name
+        )
+    }
+
     fn counter_key(&self) -> String {
         format!(
             "flow.{}.counter.{}",
@@ -174,14 +182,38 @@ impl EventHandler {
         }
     }
 
+    /// Records `at` as the last attempt, which an interval counts from after a restart.
+    async fn record_attempt(&self, at: u64) {
+        if let Err(e) = self.write_cached_u64(&self.last_attempt_key(), at).await {
+            warn!(error = %e, "Failed to persist generate attempt time");
+        }
+    }
+
+    /// What an interval counts from: the last attempt, failed or not, with the
+    /// first start counting as one, so a restart neither pushes a run back
+    /// nor fires one early. `None` on the first start, which it records.
+    async fn interval_anchor(&self) -> Result<Option<u64>, Error> {
+        let anchor = match self.read_cached_u64(&self.last_attempt_key()).await? {
+            Some(last_attempt) => Some(last_attempt),
+            None => self.read_cached_u64(&self.last_run_key()).await?,
+        };
+        match anchor {
+            Some(anchor) => Ok(Some(anchor)),
+            None => {
+                self.record_attempt(unix_now()?.as_secs()).await;
+                Ok(None)
+            }
+        }
+    }
+
     /// When the first run after startup is due.
     async fn first_due(&self) -> Result<Due, Error> {
         match &self.schedule {
             Schedule::Interval(interval) => {
-                // Capped at one interval so a last run stamped in the future
+                // Capped at one interval so an anchor stamped in the future
                 // (clock skew, restored cache) cannot stall the task.
-                let wait = match self.read_cached_u64(&self.last_run_key()).await? {
-                    Some(last_run) => Duration::from_secs(last_run)
+                let wait = match self.interval_anchor().await? {
+                    Some(anchor) => Duration::from_secs(anchor)
                         .saturating_add(*interval)
                         .saturating_sub(unix_now()?)
                         .min(*interval),
@@ -275,6 +307,9 @@ impl EventHandler {
 
             let attempt_at = Instant::now();
             let current_time = unix_now()?;
+            if let Schedule::Interval(_) = self.schedule {
+                self.record_attempt(current_time.as_secs()).await;
+            }
 
             let next_run_time = match self.config.count {
                 Some(count) if count == counter + 1 => None,
@@ -1002,6 +1037,85 @@ mod tests {
         rx.recv().await.expect("expected an event");
 
         assert!(Instant::now() - started_at <= Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_first_start_and_attempts_are_recorded() {
+        let cache = memory_cache();
+        let (subscriber, mut rx) = subscriber_with(
+            Config {
+                interval: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            Arc::clone(&cache),
+        );
+        tokio::spawn(subscriber.run());
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let first_start = read_cached(&cache, "last_attempt").await;
+        assert!(first_start.is_some(), "first start should be recorded");
+        assert!(rx.try_recv().is_err(), "first run waits one interval");
+
+        let event = rx.recv().await.expect("expected an event");
+        let attempt = read_cached(&cache, "last_attempt").await;
+        assert!(attempt >= first_start, "the attempt should be recorded");
+        complete(&event);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_restart_after_a_failed_attempt_waits_for_the_interval() {
+        let cache = memory_cache();
+        let attempted = unix_now().unwrap().as_secs() - 1;
+        cache
+            .put(
+                &cache_key("last_attempt"),
+                attempted.to_string().into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let (subscriber, mut rx) = subscriber_with(
+            Config {
+                interval: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            cache,
+        );
+        let restarted_at = Instant::now();
+        tokio::spawn(subscriber.run());
+
+        rx.recv().await.expect("expected an event");
+
+        assert!(
+            Instant::now() - restarted_at >= Duration::from_secs(7),
+            "restart fired a failed run early"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_restart_before_the_first_run_keeps_its_schedule() {
+        let cache = memory_cache();
+        let started = unix_now().unwrap().as_secs() - 9;
+        cache
+            .put(&cache_key("last_attempt"), started.to_string().into(), None)
+            .await
+            .unwrap();
+        let (subscriber, mut rx) = subscriber_with(
+            Config {
+                interval: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            cache,
+        );
+        let restarted_at = Instant::now();
+        tokio::spawn(subscriber.run());
+
+        rx.recv().await.expect("expected an event");
+
+        assert!(
+            Instant::now() - restarted_at <= Duration::from_secs(2),
+            "restart pushed the first run back"
+        );
     }
 
     #[tokio::test(start_paused = true)]

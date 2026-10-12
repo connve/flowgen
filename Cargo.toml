@@ -156,6 +156,10 @@ scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 secrecy = { version = "0.10", features = ["serde"] }
 subtle = { version = "2.6" }
+ssh-key = { version = "0.6", default-features = false, features = [
+    "ed25519",
+    "std",
+] }
 getrandom = { version = "0.3" }
 walkdir = { version = "2.5" }
 testcontainers = { version = "0.27" }

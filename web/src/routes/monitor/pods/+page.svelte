@@ -2,10 +2,11 @@
 	import Badge from '$lib/Badge.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import { cluster } from '$lib/clusterStatus.svelte';
+	import { m } from '$lib/paraglide/messages.js';
 </script>
 
 <svelte:head>
-	<title>Pods | Flowgen</title>
+	<title>{m.pods_page_title()}</title>
 </svelte:head>
 
 <div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
@@ -14,20 +15,24 @@
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>
 	{:else if !cluster.status}
-		<StateMessage tone="oops" title="Failed to load pods" message="GET /api/cluster did not answer." />
+		<StateMessage
+			tone="oops"
+			title={m.pods_load_failed_title()}
+			message={cluster.error ?? m.pods_load_failed_message()}
+		/>
 	{:else}
 		<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 			<table class="table table-sm w-full bg-base-100">
 				<thead class="bg-base-100 text-xs uppercase tracking-wide">
 					<tr>
-						<th>Pod</th>
-						<th>Status</th>
+						<th>{m.pods_column_pod()}</th>
+						<th>{m.pods_column_status()}</th>
 						<th>
 							<span
 								class="tooltip tooltip-bottom before:normal-case before:tracking-normal"
-								data-tip="Flows without leader election, plus the leader-elected flows this pod leads"
+								data-tip={m.pods_column_flows_tooltip()}
 							>
-								Flows
+								{m.pods_column_flows()}
 							</span>
 						</th>
 					</tr>
@@ -39,11 +44,11 @@
 							<td class="text-sm">
 								{#if pod.unreachable_reason}
 									<span class="flex items-start gap-2">
-										<Badge variant="warning">unreachable</Badge>
+										<Badge variant="warning">{m.pods_status_unreachable()}</Badge>
 										<span class="opacity-70">{pod.unreachable_reason}</span>
 									</span>
 								{:else}
-									<Badge variant="success">ok</Badge>
+									<Badge variant="success">{m.pods_status_ok()}</Badge>
 								{/if}
 							</td>
 							<td class="text-sm tabular-nums">

@@ -89,7 +89,7 @@ pub struct EventHandler {
 
 impl EventHandler {
     /// Pushes the event's files and emits the data with the digest added.
-    #[tracing::instrument(skip(self, event), name = "task.handle")]
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
@@ -103,6 +103,7 @@ impl EventHandler {
             let ProcessorConfig {
                 repository,
                 tags,
+                annotations,
                 credentials_path,
                 ..
             } = self
@@ -130,6 +131,7 @@ impl EventHandler {
             let push = Push {
                 repository,
                 credentials_path,
+                annotations,
             };
             let Pushed { digest, references } = {
                 let _pushing = self.pushing.lock().await;
@@ -328,6 +330,7 @@ mod tests {
             name: "release".to_string(),
             repository: "127.0.0.1:9/a".to_string(),
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            annotations: Default::default(),
             credentials_path: None,
             depends_on: None,
             retry: None,

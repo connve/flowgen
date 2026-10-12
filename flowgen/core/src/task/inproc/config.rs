@@ -3,16 +3,23 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// How long an in-process call may take when `ack_timeout` is not set.
+pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn default_ack_timeout() -> Duration {
+    DEFAULT_ACK_TIMEOUT
+}
+
 /// Source that makes its flow callable in-process at the flow's identity.
-#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// The unique name of the task.
     pub name: String,
     /// How long a call may take, from handing its event to the flow until the
-    /// flow finishes. Unbounded when unset.
-    #[serde(default, with = "humantime_serde")]
-    pub ack_timeout: Option<Duration>,
+    /// flow finishes.
+    #[serde(default = "default_ack_timeout", with = "humantime_serde")]
+    pub ack_timeout: Duration,
     /// Flows allowed to call, e.g. `["user/", "platform/"]`: each entry admits the
     /// flow of that identity and every flow in it as a folder, and `""` admits
     /// every flow. Defaults to the flow's own top-level folder; flowgen itself may
@@ -47,6 +54,9 @@ mod tests {
     fn endpoint_ack_timeout_is_a_duration() {
         let endpoint: Endpoint =
             serde_json::from_str(r#"{"name": "on_call", "ack_timeout": "2m"}"#).unwrap();
-        assert_eq!(endpoint.ack_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(endpoint.ack_timeout, Duration::from_secs(120));
+
+        let endpoint: Endpoint = serde_json::from_str(r#"{"name": "on_call"}"#).unwrap();
+        assert_eq!(endpoint.ack_timeout, DEFAULT_ACK_TIMEOUT);
     }
 }

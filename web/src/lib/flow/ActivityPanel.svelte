@@ -12,6 +12,7 @@
 	import type { ActivityLevel } from '$lib/logRecord';
 	import { LOGS_LIMIT_MAX, clampLogsLimit } from '$lib/logsLimit';
 	import { formatAbsolute, formatRelative } from '$lib/time';
+	import { m } from '$lib/paraglide/messages.js';
 
 	interface Activity {
 		flow: string;
@@ -209,25 +210,25 @@
 				icon={expanded ? 'tabler:chevron-down' : 'tabler:chevron-up'}
 				class="h-4 w-4 opacity-60"
 			/>
-			<span class="text-xs font-semibold uppercase tracking-wide opacity-70">Activity</span>
+			<span class="text-xs font-semibold uppercase tracking-wide opacity-70">{m.activity_heading()}</span>
 		</span>
 		{#if !expanded}
 			<span class="h-4 w-px bg-base-300"></span>
 			<span class="flex items-center gap-1">
 				<span class="chip-sm chip-info">
-					<span>Info</span>
+					<span>{levelLabel('info')}</span>
 					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
 						>{counts.info}</span
 					>
 				</span>
 				<span class="chip-sm chip-warn">
-					<span>Warn</span>
+					<span>{levelLabel('warn')}</span>
 					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
 						>{counts.warn}</span
 					>
 				</span>
 				<span class="chip-sm chip-error">
-					<span>Error</span>
+					<span>{levelLabel('error')}</span>
 					<span class="inline-block tabular-nums opacity-60" style="min-width: {countWidth}"
 						>{counts.error}</span
 					>
@@ -240,10 +241,10 @@
 				<span class="opacity-40">•</span>
 				<span class="font-mono">{latest.task_type ?? '—'}</span>
 				<span class="opacity-40">•</span>
-				<span class="font-mono">{latest.task ?? 'flow'}</span>
+				<span class="font-mono">{latest.task ?? m.activity_flow_task()}</span>
 			</span>
 		{:else}
-			<span class="ml-auto text-xs opacity-40">No events yet</span>
+			<span class="ml-auto text-xs opacity-40">{m.activity_empty_collapsed()}</span>
 		{/if}
 	</button>
 
@@ -270,12 +271,12 @@
 				{/each}
 			</span>
 
-			<div class="tooltip tooltip-bottom" data-tip="Max number of results per log level">
+			<div class="tooltip tooltip-bottom" data-tip={m.activity_limit_tooltip()}>
 				<label
 					class="input input-xs flex items-center gap-1.5 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 				>
 					<Icon icon="tabler:stack-2" class="h-3.5 w-3.5 opacity-70" />
-					<span class="opacity-70">Limit</span>
+					<span class="opacity-70">{m.activity_limit()}</span>
 					<input
 						type="number"
 						min="1"
@@ -284,7 +285,7 @@
 						value={flowActivityLimit}
 						onchange={(e) => applyLimit(e.currentTarget.valueAsNumber)}
 						class="no-spinner w-12 bg-transparent tabular-nums outline-none"
-						aria-label="Activity history limit"
+						aria-label={m.activity_limit_label()}
 					/>
 				</label>
 			</div>
@@ -293,12 +294,12 @@
 				<span
 					class="flex h-6 items-center gap-1 rounded-full border border-primary/50 bg-primary/10 px-2 text-xs"
 				>
-					<span class="opacity-60">task:</span>
+					<span class="opacity-60">{m.activity_task_filter_prefix()}</span>
 					<span class="font-mono">{taskFilter}</span>
 					<button
 						type="button"
 						class="ml-0.5 opacity-60 hover:opacity-100"
-						aria-label="Clear task filter"
+						aria-label={m.activity_task_filter_clear()}
 						onclick={() => (taskFilter = null)}
 					>
 						<Icon icon="tabler:x" class="h-3.5 w-3.5" />
@@ -312,7 +313,7 @@
 					class="text-xs opacity-60 hover:opacity-100"
 					onclick={clearFilters}
 				>
-					Clear
+					{m.activity_filters_clear()}
 				</button>
 			{/if}
 
@@ -322,13 +323,13 @@
 				class="input input-xs flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 			>
 				<Icon icon="tabler:search" class="h-4 w-4 opacity-50" />
-				<input type="text" placeholder="Search task, processor, message..." bind:value={search} />
+				<input type="text" placeholder={m.activity_search_placeholder()} bind:value={search} />
 				{#if search}
-					<div class="tooltip tooltip-left" data-tip="Clear search">
+					<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
 						<button
 							type="button"
 							class="opacity-50 hover:opacity-100"
-							aria-label="Clear search"
+							aria-label={m.common_clear_search()}
 							onclick={() => (search = '')}
 						>
 							<Icon icon="tabler:x" class="h-5 w-5" />
@@ -341,9 +342,9 @@
 		{#if ordered.length === 0}
 			<div class="px-4 py-6 text-center text-xs opacity-50">
 				{#if anyFilterActive}
-					No events match the current filters
+					{m.activity_no_match()}
 				{:else}
-					No activity recorded
+					{m.activity_empty()}
 				{/if}
 			</div>
 		{:else}
@@ -353,14 +354,14 @@
 				class="grid h-8 items-center border-b border-base-200 bg-base-100 px-3 text-xs font-semibold uppercase tracking-wide opacity-60"
 				style="grid-template-columns: 5.5rem 5rem 11rem 9rem 9rem 5rem 9rem 1fr; gap: 0.75rem"
 			>
-				<span>Status</span>
-				<span>When</span>
-				<span>Timestamp</span>
-				<span>Processor</span>
-				<span>Task</span>
-				<span>Duration</span>
-				<span>Event</span>
-				<span>Message</span>
+				<span>{m.activity_field_status()}</span>
+				<span>{m.activity_field_when()}</span>
+				<span>{m.activity_field_timestamp()}</span>
+				<span>{m.activity_field_processor()}</span>
+				<span>{m.activity_field_task()}</span>
+				<span>{m.activity_field_duration()}</span>
+				<span>{m.activity_field_event()}</span>
+				<span>{m.activity_field_message()}</span>
 			</div>
 			<div
 				bind:this={scroller}
@@ -386,7 +387,7 @@
 						</span>
 						<span class="whitespace-nowrap font-mono opacity-60">{formatAbsolute(event.ts_ms)}</span>
 						<span class="truncate font-mono opacity-70">{event.task_type ?? '—'}</span>
-						<span class="truncate font-mono opacity-80">{event.task ?? '_flow'}</span>
+						<span class="truncate font-mono opacity-80">{event.task ?? m.activity_flow_task()}</span>
 						<span class="whitespace-nowrap font-mono tabular-nums opacity-60">
 							{formatDuration(event.duration_ms)}
 						</span>
@@ -409,7 +410,7 @@
 		class="fixed inset-y-0 right-0 z-40 flex w-full max-w-2xl flex-col border-l border-base-200 bg-base-100 shadow-xl"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Activity detail"
+		aria-label={m.activity_detail_label()}
 	>
 		<div class="flex items-center justify-between border-b border-base-200 px-4 py-2">
 			<div class="flex items-center gap-2 text-xs">
@@ -417,15 +418,15 @@
 				<span class="opacity-40">•</span>
 				<span class="font-mono opacity-70">{selected.task_type ?? '—'}</span>
 				<span class="opacity-40">•</span>
-				<span class="font-mono opacity-80">{selected.task ?? '_flow'}</span>
+				<span class="font-mono opacity-80">{selected.task ?? m.activity_flow_task()}</span>
 			</div>
 			<div class="flex items-center gap-1">
-				<CopyButton text={buildClipboard(selected)} label="Copy log" />
-				<div class="tooltip tooltip-left" data-tip="Close">
+				<CopyButton text={buildClipboard(selected)} label={m.activity_copy_log()} />
+				<div class="tooltip tooltip-left" data-tip={m.common_close()}>
 					<button
 						type="button"
 						class="btn btn-ghost btn-sm btn-circle"
-						aria-label="Close"
+						aria-label={m.common_close()}
 						onclick={() => (selected = null)}
 					>
 						<Icon icon="tabler:x" class="h-5 w-5" />
@@ -434,24 +435,24 @@
 			</div>
 		</div>
 		<dl class="grid grid-cols-[6rem_1fr] gap-x-4 gap-y-1 px-4 py-2 text-xs">
-			<dt class="opacity-50">Timestamp</dt>
+			<dt class="opacity-50">{m.activity_field_timestamp()}</dt>
 			<dd class="font-mono">{formatAbsolute(selected.ts_ms)}</dd>
-			<dt class="opacity-50">When</dt>
+			<dt class="opacity-50">{m.activity_field_when()}</dt>
 			<dd>{formatRelative(selected.ts_ms)}</dd>
-			<dt class="opacity-50">Duration</dt>
+			<dt class="opacity-50">{m.activity_field_duration()}</dt>
 			<dd class="font-mono tabular-nums">{formatDuration(selected.duration_ms)}</dd>
-			<dt class="opacity-50">Event</dt>
+			<dt class="opacity-50">{m.activity_field_event()}</dt>
 			<dd class="font-mono">{selected.event_id ?? '—'}</dd>
 		</dl>
 		<div class="border-t border-base-200 px-4 py-2">
-			<div class="pb-1 text-xs opacity-50">Message</div>
+			<div class="pb-1 text-xs opacity-50">{m.activity_field_message()}</div>
 			<pre class="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs {selected.message
 					? 'opacity-80'
 					: 'opacity-40'}">{selected.message || '—'}</pre>
 		</div>
 		{#if selected.extra && selected.extra.length > 0}
 			<div class="border-t border-base-200 px-4 py-2">
-				<div class="pb-1 text-xs opacity-50">Attributes</div>
+				<div class="pb-1 text-xs opacity-50">{m.activity_field_attributes()}</div>
 				<dl class="grid grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs">
 					{#each selected.extra as [key, value] (key)}
 						<dt class="truncate font-mono opacity-70" title={key}>{key}</dt>

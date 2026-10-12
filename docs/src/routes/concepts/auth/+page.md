@@ -216,7 +216,7 @@ Without it, sign-out is local to flowgen: the provider still considers the brows
 | Route | Purpose |
 |---|---|
 | `GET {path}/auth/login` | Redirects to the identity provider. `return_to` names a web UI page to come back to after sign-in. 404 if `auth` isn't configured. |
-| `GET {path}/auth/callback` | Identity provider redirect target; exchanges the code and sets the session cookie. |
+| `GET {path}/auth/callback` | Identity provider redirect target; exchanges the code and sets the session cookie. When signing in fails, for example because the user is not assigned to the application, it redirects to the web UI's login page, which says why; the provider's own description is in the flowgen logs. |
 | `GET {path}/auth/logout` | Clears the session cookie, then redirects to `signout_redirect_url` or back to the UI. 404 if `auth` isn't configured. |
 | `GET {path}/auth/me` | The signed-in user, 401 if not signed in, or 404 if `auth` isn't configured. |
 

@@ -815,9 +815,10 @@ pub struct WebOptions {
     /// on loopback. Set when the gateway runs in a separate process or pod.
     #[serde(default)]
     pub ai_gateway_url: Option<String>,
-    /// Settings for the built-in Agents chat (conversation history, etc.).
+    /// The built-in Agents chat. Omit to hide the Agents tab and disable
+    /// `/api/agents`.
     #[serde(default)]
-    pub agents: AgentsOptions,
+    pub agents: Option<AgentsOptions>,
     /// HTTP headers sent with every outbound request the web server
     /// makes (currently the Agents chat proxy to the AI gateway). Used to
     /// identify this web server to `llm_proxy`/`mcp_tool` scoping, e.g.
@@ -889,10 +890,6 @@ pub struct AuthoringOptions {
     /// Claim of the signed-in user that lists their groups. Defaults to `groups`.
     #[serde(default = "default_groups_claim")]
     pub groups_claim: String,
-    /// How long publishing may take before the change is recorded as failed.
-    /// Defaults to 5 minutes.
-    #[serde(default = "default_publish_timeout", with = "humantime_serde")]
-    pub publish_timeout: Duration,
 }
 
 /// Workspace paths changed, approved, and published together.
@@ -914,6 +911,10 @@ pub struct AuthoringTarget {
     /// allows every signed-in user.
     #[serde(default)]
     pub approver_groups: Vec<String>,
+    /// Whether a published change reports when this instance runs it. Turn off
+    /// when the target is not deployed here automatically. Defaults to `true`.
+    #[serde(default = "default_track_deployment")]
+    pub track_deployment: bool,
 }
 
 impl AuthoringOptions {
@@ -946,6 +947,7 @@ fn default_targets() -> Vec<AuthoringTarget> {
         paths: vec!["flows/".to_string(), "resources/".to_string()],
         publish_flow: default_publish_flow(),
         approver_groups: Vec::new(),
+        track_deployment: default_track_deployment(),
     }]
 }
 
@@ -953,12 +955,12 @@ fn default_publish_flow() -> String {
     "system/publish_workspace".to_string()
 }
 
-fn default_groups_claim() -> String {
-    "groups".to_string()
+fn default_track_deployment() -> bool {
+    true
 }
 
-fn default_publish_timeout() -> Duration {
-    Duration::from_secs(300)
+fn default_groups_claim() -> String {
+    "groups".to_string()
 }
 
 fn serialize_redacted_cookie_secret<S>(
@@ -976,7 +978,10 @@ where
 
 /// Settings for the built-in Agents chat surface.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentsOptions {
+    /// Whether the Agents chat is enabled.
+    pub enabled: bool,
     /// How long a conversation lives in the configured cache before it
     /// expires. Refreshed on every write, so the window counts from the last
     /// activity. Defaults to 30 days; set to `0` to persist indefinitely.
@@ -984,14 +989,6 @@ pub struct AgentsOptions {
     /// this cache.
     #[serde(default = "default_conversation_history_ttl", with = "humantime_serde")]
     pub conversation_history_ttl: Option<Duration>,
-}
-
-impl Default for AgentsOptions {
-    fn default() -> Self {
-        Self {
-            conversation_history_ttl: default_conversation_history_ttl(),
-        }
-    }
 }
 
 /// Default conversation history TTL for the built-in Agents chat: 30 days.
@@ -1213,6 +1210,7 @@ mod tests {
             paths: vec![path.to_string()],
             publish_flow: default_publish_flow(),
             approver_groups: Vec::new(),
+            track_deployment: true,
         };
         let authoring = AuthoringOptions {
             enabled: true,
@@ -1222,7 +1220,6 @@ mod tests {
                 target("user", "flows/user/"),
             ],
             groups_claim: default_groups_claim(),
-            publish_timeout: default_publish_timeout(),
         };
         let owner = |path: &str| authoring.target_of(path).map(|t| t.name.as_str());
 

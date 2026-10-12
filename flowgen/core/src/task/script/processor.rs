@@ -30,6 +30,8 @@ pub enum Error {
         #[source]
         source: Box<rhai::EvalAltResult>,
     },
+    #[error("{0}")]
+    Thrown(String),
     #[error("Event conversion error: {source}")]
     EventConversion {
         #[source]
@@ -70,6 +72,16 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+}
+
+/// A string the script throws is its error message as written.
+fn execution_error(source: Box<rhai::EvalAltResult>) -> Error {
+    match source.as_ref() {
+        rhai::EvalAltResult::ErrorRuntime(value, _) if value.is_string() => {
+            Error::Thrown(value.to_string())
+        }
+        _ => Error::ScriptExecution { source },
+    }
 }
 
 /// Handles individual script execution operations.
@@ -191,7 +203,7 @@ impl EventHandler {
             let result: Dynamic = self
                 .engine
                 .eval_with_scope(&mut scope, &self.code)
-                .map_err(|e| Error::ScriptExecution { source: e })?;
+                .map_err(execution_error)?;
 
             // Extract ctx from scope after script execution.
             let ctx_dynamic = scope.get_value::<Dynamic>("ctx");
@@ -741,6 +753,7 @@ impl crate::task::runner::Runner for Processor {
                                         let is_retriable = !matches!(
                                             &e,
                                             Error::ScriptExecution { .. }
+                                                | Error::Thrown(_)
                                                 | Error::InvalidReturnType(_)
                                                 | Error::ResourceLoad { .. }
                                         );
@@ -1106,6 +1119,21 @@ mod tests {
         let mut engine = Engine::new();
         register_helpers(&mut engine);
         engine
+    }
+
+    #[test]
+    fn a_thrown_string_is_the_error_message() {
+        let engine = Engine::new();
+        let thrown = engine
+            .eval::<rhai::Dynamic>(r#"throw "Push rejected""#)
+            .unwrap_err();
+        assert_eq!(execution_error(thrown).to_string(), "Push rejected");
+
+        let failed = engine.eval::<rhai::Dynamic>("missing()").unwrap_err();
+        assert!(matches!(
+            execution_error(failed),
+            Error::ScriptExecution { .. }
+        ));
     }
 
     #[test]

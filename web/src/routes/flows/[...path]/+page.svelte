@@ -6,6 +6,7 @@
 	import PendingChanges from '$lib/PendingChanges.svelte';
 	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import { editUrl, flowFilePath, targetOf } from '$lib/changes';
+	import { m } from '$lib/paraglide/messages.js';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -26,14 +27,14 @@
 </script>
 
 <svelte:head>
-	<title>{data.detail.display_name ?? data.identity} | Flowgen</title>
+	<title>{m.flow_page_title({ name: data.detail.display_name ?? data.identity })}</title>
 </svelte:head>
 
 <section class="p-6">
 	<div class="mb-4">
 		<div class="flex min-h-8 items-center justify-between gap-2">
 			<div class="flex items-center gap-1.5 text-sm">
-				<a href="{base}/" class="text-primary hover:underline">Flows</a>
+				<a href="{base}/" class="text-primary hover:underline">{m.flow_breadcrumb_flows()}</a>
 				{#each folderSegments as segment, i (i)}
 					<span class="opacity-40">/</span>
 					<span class="font-mono opacity-70">{segment}</span>

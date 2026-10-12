@@ -13,11 +13,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lock = web_dir.join("package-lock.json");
     let src_dir = web_dir.join("src");
     let static_dir = web_dir.join("static");
+    let messages_dir = web_dir.join("messages");
+    let inlang_dir = web_dir.join("project.inlang");
 
     println!("cargo:rerun-if-changed={}", package_json.display());
     println!("cargo:rerun-if-changed={}", lock.display());
     println!("cargo:rerun-if-changed={}", src_dir.display());
     println!("cargo:rerun-if-changed={}", static_dir.display());
+    println!("cargo:rerun-if-changed={}", messages_dir.display());
+    println!("cargo:rerun-if-changed={}", inlang_dir.display());
     println!("cargo:rerun-if-env-changed=FLOWGEN_SKIP_WEB_BUILD");
 
     if std::env::var_os("FLOWGEN_SKIP_WEB_BUILD").is_some() {

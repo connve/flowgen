@@ -20,7 +20,7 @@ A flow with an `inproc_endpoint` runs on every pod, like a flow with an `http_en
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | required | Task name. |
-| `ack_timeout` | duration | | How long a call may take, from handing its event to the flow until the flow finishes. Unbounded when unset. |
+| `ack_timeout` | duration | `30s` | How long a call may take, from handing its event to the flow until the flow finishes. |
 | `callers` | list | the flow's top-level folder | Flows allowed to call, e.g. `["user/", "platform/"]`. Each entry admits the flow of that identity and every flow in it as a folder; `""` admits every flow. |
 
 The caller's event data becomes this task's event data, and its `meta` is merged in, so `event.meta.auth` carries the caller's user.

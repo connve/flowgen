@@ -16,7 +16,7 @@ Produces events on a schedule. Source task — typically first in a flow.
 |---|---|---|---|
 | `name` | string | required | Task name. |
 | `payload` | object | | Structured data to include in each event. `system_info` is added only when the payload is an object. |
-| `interval` | duration | | Interval schedule (e.g., `500ms`, `5s`, `1m`). The first run fires one interval after start, or at most one interval after the last successful run when resuming. Maximum `100y`. Mutually exclusive with `cron`. |
+| `interval` | duration | | Interval schedule (e.g., `500ms`, `5s`, `1m`). The first run fires one interval after the flow first starts, and each next one an interval after the previous attempt, failed or not. A restart keeps that schedule, so a flow restarted more often than its interval still runs, and never more often. Maximum `100y`. Mutually exclusive with `cron`. |
 | `cron` | string | | Cron expression, validated at startup. Mutually exclusive with `interval`. |
 | `timezone` | string | `UTC` | IANA timezone for cron evaluation (e.g., `Europe/London`), validated at startup. |
 | `count` | int | | Max events to generate. Runs indefinitely if omitted. |

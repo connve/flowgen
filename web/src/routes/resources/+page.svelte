@@ -9,9 +9,12 @@
 	import CopyButton from '$lib/CopyButton.svelte';
 	import StateMessage from '$lib/StateMessage.svelte';
 	import Icon from '@iconify/svelte';
+	import { m } from '$lib/paraglide/messages.js';
 	import {
 		apiUrl,
 		encodePath,
+		errorMessage,
+		failure,
 		type AuthoringTarget,
 		type ChangeSummary,
 		type ResourceSummary as Resource,
@@ -69,10 +72,10 @@
 
 		try {
 			const response = await fetch(apiUrl('api/resources'));
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			if (!response.ok) throw await failure(response);
 			resources = await response.json();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load resources';
+			error = errorMessage(err, m.resources_load_failed_reason());
 		} finally {
 			loading = false;
 		}
@@ -136,8 +139,9 @@
 			selectedLoading = true;
 		}
 		try {
-			const response = await fetch(apiUrl(`api/resources/${key}`));
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			const response = await fetch(apiUrl(`api/resources/${encodePath(key)}`));
+			if (response.status === 404) throw new Error(m.resource_not_found({ key }));
+			if (!response.ok) throw await failure(response);
 			const body: ResourceContent = await response.json();
 			contentCache.set(key, body);
 			if (pendingResource !== key) return;
@@ -147,7 +151,7 @@
 		} catch (err) {
 			if (pendingResource !== key) return;
 			selected = key;
-			selectedError = err instanceof Error ? err.message : 'Failed to load resource';
+			selectedError = errorMessage(err, m.resource_load_failed_named({ key }));
 		} finally {
 			if (pendingResource === key) selectedLoading = false;
 		}
@@ -184,7 +188,7 @@
 </script>
 
 <svelte:head>
-	<title>Resources Overview | Flowgen</title>
+	<title>{m.resources_page_title()}</title>
 </svelte:head>
 
 <svelte:window on:keydown={onKeydown} />
@@ -197,10 +201,10 @@
 	>
 		{#if !foldersPaneOpen}
 			<div class="flex flex-1 flex-col items-center py-2">
-				<div class="tooltip tooltip-right" data-tip="Folders">
+				<div class="tooltip tooltip-right" data-tip={m.resources_folders()}>
 					<button
 						type="button"
-						aria-label="Expand folders"
+						aria-label={m.resources_expand_folders()}
 						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
 						onclick={toggleFoldersPane}
 					>
@@ -224,7 +228,7 @@
 								<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
 							{/if}
 							<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
-							<span>All resources</span>
+							<span>{m.resources_all()}</span>
 							<span class="ml-auto text-xs opacity-50">{resources.length}</span>
 						</button>
 					</li>
@@ -240,7 +244,7 @@
 											<button
 												type="button"
 												class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-base-200"
-												aria-label={isOpen ? 'Collapse' : 'Expand'}
+												aria-label={isOpen ? m.resources_collapse_folder() : m.resources_expand_folder()}
 												onclick={() => toggleFolder(node.fullPath)}
 											>
 												<Icon
@@ -290,8 +294,8 @@
 		>
 			<button
 				type="button"
-				aria-label={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
-				data-tip={foldersPaneOpen ? 'Collapse folders' : 'Expand folders'}
+				aria-label={foldersPaneOpen ? m.resources_collapse_folders() : m.resources_expand_folders()}
+				data-tip={foldersPaneOpen ? m.resources_collapse_folders() : m.resources_expand_folders()}
 				class="tooltip {foldersPaneOpen
 					? 'tooltip-top'
 					: 'tooltip-right'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
@@ -314,7 +318,7 @@
 						type="button"
 						class="text-primary hover:underline"
 						onclick={() => selectFolder(null)}
-					>All resources</button>
+					>{m.resources_all()}</button>
 					{#each segments as segment, i}
 						<span class="opacity-40">/</span>
 						{#if i < segments.length - 1}
@@ -327,7 +331,7 @@
 							<span class="font-mono">{segment}</span>
 						{/if}
 					{/each}
-					<span class="text-xs opacity-50">· {visibleResources.length} {visibleResources.length === 1 ? 'item' : 'items'}</span>
+					<span class="text-xs opacity-50">· {m.resources_item_count({ count: visibleResources.length })}</span>
 				</div>
 			{/if}
 			<div class="flex items-center justify-end gap-2">
@@ -337,14 +341,14 @@
 						class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
 					>
 						<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
-						{pending.length} pending {pending.length === 1 ? 'change' : 'changes'}
+						{m.resources_pending_changes({ count: pending.length })}
 					</a>
 					<a
 						href="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
 						class="btn btn-primary btn-sm gap-1.5"
 					>
 						<Icon icon="tabler:plus" class="h-4 w-4" />
-						New
+						{m.common_new()}
 					</a>
 				{/if}
 				<label
@@ -360,13 +364,13 @@
 						<circle cx="11" cy="11" r="8" />
 						<path d="M21 21l-4.35-4.35" />
 					</svg>
-					<input type="text" placeholder="Search resources..." bind:value={search} />
+					<input type="text" placeholder={m.resources_search_placeholder()} bind:value={search} />
 					{#if search}
-						<div class="tooltip tooltip-left" data-tip="Clear search">
+						<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
 							<button
 								type="button"
 								class="opacity-50 hover:opacity-100"
-								aria-label="Clear search"
+								aria-label={m.common_clear_search()}
 								onclick={() => (search = '')}
 							>
 								<Icon icon="tabler:x" class="h-5 w-5" />
@@ -383,21 +387,25 @@
 				<span class="loading loading-spinner loading-lg text-primary"></span>
 			</div>
 		{:else if error}
-			<StateMessage tone="oops" title="Failed to load resources" message={error} />
+			<StateMessage tone="oops" title={m.resources_load_failed()} message={error} />
 		{:else if visibleResources.length === 0}
 			<StateMessage
 				tone="notice"
-				title={searchActive ? 'No matches' : 'No resources'}
-				message={searchActive ? `Nothing matches "${search}".` : 'Nothing registered yet.'}
+				title={searchActive ? m.resources_no_match_title() : m.resources_empty_title()}
+				message={searchActive
+					? m.resources_no_match_message({ search })
+					: authoring
+						? m.resources_empty_message_authoring()
+						: m.resources_empty_message()}
 			/>
 		{:else}
 			<div class="shrink-0 overflow-x-auto rounded-lg border border-base-300 bg-base-100">
 				<table class="table table-sm w-full bg-base-100">
 					<thead class="bg-base-100 text-xs uppercase tracking-wide">
 						<tr>
-							<th>Key</th>
-							<th>Type</th>
-							<th class="text-right">Size</th>
+							<th>{m.resources_column_key()}</th>
+							<th>{m.resources_column_type()}</th>
+							<th class="text-right">{m.resources_column_size()}</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -438,7 +446,7 @@
 		class="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Resource viewer"
+		aria-label={m.resource_viewer_label()}
 		onclick={(e) => {
 			if (e.target === e.currentTarget) closeResource();
 		}}
@@ -453,7 +461,7 @@
 			<div class="flex items-start justify-between border-b border-base-200 px-4 py-3">
 				<div class="min-w-0 flex-1">
 					<div class="mb-0.5 flex items-center gap-1.5 text-xs">
-						<span class="opacity-60">Resources</span>
+						<span class="opacity-60">{m.resources_breadcrumb()}</span>
 						{#each selectedFolderSegments as segment}
 							<span class="opacity-40">/</span>
 							<span class="font-mono opacity-70">{segment}</span>
@@ -468,21 +476,21 @@
 						{#if targetOf(targets, `resources/${selected}`)}
 							<EditButton href={editUrl(base, `resources/${selected}`)} tooltip="left" />
 						{/if}
-						<div class="tooltip tooltip-left" data-tip="Open full page">
+						<div class="tooltip tooltip-left" data-tip={m.resource_open_full_page()}>
 							<a
 								href="{base}/resources/{encodePath(selected)}"
 								class="btn btn-ghost btn-sm btn-circle"
-								aria-label="Open full page"
+								aria-label={m.resource_open_full_page()}
 							>
 								<Icon icon="tabler:external-link" class="h-5 w-5" />
 							</a>
 						</div>
 					{/if}
-					<div class="tooltip tooltip-left" data-tip="Close">
+					<div class="tooltip tooltip-left" data-tip={m.common_close()}>
 						<button
 							type="button"
 							class="btn btn-ghost btn-sm btn-circle"
-							aria-label="Close"
+							aria-label={m.common_close()}
 							onclick={closeResource}
 						>
 							<Icon icon="tabler:x" class="h-5 w-5" />
@@ -492,9 +500,9 @@
 			</div>
 			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
 				<span class="text-xs font-medium uppercase opacity-70">
-					{selectedContent?.extension ?? 'File'}
+					{selectedContent?.extension ?? m.resource_file_type_fallback()}
 				</span>
-				<CopyButton text={selectedContent?.content} label="Copy" />
+				<CopyButton text={selectedContent?.content} label={m.common_copy()} />
 			</div>
 			<div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-base-200">
 				{#if selectedLoading}
@@ -503,7 +511,7 @@
 					</div>
 				{:else if selectedError}
 					<div class="flex-1">
-						<StateMessage tone="oops" title="Failed to load resource" message={selectedError} />
+						<StateMessage tone="oops" title={m.resource_load_failed()} message={selectedError} />
 					</div>
 				{:else if selectedContent}
 					<div class="min-h-0 flex-1 overflow-auto">

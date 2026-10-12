@@ -193,6 +193,9 @@ Embedded web dashboard and JSON API.
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
 | `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
+| `agents.enabled` | bool | required | Shows the Agents tab and enables `/api/agents`. Omit `agents` to hide the tab. |
+| `agents.conversation_history_ttl` | duration | `30d` | How long a conversation is kept after its last message; `0` keeps it indefinitely. |
+| `ai_gateway_url` | string | same-process `ai_gateway` | Base URL the Agents chat is proxied to, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
 | `api_credentials_path` | string | | Machine keys the API accepts as `Authorization: Bearer` next to the login session. See [Authoring](/docs/flowgen/concepts/authoring#machine-keys). |
 | `authoring.enabled` | bool | required | Enables change proposals. See [Authoring](/docs/flowgen/concepts/authoring). |
 | `authoring.targets` | list | one `workspace` target over `flows/` and `resources/` | Where changes can be proposed. See [Targets](/docs/flowgen/concepts/authoring#targets). |
@@ -200,8 +203,8 @@ Embedded web dashboard and JSON API.
 | `authoring.targets[].paths` | list of string | required | Workspace folders the target covers, e.g. `flows/user/`. |
 | `authoring.targets[].publish_flow` | string | `system/publish_workspace` | Identity of the flow, starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc), that publishes the target's approved changes. |
 | `authoring.targets[].approver_groups` | list of string | `[]` | Identity provider groups whose members may approve and reject the target's changes. Empty allows every signed-in user. |
+| `authoring.targets[].track_deployment` | bool | `true` | Reports when a committed change runs on this instance. Turn off when the target is not deployed here automatically. |
 | `authoring.groups_claim` | string | `groups` | Claim of the signed-in user that lists their groups. |
-| `authoring.publish_timeout` | duration | `5m` | How long publishing may take before the change is recorded as failed. |
 
 The API contract is defined in `openapi.yaml` and served at `<path>/api/openapi.yaml`.
 

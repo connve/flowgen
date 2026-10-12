@@ -3,8 +3,9 @@
 // (`/api/agents/conversations`). Types come from the generated OpenAPI schema
 // so they stay in lockstep with the Rust handlers.
 
-import { apiUrl } from '$lib/api';
+import { apiUrl, failure } from '$lib/api';
 import type { components } from '$lib/api/generated';
+import { m } from '$lib/paraglide/messages.js';
 
 export type ConversationMessage = components['schemas']['ConversationMessage'];
 export type Conversation = components['schemas']['Conversation'];
@@ -14,7 +15,7 @@ export type ToolStep = components['schemas']['ToolStep'];
 // Fetches conversation summaries (no message bodies), newest first.
 export async function listConversations(): Promise<ConversationSummary[]> {
 	const res = await fetch(apiUrl('api/agents/conversations'));
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) throw await failure(res);
 	const body = await res.json();
 	return body.conversations ?? [];
 }
@@ -22,7 +23,7 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 // Fetches one conversation with its full message history.
 export async function getConversation(id: string): Promise<Conversation> {
 	const res = await fetch(apiUrl(`api/agents/conversations/${encodeURIComponent(id)}`));
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) throw await failure(res);
 	return res.json();
 }
 
@@ -39,14 +40,14 @@ export async function putConversation(
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ title, messages, model })
 	});
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) throw await failure(res);
 }
 
 export async function deleteConversation(id: string): Promise<void> {
 	const res = await fetch(apiUrl(`api/agents/conversations/${encodeURIComponent(id)}`), {
 		method: 'DELETE'
 	});
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) throw await failure(res);
 }
 
 // Longest title kept from a first message before it is truncated.
@@ -58,7 +59,7 @@ const TITLE_MAX = 60;
 // message may have no sentence structure, so the cut is purely by length.
 export function deriveTitle(firstUserMessage: string): string {
 	const text = firstUserMessage.trim().replace(/\s+/g, ' ');
-	if (!text) return 'New conversation';
+	if (!text) return m.agents_new_conversation();
 	if (text.length <= TITLE_MAX) return text;
 	const clipped = text.slice(0, TITLE_MAX);
 	// Back up to the last space so we don't end in the middle of a word; fall

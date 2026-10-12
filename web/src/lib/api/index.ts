@@ -1,4 +1,5 @@
 import { base } from '$app/paths';
+import { m } from '$lib/paraglide/messages.js';
 import type { components } from './generated';
 
 // The mount prefix is baked into the SvelteKit build via `paths.base` in
@@ -13,6 +14,33 @@ export function apiUrl(path: string): string {
 // URL-encode a slash-delimited flow or resource path so it survives fetch and goto.
 export function encodePath(path: string): string {
 	return path.split('/').map(encodeURIComponent).join('/');
+}
+
+// A failed response as the server explains it: its text, or the `error.message`
+// of a JSON body. Without either, the status and where to look.
+export async function failure(res: Response): Promise<Error> {
+	const body = (await res.text().catch(() => '')).trim();
+	return new Error(serverReason(body) ?? m.common_failed_with_status({ status: res.status }));
+}
+
+function serverReason(body: string): string | null {
+	if (body === '' || body.startsWith('<')) return null;
+	try {
+		const json = JSON.parse(body);
+		const message = json?.error?.message ?? json?.message ?? json?.error;
+		return typeof message === 'string' && message !== '' ? message : null;
+	} catch {
+		return body;
+	}
+}
+
+// What to show for a failed request; browsers word a lost connection as
+// "Failed to fetch", "Load failed" or "NetworkError…".
+export function errorMessage(err: unknown, fallback: string): string {
+	if (err instanceof TypeError && /^(Failed to fetch|Load failed|NetworkError)/.test(err.message)) {
+		return m.common_server_unreachable();
+	}
+	return err instanceof Error && err.message ? err.message : fallback;
 }
 
 type Schemas = components['schemas'];

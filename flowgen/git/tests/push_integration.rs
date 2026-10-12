@@ -1,7 +1,7 @@
 //! Integration tests for `push` against `git http-backend`, served over HTTP
 //! by an in-process server.
 //!
-//! Depends only on the `git` binary in `PATH`, so it is not `#[ignore]`d.
+//! Depends only on `git` and `ssh-keygen` in `PATH`, so it is not `#[ignore]`d.
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -176,6 +176,8 @@ impl Remote {
             branch: "main".to_string(),
             path: path.map(str::to_string),
             credentials: None,
+            committer: None,
+            signing_key: None,
             http: reqwest::Client::new(),
             timeout: None,
         }
@@ -231,6 +233,41 @@ async fn the_first_push_creates_the_branch() {
             &["log", "-1", "--format=%an <%ae> %s"]
         ),
         "Jane Doe <jane@example.com> Add a"
+    );
+}
+
+#[tokio::test]
+async fn a_signed_push_verifies_with_git_for_the_committer() {
+    let remote = Remote::new().await;
+    let key = ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]));
+    let public_key = key.public_key().to_openssh().unwrap();
+    let mut push = remote.push(None);
+    push.committer = Some(Author {
+        name: "Bot".to_string(),
+        email: "bot@example.com".to_string(),
+    });
+    push.signing_key = Some(Arc::new(key));
+
+    push.push(
+        vec![write("a.yaml", "a: 1\n")],
+        author(),
+        "Add a".to_string(),
+    )
+    .await
+    .unwrap();
+
+    let bare = remote.root.join("repo.git");
+    let signers = remote.root.join("allowed_signers");
+    std::fs::write(
+        &signers,
+        format!("bot@example.com namespaces=\"git\" {public_key}\n"),
+    )
+    .unwrap();
+    let signers = format!("gpg.ssh.allowedSignersFile={}", signers.display());
+    git(&bare, &["-c", &signers, "verify-commit", "main"]);
+    assert_eq!(
+        git(&bare, &["log", "-1", "--format=%an <%ae> / %cn <%ce>"]),
+        "Jane Doe <jane@example.com> / Bot <bot@example.com>"
     );
 }
 
@@ -478,6 +515,8 @@ async fn ssh_urls_and_tokens_over_plain_http_are_rejected_before_any_request() {
         branch: "main".to_string(),
         path: None,
         credentials,
+        committer: None,
+        signing_key: None,
         http: reqwest::Client::new(),
         timeout: None,
     };

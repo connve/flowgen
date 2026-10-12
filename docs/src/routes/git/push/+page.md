@@ -34,6 +34,9 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
 | `credentials_path` | string | | Path to [credentials JSON file](/docs/flowgen/git#credentials). |
 | `author.name` | string | required | Commit author name. Supports templating. |
 | `author.email` | string | required | Commit author email. Supports templating. |
+| `committer.name` | string | author's | Committer name. Supports templating. |
+| `committer.email` | string | author's | Committer email. Supports templating. |
+| `signing_key_path` | string | | Path to an unencrypted OpenSSH Ed25519 private key that signs each commit. See [Signed commits](#signed-commits). |
 | `message` | string | required | Commit message. Supports templating. |
 | `timeout` | duration | `120s` | Time budget for each request to the git server, including the pack upload, and for fetching the branch and building the commit. |
 | `connect_timeout` | duration | `10s` | TCP/TLS connect timeout. |
@@ -50,6 +53,27 @@ The output lists the text files under `path`; files that are not UTF-8 are left 
   ]
 }
 ```
+
+## Signed commits
+
+With `signing_key_path`, each commit is signed the way `git commit -S` signs with `gpg.format=ssh`. Git hosts verify the signature against the committer's account, and branches that require signed commits accept only verified ones. Set `committer` to the account that holds the key, and keep `author` as the person behind the change:
+
+```yaml
+- git_push:
+    name: commit
+    repository_url: "{{env.GIT_REPOSITORY_URL}}"
+    credentials_path: /etc/git/credentials.json
+    signing_key_path: /etc/git/signing_key
+    committer:
+      name: "flowgen"
+      email: "flowgen@example.com"
+    author:
+      name: "{{event.data.author.name}}"
+      email: "{{event.data.author.email}}"
+    message: "{{event.data.title}}"
+```
+
+Create the key with `ssh-keygen -t ed25519 -N "" -f signing_key`, mount the private key at `signing_key_path`, and add `signing_key.pub` as a signing key to the committer's account on the git host. The committer's email must be a verified email of that account.
 
 ## Output
 

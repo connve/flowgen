@@ -6,12 +6,23 @@
 	import { apiUrl, type UserContext } from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
 	import Badge from '$lib/Badge.svelte';
+	import { m } from '$lib/paraglide/messages.js';
 	import Icon from '@iconify/svelte';
 	import '../app.css';
+	import type { LayoutProps } from './$types';
 
 	type ThemePref = 'system' | 'light' | 'dark';
 
-	let { children } = $props();
+	let { children, data }: LayoutProps = $props();
+
+	const NAV = [
+		{ href: '/agents', icon: 'tabler:robot', label: m.nav_agents(), match: (p: string) => p.startsWith(base + '/agents') },
+		{ href: '/', icon: 'tabler:binary-tree', label: m.nav_flows(), match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') || p.startsWith(base + '/changes') },
+		{ href: '/resources', icon: 'tabler:file-code', label: m.nav_resources(), match: (p: string) => p.startsWith(base + '/resources') },
+		{ href: '/monitor/logs', icon: 'tabler:activity', label: m.nav_monitor(), match: (p: string) => p.startsWith(base + '/monitor') }
+	];
+	let nav = $derived(data.agents ? NAV : NAV.filter((item) => item.href !== '/agents'));
+
 	let collapsed = $state(true);
 	let version = $state<string | null>(null);
 	let currentPath = $derived(page.url.pathname);
@@ -48,6 +59,7 @@
 			osDark = e.matches;
 		});
 
+		if (data.login) return;
 		try {
 			const res = await fetch(apiUrl('api/version'));
 			if (res.ok) {
@@ -77,7 +89,9 @@
 	}
 </script>
 
-{#if !auth.checked}
+{#if data.login}
+	{@render children()}
+{:else if !auth.checked}
 	<div class="flex min-h-screen items-center justify-center bg-base-100">
 		<span class="loading loading-spinner loading-lg text-primary"></span>
 	</div>
@@ -98,7 +112,7 @@
 					<a
 						href="{base}/"
 						class="flex h-10 items-center text-primary {collapsed ? 'w-10 justify-center' : ''}"
-						aria-label="CONNVE home"
+						aria-label={m.nav_home()}
 					>
 						<svg
 							class="h-6 w-auto shrink-0"
@@ -120,7 +134,7 @@
 			<nav
 				class="flex-1 space-y-0.5 py-2 {collapsed ? 'flex flex-col items-center' : 'px-3'}"
 			>
-				{#each [{ href: '/agents', icon: 'tabler:robot', label: 'Agents', match: (p: string) => p.startsWith(base + '/agents') }, { href: '/', icon: 'tabler:binary-tree', label: 'Flows', match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') || p.startsWith(base + '/changes') }, { href: '/resources', icon: 'tabler:file-code', label: 'Resources', match: (p: string) => p.startsWith(base + '/resources') }, { href: '/monitor/logs', icon: 'tabler:activity', label: 'Monitor', match: (p: string) => p.startsWith(base + '/monitor') }] as item (item.href)}
+				{#each nav as item (item.href)}
 					{@const active = item.match(currentPath)}
 					<a
 						href="{base}{item.href}"
@@ -150,7 +164,7 @@
 				{#if !collapsed}
 					<div class="flex items-center gap-2">
 						{#if version}
-							<div class="tooltip tooltip-right" data-tip="Release notes">
+							<div class="tooltip tooltip-right" data-tip={m.nav_release_notes()}>
 								<a
 									href="https://github.com/connve/flowgen/releases/tag/v{version}"
 									target="_blank"
@@ -161,7 +175,7 @@
 								</a>
 							</div>
 						{/if}
-						<div class="tooltip tooltip-right" data-tip="System">
+						<div class="tooltip tooltip-right" data-tip={m.nav_system()}>
 							<a
 								href="{base}/system"
 								class="flex h-7 w-7 items-center justify-center rounded-md text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content {currentPath.startsWith(
@@ -169,7 +183,7 @@
 								)
 									? 'bg-base-200 text-primary'
 									: ''}"
-								aria-label="System"
+								aria-label={m.nav_system()}
 							>
 								<Icon icon="tabler:adjustments" class="h-5 w-5" />
 							</a>
@@ -178,8 +192,8 @@
 				{/if}
 				<button
 					type="button"
-					aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-					data-tip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+					aria-label={collapsed ? m.nav_expand() : m.nav_collapse()}
+					data-tip={collapsed ? m.nav_expand() : m.nav_collapse()}
 					class="tooltip {collapsed
 						? 'tooltip-right'
 						: 'tooltip-top'} flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
@@ -202,9 +216,9 @@
 					<div
 						class="flex items-center gap-0.5 rounded-full border border-base-300 bg-base-200/50 p-0.5"
 						role="group"
-						aria-label="Color theme"
+						aria-label={m.theme_label()}
 					>
-						{#each [{ pref: 'system' as ThemePref, icon: 'tabler:device-desktop', label: 'System' }, { pref: 'light' as ThemePref, icon: 'tabler:sun', label: 'Light' }, { pref: 'dark' as ThemePref, icon: 'tabler:moon', label: 'Dark' }] as opt (opt.pref)}
+						{#each [{ pref: 'system' as ThemePref, icon: 'tabler:device-desktop', label: m.theme_system() }, { pref: 'light' as ThemePref, icon: 'tabler:sun', label: m.theme_light() }, { pref: 'dark' as ThemePref, icon: 'tabler:moon', label: m.theme_dark() }] as opt (opt.pref)}
 							<div class="tooltip tooltip-bottom" data-tip={opt.label}>
 								<button
 									type="button"
@@ -212,7 +226,7 @@
 									opt.pref
 										? 'bg-base-100 text-primary shadow-sm'
 										: 'text-base-content/60 hover:text-base-content'}"
-									aria-label="{opt.label} theme"
+									aria-label={m.theme_option({ theme: opt.label })}
 									aria-pressed={themePref === opt.pref}
 									onclick={() => setTheme(opt.pref)}
 								>
@@ -223,12 +237,12 @@
 					</div>
 
 					{#if auth.user}
-						<div class="tooltip tooltip-left" data-tip="Sign out ({displayName(auth.user)})">
+						<div class="tooltip tooltip-left" data-tip={m.user_sign_out({ name: displayName(auth.user) })}>
 							<a
 								href={apiUrl('auth/logout')}
 								data-sveltekit-reload
 								class="flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70 transition-colors hover:text-base-content"
-								aria-label="Sign out ({displayName(auth.user)})"
+								aria-label={m.user_sign_out({ name: displayName(auth.user) })}
 							>
 								<Icon icon="tabler:user-check" class="h-6 w-6" />
 							</a>
@@ -236,8 +250,8 @@
 					{:else}
 						<div
 							class="tooltip tooltip-bottom flex h-8 w-8 items-center justify-center rounded-full bg-base-200 text-base-content/70"
-							data-tip="Signed in"
-							aria-label="User"
+							data-tip={m.user_signed_in()}
+							aria-label={m.user_signed_in()}
 						>
 							<Icon icon="tabler:user" class="h-6 w-6" />
 						</div>

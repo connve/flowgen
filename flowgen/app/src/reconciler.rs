@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Coalescing window: events that arrive within this window are batched together.
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(2);
@@ -300,6 +300,11 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         return;
     }
 
+    if runs_source(&flow_id, config.raw_source.as_deref(), ctx) {
+        debug!(flow = %flow_id, key = %key, "Flow unchanged, keeping it running");
+        return;
+    }
+
     // Build and init before touching the running flow so a broken config leaves it serving.
     let mut new_flow = match build_flow(config, ctx) {
         Ok(f) => f,
@@ -425,6 +430,16 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         Err(_) => {
             error!(error = %Error::RegistryWriteFailed);
         }
+    }
+}
+
+/// Whether `flow_id` is still running from exactly `source`.
+fn runs_source(flow_id: &str, source: Option<&str>, ctx: &ReconcilerContext) -> bool {
+    match (source, ctx.flow_registry.read()) {
+        (Some(source), Ok(registry)) => registry.get(flow_id).is_some_and(|handle| {
+            handle.flow_yaml() == source && !handle.join_handle.is_finished()
+        }),
+        _ => false,
     }
 }
 
@@ -1023,6 +1038,41 @@ flow:
         assert!(
             !seq[first_v2..].contains('1'),
             "old flow still ticking after reload: {seq}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hot_reload_with_the_same_source_keeps_the_flow_running() {
+        let ctx = test_context("flows");
+        let started_at = |ctx: &ReconcilerContext| {
+            ctx.flow_registry
+                .read()
+                .expect("read registry")
+                .get("same")
+                .map(FlowHandle::started_at)
+        };
+
+        reconcile_put("flows.same", versioned_flow_yaml(1), &ctx).await;
+        let first = started_at(&ctx);
+        reconcile_put("flows.same", versioned_flow_yaml(1), &ctx).await;
+        let unchanged = started_at(&ctx);
+        reconcile_put("flows.same", versioned_flow_yaml(2), &ctx).await;
+        let changed = started_at(&ctx);
+
+        if let Some(handle) = ctx.flow_registry.read().expect("read registry").get("same") {
+            handle.join_handle.abort();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        reconcile_put("flows.same", versioned_flow_yaml(2), &ctx).await;
+        let revived = started_at(&ctx);
+        stop_and_deregister("same", &ctx).await;
+
+        assert!(first.is_some(), "flow should be running");
+        assert_eq!(first, unchanged, "the same source restarted the flow");
+        assert_ne!(first, changed, "a new source should replace the flow");
+        assert_ne!(
+            changed, revived,
+            "the same source should restart a stopped flow"
         );
     }
 

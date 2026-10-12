@@ -70,6 +70,18 @@ pub struct Processor {
     ///
     /// Example: `author: {name: "{{event.data.author.name}}", email: "{{event.data.author.email}}"}`
     pub author: Author,
+    /// Committer. Defaults to the author. When commits are signed, the
+    /// account that holds the signing key on the git host.
+    ///
+    /// Example: `committer: {name: "flowgen", email: "flowgen@example.com"}`
+    #[serde(default)]
+    pub committer: Option<Author>,
+    /// Unencrypted OpenSSH Ed25519 private key that signs each commit, as
+    /// `git commit -S` does with `gpg.format=ssh`.
+    ///
+    /// Example: `signing_key_path: /etc/git/signing_key`
+    #[serde(default)]
+    pub signing_key_path: Option<PathBuf>,
     /// Commit message.
     ///
     /// Example: `message: "{{event.data.title}}"`
@@ -98,15 +110,15 @@ pub struct Processor {
     pub retry: Option<flowgen_core::retry::RetryConfig>,
 }
 
-/// Commit author.
+/// Commit author or committer.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Author {
-    /// Author name.
+    /// Name.
     ///
     /// Example: `name: "{{event.data.author.name}}"`
     pub name: String,
-    /// Author email.
+    /// Email.
     ///
     /// Example: `email: "{{event.data.author.email}}"`
     pub email: String,

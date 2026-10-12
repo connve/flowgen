@@ -1,0 +1,402 @@
+{
+	"$schema": "https://inlang.com/schema/inlang-message-format",
+	"common_edit": "Edit",
+	"common_save": "Save",
+	"common_cancel": "Cancel",
+	"common_validate": "Validate",
+	"common_delete": "Delete",
+	"common_new": "New",
+	"common_close": "Close",
+	"common_clear_search": "Clear search",
+	"common_review": "Review",
+	"common_retry": "Retry",
+	"common_copy": "Copy",
+	"common_copied": "Copied",
+	"common_not_found": "Not found",
+	"common_not_found_message": "This page doesn't exist.",
+	"common_server_unreachable": "Can't reach the server. Please try again.",
+	"common_config_unavailable": "Failed to load the app config. Please reload the page.",
+	"common_failed_with_status": "Something went wrong (HTTP {status}). Please try again.",
+	"state_notice_title": "Nothing here yet",
+	"state_oops_title": "Oops, something went wrong",
+	"error_page_status": "Failed to load the page (HTTP {status}).",
+	"nav_home": "CONNVE home",
+	"nav_agents": "Agents",
+	"nav_flows": "Flows",
+	"nav_resources": "Resources",
+	"nav_monitor": "Monitor",
+	"nav_system": "System",
+	"nav_release_notes": "Release notes",
+	"nav_expand": "Expand sidebar",
+	"nav_collapse": "Collapse sidebar",
+	"theme_label": "Color theme",
+	"theme_system": "System",
+	"theme_light": "Light",
+	"theme_dark": "Dark",
+	"theme_option": "{theme} theme",
+	"user_sign_out": "Sign out ({name})",
+	"user_signed_in": "Signed in",
+	"login_page_title": "Sign in | Flowgen",
+	"login_title": "Sign in",
+	"login_message": "Sign in with your company account.",
+	"login_sign_in": "Sign in",
+	"login_failed_title": "Login failed",
+	"login_error_access_denied": "Your user is not assigned to this application.",
+	"login_error_provider": "Login provider denied the login request.",
+	"login_error_expired": "Your login session expired. Please try again.",
+	"login_error_failed": "Something went wrong. Please try again.",
+	"time_just_now": "just now",
+	"flows_page_title": "Flows Overview | Flowgen",
+	"flows_load_failed": "Failed to load flows",
+	"flows_folders": "Folders",
+	"flows_folders_expand": "Expand folders",
+	"flows_folders_collapse": "Collapse folders",
+	"flows_folder_expand": "Expand {folder}",
+	"flows_folder_collapse": "Collapse {folder}",
+	"flows_all": "All flows",
+	"flows_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} flow",
+				"countPlural=other": "{count} flows"
+			}
+		}
+	],
+	"flows_status_idle": "Idle",
+	"flows_status_ok": "Ok",
+	"flows_status_warn": "Warn",
+	"flows_status_error": "Error",
+	"flows_tag_filter": "Filter by tag",
+	"flows_tag_filter_remove": "Remove {tag} filter",
+	"flows_tag_filters_clear": "Clear tag filters",
+	"flows_pending_changes": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} pending change",
+				"countPlural=other": "{count} pending changes"
+			}
+		}
+	],
+	"flows_search_placeholder": "Search flows...",
+	"flows_empty_title": "No flows yet",
+	"flows_empty_message_authoring": "Create a flow to get started.",
+	"flows_empty_message": "Add a flow to flows/ in your workspace.",
+	"flows_no_match_title": "No flows match",
+	"flows_no_match_message": "Try a different search or clear the filters.",
+	"flows_column_name": "Name",
+	"flows_column_description": "Description",
+	"flows_column_tags": "Tags",
+	"flows_column_status": "Status",
+	"flows_column_last_event": "Last event",
+	"flows_sort_by_name": "Sort by name",
+	"flows_sort_by_status": "Sort by status",
+	"flows_sort_by_last_event": "Sort by last event",
+	"flow_page_title": "{name} | Flowgen",
+	"flow_breadcrumb_flows": "Flows",
+	"flow_preview_label": "Flow YAML viewer",
+	"flow_open_full_page": "Open full page",
+	"flow_load_failed": "Failed to load flow '{path}'",
+	"flow_load_failed_title": "Failed to load flow",
+	"flow_not_found": "Flow '{path}' not found.",
+	"flow_graph_heading": "Graph",
+	"flow_config_heading": "Config",
+	"flow_copy_yaml": "Copy YAML",
+	"flow_config_editor_label": "Flow config",
+	"flow_resource_preview_label": "Resource preview",
+	"flow_resource_load_failed": "Failed to load resource '{key}'",
+	"flow_resource_load_failed_title": "Failed to load resource",
+	"activity_heading": "Activity",
+	"activity_empty_collapsed": "No events yet",
+	"activity_limit": "Limit",
+	"activity_limit_tooltip": "Max number of results per log level",
+	"activity_limit_label": "Activity history limit",
+	"activity_task_filter_prefix": "task:",
+	"activity_task_filter_clear": "Clear task filter",
+	"activity_filters_clear": "Clear",
+	"activity_search_placeholder": "Search task, processor, message...",
+	"activity_no_match": "No events match the filters.",
+	"activity_empty": "No activity yet.",
+	"activity_field_status": "Status",
+	"activity_field_when": "When",
+	"activity_field_timestamp": "Timestamp",
+	"activity_field_processor": "Processor",
+	"activity_field_task": "Task",
+	"activity_field_duration": "Duration",
+	"activity_field_event": "Event",
+	"activity_field_message": "Message",
+	"activity_field_attributes": "Attributes",
+	"activity_detail_label": "Activity detail",
+	"activity_copy_log": "Copy log",
+	"activity_flow_task": "flow",
+	"resources_page_title": "Resources Overview | Flowgen",
+	"resources_breadcrumb": "Resources",
+	"resources_all": "All resources",
+	"resources_folders": "Folders",
+	"resources_expand_folders": "Expand folders",
+	"resources_collapse_folders": "Collapse folders",
+	"resources_expand_folder": "Expand folder",
+	"resources_collapse_folder": "Collapse folder",
+	"resources_item_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} item",
+				"countPlural=other": "{count} items"
+			}
+		}
+	],
+	"resources_pending_changes": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} pending change",
+				"countPlural=other": "{count} pending changes"
+			}
+		}
+	],
+	"resources_search_placeholder": "Search resources...",
+	"resources_load_failed": "Failed to load resources",
+	"resources_load_failed_reason": "Failed to list resources",
+	"resources_empty_title": "No resources yet",
+	"resources_empty_message_authoring": "Create a resource to get started.",
+	"resources_empty_message": "Add files to resources/ in your workspace.",
+	"resources_no_match_title": "No resources match",
+	"resources_no_match_message": "Nothing matches \"{search}\".",
+	"resources_column_key": "Key",
+	"resources_column_type": "Type",
+	"resources_column_size": "Size",
+	"resource_viewer_label": "Resource viewer",
+	"resource_open_full_page": "Open full page",
+	"resource_file_type_fallback": "File",
+	"resource_load_failed": "Failed to load resource",
+	"resource_load_failed_named": "Failed to load resource '{key}'",
+	"resource_not_found": "Resource '{key}' not found.",
+	"editor_flows_breadcrumb": "Flows",
+	"editor_new_flow": "New flow",
+	"editor_new_resource": "New resource",
+	"editor_outside_targets": "Changes can only be made under {folders}.",
+	"editor_empty_file": "The file is empty.",
+	"editor_validate_failed": "Failed to validate the file",
+	"editor_save_failed": "Failed to save the change",
+	"editor_change_title_add": "Add {path}",
+	"editor_change_title_update": "Update {path}",
+	"editor_change_title_delete": "Delete {path}",
+	"change_title_more": [
+		{
+			"declarations": [
+				"input title",
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{title} and {count} more file",
+				"countPlural=other": "{title} and {count} more files"
+			}
+		}
+	],
+	"editor_valid": "valid",
+	"editor_issue_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} issue",
+				"countPlural=other": "{count} issues"
+			}
+		}
+	],
+	"editor_delete_read_only": "Read-only, managed in the repository",
+	"editor_nothing_to_save": "No changes to save",
+	"editor_exit": "Exit editor",
+	"editor_target_label": "Authoring target",
+	"editor_path_label": "Path",
+	"editor_content_heading": "Content",
+	"editor_content_label": "File content",
+	"editor_discard_label": "Discard changes",
+	"editor_discard_title": "Discard changes?",
+	"editor_discard_message": "Your edits to {path} are not saved.",
+	"editor_keep_editing": "Keep editing",
+	"editor_discard": "Discard",
+	"edit_button_read_only": "Read-only, managed in the repository",
+	"pending_change_title": "Pending change: {title}",
+	"changes_breadcrumb": "Changes",
+	"changes_pending_count": [
+		{
+			"declarations": [
+				"input count",
+				"local countPlural = count: plural"
+			],
+			"selectors": [
+				"countPlural"
+			],
+			"match": {
+				"countPlural=one": "{count} pending",
+				"countPlural=other": "{count} pending"
+			}
+		}
+	],
+	"changes_empty_title": "No changes yet",
+	"changes_empty_message": "Edit a flow or resource to propose a change.",
+	"changes_not_enabled": "Changes are disabled. Set web.authoring.enabled to turn them on.",
+	"changes_column_title": "Title",
+	"changes_column_status": "Status",
+	"changes_column_proposed_by": "Proposed by",
+	"changes_column_files": "Files",
+	"changes_column_created": "Created",
+	"change_not_found": "Change '{id}' not found.",
+	"change_proposed_by": "Proposed by {name} · {date}",
+	"change_proposed_at": "Proposed {date}",
+	"change_approved_by": "approved by {name} {when}",
+	"change_rejected_by": "rejected by {name} {when}",
+	"change_approved": "approved {when}",
+	"change_rejected": "rejected {when}",
+	"change_actor_anonymous": "Anonymous",
+	"change_actor_agent": "Agent",
+	"change_approve": "Approve",
+	"change_reject": "Reject",
+	"change_approve_blocked": "Fix the validation issues to approve",
+	"change_approve_failed": "Failed to approve the change",
+	"change_reject_failed": "Failed to reject the change",
+	"change_edit_details": "Edit title and description",
+	"change_edit_failed": "Failed to save the change",
+	"change_title_label": "Title",
+	"change_description_label": "Description",
+	"change_publish_failed": "Publishing failed: {error}",
+	"change_validation_issues": "Validation issues",
+	"change_file_deleted": "deleted",
+	"change_file_new": "new",
+	"change_status_pending": "Pending",
+	"change_status_rejected": "Rejected",
+	"change_status_publishing": "Publishing",
+	"change_status_published": "Published",
+	"change_status_failed": "Failed",
+	"change_deployment_waiting": "Deploying",
+	"change_deployment_deployed": "Deployed",
+	"change_deployment_slow": "Not deployed yet. Check the logs.",
+	"change_open_logs": "Open logs",
+	"agents_page_title": "Agents | Flowgen",
+	"agents_breadcrumb": "Agents",
+	"agents_not_enabled": "Agents are disabled. Set web.agents.enabled to turn them on.",
+	"agents_new_conversation": "New conversation",
+	"agents_conversation_fallback_title": "Conversation",
+	"agents_conversations": "Conversations",
+	"agents_all_conversations": "All conversations",
+	"agents_conversations_filtered_count": "{shown} of {total}",
+	"agents_history_expand": "Expand conversations",
+	"agents_history_collapse": "Collapse conversations",
+	"agents_conversation_delete": "Delete conversation",
+	"agents_conversation_load_failed": "Failed to load the conversation",
+	"agents_conversation_save_failed": "Failed to save the conversation",
+	"agents_conversation_delete_failed": "Failed to delete the conversation",
+	"agents_search_placeholder": "Search conversations...",
+	"agents_model_picker": "Model",
+	"agents_models_load_failed": "Failed to load models from the AI gateway",
+	"agents_models_error_title": "The AI gateway didn't respond",
+	"agents_models_empty_title": "No models yet",
+	"agents_models_empty_message": "Add an llm_proxy flow with models to start chatting.",
+	"agents_greeting": "What's on your mind today?",
+	"agents_composer_placeholder": "Send a message...",
+	"agents_send": "Send",
+	"agents_stop": "Stop generating",
+	"agents_stop_tooltip": "Stop (Esc)",
+	"agents_working": "Working…",
+	"agents_tool_step_fallback": "tool",
+	"agents_reply_empty": "(no content returned)",
+	"agents_reply_stopped": "(stopped)",
+	"agents_chat_failed": "The chat request failed",
+	"monitor_tabs_label": "Monitor",
+	"monitor_tab_logs": "Logs",
+	"monitor_tab_pods": "Pods",
+	"monitor_pods_reachable": [
+		{
+			"declarations": [
+				"input reachable",
+				"input total",
+				"local totalPlural = total: plural"
+			],
+			"selectors": [
+				"totalPlural"
+			],
+			"match": {
+				"totalPlural=one": "{reachable} of {total} pod reachable",
+				"totalPlural=other": "{reachable} of {total} pods reachable"
+			}
+		}
+	],
+	"pods_page_title": "Pods | Flowgen",
+	"pods_load_failed_title": "Failed to load pods",
+	"pods_load_failed_message": "Failed to load the cluster status. Retrying…",
+	"pods_column_pod": "Pod",
+	"pods_column_status": "Status",
+	"pods_column_flows": "Flows",
+	"pods_column_flows_tooltip": "Flows running on this pod",
+	"pods_status_ok": "ok",
+	"pods_status_unreachable": "unreachable",
+	"logs_limit": "Limit",
+	"logs_limit_label": "Line limit",
+	"logs_limit_tooltip": "Max number of results per log level",
+	"logs_jump_to_latest": "Jump to latest",
+	"logs_tail_pause": "Pause live tail",
+	"logs_tail_resume": "Resume live tail",
+	"logs_clear_view": "Clear view",
+	"logs_search_placeholder": "Search logs...",
+	"logs_empty_title": "No log records yet",
+	"logs_empty_message": "Try turning on more log levels.",
+	"logs_no_match_title": "No records match",
+	"logs_no_match_message": "Try a different search.",
+	"logs_load_failed_title": "Failed to load logs",
+	"logs_column_level": "Level",
+	"logs_column_when": "When",
+	"logs_column_timestamp": "Timestamp",
+	"logs_column_target": "Target",
+	"logs_column_message": "Message",
+	"logs_detail_label": "Log record detail",
+	"logs_detail_duration": "Duration",
+	"logs_detail_event": "Event",
+	"logs_detail_flow": "Flow",
+	"logs_detail_spans": "Spans",
+	"logs_detail_attributes": "Attributes",
+	"logs_copy_record": "Copy log",
+	"level_info": "Info",
+	"level_warn": "Warn",
+	"level_error": "Error",
+	"level_debug": "Debug",
+	"level_trace": "Trace",
+	"system_page_title": "System | Flowgen",
+	"system_breadcrumb": "System",
+	"system_config_load_failed_title": "Failed to load config"
+}

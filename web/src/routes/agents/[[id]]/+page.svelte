@@ -14,7 +14,8 @@
 	import 'prismjs/components/prism-python';
 	import 'prismjs/components/prism-typescript';
 	import 'prismjs/components/prism-markdown';
-	import { apiUrl } from '$lib/api';
+	import { apiUrl, errorMessage, failure } from '$lib/api';
+	import { m } from '$lib/paraglide/messages.js';
 	import { formatRelative } from '$lib/time';
 	import CopyButton from '$lib/CopyButton.svelte';
 	import {
@@ -107,32 +108,32 @@
 	}
 	let proxyGroups = $derived.by(() => {
 		const groups = new Map<string, ProxyGroup>();
-		for (const m of models) {
-			const [proxy, ...rest] = m.id.split('/');
+		for (const entry of models) {
+			const [proxy, ...rest] = entry.id.split('/');
 			const name = rest.length > 0 ? rest.join('/') : null;
 			let group = groups.get(proxy);
 			if (!group) {
 				group = {
 					proxy,
-					display_name: m.display_name || proxy,
-					description: m.description,
+					display_name: entry.display_name || proxy,
+					description: entry.description,
 					models: [],
 				};
 				groups.set(proxy, group);
 			}
-			group.models.push({ id: m.id, name });
+			group.models.push({ id: entry.id, name });
 		}
 		return [...groups.values()];
 	});
 
 	function modelLabel(id: string): string {
-		const opt = models.find((m) => m.id === id);
+		const opt = models.find((entry) => entry.id === id);
 		const proxyKey = id.split('/')[0];
 		const name = id.includes('/') ? id.split('/').slice(1).join('/') : null;
 		const proxy = opt?.display_name || proxyKey;
 		// Append the model only when the proxy exposes more than one, so a
 		// single-model agent reads as just its name, not "Agent · model".
-		const multiModel = models.filter((m) => m.id.split('/')[0] === proxyKey).length > 1;
+		const multiModel = models.filter((entry) => entry.id.split('/')[0] === proxyKey).length > 1;
 		return name && multiModel ? `${proxy} · ${name}` : proxy;
 	}
 
@@ -164,8 +165,8 @@
 	// placeholder for a fresh chat.
 	let activeTitle = $derived(
 		activeId === null
-			? 'New conversation'
-			: (conversations.find((c) => c.id === activeId)?.title ?? 'Conversation')
+			? m.agents_new_conversation()
+			: (conversations.find((c) => c.id === activeId)?.title ?? m.agents_conversation_fallback_title())
 	);
 
 	// Case-insensitive title filter for the history pane; empty search shows all.
@@ -212,14 +213,14 @@
 			.then((c) => {
 				// Guard against a race: the URL may have changed again mid-fetch.
 				if (activeId !== c.id) return;
-				messages = c.messages.map((m) => ({ ...m }) as ChatMessage);
+				messages = c.messages.map((msg) => ({ ...msg }) as ChatMessage);
 				if (c.model) model = c.model;
 				error = null;
 				resetComposer();
 				scrollToBottom();
 			})
 			.catch((err) => {
-				error = err instanceof Error ? err.message : 'Failed to load conversation.';
+				error = errorMessage(err, m.agents_conversation_load_failed());
 			})
 			.finally(() => {
 				if (activeId === id) convoLoading = false;
@@ -253,7 +254,7 @@
 			if (activeId === id) newConversation();
 			await refreshConversations();
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to delete conversation.';
+			error = errorMessage(err, m.agents_conversation_delete_failed());
 		}
 	}
 
@@ -272,13 +273,13 @@
 			await putConversation(
 				id,
 				title,
-				messages.map((m) => ({ role: m.role, content: m.content, at: m.at, steps: m.steps })),
+				messages.map((msg) => ({ role: msg.role, content: msg.content, at: msg.at, steps: msg.steps })),
 				model || undefined
 			);
 			if (isNew) goto(`${base}/agents/${id}`);
 			await refreshConversations();
 		} catch (err) {
-			console.error('Failed to persist conversation', err);
+			error = errorMessage(err, m.agents_conversation_save_failed());
 		}
 	}
 
@@ -294,16 +295,16 @@
 
 		try {
 			const res = await fetch(apiUrl('api/agents/models'));
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (!res.ok) throw await failure(res);
 			const body = await res.json();
 			models = (body.data ?? [])
 				// The built-in chat speaks OpenAI (`/chat/completions`); skip proxies
 				// that speak another protocol so they can't be picked and then fail.
-				.filter((m: { protocol?: string }) => (m.protocol ?? 'openai') === 'openai')
-				.map((m: { id: string; display_name?: string; description?: string }) => ({
-					id: m.id,
-					display_name: m.display_name,
-					description: m.description
+				.filter((entry: { protocol?: string }) => (entry.protocol ?? 'openai') === 'openai')
+				.map((entry: { id: string; display_name?: string; description?: string }) => ({
+					id: entry.id,
+					display_name: entry.display_name,
+					description: entry.description
 				}));
 			// The conversation-load effect may have already restored a saved
 			// model by the time this fetch resolves — don't clobber it.
@@ -313,8 +314,7 @@
 				modelsEmpty = true;
 			}
 		} catch (err) {
-			modelsError =
-				err instanceof Error ? err.message : 'Failed to load models from the AI gateway.';
+			modelsError = errorMessage(err, m.agents_models_load_failed());
 		} finally {
 			modelsLoading = false;
 		}
@@ -360,13 +360,12 @@
 					stream: true,
 					messages: messages
 						.slice(0, -1)
-						.map((m) => ({ role: m.role, content: m.content })),
+						.map((msg) => ({ role: msg.role, content: msg.content })),
 				}),
 			});
 
-			if (!res.ok || !res.body) {
-				throw new Error(`Gateway responded with HTTP ${res.status}`);
-			}
+			if (!res.ok) throw await failure(res);
+			if (!res.body) throw new Error(m.agents_chat_failed());
 
 			const reader = res.body.getReader();
 			const decoder = new TextDecoder();
@@ -426,7 +425,7 @@
 			}
 
 			if (messages[idx].content.length === 0) {
-				messages[idx].content = '(no content returned)';
+				messages[idx].content = m.agents_reply_empty();
 			}
 			messages[idx].at = Date.now();
 			// Save the completed turn so it survives a reload.
@@ -436,12 +435,12 @@
 			// don't surface it as an error.
 			if (err instanceof DOMException && err.name === 'AbortError') {
 				if (messages[idx]) {
-					if (messages[idx].content.length === 0) messages[idx].content = '(stopped)';
+					if (messages[idx].content.length === 0) messages[idx].content = m.agents_reply_stopped();
 					messages[idx].at = Date.now();
 					await persistConversation();
 				}
 			} else {
-				error = err instanceof Error ? err.message : 'Chat request failed.';
+				error = errorMessage(err, m.agents_chat_failed());
 				// Drop the empty assistant bubble on failure.
 				if (messages[idx]?.content.length === 0) messages.splice(idx, 1);
 			}
@@ -497,7 +496,7 @@
 </script>
 
 <svelte:head>
-	<title>Agents | Flowgen</title>
+	<title>{m.agents_page_title()}</title>
 </svelte:head>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -511,10 +510,10 @@
 	>
 		{#if !historyPaneOpen}
 			<div class="flex flex-1 flex-col items-center gap-1 py-2">
-				<div class="tooltip tooltip-right" data-tip="New">
+				<div class="tooltip tooltip-right" data-tip={m.common_new()}>
 					<button
 						type="button"
-						aria-label="New"
+						aria-label={m.agents_new_conversation()}
 						class="flex h-10 w-10 items-center justify-center rounded-md bg-primary text-primary-content transition-colors hover:bg-primary/90 disabled:opacity-50"
 						onclick={newConversation}
 						disabled={sending}
@@ -522,10 +521,10 @@
 						<Icon icon="tabler:plus" class="h-5 w-5 shrink-0" />
 					</button>
 				</div>
-				<div class="tooltip tooltip-right" data-tip="Conversations">
+				<div class="tooltip tooltip-right" data-tip={m.agents_conversations()}>
 					<button
 						type="button"
-						aria-label="Expand conversations"
+						aria-label={m.agents_history_expand()}
 						class="relative flex h-10 w-10 items-center justify-center rounded-md bg-base-200 text-primary transition-colors hover:bg-base-200"
 						onclick={toggleHistoryPane}
 					>
@@ -544,7 +543,7 @@
 					disabled={sending}
 				>
 					<Icon icon="tabler:plus" class="h-4 w-4" />
-					New
+					{m.common_new()}
 				</button>
 				<button
 					type="button"
@@ -558,9 +557,12 @@
 						<span class="absolute -left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-primary"></span>
 					{/if}
 					<Icon icon="tabler:message-2" class="h-5 w-5 shrink-0 opacity-70" />
-					<span>All conversations</span>
+					<span>{m.agents_all_conversations()}</span>
 					<span class="ml-auto text-xs opacity-50">
-						{#if convoSearch.trim()}{filteredConversations.length} of {conversations.length}{:else}{conversations.length}{/if}
+						{#if convoSearch.trim()}{m.agents_conversations_filtered_count({
+								shown: filteredConversations.length,
+								total: conversations.length
+							})}{:else}{conversations.length}{/if}
 					</span>
 				</button>
 				<ul class="mt-1 min-h-0 flex-1 space-y-0.5 overflow-y-auto text-sm">
@@ -586,12 +588,12 @@
 							</button>
 							<div
 								class="tooltip tooltip-left absolute right-1 top-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-100"
-								data-tip="Delete"
+								data-tip={m.common_delete()}
 							>
 								<button
 									type="button"
 									class="btn btn-ghost btn-circle btn-xs"
-									aria-label="Delete conversation"
+									aria-label={m.agents_conversation_delete()}
 									onclick={() => removeConversation(c.id)}
 								>
 									<Icon icon="tabler:trash" class="h-5 w-5" />
@@ -609,11 +611,11 @@
 		>
 			<div
 				class="tooltip {historyPaneOpen ? 'tooltip-top' : 'tooltip-right'}"
-				data-tip={historyPaneOpen ? 'Collapse conversations' : 'Expand conversations'}
+				data-tip={historyPaneOpen ? m.agents_history_collapse() : m.agents_history_expand()}
 			>
 				<button
 					type="button"
-					aria-label={historyPaneOpen ? 'Collapse conversations' : 'Expand conversations'}
+					aria-label={historyPaneOpen ? m.agents_history_collapse() : m.agents_history_expand()}
 					class="flex h-10 w-10 items-center justify-center rounded-md text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
 					onclick={toggleHistoryPane}
 				>
@@ -630,7 +632,7 @@
 	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
 		<div class="flex flex-wrap items-center gap-2">
 			<div class="flex min-w-0 items-center gap-1.5 text-sm">
-				<a href="{base}/agents" class="shrink-0 hover:text-primary">Agents</a>
+				<a href="{base}/agents" class="shrink-0 hover:text-primary">{m.agents_breadcrumb()}</a>
 				<span class="shrink-0 opacity-40">/</span>
 				<span
 					class="tooltip tooltip-bottom truncate before:max-w-xs before:whitespace-normal before:break-words"
@@ -645,7 +647,7 @@
 					disabled={models.length === 0}
 				>
 					<Icon icon="tabler:brain" class="h-4 w-4 opacity-70" />
-					<span>{model ? modelLabel(model) : 'Model'}</span>
+					<span>{model ? modelLabel(model) : m.agents_model_picker()}</span>
 					<Icon icon="tabler:chevron-down" class="h-3.5 w-3.5 opacity-60" />
 				</button>
 				<div
@@ -692,21 +694,21 @@
 									<span class="line-clamp-2 block text-xs opacity-50">{group.description}</span>
 								{/if}
 							</div>
-							{#each group.models as m (m.id)}
+							{#each group.models as opt (opt.id)}
 								<button
 									type="button"
 									class="flex w-full items-center gap-2 rounded py-1 pl-4 pr-2 text-left text-sm hover:bg-base-200"
 									onclick={(e) => {
-										model = m.id;
+										model = opt.id;
 										e.currentTarget.blur();
 									}}
 								>
 									<span class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary">
-										{#if model === m.id}
+										{#if model === opt.id}
 											<Icon icon="tabler:check" class="h-3.5 w-3.5" />
 										{/if}
 									</span>
-									<span class="min-w-0 flex-1 truncate font-mono text-xs">{m.name}</span>
+									<span class="min-w-0 flex-1 truncate font-mono text-xs">{opt.name}</span>
 								</button>
 							{/each}
 						{/if}
@@ -729,13 +731,13 @@
 					<circle cx="11" cy="11" r="8" />
 					<path d="M21 21l-4.35-4.35" />
 				</svg>
-				<input type="text" placeholder="Search conversations..." bind:value={convoSearch} />
+				<input type="text" placeholder={m.agents_search_placeholder()} bind:value={convoSearch} />
 				{#if convoSearch}
-					<div class="tooltip tooltip-left" data-tip="Clear search">
+					<div class="tooltip tooltip-left" data-tip={m.common_clear_search()}>
 						<button
 							type="button"
 							class="opacity-50 hover:opacity-100"
-							aria-label="Clear search"
+							aria-label={m.common_clear_search()}
 							onclick={() => (convoSearch = '')}
 						>
 							<Icon icon="tabler:x" class="h-6 w-6" />
@@ -756,7 +758,7 @@
 				bind:this={textareaEl}
 				class="max-h-48 min-h-[2.5rem] flex-1 resize-none bg-transparent px-2 py-2 text-[0.9375rem] leading-6 outline-none placeholder:text-base-content/40"
 				rows="1"
-				placeholder="Send a message..."
+				placeholder={m.agents_composer_placeholder()}
 				bind:value={input}
 				onkeydown={onKeydown}
 				oninput={onInput}
@@ -764,24 +766,24 @@
 			></textarea>
 			{#if sending}
 				<!-- While a turn streams, the send button becomes Stop (also Esc). -->
-				<div class="tooltip tooltip-top shrink-0" data-tip="Stop (Esc)">
+				<div class="tooltip tooltip-top shrink-0" data-tip={m.agents_stop_tooltip()}>
 					<button
 						type="button"
 						class="btn btn-ghost btn-sm btn-circle"
 						onclick={stopGenerating}
-						aria-label="Stop generating"
+						aria-label={m.agents_stop()}
 					>
 						<Icon icon="tabler:player-stop-filled" class="h-5 w-5" />
 					</button>
 				</div>
 			{:else}
-				<div class="tooltip tooltip-top shrink-0" data-tip="Send">
+				<div class="tooltip tooltip-top shrink-0" data-tip={m.agents_send()}>
 					<button
 						type="button"
 						class="btn btn-ghost btn-sm btn-circle text-primary"
 						onclick={send}
 						disabled={!model || input.trim().length === 0}
-						aria-label="Send"
+						aria-label={m.agents_send()}
 					>
 						<Icon icon="tabler:arrow-up" class="h-5 w-5" />
 					</button>
@@ -800,7 +802,7 @@
 		<div class="flex flex-1 items-center justify-center">
 			<StateMessage
 				tone="oops"
-				title="The AI gateway didn't respond"
+				title={m.agents_models_error_title()}
 				message={modelsError}
 			/>
 		</div>
@@ -808,8 +810,8 @@
 		<div class="flex flex-1 items-center justify-center">
 			<StateMessage
 				tone="notice"
-				title="No models yet"
-				message="No models are registered on the gateway. Add an llm_proxy flow with a models list to start a conversation."
+				title={m.agents_models_empty_title()}
+				message={m.agents_models_empty_message()}
 			/>
 		</div>
 	{:else if convoLoading && messages.length === 0}
@@ -827,7 +829,7 @@
 				<div class="hero-blob hero-blob-3"></div>
 			</div>
 			<p class="edge-word relative text-3xl font-extrabold tracking-tight">
-				What's on your mind today?
+				{m.agents_greeting()}
 			</p>
 			<div class="relative w-full max-w-2xl">
 				{@render composer()}
@@ -837,12 +839,12 @@
 		<!-- Conversation: scrolling messages, composer pinned to the bottom. -->
 		<div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto px-6 py-6">
 			<div class="mx-auto flex max-w-4xl flex-col gap-5">
-				{#each messages as m, i (i)}
-					{@const streaming = sending && m.role === 'assistant' && i === messages.length - 1}
-					{@const steps = m.steps ?? []}
-					{@const hasBody = m.content.length > 0 || steps.length > 0}
-					{@const bareStatus = m.role === 'assistant' && streaming && !hasBody}
-					<div class="group flex flex-col gap-1 {m.role === 'user' ? 'items-end' : 'items-start'}">
+				{#each messages as msg, i (i)}
+					{@const streaming = sending && msg.role === 'assistant' && i === messages.length - 1}
+					{@const steps = msg.steps ?? []}
+					{@const hasBody = msg.content.length > 0 || steps.length > 0}
+					{@const bareStatus = msg.role === 'assistant' && streaming && !hasBody}
+					<div class="group flex flex-col gap-1 {msg.role === 'user' ? 'items-end' : 'items-start'}">
 						{#if bareStatus}
 							<!-- Streaming, nothing arrived yet: the shimmering status line
 							     alone stands in for a bubble. -->
@@ -850,20 +852,20 @@
 								class="chat-status chat-status-live flex items-center gap-1.5 px-1 py-2 text-sm font-medium"
 							>
 								<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-4 w-4" />
-								Working…
+								{m.agents_working()}
 							</span>
-						{:else if m.role === 'user'}
+						{:else if msg.role === 'user'}
 							<div
 								class="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-content shadow-sm"
 							>
-								{m.content}
+								{msg.content}
 							</div>
 						{:else}
 							<div
 								class="chat-markdown prose prose-sm max-w-[85%] min-w-0 rounded-2xl border border-base-200 bg-base-100/60 px-4 py-2.5 text-sm text-base-content shadow-sm"
 							>
 								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-								{@html renderMarkdown(m.content)}
+								{@html renderMarkdown(msg.content)}
 								{#if steps.length > 0}
 									<!-- Tool calls as status lines: `✱ <name>`, expandable to
 									     its arguments. The last one shimmers while streaming. -->
@@ -881,7 +883,7 @@
 														mode="mask"
 														class="h-3 w-3 shrink-0 {live ? 'chat-status-pulse' : 'opacity-60'}"
 													/>
-													<span class="truncate">{step.name || 'tool'}{live ? '…' : ''}</span>
+													<span class="truncate">{step.name || m.agents_tool_step_fallback()}{live ? '…' : ''}</span>
 													{#if step.arguments}
 														<Icon
 															icon="tabler:chevron-right"
@@ -899,28 +901,28 @@
 										{/each}
 									</div>
 								{/if}
-								{#if streaming && (steps.length === 0 || m.content.length > 0)}
+								{#if streaming && (steps.length === 0 || msg.content.length > 0)}
 									<!-- Text is streaming (no fresh tool call to shimmer): a
 									     working status line marks progress instead of a cursor. -->
 									<span
 										class="chat-status chat-status-live mt-2 flex items-center gap-1.5 text-xs font-medium"
 									>
 										<Icon icon="tabler:activity" mode="mask" class="chat-status-pulse h-3.5 w-3.5" />
-										Working…
+										{m.agents_working()}
 									</span>
 								{/if}
 							</div>
 						{/if}
 						{#if !streaming && !bareStatus}
 							<div
-								class="flex items-center gap-1 px-1 opacity-0 transition-opacity group-hover:opacity-100 {m.role ===
+								class="flex items-center gap-1 px-1 opacity-0 transition-opacity group-hover:opacity-100 {msg.role ===
 								'user'
 									? 'flex-row-reverse'
 									: ''}"
 							>
-								<CopyButton text={m.content} size="xs" />
+								<CopyButton text={msg.content} size="xs" />
 								<span class="text-xs tabular-nums text-base-content/40">
-									{formatTimestamp(m.at)}
+									{formatTimestamp(msg.at)}
 								</span>
 							</div>
 						{/if}

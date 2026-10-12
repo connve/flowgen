@@ -25,7 +25,9 @@ propose ──► validate + diff ──► approve (signed-in user) ──► p
 }
 ```
 
-Paths start at the workspace root and must be under `flows/` or `resources/`, all within one [target](#targets). Each file is recorded with the content deployed when the change was proposed — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — and the change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
+Paths start at the workspace root and must be under `flows/` or `resources/`, all within one [target](#targets). Each file is recorded with the version it is based on: the deployed content — for a flow, the source synced to the flows cache, so a flow that failed to start can be fixed too — with every published change that is not deployed yet applied on top, so editing a file right after an approval builds on that commit. `GET {path}/api/workspace/file?path=` returns that version. The change carries a unified diff per file plus every validation issue. A change with issues can be reviewed but not approved.
+
+While a change is pending, its proposer can extend it: `POST {path}/api/changes/{id}/files` adds files or replaces ones it has, with the same body as `files` above, and `PATCH {path}/api/changes/{id}` sets its `title` and `description`. A replaced file keeps the version recorded when it was first added. Saving in the web UI editor adds the file to the user's most recently edited pending change in the same target, or proposes a new one.
 
 `POST {path}/api/workspace/validate` runs the same validation without recording anything:
 
@@ -64,9 +66,9 @@ Flows in different folders are kept apart at runtime too: an [`inproc_endpoint`]
 
 ## Approving
 
-`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never publish them. Approving moves the change to `publishing`, runs the publish flow, and records `published` with the flow's result, or `failed` with the error. Publishing runs to the end even when the browser disconnects, and is recorded as failed after `web.authoring.publish_timeout` (5 minutes by default).
+`POST {path}/api/changes/{id}/approve` and `/reject` require a signed-in user, and a member of one of the change's target's `approver_groups` when the list is set. Groups are read from the user's claim named by `web.authoring.groups_claim` (default `groups`); most providers include it only when asked, for example with a `groups` scope in `web.auth.extra_scopes`. Requests authenticated with a machine key are refused, so an agent can propose changes but never publish them. With `?updatedAt=` set to the change's `updatedAt` as reviewed, approving fails with 409 when the change was edited since. Approving moves the change to `publishing`, runs the publish flow, and records `published` with the flow's result, or `failed` with the error. Publishing runs to the end even when the browser disconnects, and is recorded as failed after the `ack_timeout` of the publish flow's `inproc_endpoint`.
 
-A failed change can be approved again, as can one left in `publishing` past the timeout, for example after a restart. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so publishing again after a partial success does not conflict.
+A failed change can be approved again, as can one left in `publishing` past the timeout, for example after a restart; such a change has `stalled` set, and the web UI offers to retry it. [Git Push](/docs/flowgen/git/push) accepts files that already hold the proposed content, so publishing again after a partial success does not conflict.
 
 The publish flow is any flow starting with an [`inproc_endpoint`](/docs/flowgen/core/inproc); the target's `publish_flow` names it by its identity (default `system/publish_workspace`), so targets can share one publish flow or commit to different repositories. Approvals call it in-process, and it has no HTTP route, so nothing else can trigger a publish. It receives:
 
@@ -81,12 +83,15 @@ The approving user's identity is in `event.meta.auth`. [`examples/authoring/publ
 
 ## Releasing
 
-An approved change ends as a commit, the same as a change pushed by hand, and the deployment releases every commit the same way. Exactly one thing should publish the workspace artifact that the [OCI Sync](/docs/flowgen/oci/sync) bootstrap deploys:
+An approved change ends as a commit, the same as a change pushed by hand, and the deployment releases every commit the same way. The workspace is deployed in one of three ways:
 
-- the repository's CI pipeline, where there is one; flowgen then needs only read access to the registry;
-- otherwise a release flow in flowgen. [`examples/authoring/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/release_workspace.yaml) pulls the branch with [Git Sync](/docs/flowgen/git/sync) when it moves and pushes it with [OCI Push](/docs/flowgen/oci/push), tagged with the commit and `latest`.
+- straight from the repository with [Git Sync](/docs/flowgen/git/sync), as in [`examples/git/sync_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/git/sync_workspace.yaml);
+- from an artifact the repository's CI pipeline publishes, deployed by the [OCI Sync](/docs/flowgen/oci/sync) bootstrap; flowgen then needs only read access to the registry;
+- from an artifact a release flow in flowgen publishes. [`examples/authoring/release_workspace.yaml`](https://github.com/connve/flowgen/blob/main/examples/authoring/release_workspace.yaml) pulls the branch with [Git Sync](/docs/flowgen/git/sync) when it moves and pushes it with [OCI Push](/docs/flowgen/oci/push), tagged with the commit and `latest`.
 
-A change is `published` once committed; it is deployed when the release reaches the registry and the next sync picks it up.
+An artifact lets every environment run a release by its tag and roll back to an earlier one. Exactly one thing should publish it.
+
+A `published` change reports its `deployment` against what this instance runs: `waiting` while a file still runs as before the change, `deployed` otherwise. Set `track_deployment: false` on a target that is not deployed to this instance automatically.
 
 ## Machine keys
 
@@ -106,7 +111,7 @@ web:
 
 Send the key as `Authorization: Bearer <key>`. The key's name is recorded as the proposer (`key:operator-agent`). Keys shorter than 32 characters are ignored, and keys are read at startup.
 
-A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, and proposing changes. Every other route answers `403` to a key. Machine keys apply only when `web.auth` is set; without it the API is open and anyone can approve.
+A machine key reaches only what an agent needs: reading flows, resources, logs and changes (`GET`), validating files, proposing changes, and adding files to and editing the pending changes it proposed. Every other route answers `403` to a key. Machine keys apply only when `web.auth` is set; without it the API is open and anyone can approve.
 
 ## Operator agent
 

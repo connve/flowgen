@@ -11,6 +11,9 @@ The input event carries `files`, each `{path, content}`; the output of [Git Push
     name: release
     repository: "{{env.OCI_REPOSITORY}}"
     tags: ["{{event.data.commit}}", "latest"]
+    annotations:
+      org.opencontainers.image.source: "{{env.GIT_REPOSITORY_URL}}"
+      org.opencontainers.image.revision: "{{event.data.commit}}"
     credentials_path: /etc/registry/credentials.json
 ```
 
@@ -21,6 +24,7 @@ The input event carries `files`, each `{path, content}`; the output of [Git Push
 | `name` | string | required | Task name. |
 | `repository` | string | required | Registry and repository without a tag, e.g. `registry.example.com/team/configs`. |
 | `tags` | list | required | Tags to push the artifact under, at least one. Supports templating. Every tag is checked before anything is pushed. |
+| `annotations` | map | | Manifest annotations. Supports templating. For example, `org.opencontainers.image.source` names the source repository, which some registries use to link the package to it, and `org.opencontainers.image.revision` the commit. Annotations are part of the manifest, so they change its digest. |
 | `credentials_path` | string | | Registry credentials, in either format [OCI Sync](/docs/flowgen/oci/sync) accepts. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
