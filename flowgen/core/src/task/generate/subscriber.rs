@@ -799,7 +799,7 @@ mod tests {
     #[derive(Debug)]
     struct FlakyCache {
         inner: crate::cache::memory::MemoryCache,
-        failures: std::sync::atomic::AtomicUsize,
+        failures: std::sync::Mutex<usize>,
     }
 
     #[async_trait::async_trait]
@@ -814,14 +814,19 @@ mod tests {
         }
 
         async fn get(&self, key: &str) -> Result<Option<bytes::Bytes>, crate::cache::Error> {
-            let remaining = self.failures.fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |n| n.checked_sub(1),
-            );
-            match remaining {
-                Ok(_) => Err(crate::cache::Error::StoreNotInitialized),
-                Err(_) => self.inner.get(key).await,
+            let failing = {
+                let mut failures = self.failures.lock().unwrap();
+                match *failures {
+                    0 => false,
+                    _ => {
+                        *failures -= 1;
+                        true
+                    }
+                }
+            };
+            match failing {
+                true => Err(crate::cache::Error::StoreNotInitialized),
+                false => self.inner.get(key).await,
             }
         }
 
@@ -1000,7 +1005,7 @@ mod tests {
             .unwrap();
         let cache = Arc::new(FlakyCache {
             inner,
-            failures: std::sync::atomic::AtomicUsize::new(1),
+            failures: std::sync::Mutex::new(1),
         });
         let (subscriber, mut rx) = subscriber_with(
             Config {
@@ -1122,7 +1127,7 @@ mod tests {
     async fn test_scheduled_task_keeps_retrying_past_max_attempts() {
         let cache = Arc::new(FlakyCache {
             inner: crate::cache::memory::MemoryCache::new(),
-            failures: std::sync::atomic::AtomicUsize::new(20),
+            failures: std::sync::Mutex::new(20),
         });
         let (subscriber, mut rx) = subscriber_with(
             Config {

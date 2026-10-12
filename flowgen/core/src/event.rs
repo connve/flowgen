@@ -57,27 +57,34 @@ impl CompletionState {
         }
     }
 
+    /// Counts one leaf as done and returns whether it was the last one. The
+    /// count saturates at zero, so a leaf signalling twice cannot underflow it
+    /// and fire completion again.
+    fn last_leaf(&self) -> bool {
+        let mut current = self.remaining.load(Ordering::Acquire);
+        loop {
+            match current {
+                0 => return false,
+                n => match self.remaining.compare_exchange_weak(
+                    n,
+                    n - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(previous) => return previous == 1,
+                    Err(actual) => current = actual,
+                },
+            }
+        }
+    }
+
     /// Signals completion from a leaf task with its result payload.
     ///
     /// Decrements the outstanding-leaf counter; the leaf that brings it to zero
     /// delivers its payload to the source via the one-shot channel. Earlier
     /// leaves' payloads are dropped. Subsequent calls after delivery are no-ops.
     pub fn signal_completion(&self, payload: Option<serde_json::Value>) {
-        // Saturating decrement protects against accidental double-signal from
-        // a single leaf (which would otherwise underflow `remaining` and
-        // eventually re-trigger the delivery branch).
-        let previous = self.remaining.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| match current {
-                0 => None,
-                n => Some(n - 1),
-            },
-        );
-        // We are the last leaf when the previous value was 1; otherwise
-        // either more leaves are still outstanding or completion already
-        // fired and the counter is saturated at zero.
-        if !matches!(previous, Ok(1)) {
+        if !self.last_leaf() {
             return;
         }
         if let Ok(mut guard) = self.sender.lock() {
@@ -95,15 +102,7 @@ impl CompletionState {
     /// caller as a tool/request error instead of falling back to an opaque
     /// acknowledgement timeout.
     pub fn signal_completion_with_error(&self, error: String) {
-        let previous = self.remaining.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| match current {
-                0 => None,
-                n => Some(n - 1),
-            },
-        );
-        if !matches!(previous, Ok(1)) {
+        if !self.last_leaf() {
             return;
         }
         if let Ok(mut guard) = self.sender.lock() {
