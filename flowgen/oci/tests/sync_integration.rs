@@ -354,11 +354,6 @@ fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Extended layer variants: uncompressed tar, whiteouts, non-file entries,
-// tar-bomb size caps.
-// ---------------------------------------------------------------------------
-
 /// Boots a fresh registry container and returns `(container, host)` so
 /// the container stays alive for the test's lifetime.
 async fn boot_registry() -> (testcontainers::ContainerAsync<GenericImage>, String) {

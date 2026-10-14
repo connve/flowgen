@@ -137,6 +137,19 @@ The key fields used for deduplication depend on the task family:
 
 Tasks with different identity fields get separate clients. Two MSSQL tasks with the same credentials but different `max_connections` do not share a pool.
 
+## Connections in the web UI
+
+The **Connections** tab lists the external systems the loaded flows connect to, including `ai_completion` MCP servers. Each row is one connector and credentials file, so Salesforce tasks that share a credentials file are one connection.
+
+- Next to the name, a row shows what the credentials file points to, read from its non-secret fields: a Salesforce org host, a service account email, an MSSQL server and database, MongoDB hosts, or a Braze REST endpoint.
+- It also shows where its tasks connect, from their configs: hosts, brokers, repositories, buckets, or an AI provider and model.
+- Values set per event show as `per event`. An MCP server called with `on_behalf_of_user: true` shows as `on behalf of user`.
+- A `{{env.…}}` value shows what it renders to, with the same parts left out as a value written in the config. When the variable is unset, it shows as written.
+- The status comes from the latest log record of each task using the connection. It is `error` or `warn` when any of them is one, `ok` otherwise, and `idle` without records.
+- The flow count links to the **Flows** tab filtered to that connection.
+
+Tasks that receive calls, such as `http_endpoint` and `mcp_tool`, are not listed. `GET /api/connections` and `GET /api/connections/{id}` return the same data, and `GET /api/connectors` lists each connector with its task types.
+
 ## Operational notes
 
 - **File permissions** should be `0600` (read-write for the flowgen user only). Flowgen does not enforce this — the operator is responsible.

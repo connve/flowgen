@@ -162,6 +162,22 @@ Each entry also accepts `headers`, sent with every request to that MCP server. U
           X-Flowgen-Client: your-agent-name
 ```
 
+### Calling tools as the signed-in user
+
+With `on_behalf_of_user: true`, the agent calls the server as the user who sent the request, with their token as the bearer:
+
+```yaml
+    mcp_servers:
+      - url: "http://localhost:3001/mcp"
+        on_behalf_of_user: true
+```
+
+- The token is the bearer that an `llm_proxy`, `http_endpoint`, or `mcp_tool` verified with the worker's `auth` provider. This includes Agents chat requests when [`web.agents.on_behalf_of_user`](/docs/flowgen/concepts/configuration) is set. A `buffer` keeps it when every event in a batch comes from the same user.
+- Set it only for servers that trust your identity provider, such as flowgen's own. For web UI tokens, the server's `auth` is `oidc` with the issuer of `web.auth` and its `client_id` as the audience.
+- Setting it together with `credentials_path` fails the task at startup.
+- A request without a signed-in user, or whose token the server answers with 401 or 403, fails without a retry.
+- Each user gets their own connections and agent client, closed after 30 minutes without a request. A new token opens new connections. A request already running keeps its own until it finishes.
+
 ## Tool-use passthrough
 
 When `tool_passthrough: true`, the task bypasses rig's agent loop and forwards caller-supplied `tools` and `tool_choice` (from the request body) directly to the upstream provider. Tool invocations returned by the model surface as `tool_calls` on the response instead of being executed in-process. The client — typically opencode, Claude Desktop, or any OpenAI-tool-use SDK — runs the tools locally and posts the results back as `role: "tool"` follow-up messages.

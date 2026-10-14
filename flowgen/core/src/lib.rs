@@ -64,6 +64,8 @@ pub mod task {
     pub mod context;
     /// Task manager for leader election and coordination.
     pub mod manager;
+    /// What a task type says about itself.
+    pub mod meta;
     /// Base runner trait for all task implementations.
     pub mod runner;
     /// Data conversion and transformation processor.

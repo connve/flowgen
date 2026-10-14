@@ -33,5 +33,10 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 dashmap = { workspace = true }
 subtle = { workspace = true }
+
+[dev-dependencies]
+flowgen_core = { path = "../core", features = ["test-util"] }
+secrecy = { workspace = true }
+
 [lints]
 workspace = true

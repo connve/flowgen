@@ -10,6 +10,9 @@ publish.workspace = true
 name = "flowgen_core"
 path = "src/lib.rs"
 
+[features]
+test-util = []
+
 [dependencies]
 arrow = { workspace = true }
 arrow-schema = { workspace = true }

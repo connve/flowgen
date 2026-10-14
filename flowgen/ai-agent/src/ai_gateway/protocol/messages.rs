@@ -25,16 +25,12 @@ use crate::ai_gateway::config::{
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-// --- Anthropic protocol constants ---
-
 /// Response `type` field for a completed message.
 pub const OBJECT_MESSAGE: &str = "message";
 /// Stop reason when the model finishes a normal turn.
 pub const STOP_REASON_END_TURN: &str = "end_turn";
 /// Stop reason when the model stops because it wants tools invoked.
 pub const STOP_REASON_TOOL_USE: &str = "tool_use";
-
-// --- Request types ---
 
 /// Anthropic Messages API request body.
 ///
@@ -167,8 +163,6 @@ pub struct AnthropicToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
-// --- Response types (non-streaming) ---
-
 /// Anthropic Messages API non-streaming response body.
 #[derive(Debug, Clone, Serialize)]
 pub struct MessagesResponse {
@@ -239,8 +233,6 @@ impl AnthropicUsage {
         }
     }
 }
-
-// --- Streaming event types ---
 
 /// One event on the Anthropic SSE stream. Anthropic streams are
 /// stateful — each event carries an explicit `event: <type>` line
@@ -331,8 +323,6 @@ pub struct MessageDeltaBody {
     pub stop_sequence: Option<String>,
 }
 
-// --- Anthropic-shaped error body ---
-
 /// Wire shape for an Anthropic-side error response.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnthropicErrorResponse {
@@ -352,8 +342,6 @@ pub struct AnthropicErrorDetail {
     /// Human-readable error message.
     pub message: String,
 }
-
-// --- Request translation ---
 
 /// Result of translating a `MessagesRequest` into the internal payload
 /// shape. Carries both the flat prompt / system_prompt strings the
@@ -596,8 +584,6 @@ fn prepend_system(system: Option<String>, mut messages: Vec<Message>) -> Vec<Mes
     messages
 }
 
-// --- Response translation ---
-
 /// Build an Anthropic `MessagesResponse` from the leaf's completion.
 ///
 /// `stop_reason` mapping is mechanical: `tool_use` when any tool
@@ -670,8 +656,6 @@ pub fn event_type_for(event: &StreamEvent) -> &'static str {
         StreamEvent::MessageStop => "message_stop",
     }
 }
-
-// --- Protocol adapter ---
 
 /// Anthropic Messages API adapter for the shared dispatcher.
 pub struct MessagesAdapter;
@@ -846,8 +830,6 @@ impl StreamWriter for MessagesStreamWriter {
 mod tests {
     use super::*;
 
-    // --- Request deserialisation ---
-
     #[test]
     fn request_deser_plain_text() {
         let json = r#"{
@@ -950,8 +932,6 @@ mod tests {
             _ => panic!("expected blocks"),
         }
     }
-
-    // --- translate_request ---
 
     #[test]
     fn translate_request_plain_text_no_messages_field() {
@@ -1094,8 +1074,6 @@ mod tests {
         assert_eq!(asst.tool_calls[0].function.arguments, r#"{"cmd":"ls"}"#);
     }
 
-    // --- Response translation ---
-
     #[test]
     fn build_response_plain_text_end_turn() {
         let resp = build_response(
@@ -1166,8 +1144,6 @@ mod tests {
         assert!(v["usage"].get("total_tokens").is_none());
         assert!(v["usage"].get("prompt_tokens").is_none());
     }
-
-    // --- StreamWriter ---
 
     #[test]
     fn stream_writer_plain_text_sequence() {

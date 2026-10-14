@@ -152,6 +152,7 @@ rmcp = { version = "1", features = [
     "transport-streamable-http-client-reqwest",
 ] }
 schemars = { version = "1.2" }
+jsonschema = { version = "0.58", default-features = false }
 scraper = { version = "0.21" }
 jsonwebtoken = { version = "9" }
 secrecy = { version = "0.10", features = ["serde"] }

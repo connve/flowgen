@@ -19,10 +19,6 @@ use axum::response::Response;
 pub mod completions;
 pub mod messages;
 
-// ---------------------------------------------------------------------------
-// Adapter trait
-// ---------------------------------------------------------------------------
-
 /// Protocol adapter — bundles the small set of protocol-specific
 /// hooks the shared dispatcher needs.
 ///
@@ -68,10 +64,6 @@ pub trait ProtocolAdapter: Send + Sync + 'static {
     /// the last real frame. OpenAI requires it; Anthropic does not.
     const EMIT_DONE_SENTINEL: bool;
 }
-
-// ---------------------------------------------------------------------------
-// Streaming writer
-// ---------------------------------------------------------------------------
 
 /// Stream state machine driven by the shared select loop.
 ///

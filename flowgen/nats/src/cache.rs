@@ -547,10 +547,6 @@ impl CacheBuilder {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // Error Display formatting
-    // -----------------------------------------------------------------------
-
     #[test]
     fn error_missing_builder_attribute_display() {
         let err = Error::MissingBuilderAttribute("credentials_path".to_string());
@@ -571,10 +567,6 @@ mod tests {
         let err = Error::MissingJetStreamContext;
         assert_eq!(err.to_string(), "Missing required value JetStream Context");
     }
-
-    // -----------------------------------------------------------------------
-    // CacheBuilder
-    // -----------------------------------------------------------------------
 
     #[test]
     fn builder_build_without_credentials_leaves_field_none() {

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tracing::{error, info, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 /// Default MCP server port.
 pub const DEFAULT_MCP_PORT: u16 = 3001;
@@ -139,6 +139,8 @@ pub struct ToolRegistration {
     pub description: String,
     /// JSON Schema for tool input parameters.
     pub input_schema: serde_json::Value,
+    /// `input_schema` compiled to check call arguments; `None` without a schema.
+    pub input_validator: Option<Arc<jsonschema::Validator>>,
     /// Channel to send events into the flow pipeline.
     pub tx: mpsc::Sender<flowgen_core::event::Event>,
     /// Optional credentials for this specific tool.
@@ -452,10 +454,6 @@ pub fn response_registry(server: &McpServer) -> &Arc<ResponseRegistry> {
     &server.extras().response_registry
 }
 
-// ---------------------------------------------------------------------------
-// JSON-RPC protocol
-// ---------------------------------------------------------------------------
-
 /// JSON-RPC 2.0 request message.
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -497,8 +495,6 @@ struct ToolCallParams {
     #[serde(default)]
     arguments: serde_json::Value,
 }
-
-// --- Wire result envelopes -------------------------------------------------
 
 #[derive(Debug, Serialize)]
 struct InitializeResult {
@@ -688,10 +684,6 @@ struct CompletionValues {
 struct CompleteResult {
     completion: CompletionValues,
 }
-
-// ---------------------------------------------------------------------------
-// Dispatcher entry point
-// ---------------------------------------------------------------------------
 
 /// HTTP header name for MCP session correlation.
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
@@ -1418,7 +1410,8 @@ async fn execute_tool_call(
     let params: ToolCallParams = serde_json::from_value(request.params.clone())
         .map_err(|source| Error::InvalidParams { source })?;
 
-    validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
+    let api_key =
+        validate_auth(state, headers, Some(&params.name)).map_err(|_| Error::Unauthorized)?;
 
     let entry = match state.table.get(&params.name) {
         Some(entry) => entry.clone(),
@@ -1442,12 +1435,36 @@ async fn execute_tool_call(
         entry.flow_name.clone(),
     );
 
-    let user_context = validate_user_auth(state, headers, auth_required)
+    let session = validate_user_auth(state, headers, auth_required, api_key)
         .await
         .map_err(|_| Error::Unauthorized)?;
-    let auth = match user_context {
-        Some(ctx) => Some(
-            serde_json::to_value(ctx).map_err(|source| Error::UserContextSerialize { source })?,
+    let arguments = match params.arguments {
+        serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+        arguments => arguments,
+    };
+    if let Some(validator) = &entry.input_validator {
+        if let Some(problem) = invalid_arguments(validator, &arguments) {
+            tracing::info_span!(
+                "task.run",
+                flow = %flow_name,
+                task = %params.name,
+                task_id = 0,
+                task_type = "mcp_tool",
+            )
+            .in_scope(|| warn!(tool = %params.name, "MCP tool call rejected: {problem}"));
+            return Ok(json_rpc_response(
+                request.id.clone(),
+                ToolResult {
+                    content: vec![Content::Text { text: problem }],
+                    is_error: true,
+                },
+            ));
+        }
+    }
+    let auth = match &session {
+        Some(session) => Some(
+            serde_json::to_value(&session.user)
+                .map_err(|source| Error::UserContextSerialize { source })?,
         ),
         None => None,
     };
@@ -1479,13 +1496,17 @@ async fn execute_tool_call(
 
     let (completion_state, completion_rx) = flowgen_core::event::new_completion_channel(leaf_count);
 
-    let event = flowgen_core::event::EventBuilder::new()
-        .data(flowgen_core::event::EventData::Json(params.arguments))
+    let mut builder = flowgen_core::event::EventBuilder::new()
+        .data(flowgen_core::event::EventData::Json(arguments))
         .subject(params.name.clone())
         .task_id(0)
         .task_type("mcp_tool")
         .meta_merge(meta)
-        .completion_tx(completion_state)
+        .completion_tx(completion_state);
+    if let Some(session) = session {
+        builder = builder.session(Arc::new(session));
+    }
+    let event = builder
         .build()
         .map_err(|source| Error::EventBuild { source })?;
 
@@ -1632,28 +1653,18 @@ async fn execute_tool_call(
         .map_err(|source| Error::SseBody { source })
 }
 
-// ---------------------------------------------------------------------------
-// Auth helpers
-// ---------------------------------------------------------------------------
-
-/// Validates user-level authentication via the auth provider on the server.
+/// Validates user-level authentication via the auth provider on the server;
+/// when not required, a bearer that is not an API key still identifies the user.
 async fn validate_user_auth(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     auth_required: bool,
-) -> Result<Option<flowgen_core::auth::UserContext>, StatusCode> {
-    if !auth_required {
-        if let Some(provider) = &state.auth_provider {
-            if let Some(auth_header) = headers
-                .get(header::AUTHORIZATION)
-                .and_then(|h| h.to_str().ok())
-            {
-                if let Some(token) = flowgen_core::auth::extract_bearer_token(auth_header) {
-                    return Ok(provider.validate(token).await.ok());
-                }
-            }
-        }
-        return Ok(None);
+    api_key: bool,
+) -> Result<Option<flowgen_core::auth::UserSession>, StatusCode> {
+    match (auth_required, api_key) {
+        (false, true) => return Ok(None),
+        (false, false) => return Ok(optional_user(state, headers).await),
+        (true, _) => {}
     }
 
     let provider = state
@@ -1666,19 +1677,35 @@ async fn validate_user_auth(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let token =
         flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
-    provider
-        .validate(token)
-        .await
-        .map(Some)
-        .map_err(|_| StatusCode::UNAUTHORIZED)
+    match provider.validate(token).await {
+        Ok(user) => Ok(Some(flowgen_core::auth::UserSession::with_token(
+            user, token,
+        ))),
+        Err(_) => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
-/// Validates endpoint-level API key authentication for an incoming request.
+/// The user a bearer the auth provider accepts belongs to, if any.
+async fn optional_user(
+    state: &DispatchState<ToolRegistration, McpExtras>,
+    headers: &HeaderMap,
+) -> Option<flowgen_core::auth::UserSession> {
+    let provider = state.auth_provider.as_ref()?;
+    let auth_header = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = flowgen_core::auth::extract_bearer_token(auth_header)?;
+    match provider.validate(token).await {
+        Ok(user) => Some(flowgen_core::auth::UserSession::with_token(user, token)),
+        Err(_) => None,
+    }
+}
+
+/// Validates endpoint-level API key authentication for an incoming request;
+/// `true` when an API key authenticated it.
 fn validate_auth(
     state: &DispatchState<ToolRegistration, McpExtras>,
     headers: &HeaderMap,
     tool_name: Option<&str>,
-) -> Result<(), StatusCode> {
+) -> Result<bool, StatusCode> {
     let tool_creds = tool_name.and_then(|name| {
         state
             .table
@@ -1692,11 +1719,11 @@ fn validate_auth(
 
     let credentials = match credentials {
         Some(creds) => creds,
-        None => return Ok(()),
+        None => return Ok(false),
     };
 
     if credentials.api_keys.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let auth_header = headers
@@ -1708,15 +1735,11 @@ fn validate_auth(
         flowgen_core::auth::extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
 
     if credentials.api_keys.iter().any(|k| k == token) {
-        Ok(())
+        Ok(true)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Response helpers
-// ---------------------------------------------------------------------------
 
 fn json_rpc_response<T: Serialize>(id: Option<serde_json::Value>, result: T) -> Response {
     let value = match serde_json::to_value(result) {
@@ -1737,6 +1760,20 @@ fn json_rpc_response<T: Serialize>(id: Option<serde_json::Value>, result: T) -> 
         error: None,
     };
     axum::Json(response).into_response()
+}
+
+/// The first schema violation in `arguments`, with values masked so it is safe to log.
+fn invalid_arguments(
+    validator: &jsonschema::Validator,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    match validator.validate(arguments) {
+        Ok(()) => None,
+        Err(error) => match error.instance_path().as_str() {
+            "" => Some(format!("Invalid arguments: {}", error.masked())),
+            path => Some(format!("Invalid arguments: {path}: {}", error.masked())),
+        },
+    }
 }
 
 fn build_result_event(
@@ -1855,6 +1892,7 @@ mod tests {
                     "query": { "type": "string" }
                 }
             }),
+            input_validator: None,
             tx,
             credentials: None,
             ack_timeout: None,
@@ -1907,10 +1945,6 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    // -----------------------------------------------------------------------
-    // Server construction
-    // -----------------------------------------------------------------------
-
     #[test]
     fn new_mcp_server_has_empty_tool_registry() {
         let server = test_server();
@@ -1921,10 +1955,6 @@ mod tests {
         // Clean up the probe entry.
         server.deregister_flow("f");
     }
-
-    // -----------------------------------------------------------------------
-    // Tool registration
-    // -----------------------------------------------------------------------
 
     #[test]
     fn register_tool_succeeds_for_new_name() {
@@ -1958,9 +1988,194 @@ mod tests {
         assert!(Arc::ptr_eq(reg, reg2));
     }
 
-    // -----------------------------------------------------------------------
-    // JSON-RPC: initialize
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn a_tool_call_carries_the_verified_user_and_their_token() {
+        use flowgen_core::auth::testing::KnownToken;
+        use secrecy::ExposeSecret;
+        let server = test_server();
+        let (tx, mut rx) = mpsc::channel(1);
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "lookup".to_string(),
+            ToolRegistration {
+                auth_required: true,
+                tx,
+                ..test_tool_registration("f", "Look up")
+            },
+        );
+        let mut state = build_test_state(&server, table);
+        state.auth_provider = Some(Arc::new(KnownToken));
+        let flow = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let session = event.session.clone().expect("session");
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(None);
+            session
+        });
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "lookup", "arguments": {}}
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(&state.path)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer t1")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        McpDispatcher::build_router(state)
+            .oneshot(request)
+            .await
+            .unwrap();
+        let session = flow.await.unwrap();
+
+        assert_eq!(session.user.user_id, "u1");
+        assert_eq!(session.token.as_ref().unwrap().expose_secret(), "t1");
+    }
+
+    #[tokio::test]
+    async fn an_api_key_is_never_taken_for_a_user() {
+        let mut state = build_test_state(&test_server(), Arc::new(DashMap::new()));
+        state.auth_provider = Some(Arc::new(flowgen_core::auth::testing::KnownToken));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer t1".parse().unwrap());
+
+        let with_key = validate_user_auth(&state, &headers, false, true).await;
+        let without_key = validate_user_auth(&state, &headers, false, false).await;
+
+        assert!(with_key.unwrap().is_none());
+        assert_eq!(without_key.unwrap().expect("user").user.user_id, "u1");
+    }
+
+    #[tokio::test]
+    async fn a_call_missing_a_required_argument_is_a_tool_error_the_flow_never_sees() {
+        let server = test_server();
+        let (tx, mut rx) = mpsc::channel(1);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "project_id": { "type": "string" }, "query": { "type": "string" } },
+            "required": ["project_id", "query"]
+        });
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "run_query".to_string(),
+            ToolRegistration {
+                input_validator: Some(Arc::new(jsonschema::validator_for(&schema).unwrap())),
+                input_schema: schema,
+                tx,
+                ack_timeout: Some(std::time::Duration::from_secs(1)),
+                ..test_tool_registration("f", "Run a query")
+            },
+        );
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "run_query", "arguments": {"query": "SELECT 1"}}
+        });
+
+        let response = send_jsonrpc_with_state(state, body, None).await;
+
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "Invalid arguments: \"project_id\" is a required property"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_argument_value_is_left_out_of_the_error() {
+        let server = test_server();
+        let (tx, _rx) = mpsc::channel(1);
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "limit": { "type": "integer" } }
+        });
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "read".to_string(),
+            ToolRegistration {
+                input_validator: Some(Arc::new(jsonschema::validator_for(&schema).unwrap())),
+                input_schema: schema,
+                tx,
+                ack_timeout: Some(std::time::Duration::from_secs(1)),
+                ..test_tool_registration("f", "Read")
+            },
+        );
+        let state = build_test_state(&server, table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "read", "arguments": {"limit": "secret"}}
+        });
+
+        let response = send_jsonrpc_with_state(state, body, None).await;
+
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "Invalid arguments: /limit: value is not of type \"integer\""
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_without_arguments_reaches_the_flow_as_an_empty_object() {
+        let server = test_server();
+        let (tx, mut rx) = mpsc::channel(1);
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "list".to_string(),
+            ToolRegistration {
+                input_validator: Some(Arc::new(jsonschema::validator_for(&schema).unwrap())),
+                input_schema: schema,
+                tx,
+                ack_timeout: Some(std::time::Duration::from_secs(1)),
+                ..test_tool_registration("f", "List")
+            },
+        );
+        let state = build_test_state(&server, table);
+        let flow = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            event
+                .completion_tx
+                .as_ref()
+                .unwrap()
+                .signal_completion(None);
+            event.data
+        });
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list"}
+        });
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(&state.path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        McpDispatcher::build_router(state)
+            .oneshot(request)
+            .await
+            .unwrap();
+        let data = flow.await.unwrap();
+
+        assert!(
+            matches!(&data, flowgen_core::event::EventData::Json(value) if value == &serde_json::json!({})),
+            "{data:?}"
+        );
+    }
 
     #[tokio::test]
     async fn handle_initialize_returns_protocol_version() {
@@ -1979,10 +2194,6 @@ mod tests {
         assert_eq!(resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(resp["result"]["serverInfo"]["name"], "flowgen");
     }
-
-    // -----------------------------------------------------------------------
-    // JSON-RPC: tools/list
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn tools_list_returns_empty_when_no_tools() {
@@ -2022,10 +2233,6 @@ mod tests {
         assert!(tools[0]["inputSchema"]["properties"]["query"].is_object());
     }
 
-    // -----------------------------------------------------------------------
-    // JSON-RPC: method_not_found
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn unknown_method_returns_error() {
         let server = test_server();
@@ -2044,10 +2251,6 @@ mod tests {
             .unwrap()
             .contains("nonexistent/method"));
     }
-
-    // -----------------------------------------------------------------------
-    // Auth validation
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn no_credentials_allows_all_requests() {
@@ -2117,10 +2320,6 @@ mod tests {
         assert!(resp["error"].is_object());
     }
 
-    // -----------------------------------------------------------------------
-    // URI-template matcher
-    // -----------------------------------------------------------------------
-
     #[test]
     fn template_matches_single_binding() {
         let bindings =
@@ -2169,10 +2368,6 @@ mod tests {
         let bindings = match_uri_template("flowgen://static", "flowgen://static").unwrap();
         assert!(bindings.is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // Notification broadcast
-    // -----------------------------------------------------------------------
 
     fn test_prompt_registration(flow: &str) -> PromptRegistration {
         PromptRegistration {

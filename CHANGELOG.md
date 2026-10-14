@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.146.0
+
+### Breaking
+
+- **`mcp_tool` checks call arguments against its `input_schema`.** A call
+  that does not match gets a tool error naming the first problem, and the
+  flow does not run. A call without
+  `arguments` reaches the flow as `{}`. An invalid schema fails the task at
+  startup, and a `$ref` to another file or URL is not fetched.
+
+### Features
+
+- Events carry the signed-in user verified by `http_endpoint`, `llm_proxy` or
+  `mcp_tool`, through the flow and into `inproc_request` calls. Scripts and
+  templates cannot read or change it. Without `auth.required`, a bearer the
+  auth provider accepts identifies the user, unless it is the task's own key
+  from `credentials_path`. A `buffer` keeps the user
+  when every event in a batch comes from them.
+- `web.agents.on_behalf_of_user: true` makes the Agents chat call the AI
+  gateway as the signed-in user.
+- `on_behalf_of_user: true` on an `ai_completion` MCP server calls it as the
+  signed-in user. A server that answers their token with 401 or 403 fails the
+  event with an error saying the token was rejected.
+- The web UI's Connections tab and `GET /api/connections` list the systems
+  the flows connect to, one per connector and credentials file, with a
+  status from the latest log records of the tasks using each. The flow count
+  opens the Flows tab filtered to that connection. Each row shows what its
+  credentials point to and where its tasks connect.
+- `GET /api/connectors` lists each connector with its label and task types,
+  and `GET /api/connectors/{name}/icon` serves its logo. Each crate declares
+  its connector through the `TaskMeta` trait and keeps its logo in `icons/`.
+  The web UI and the docs take icons from there.
+- `mcp_tool`, `mcp_prompt`, `mcp_resource` and `ai_completion` MCP servers
+  belong to the `mcp` connector, and `html_scrape` to `html`, each with its
+  own icon.
+
+### Fixed
+
+- `http_endpoint` answers 401 to a missing or invalid token.
+- `ai_completion` tasks with the same provider and model keep their own MCP
+  tools and static context.
+- An `ai_completion` MCP server whose OAuth 2.0 token rotates gets new
+  connections that list each tool once.
+- Errors of `http_endpoint`, `mcp_tool` and other registering tasks are
+  logged at startup and on hot reload.
+- `quinn-proto` 0.11.19 fixes RUSTSEC-2026-0338 to RUSTSEC-2026-0342.
+- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to RUSTSEC-2026-0349.
+
 ## 0.145.0
 
 ### Breaking

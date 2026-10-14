@@ -520,6 +520,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -575,6 +576,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -627,6 +629,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -669,6 +672,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: Some(Arc::clone(&upstream_state)),
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -749,6 +753,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: Some(upstream_state),
+            session: None,
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -789,6 +794,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -837,6 +843,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {

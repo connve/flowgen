@@ -773,10 +773,6 @@ mod tests {
         )
     }
 
-    // ------------------------------------------------------------------
-    // Error display
-    // ------------------------------------------------------------------
-
     #[test]
     fn test_unreachable_broker_is_retried_but_bad_credentials_are_not() {
         let unreachable = Error::ClientAuth {
@@ -812,10 +808,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // ProduceResult round-trip
-    // ------------------------------------------------------------------
-
     #[test]
     fn test_produce_result_round_trip() {
         let r = ProduceResult {
@@ -830,10 +822,6 @@ mod tests {
         assert_eq!(back.offset, 99);
     }
 
-    // ------------------------------------------------------------------
-    // serialize_event_to_bytes
-    // ------------------------------------------------------------------
-
     #[test]
     fn test_serialize_json() {
         let event = Event {
@@ -846,6 +834,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         let parsed: Value = serde_json::from_slice(&bytes).unwrap();
@@ -864,6 +853,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert_eq!(bytes, b"raw data");
@@ -887,6 +877,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert!(!bytes.is_empty());
@@ -908,14 +899,11 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert_eq!(bytes, vec![0x01]);
     }
-
-    // ------------------------------------------------------------------
-    // ProducerBuilder
-    // ------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_producer_builder_success() {
@@ -1008,10 +996,6 @@ mod tests {
         assert!(matches!(e, Error::MissingBuilderAttribute(attr) if attr == "task_context"));
     }
 
-    // ------------------------------------------------------------------
-    // Config create_or_update field
-    // ------------------------------------------------------------------
-
     #[test]
     fn test_config_create_or_update_default() {
         let config = super::super::config::Produce::default();
@@ -1031,10 +1015,6 @@ mod tests {
         let deserialized: super::super::config::Produce = serde_json::from_str(&json).unwrap();
         assert!(deserialized.create_or_update);
     }
-
-    // ------------------------------------------------------------------
-    // message_key id fallback
-    // ------------------------------------------------------------------
 
     #[test]
     fn test_murmur2_matches_the_java_client() {

@@ -27,8 +27,6 @@ pub use super::protocol::completions::{
     SSE_DONE, TOOL_TYPE_FUNCTION,
 };
 
-// --- Task configuration ---
-
 /// LLM proxy protocol shape.
 ///
 /// Determines the URL layout the AI gateway server mounts for this task. The
@@ -133,8 +131,6 @@ pub struct Processor {
 
 impl ConfigExt for Processor {}
 
-// --- Pipeline event payload ---
-
 /// Payload the AI gateway server writes into `event.data` before
 /// dispatching an incoming request into the flow pipeline.
 ///
@@ -176,8 +172,6 @@ pub struct EventPayload<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- Processor config deserialization ---
 
     #[test]
     fn processor_deser_minimal() {

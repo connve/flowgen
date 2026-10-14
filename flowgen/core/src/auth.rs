@@ -25,6 +25,24 @@ pub struct UserContext {
     pub claims: HashMap<String, serde_json::Value>,
 }
 
+/// A verified user and their token, carried by events so tasks can act on their behalf.
+#[derive(Debug)]
+pub struct UserSession {
+    pub user: UserContext,
+    /// The bearer token they presented, when forwarded.
+    pub token: Option<secrecy::SecretString>,
+}
+
+impl UserSession {
+    /// A session for `user`, verified by the bearer `token`.
+    pub fn with_token(user: UserContext, token: &str) -> Self {
+        Self {
+            user,
+            token: Some(secrecy::SecretString::from(token)),
+        }
+    }
+}
+
 /// Auth provider errors.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -80,6 +98,27 @@ pub enum AuthError {
 pub trait AuthProvider: std::fmt::Debug + Send + Sync + 'static {
     /// Validate a bearer token and extract user context.
     async fn validate(&self, token: &str) -> Result<UserContext, AuthError>;
+}
+
+/// Test helpers for crates that verify users.
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing {
+    /// Accepts the token `t1` as user `u1` and rejects any other.
+    #[derive(Debug)]
+    pub struct KnownToken;
+
+    #[async_trait::async_trait]
+    impl super::AuthProvider for KnownToken {
+        async fn validate(&self, token: &str) -> Result<super::UserContext, super::AuthError> {
+            match token {
+                "t1" => Ok(super::UserContext {
+                    user_id: "u1".to_string(),
+                    claims: Default::default(),
+                }),
+                _ => Err(super::AuthError::NoToken),
+            }
+        }
+    }
 }
 
 /// Auth provider configuration (deserialized from worker YAML).

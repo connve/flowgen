@@ -18,6 +18,8 @@ const SECTION_LABELS: Record<string, string> = {
 	git: 'Flowgen Git',
 	gcp: 'Flowgen Google Cloud',
 	http: 'Flowgen HTTP',
+	kafka: 'Flowgen Kafka',
+	mongodb: 'Flowgen MongoDB',
 	mssql: 'Flowgen MSSQL',
 	nats: 'Flowgen NATS JetStream',
 	'object-store': 'Flowgen Object Store',

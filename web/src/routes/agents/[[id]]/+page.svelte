@@ -582,8 +582,8 @@
 									></span>
 								{/if}
 								<span
-									class="tooltip tooltip-right block w-full truncate before:max-w-xs before:whitespace-normal before:break-words"
-									data-tip={c.title}>{c.title}</span>
+									class="tooltip tooltip-right block w-full before:max-w-xs before:whitespace-normal before:break-words"
+									data-tip={c.title}><span class="block truncate">{c.title}</span></span>
 								<span class="text-xs opacity-50">{formatRelative(c.updatedAt)}</span>
 							</button>
 							<div
@@ -635,8 +635,8 @@
 				<a href="{base}/agents" class="shrink-0 hover:text-primary">{m.agents_breadcrumb()}</a>
 				<span class="shrink-0 opacity-40">/</span>
 				<span
-					class="tooltip tooltip-bottom truncate before:max-w-xs before:whitespace-normal before:break-words"
-					data-tip={activeTitle}>{activeTitle}</span>
+					class="tooltip tooltip-bottom min-w-0 before:max-w-xs before:whitespace-normal before:break-words"
+					data-tip={activeTitle}><span class="block truncate">{activeTitle}</span></span>
 			</div>
 
 			<div class="dropdown">

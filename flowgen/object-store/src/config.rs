@@ -85,7 +85,6 @@ pub struct Processor {
     /// Object store operation to perform.
     pub operation: Operation,
 
-    // --- Shared fields (read, write, list) ---
     /// Path to the object store location.
     /// Required for read, write, and list operations.
     #[serde(default)]
@@ -95,7 +94,6 @@ pub struct Processor {
     /// Additional client connection options.
     pub client_options: Option<HashMap<String, String>>,
 
-    // --- Read-specific fields ---
     /// Number of records to process in each batch (read only).
     pub batch_size: Option<usize>,
     /// Whether the input data has a header row (read only).
@@ -105,20 +103,17 @@ pub struct Processor {
     /// Delete the file after successfully reading it (read only).
     pub delete_after_read: Option<bool>,
 
-    // --- Write-specific fields ---
     /// Output format for the data, defaults to Auto (write only).
     #[serde(default)]
     pub format: WriteFormat,
     /// Hive-style partitioning configuration (write only).
     pub hive_partition_options: Option<HivePartitionOptions>,
 
-    // --- List-specific fields ---
     /// Recursively list files in nested subdirectories (list only).
     /// Defaults to false (single level).
     #[serde(default)]
     pub recursive: bool,
 
-    // --- Move-specific fields ---
     /// Source path pattern with wildcard support (move only).
     /// Ignored if source_files is provided.
     #[serde(default)]
@@ -131,7 +126,6 @@ pub struct Processor {
     /// Destination path for moved files (move only).
     pub destination: Option<PathBuf>,
 
-    // --- Common optional fields ---
     /// Optional list of upstream task names this task depends on.
     /// When set, this task only receives events from the named tasks.
     /// When not set, the task receives from the previous task in the list (linear chain).

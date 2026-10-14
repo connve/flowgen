@@ -154,10 +154,6 @@ impl Dispatcher for AiGatewayDispatcher {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Dispatcher entry points
-// ---------------------------------------------------------------------------
-
 /// Compact OpenAI-compatible response for `GET <path>/models`.
 #[derive(Serialize)]
 struct ModelsResponse {
@@ -361,17 +357,13 @@ async fn dispatch_messages(
     dispatch::<MessagesAdapter>(ctx, &payload, request.stream, true).await
 }
 
-// ---------------------------------------------------------------------------
-// Shared dispatch skeleton
-// ---------------------------------------------------------------------------
-
 /// Everything the generic dispatcher needs to know about a resolved
 /// request: the target registration and the caller's user identity
 /// (when auth is enabled). Built once by `resolve_registration` and
 /// consumed by `dispatch::<Adapter>`.
 struct DispatchContext {
     registration: LlmProxyRegistration,
-    user_context: Option<flowgen_core::auth::UserContext>,
+    session: Option<Arc<flowgen_core::auth::UserSession>>,
 }
 
 /// Per-request state passed from `dispatch<A>` into the blocking /
@@ -385,6 +377,7 @@ struct DispatchRequest<'a> {
     created: i64,
     include_usage: bool,
     gateway_ctx: &'a crate::meta::GatewayContext,
+    session: Option<Arc<flowgen_core::auth::UserSession>>,
 }
 
 /// Look up the registration by name, enforce the URL/protocol guard,
@@ -432,14 +425,14 @@ async fn resolve_registration(
         return Err(Box::new(e.into_response()));
     }
 
-    let user_context = match validate_user_auth(&registration, headers).await {
-        Ok(ctx) => ctx,
+    let session = match validate_user_auth(&registration, headers).await {
+        Ok(session) => session.map(Arc::new),
         Err(e) => return Err(Box::new(e.into_response())),
     };
 
     Ok(DispatchContext {
         registration,
-        user_context,
+        session,
     })
 }
 
@@ -506,8 +499,8 @@ async fn dispatch<A: ProtocolAdapter>(
     };
 
     let mut meta = serde_json::Map::new();
-    if let Some(ref uctx) = ctx.user_context {
-        match serde_json::to_value(uctx) {
+    if let Some(session) = &ctx.session {
+        match serde_json::to_value(&session.user) {
             Ok(value) => {
                 meta.insert(flowgen_core::auth::AUTH.to_string(), value);
             }
@@ -523,7 +516,10 @@ async fn dispatch<A: ProtocolAdapter>(
         proxy_name: ctx.registration.config.name.clone(),
         requested_model: downstream_model.clone(),
         stream: is_stream,
-        user_id: ctx.user_context.as_ref().map(|u| u.user_id.clone()),
+        user_id: ctx
+            .session
+            .as_ref()
+            .map(|session| session.user.user_id.clone()),
     };
     gateway_ctx.insert_into(&mut meta);
 
@@ -539,6 +535,7 @@ async fn dispatch<A: ProtocolAdapter>(
         created: chrono::Utc::now().timestamp(),
         include_usage,
         gateway_ctx: &gateway_ctx,
+        session: ctx.session,
     };
 
     let run_span = tracing::info_span!(
@@ -572,10 +569,6 @@ async fn dispatch<A: ProtocolAdapter>(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Auth helpers
-// ---------------------------------------------------------------------------
 
 /// Validates endpoint-level credentials (bearer/basic) on the request.
 fn validate_endpoint_auth(
@@ -622,15 +615,15 @@ fn validate_endpoint_auth(
     Err(DispatchError::InvalidCredentials)
 }
 
-/// Validates user-level auth via the worker auth provider when
-/// `config.auth.required` is true.
+/// Validates user-level auth via the worker auth provider; when not
+/// required, a valid bearer still identifies the user.
 async fn validate_user_auth(
     registration: &LlmProxyRegistration,
     headers: &HeaderMap,
-) -> Result<Option<flowgen_core::auth::UserContext>, DispatchError> {
+) -> Result<Option<flowgen_core::auth::UserSession>, DispatchError> {
     match &registration.config.auth {
         Some(config) if config.required => {}
-        _ => return Ok(None),
+        _ => return Ok(optional_user(registration, headers).await),
     }
 
     let provider = registration
@@ -645,16 +638,31 @@ async fn validate_user_auth(
 
     let token = extract_bearer_token(auth_header).ok_or(DispatchError::MalformedCredentials)?;
 
-    provider
-        .validate(token)
-        .await
-        .map(Some)
-        .map_err(|_| DispatchError::InvalidCredentials)
+    match provider.validate(token).await {
+        Ok(user) => Ok(Some(flowgen_core::auth::UserSession::with_token(
+            user, token,
+        ))),
+        Err(_) => Err(DispatchError::InvalidCredentials),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch implementations
-// ---------------------------------------------------------------------------
+/// The user a bearer the auth provider accepts belongs to; none when the proxy
+/// has its own credentials, since the bearer is then its key.
+async fn optional_user(
+    registration: &LlmProxyRegistration,
+    headers: &HeaderMap,
+) -> Option<flowgen_core::auth::UserSession> {
+    let provider = match (&registration.auth_provider, &registration.credentials) {
+        (Some(provider), None) => provider,
+        _ => return None,
+    };
+    let auth_header = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = extract_bearer_token(auth_header)?;
+    match provider.validate(token).await {
+        Ok(user) => Some(flowgen_core::auth::UserSession::with_token(user, token)),
+        Err(_) => None,
+    }
+}
 
 /// Non-streaming dispatch: send event, await leaf completion, hand
 /// off to the adapter to shape the wire response.
@@ -664,13 +672,17 @@ async fn dispatch_blocking<A: ProtocolAdapter>(
 ) -> Result<Response, DispatchError> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
-    let e = EventBuilder::new()
+    let mut builder = EventBuilder::new()
         .data(EventData::Json(request.data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
         .completion_tx(completion_state)
-        .meta_merge(request.meta)
+        .meta_merge(request.meta);
+    if let Some(session) = request.session {
+        builder = builder.session(session);
+    }
+    let e = builder
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;
 
@@ -783,6 +795,7 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         created,
         include_usage,
         gateway_ctx,
+        session,
     } = request;
 
     let correlation_id = uuid::Uuid::now_v7().to_string();
@@ -807,13 +820,17 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
 
     let (completion_state_tx, completion_rx) = new_completion_channel(registration.leaf_count);
 
-    let e = EventBuilder::new()
+    let mut builder = EventBuilder::new()
         .data(EventData::Json(data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
         .meta_merge(meta)
-        .completion_tx(completion_state_tx)
+        .completion_tx(completion_state_tx);
+    if let Some(session) = session {
+        builder = builder.session(session);
+    }
+    let e = builder
         .build()
         .map_err(|source| DispatchError::EventBuilder { source })?;
 
@@ -1007,10 +1024,6 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         .body(Body::from_stream(stream))
         .map_err(|_| DispatchError::FlowCompletionFailed)
 }
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
 
 /// Errors raised by the dispatcher path. Implements `IntoResponse` for HTTP
 /// status mapping.

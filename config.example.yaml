@@ -152,6 +152,11 @@ http_server:
 #     # persist indefinitely. Long-term history belongs in a database via a
 #     # persistence flow, not this cache.
 #     conversation_history_ttl: 30d
+#     # Call the AI gateway as the signed-in user, with their login token as
+#     # the bearer (default false). Needs web.auth, and the gateway's auth
+#     # provider must accept the token. Replaces any Authorization header in
+#     # web.headers.
+#     # on_behalf_of_user: true
 #   # HTTP headers sent with every outbound request the web server makes
 #   # (currently the Agents chat proxy to the AI gateway). Identifies this
 #   # web server to llm_proxy/mcp_tool `headers` scoping.

@@ -15,8 +15,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
-// --- Configuration ---
-
 /// Default NATS server URL function for serde.
 fn default_nats_url() -> String {
     crate::client::DEFAULT_NATS_URL.to_string()
@@ -179,8 +177,6 @@ pub struct DeleteResult {
     /// Key that was deleted.
     pub key: String,
 }
-
-// --- Errors ---
 
 /// Errors that can occur during KV store processing.
 #[derive(thiserror::Error, Debug)]
@@ -370,8 +366,6 @@ where
     }
     Ok(keys)
 }
-
-// --- Event Handler ---
 
 /// Event handler for KV store operations.
 pub struct EventHandler {
@@ -609,8 +603,6 @@ impl EventHandler {
     }
 }
 
-// --- Processor / Runner ---
-
 /// NATS KV store processor.
 #[derive(Debug)]
 pub struct Processor {
@@ -823,8 +815,6 @@ impl ProcessorBuilder {
 mod tests {
     use super::*;
 
-    // --- Config deserialization ---
-
     #[test]
     fn config_deser_minimal() {
         let json = r#"{
@@ -942,8 +932,6 @@ mod tests {
         assert_eq!(cfg, back);
     }
 
-    // --- Operation enum ---
-
     #[test]
     fn operation_default_is_put() {
         assert_eq!(Operation::default(), Operation::Put);
@@ -963,8 +951,6 @@ mod tests {
             assert_eq!(back, variant);
         }
     }
-
-    // --- Result struct serialization ---
 
     #[test]
     fn get_result_found_serializes() {

@@ -304,6 +304,22 @@ fn router(path: &str, mut state: WebState) -> Router {
         .route(&format!("{api_prefix}/flows/{{*path}}"), get(get_flow))
         .route(&format!("{api_prefix}/logs"), get(list_logs))
         .route(&format!("{api_prefix}/logs/stream"), get(stream_logs))
+        .route(
+            &format!("{api_prefix}/connections"),
+            get(crate::connections::list_connections),
+        )
+        .route(
+            &format!("{api_prefix}/connections/{{id}}"),
+            get(crate::connections::get_connection),
+        )
+        .route(
+            &format!("{api_prefix}/connectors"),
+            get(crate::connections::list_connectors),
+        )
+        .route(
+            &format!("{api_prefix}/connectors/{{name}}/icon"),
+            get(crate::connections::connector_icon),
+        )
         .route(&format!("{api_prefix}/cluster"), get(get_cluster_status))
         .route(
             &format!("{api_prefix}/cluster/token"),
@@ -362,8 +378,6 @@ fn router(path: &str, mut state: WebState) -> Router {
         .with_state(state)
 }
 
-// --- Web UI OIDC login --------------------------------------------------
-//
 // No server-side session store (see `crate::login`): the browser's cookie
 // *is* the session, encrypted with `WebState::cookie_key` so it can't be
 // read or forged client-side. Two cookies, both `HttpOnly; Secure;
@@ -762,6 +776,12 @@ async fn auth_middleware(
         Some(resolved) => {
             let user = resolved.session.user.clone();
             request.extensions_mut().insert(Caller::User(user.clone()));
+            request
+                .extensions_mut()
+                .insert(Arc::new(flowgen_core::auth::UserSession::with_token(
+                    user.clone(),
+                    &resolved.session.id_token,
+                )));
             request.extensions_mut().insert(user);
             let mut response = next.run(request).await;
             if let Some(jar) = resolved.refreshed {
@@ -1342,6 +1362,7 @@ fn outbound_gateway_headers(state: &WebState) -> reqwest::header::HeaderMap {
 /// publicly reachable.
 async fn proxy_chat(
     State(state): State<Arc<WebState>>,
+    session: Option<axum::Extension<Arc<flowgen_core::auth::UserSession>>>,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let Some(base) = gateway_base_url(&state) else {
@@ -1351,10 +1372,35 @@ async fn proxy_chat(
         )
             .into_response();
     };
+    let mut headers = outbound_gateway_headers(&state);
+    if let (
+        Some(crate::config::AgentsOptions {
+            on_behalf_of_user: true,
+            ..
+        }),
+        Some(axum::Extension(session)),
+    ) = (&state.agents, session)
+    {
+        if let Some(token) = &session.token {
+            use secrecy::ExposeSecret;
+            match reqwest::header::HeaderValue::from_str(&format!(
+                "Bearer {}",
+                token.expose_secret()
+            )) {
+                Ok(mut value) => {
+                    value.set_sensitive(true);
+                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                }
+                Err(source) => {
+                    warn!(error = %source, "Failed to forward the user's token to the AI gateway");
+                }
+            }
+        }
+    }
     let upstream = reqwest::Client::new()
         .post(format!("{base}/chat/completions"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .headers(outbound_gateway_headers(&state))
+        .headers(headers)
         .body(body)
         .send()
         .await;
@@ -1421,8 +1467,6 @@ async fn proxy_models(State(state): State<Arc<WebState>>) -> axum::response::Res
     }
 }
 
-// --- Built-in Agents conversation history -------------------------------
-//
 // Persistence for the web UI's Agents chat. The gateway proxy stays
 // stateless; conversation memory is our UI's domain and lives in the
 // configured system cache (see `WebState::conversation_cache`), out of
@@ -2524,12 +2568,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_agents_chat_sends_the_users_token_only_when_told_to() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let gateway = serve(Router::new().route(
+            "/chat/completions",
+            post(move |headers: HeaderMap| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    let header = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .map(|value| value.to_str().unwrap().to_string());
+                    recorded.lock().unwrap().push(header);
+                    "{}"
+                }
+            }),
+        ))
+        .await;
+        let session = Arc::new(flowgen_core::auth::UserSession {
+            user: flowgen_core::auth::UserContext {
+                user_id: "u1".to_string(),
+                claims: Default::default(),
+            },
+            token: Some(secrecy::SecretString::from("id-token")),
+        });
+        let chat = |on_behalf_of_user: bool| {
+            let mut state = test_state();
+            state.app_config = Arc::new(crate::config::AppConfig {
+                web: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "enabled": true,
+                        "ai_gateway_url": gateway.clone(),
+                    }))
+                    .unwrap(),
+                ),
+                ..(*state.app_config).clone()
+            });
+            state.agents = Some(crate::config::AgentsOptions {
+                enabled: true,
+                conversation_history_ttl: None,
+                on_behalf_of_user,
+            });
+            proxy_chat(
+                State(Arc::new(state)),
+                Some(axum::Extension(Arc::clone(&session))),
+                axum::body::Bytes::from_static(b"{}"),
+            )
+        };
+
+        chat(false).await;
+        chat(true).await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("Bearer id-token".to_string())]
+        );
+    }
+
+    #[tokio::test]
     async fn agents_routes_answer_404_unless_web_agents_is_enabled() {
         let off = serve(router("/flowgen", test_state())).await;
         let mut state = test_state();
         state.agents = Some(crate::config::AgentsOptions {
             enabled: true,
             conversation_history_ttl: None,
+            on_behalf_of_user: false,
         });
         let on = serve(router("/flowgen", state)).await;
 
@@ -2596,6 +2699,7 @@ mod tests {
                 flow_tags: Vec::new(),
                 require_leader_election: false,
                 task_count: 1,
+                connections: Vec::new(),
                 started_at: std::time::SystemTime::now(),
                 flow_yaml: String::new(),
                 cancellation_token: tokio_util::sync::CancellationToken::new(),

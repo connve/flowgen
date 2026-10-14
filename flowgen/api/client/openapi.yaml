@@ -197,6 +197,86 @@ paths:
               schema:
                 type: string
 
+  /api/connections:
+    get:
+      operationId: listConnections
+      summary: External systems the loaded flows connect to, with their status.
+      description: |
+        One entry per connector and credentials file, gathered from the loaded
+        flows' task configs and from `ai_completion` MCP servers. Status comes
+        from the latest log records of the tasks using it.
+      tags: [connections]
+      responses:
+        "200":
+          description: Connections sorted by connector, then credentials file.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Connection"
+
+  /api/connections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getConnection
+      summary: Fetch one connection.
+      tags: [connections]
+      responses:
+        "200":
+          description: The connection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connection"
+        "404":
+          description: No loaded flow uses a connection with that id.
+
+  /api/connectors:
+    get:
+      operationId: listConnectors
+      summary: Every connector with the task types its crate declares.
+      tags: [connections]
+      responses:
+        "200":
+          description: Connectors sorted by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Connector"
+
+  /api/connectors/{name}/icon:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getConnectorIcon
+      summary: The connector's logo, as declared by its crate.
+      tags: [connections]
+      responses:
+        "200":
+          description: An SVG or PNG image.
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No connector with that name.
+
   /api/cluster:
     get:
       operationId: getClusterStatus
@@ -888,6 +968,57 @@ paths:
 
 components:
   schemas:
+    Connection:
+      type: object
+      required: [id, connector, targets, perEvent, onBehalfOfUser, flows, status]
+      properties:
+        id:
+          type: string
+          description: Stable id derived from the connector and credentials file.
+        connector:
+          type: string
+          description: The connector of the task types using it, such as `salesforce`, or `mcp` for an `ai_completion` MCP server.
+        credentialsPath:
+          type: string
+          description: The credentials file; absent when the config sets none.
+        account:
+          type: string
+          description: The account or instance the credentials file points to, such as a Salesforce org host or a service account email.
+        targets:
+          type: array
+          description: Where its tasks connect, from their configs, such as hosts or an AI provider and model.
+          items:
+            type: string
+        perEvent:
+          type: boolean
+          description: Whether a task sets the target or the credentials per event.
+        onBehalfOfUser:
+          type: boolean
+          description: Whether a task calls it as the signed-in user, with their token.
+        flows:
+          type: array
+          description: Identities of the flows using it.
+          items:
+            type: string
+        status:
+          $ref: "#/components/schemas/FlowStatus"
+
+    Connector:
+      type: object
+      required: [name, label, taskTypes]
+      properties:
+        name:
+          type: string
+          description: Such as `salesforce`.
+        label:
+          type: string
+          description: Display name, such as `Salesforce`.
+        taskTypes:
+          type: array
+          description: YAML tags of its task types, such as `salesforce_restapi_search`.
+          items:
+            type: string
+
     FlowSummary:
       type: object
       description: Registry entry combined with tracing-derived counters.

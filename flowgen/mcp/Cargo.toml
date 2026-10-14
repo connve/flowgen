@@ -29,8 +29,11 @@ handlebars = { workspace = true }
 tokio-stream = { workspace = true }
 humantime-serde = { workspace = true }
 humantime = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
+flowgen_core = { path = "../core", features = ["test-util"] }
+secrecy = { workspace = true }
 http-body-util = "0.1"
 tower = { workspace = true }
 reqwest = { workspace = true }

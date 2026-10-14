@@ -154,6 +154,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * External systems the loaded flows connect to, with their status.
+         * @description One entry per connector and credentials file, gathered from the loaded
+         *     flows' task configs and from `ai_completion` MCP servers. Status comes
+         *     from the latest log records of the tasks using it.
+         */
+        get: operations["listConnections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/connections/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Fetch one connection. */
+        get: operations["getConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every connector with the task types its crate declares. */
+        get: operations["listConnectors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/connectors/{name}/icon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        /** The connector's logo, as declared by its crate. */
+        get: operations["getConnectorIcon"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/cluster": {
         parameters: {
             query?: never;
@@ -678,6 +755,33 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Connection: {
+            /** @description Stable id derived from the connector and credentials file. */
+            id: string;
+            /** @description The connector of the task types using it, such as `salesforce`, or `mcp` for an `ai_completion` MCP server. */
+            connector: string;
+            /** @description The credentials file; absent when the config sets none. */
+            credentialsPath?: string;
+            /** @description The account or instance the credentials file points to, such as a Salesforce org host or a service account email. */
+            account?: string;
+            /** @description Where its tasks connect, from their configs, such as hosts or an AI provider and model. */
+            targets: string[];
+            /** @description Whether a task sets the target or the credentials per event. */
+            perEvent: boolean;
+            /** @description Whether a task calls it as the signed-in user, with their token. */
+            onBehalfOfUser: boolean;
+            /** @description Identities of the flows using it. */
+            flows: string[];
+            status: components["schemas"]["FlowStatus"];
+        };
+        Connector: {
+            /** @description Such as `salesforce`. */
+            name: string;
+            /** @description Display name, such as `Salesforce`. */
+            label: string;
+            /** @description YAML tags of its task types, such as `salesforce_restapi_search`. */
+            taskTypes: string[];
+        };
         /** @description Registry entry combined with tracing-derived counters. */
         FlowSummary: {
             /**
@@ -1199,6 +1303,105 @@ export interface operations {
                 content: {
                     "text/event-stream": string;
                 };
+            };
+        };
+    };
+    listConnections: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connections sorted by connector, then credentials file. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"][];
+                };
+            };
+        };
+    };
+    getConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The connection. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description No loaded flow uses a connection with that id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listConnectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connectors sorted by name. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connector"][];
+                };
+            };
+        };
+    };
+    getConnectorIcon: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description An SVG or PNG image. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/svg+xml": string;
+                    "image/png": string;
+                };
+            };
+            /** @description No connector with that name. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

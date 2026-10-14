@@ -12,8 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// --- OpenAI protocol constants ---
-
 /// OpenAI object type for non-streaming responses.
 pub const OBJECT_CHAT_COMPLETION: &str = "chat.completion";
 /// OpenAI object type for streaming chunks.
@@ -32,8 +30,6 @@ pub const FINISH_REASON_TOOL_CALLS: &str = "tool_calls";
 pub const TOOL_TYPE_FUNCTION: &str = "function";
 /// SSE terminator per OpenAI streaming specification.
 pub const SSE_DONE: &str = "data: [DONE]\n\n";
-
-// --- OpenAI request types ---
 
 /// OpenAI chat completion request body.
 #[derive(Debug, Clone, Deserialize)]
@@ -219,8 +215,6 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
-// --- OpenAI response types (non-streaming) ---
-
 /// OpenAI chat completion response.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatCompletionResponse {
@@ -306,8 +300,6 @@ pub struct Usage {
     /// Total tokens used.
     pub total_tokens: u64,
 }
-
-// --- OpenAI streaming types ---
 
 /// OpenAI streaming chunk sent as an SSE event.
 #[derive(Debug, Clone, Serialize)]
@@ -569,10 +561,6 @@ pub struct ToolCallDeltaFunction {
     pub arguments: String,
 }
 
-// ---------------------------------------------------------------------------
-// Protocol adapter
-// ---------------------------------------------------------------------------
-
 use super::{ProtocolAdapter, StopReason, StreamWriter};
 use axum::response::{IntoResponse, Response};
 
@@ -764,8 +752,6 @@ impl StreamWriter for OpenAiStreamWriter {
 mod tests {
     use super::*;
 
-    // --- ChatCompletionRequest deserialization ---
-
     #[test]
     fn chat_request_deser_minimal() {
         let json = r#"{
@@ -847,8 +833,6 @@ mod tests {
         assert!(!req.stream);
     }
 
-    // --- Message helpers ---
-
     #[test]
     fn message_assistant_factory() {
         let msg = Message::assistant("Hello there".to_string());
@@ -879,8 +863,6 @@ mod tests {
         let assistant = Message::assistant("asst msg".to_string());
         assert!(!assistant.is_system());
     }
-
-    // --- ChatCompletionResponse::new ---
 
     #[test]
     fn chat_response_new_structure() {
@@ -917,8 +899,6 @@ mod tests {
         assert_eq!(v["choices"][0]["message"]["content"], "ok");
     }
 
-    // --- ChatCompletionChunk factories ---
-
     #[test]
     fn chunk_content_structure() {
         let chunk = ChatCompletionChunk::content("id-1", 1700000000, "gpt-4", "Hello".to_string());
@@ -951,8 +931,6 @@ mod tests {
         assert_eq!(chunk.choices[0].delta.content, None);
         assert_eq!(chunk.choices[0].finish_reason, Some(FINISH_REASON_STOP));
     }
-
-    // --- StreamWriter::tool_step ---
 
     #[test]
     fn tool_step_emits_tool_call_delta_without_terminating_turn() {
@@ -995,8 +973,6 @@ mod tests {
         assert_eq!(open2["choices"][0]["delta"]["tool_calls"][0]["index"], 1);
     }
 
-    // --- to_sse formatting ---
-
     #[test]
     fn to_sse_format() {
         let chunk = ChatCompletionChunk::content("id-1", 1700000000, "gpt-4", "Hi".to_string());
@@ -1013,8 +989,6 @@ mod tests {
     fn sse_done_sentinel() {
         assert_eq!(SSE_DONE, "data: [DONE]\n\n");
     }
-
-    // --- Delta skip_serializing_if ---
 
     #[test]
     fn delta_skips_none_fields() {
@@ -1038,8 +1012,6 @@ mod tests {
         let v = serde_json::to_value(&delta).unwrap();
         assert!(v.as_object().unwrap().is_empty());
     }
-
-    // --- Tool-use passthrough types ---
 
     #[test]
     fn chat_request_deser_with_tools() {
@@ -1106,8 +1078,6 @@ mod tests {
         assert!(msg.tool_calls.is_empty());
     }
 
-    // --- stream_options / include_usage ---
-
     #[test]
     fn chat_request_deser_without_stream_options_defaults_to_none() {
         let json = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
@@ -1134,8 +1104,6 @@ mod tests {
         assert!(!opts.include_usage);
     }
 
-    // --- Usage deserialization (leaf → gateway path) ---
-
     #[test]
     fn usage_roundtrip() {
         let usage = Usage {
@@ -1149,8 +1117,6 @@ mod tests {
         assert_eq!(back.completion_tokens, 7);
         assert_eq!(back.total_tokens, 49);
     }
-
-    // --- ChatCompletionChunk usage frame ---
 
     #[test]
     fn chunk_usage_frame_carries_usage_and_no_choices() {

@@ -230,10 +230,6 @@ fn base_config(url: &str, clone_path: PathBuf) -> GitSyncConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Baseline: clone, walk, emit one FileEvent per file with the HEAD commit.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn git_sync_emits_one_event_per_file_with_head_commit() {
     let repo = TestRepo::new();
@@ -298,10 +294,6 @@ async fn git_sync_emits_one_event_per_file_with_head_commit() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scoped scan: `path:` scopes the walker to a subdirectory.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn git_sync_only_emits_files_under_the_configured_path() {
     let repo = TestRepo::new();
@@ -341,10 +333,6 @@ async fn git_sync_only_emits_files_under_the_configured_path() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// HEAD-commit cache: unchanged commit skips the file walk entirely.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn git_sync_skips_the_file_walk_when_head_matches_last_sync() {
     let repo = TestRepo::new();
@@ -369,10 +357,6 @@ async fn git_sync_skips_the_file_walk_when_head_matches_last_sync() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// force_pull: bypass the HEAD cache and re-emit even when nothing changed.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn git_sync_force_pull_reemits_even_when_head_is_unchanged() {
     let repo = TestRepo::new();
@@ -394,10 +378,6 @@ async fn git_sync_force_pull_reemits_even_when_head_is_unchanged() {
         "force_pull must bypass the HEAD cache and re-emit files",
     );
 }
-
-// ---------------------------------------------------------------------------
-// New commit: fetch propagates and the new commit hash lands on the events.
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
@@ -452,10 +432,6 @@ async fn git_sync_reemits_with_new_commit_when_upstream_advances() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// SSH URL: rejected up front so operators cannot misconfigure the task.
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn git_sync_rejects_ssh_url_before_touching_the_network() {

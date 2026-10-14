@@ -4,6 +4,8 @@
 //! Implements the MCP spec (2025-03-26) with JSON-RPC 2.0 over a single POST endpoint
 //! that returns SSE streams for real-time progress and results.
 
+use flowgen_core::task::meta::{Connector, Icon, TaskMeta};
+
 /// Shared completion-source primitives for prompts and resource templates.
 pub mod completion;
 /// MCP tool task configuration.
@@ -18,3 +20,23 @@ pub mod resource;
 pub mod server;
 
 pub use config::Processor;
+
+/// The connector of this crate's task types and of the MCP servers agents call.
+pub const CONNECTOR: Connector = Connector {
+    name: "mcp",
+    label: "MCP",
+    icon: Icon::Svg(include_str!("../icons/mcp.svg")),
+    describe_credentials: None,
+};
+
+impl TaskMeta for config::Processor {
+    const CONNECTOR: Connector = CONNECTOR;
+}
+
+impl TaskMeta for prompt::config::Processor {
+    const CONNECTOR: Connector = CONNECTOR;
+}
+
+impl TaskMeta for resource::config::Processor {
+    const CONNECTOR: Connector = CONNECTOR;
+}

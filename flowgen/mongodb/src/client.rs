@@ -2,7 +2,7 @@ use mongodb::{options::ClientOptions, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Default MongoDB host.
 pub const DEFAULT_MONGO_HOST: &str = "localhost";
@@ -134,7 +134,7 @@ pub struct MongoCredentials {
 }
 
 impl MongoCredentials {
-    pub fn from_file(path: &PathBuf) -> Result<Self, Error> {
+    pub fn from_file(path: &Path) -> Result<Self, Error> {
         let content =
             fs::read_to_string(path).map_err(|source| Error::CredentialsFileRead { source })?;
 
@@ -168,6 +168,14 @@ impl MongoCredentials {
             uri.push_str(&query);
         }
         Ok(uri)
+    }
+
+    /// The hosts it connects to, without user info.
+    pub fn authority(&self) -> String {
+        match self.scheme.as_deref() {
+            Some(scheme) => self.build_authority(scheme),
+            None => self.build_authority(DEFAULT_MONGO_SCHEME),
+        }
     }
 
     /// Renders the host segment: one host, or a comma-joined seed list.

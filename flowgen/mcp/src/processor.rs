@@ -39,6 +39,12 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Invalid input_schema at '{location}': {source}")]
+    InputSchema {
+        location: String,
+        #[source]
+        source: Box<jsonschema::ValidationError<'static>>,
+    },
     #[error("Failed to register MCP tool: {source}")]
     ToolRegistration {
         #[source]
@@ -153,6 +159,16 @@ impl Runner for Processor {
             )
         })?;
 
+        let input_validator = match &event_handler.config.input_schema {
+            serde_json::Value::Null => None,
+            schema => Some(Arc::new(jsonschema::validator_for(schema).map_err(
+                |source| Error::InputSchema {
+                    location: source.instance_path().to_string(),
+                    source: Box::new(source),
+                },
+            )?)),
+        };
+
         super::server::register_tool(
             self.mcp_server.as_ref(),
             tool_name.clone(),
@@ -160,6 +176,7 @@ impl Runner for Processor {
                 flow_name: self.task_context.flow.identity().to_string(),
                 description: event_handler.config.description.clone(),
                 input_schema: event_handler.config.input_schema.clone(),
+                input_validator,
                 tx: tool_tx,
                 credentials,
                 ack_timeout: event_handler.config.ack_timeout,

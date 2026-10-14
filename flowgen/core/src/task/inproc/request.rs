@@ -90,6 +90,7 @@ impl EventHandler {
                 &config.flow,
                 data,
                 meta,
+                event.session.clone(),
             )
             .await?;
 
@@ -103,6 +104,9 @@ impl EventHandler {
             .task_type(self.task_type);
         if let Some(meta) = &event.meta {
             builder = builder.meta_merge(meta.clone());
+        }
+        if let Some(session) = &event.session {
+            builder = builder.session(Arc::clone(session));
         }
         let mut e = builder
             .build()

@@ -87,6 +87,12 @@ pub enum Error {
     },
     #[error("Failed to connect to MCP server at {url}: {reason}")]
     McpConnection { url: String, reason: String },
+    #[error("MCP server {url} cannot set both on_behalf_of_user and credentials_path")]
+    McpUserCredentials { url: String },
+    #[error("MCP server {url} needs a signed-in user")]
+    McpUserRequired { url: String },
+    #[error("MCP server {url} rejected the signed-in user's token")]
+    McpUserUnauthorized { url: String },
     #[error("Invalid Authorization header for MCP server at {url}: {source}")]
     McpAuthHeader {
         url: String,
@@ -107,10 +113,6 @@ pub enum Error {
         #[source]
         source: http::header::InvalidHeaderValue,
     },
-    #[error(
-        "Client registry type mismatch — same provider/model/credentials key used with incompatible client types"
-    )]
-    ClientRegistryMismatch,
     #[error("Event data error: {source}")]
     Event {
         #[source]
@@ -224,86 +226,61 @@ pub struct Credentials {
     pub region: Option<String>,
 }
 
-/// One live MCP server connection plus the credentials used to establish
-/// it. Kept together so a later refresh check can tell whether the
-/// `Authorization` header has changed since `service` was connected.
+/// One live MCP server connection plus the credentials used to establish it.
 struct McpServerConnection {
     url: String,
-    /// `None` when the server has no `credentials_path` — never needs refresh.
+    /// `None` unless the server uses OAuth 2.0 client credentials, the only
+    /// static credentials whose token rotates.
     creds: Option<flowgen_core::credentials::HttpCredentials>,
-    /// Static headers from config, merged with the auth header on (re)connect.
-    static_headers: std::collections::HashMap<http::HeaderName, http::HeaderValue>,
-    /// Header value active on `service` at connect time, for change detection.
+    on_behalf_of_user: bool,
+    /// Header value the connection was opened with, for change detection.
     active_header: Option<String>,
-    service: rmcp::service::RunningService<rmcp::service::RoleClient, McpClientHandler>,
+    _service: rmcp::service::RunningService<rmcp::service::RoleClient, McpClientHandler>,
 }
 
 /// Tool server handle plus the `RunningService` connections backing it. The
 /// services must stay alive as long as tools are used — dropping a service
-/// closes its connection.
-///
-/// `connections` is behind a `Mutex` (rather than stored as a plain `Vec` at
-/// init time) because OAuth 2.0 client-credentials tokens expire while these
-/// connections are held open for the processor's entire lifetime;
-/// [`McpTools::ensure_fresh`] reconnects any server whose token has rotated.
+/// closes its connection. Never reconnected in place: rmcp bakes the
+/// `Authorization` header in at connect time and reconnecting would register
+/// every tool on the handle again.
 struct McpTools {
     handle: ToolServerHandle,
-    client_info: rmcp::model::ClientInfo,
-    connections: tokio::sync::Mutex<Vec<McpServerConnection>>,
+    connections: Vec<McpServerConnection>,
 }
 
 impl McpTools {
-    /// Re-checks the `Authorization` header for every MCP server backed by
-    /// `oauth2_client_credentials` and reconnects any whose token has
-    /// rotated since the last (re)connect. Bearer/Basic/no-auth servers are
-    /// static and skipped.
-    ///
-    /// Reconnecting registers tools under the same names via the shared
-    /// `handle`, so callers with an existing `ToolServerHandle` clone see
-    /// the refreshed connection without rebuilding their `AgentClient`.
-    async fn ensure_fresh(&self) -> Result<(), Error> {
-        let mut connections = self.connections.lock().await;
-        for conn in connections.iter_mut() {
-            let Some(creds) = &conn.creds else {
-                continue;
+    /// Whether every connection still carries the `Authorization` header it
+    /// would get now.
+    async fn is_current(&self, user_token: Option<&str>) -> Result<bool, Error> {
+        for conn in &self.connections {
+            let header_value = match (conn.on_behalf_of_user, &conn.creds) {
+                (true, _) => Some(user_bearer(&conn.url, user_token)?),
+                (false, Some(creds)) => {
+                    creds
+                        .authorization_header_async()
+                        .await
+                        .map_err(|source| Error::McpOAuth2 {
+                            url: conn.url.clone(),
+                            source,
+                        })?
+                }
+                (false, None) => continue,
             };
-            let header_value =
-                creds
-                    .authorization_header_async()
-                    .await
-                    .map_err(|source| Error::McpOAuth2 {
-                        url: conn.url.clone(),
-                        source,
-                    })?;
-            if header_value == conn.active_header {
-                continue;
+            if header_value != conn.active_header {
+                return Ok(false);
             }
-
-            let handler = McpClientHandler::new(self.client_info.clone(), self.handle.clone());
-            let mut headers = conn.static_headers.clone();
-            if let Some(header_value) = &header_value {
-                let value = http::HeaderValue::from_str(header_value).map_err(|source| {
-                    Error::McpAuthHeader {
-                        url: conn.url.clone(),
-                        source,
-                    }
-                })?;
-                headers.insert(http::header::AUTHORIZATION, value);
-            }
-            let transport = build_mcp_transport(&conn.url, headers);
-            let service = handler
-                .connect(transport)
-                .await
-                .map_err(|e| Error::McpConnection {
-                    url: conn.url.clone(),
-                    reason: e.to_string(),
-                })?;
-
-            info!(url = %conn.url, "Reconnected MCP server with refreshed OAuth 2.0 token");
-            conn.service = service;
-            conn.active_header = header_value;
         }
-        Ok(())
+        Ok(true)
+    }
+}
+
+/// The `Authorization` value for a server called on behalf of the user.
+fn user_bearer(url: &str, user_token: Option<&str>) -> Result<String, Error> {
+    match user_token {
+        Some(token) => Ok(format!("Bearer {token}")),
+        None => Err(Error::McpUserRequired {
+            url: url.to_string(),
+        }),
     }
 }
 
@@ -321,13 +298,12 @@ fn build_mcp_transport(
     rmcp::transport::StreamableHttpClientTransport::from_config(transport_config)
 }
 
-/// Connects to the configured MCP servers and discovers their tools. `None`
-/// when none are configured.
-async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<McpTools>, Error> {
-    if config.mcp_servers.is_empty() {
-        return Ok(None);
-    }
-
+/// Connects to the configured MCP servers and discovers their tools, calling
+/// the servers marked `on_behalf_of_user` with `user_token`.
+async fn connect_mcp_tools(
+    config: &super::config::Processor,
+    user_token: Option<&str>,
+) -> Result<McpTools, Error> {
     let handle = ToolServer::new().run();
     let client_info = rmcp::model::ClientInfo::new(
         rmcp::model::ClientCapabilities::default(),
@@ -341,7 +317,9 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
         let mut oauth_creds = None;
         let mut header_value = None;
 
-        if let Some(ref creds_path) = mcp_config.credentials_path {
+        if mcp_config.on_behalf_of_user {
+            header_value = Some(user_bearer(&mcp_config.url, user_token)?);
+        } else if let Some(ref creds_path) = mcp_config.credentials_path {
             let creds = flowgen_core::credentials::load_http_credentials(creds_path)
                 .await
                 .map_err(|source| Error::McpCredentials {
@@ -368,7 +346,7 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
             }
         }
 
-        let mut static_headers = std::collections::HashMap::new();
+        let mut headers = std::collections::HashMap::new();
         for (name, value) in mcp_config.headers.iter().flatten() {
             let header_name = http::HeaderName::try_from(name.as_str()).map_err(|source| {
                 Error::McpHeaderName {
@@ -383,10 +361,8 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
                     name: name.clone(),
                     source,
                 })?;
-            static_headers.insert(header_name, header_value);
+            headers.insert(header_name, header_value);
         }
-
-        let mut headers = static_headers.clone();
         if let Some(header_value) = &header_value {
             let value = http::HeaderValue::from_str(header_value).map_err(|source| {
                 Error::McpAuthHeader {
@@ -398,38 +374,105 @@ async fn connect_mcp_tools(config: &super::config::Processor) -> Result<Option<M
         }
         let transport = build_mcp_transport(&mcp_config.url, headers);
 
-        let service = handler
-            .connect(transport)
-            .await
-            .map_err(|e| Error::McpConnection {
-                url: mcp_config.url.clone(),
-                reason: e.to_string(),
-            })?;
+        let service = match handler.connect(transport).await {
+            Ok(service) => service,
+            Err(e) => {
+                let rejected = match (mcp_config.on_behalf_of_user, &header_value) {
+                    (true, Some(authorization)) => rejects(&mcp_config.url, authorization).await,
+                    _ => false,
+                };
+                return Err(match rejected {
+                    true => Error::McpUserUnauthorized {
+                        url: mcp_config.url.clone(),
+                    },
+                    false => Error::McpConnection {
+                        url: mcp_config.url.clone(),
+                        reason: e.to_string(),
+                    },
+                });
+            }
+        };
 
         info!(url = %mcp_config.url, "Connected to MCP server and discovered tools");
 
         connections.push(McpServerConnection {
             url: mcp_config.url.clone(),
             creds: oauth_creds,
-            static_headers,
+            on_behalf_of_user: mcp_config.on_behalf_of_user,
             active_header: header_value,
-            service,
+            _service: service,
         });
     }
 
-    Ok(Some(McpTools {
+    Ok(McpTools {
         handle,
-        client_info,
-        connections: tokio::sync::Mutex::new(connections),
-    }))
+        connections,
+    })
+}
+
+/// A JSON-RPC ping, sent to read the status a server answers a token with.
+#[derive(Serialize)]
+struct Ping {
+    jsonrpc: &'static str,
+    id: u32,
+    method: &'static str,
+}
+
+/// Whether the server answers `authorization` with 401 or 403; asked again
+/// because rig turns connect errors into text.
+async fn rejects(url: &str, authorization: &str) -> bool {
+    let response = reqwest::Client::new()
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .json(&Ping {
+            jsonrpc: "2.0",
+            id: 0,
+            method: "ping",
+        })
+        .send()
+        .await;
+    match response {
+        Ok(response) => matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ),
+        Err(_) => false,
+    }
+}
+
+/// The first server called on behalf of the user; when set, tools and the
+/// agent client are per user.
+fn user_mcp_server(config: &super::config::Processor) -> Option<&str> {
+    config
+        .mcp_servers
+        .iter()
+        .find(|server| server.on_behalf_of_user)
+        .map(|server| server.url.as_str())
+}
+
+/// Rejects a server that acts on behalf of the user and also has its own credentials.
+fn validate_mcp_servers(config: &super::config::Processor) -> Result<(), Error> {
+    match config
+        .mcp_servers
+        .iter()
+        .find(|server| server.on_behalf_of_user && server.credentials_path.is_some())
+    {
+        Some(server) => Err(Error::McpUserCredentials {
+            url: server.url.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Builds an `AgentClient` from a rendered config.
 ///
 /// Loads credentials, applies optional provider tuning (temperature, max
-/// tokens, static context), attaches the shared MCP tool server handle if
-/// any, and returns a ready-to-use client. Used by `EventHandler::resolve_client`
-/// on a cache miss in the worker-wide client registry.
+/// tokens, static context), attaches the toolset's MCP tool server handle if
+/// any, and returns a ready-to-use client.
 async fn build_agent_client(
     config: super::config::Processor,
     tool_server_handle: Option<ToolServerHandle>,
@@ -544,9 +587,192 @@ pub struct EventHandler {
     task_type: &'static str,
     /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
-    /// MCP connections, held open for the handler's lifetime. `None` when no
-    /// MCP servers are configured.
-    mcp_tools: Option<Arc<McpTools>>,
+    /// The task's toolset, unless a server acts on behalf of the user.
+    toolset: ToolsetSlot,
+    /// Toolsets per user, when a server acts on behalf of the user.
+    users: UserToolsets,
+}
+
+/// How long a user's MCP connections stay open without a request.
+const USER_MCP_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How often idle users' MCP connections are closed.
+const USER_MCP_SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What an agent client is cached under within a toolset.
+#[derive(PartialEq, Eq, Hash)]
+struct ClientId {
+    provider: &'static str,
+    model: String,
+    endpoint: Option<String>,
+    credentials_path: Option<std::path::PathBuf>,
+}
+
+/// MCP connections and the agent clients built on their tools, kept per task
+/// or user so clients never mix tools across them.
+struct Toolset {
+    mcp: Option<McpTools>,
+    clients:
+        tokio::sync::Mutex<std::collections::HashMap<ClientId, Arc<crate::agent::AgentClient>>>,
+}
+
+impl Toolset {
+    async fn connect(
+        config: &super::config::Processor,
+        user_token: Option<&str>,
+    ) -> Result<Self, Error> {
+        let mcp = match config.mcp_servers.is_empty() {
+            true => None,
+            false => Some(connect_mcp_tools(config, user_token).await?),
+        };
+        Ok(Self {
+            mcp,
+            clients: Default::default(),
+        })
+    }
+
+    async fn is_current(&self, user_token: Option<&str>) -> Result<bool, Error> {
+        match &self.mcp {
+            Some(mcp) => mcp.is_current(user_token).await,
+            None => Ok(true),
+        }
+    }
+
+    /// The agent client for `rendered`, built on first use.
+    async fn client(
+        &self,
+        rendered: super::config::Processor,
+        task_context: &flowgen_core::task::context::TaskContext,
+        static_context: Option<Vec<flowgen_core::resource::Source>>,
+    ) -> Result<Arc<crate::agent::AgentClient>, Error> {
+        let id = ClientId {
+            provider: rendered.provider.as_str(),
+            model: rendered.model.clone(),
+            endpoint: rendered.endpoint.clone(),
+            credentials_path: rendered.credentials_path.clone(),
+        };
+        let mut clients = self.clients.lock().await;
+        if let Some(client) = clients.get(&id) {
+            return Ok(Arc::clone(client));
+        }
+        let handle = self.mcp.as_ref().map(|mcp| mcp.handle.clone());
+        let client =
+            Arc::new(build_agent_client(rendered, handle, task_context, static_context).await?);
+        clients.insert(id, Arc::clone(&client));
+        Ok(client)
+    }
+}
+
+/// The current toolset of a task or user, replaced when a token on it changes.
+#[derive(Default)]
+struct ToolsetSlot {
+    toolset: tokio::sync::Mutex<Option<Arc<Toolset>>>,
+    connecting: tokio::sync::Mutex<()>,
+}
+
+impl ToolsetSlot {
+    /// Only callers that need new connections wait while they open, and they open once.
+    async fn current(
+        &self,
+        config: &super::config::Processor,
+        user_token: Option<&str>,
+    ) -> Result<Arc<Toolset>, Error> {
+        if let Some(toolset) = self.fresh(user_token).await? {
+            return Ok(toolset);
+        }
+        let _connecting = self.connecting.lock().await;
+        if let Some(toolset) = self.fresh(user_token).await? {
+            return Ok(toolset);
+        }
+        if self.toolset.lock().await.is_some() {
+            info!("Reopening MCP connections with a refreshed token");
+        }
+        let toolset = Arc::new(Toolset::connect(config, user_token).await?);
+        *self.toolset.lock().await = Some(Arc::clone(&toolset));
+        Ok(toolset)
+    }
+
+    async fn fresh(&self, user_token: Option<&str>) -> Result<Option<Arc<Toolset>>, Error> {
+        let toolset = self.toolset.lock().await.clone();
+        match toolset {
+            Some(toolset) => match toolset.is_current(user_token).await? {
+                true => Ok(Some(toolset)),
+                false => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+}
+
+/// One user's toolset and when they last used it.
+struct UserToolset {
+    slot: ToolsetSlot,
+    last_used: std::sync::Mutex<std::time::Instant>,
+}
+
+impl UserToolset {
+    fn last_used(&self) -> std::sync::MutexGuard<'_, std::time::Instant> {
+        match self.last_used.lock() {
+            Ok(last_used) => last_used,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// Each user's toolset is locked on its own, so connecting for one user never
+/// holds up another.
+#[derive(Default)]
+struct UserToolsets(tokio::sync::Mutex<std::collections::HashMap<String, Arc<UserToolset>>>);
+
+impl UserToolsets {
+    /// The toolset of the user who started `event`, opened on first use and
+    /// replaced when their token changes.
+    async fn current(
+        &self,
+        config: &super::config::Processor,
+        url: &str,
+        event: &Event,
+        now: std::time::Instant,
+    ) -> Result<Arc<Toolset>, Error> {
+        use secrecy::ExposeSecret;
+        let (id, token) = match event.session.as_deref() {
+            Some(flowgen_core::auth::UserSession {
+                user,
+                token: Some(token),
+            }) => (user.user_id.clone(), token.expose_secret()),
+            _ => {
+                return Err(Error::McpUserRequired {
+                    url: url.to_string(),
+                })
+            }
+        };
+        let user = {
+            let mut users = self.0.lock().await;
+            let user = users.entry(id).or_insert_with(|| {
+                Arc::new(UserToolset {
+                    slot: ToolsetSlot::default(),
+                    last_used: std::sync::Mutex::new(now),
+                })
+            });
+            *user.last_used() = now;
+            Arc::clone(user)
+        };
+        user.slot.current(config, Some(token)).await
+    }
+
+    /// Closes the connections of users idle for [`USER_MCP_IDLE`] at `now`.
+    async fn close_idle(&self, now: std::time::Instant) {
+        self.0
+            .lock()
+            .await
+            .retain(|_, user| now.duration_since(*user.last_used()) < USER_MCP_IDLE);
+    }
+}
+
+/// An agent client, with the toolset its tools run on kept open.
+struct Agent {
+    client: Arc<crate::agent::AgentClient>,
+    _toolset: Arc<Toolset>,
 }
 
 impl EventHandler {
@@ -567,17 +793,9 @@ impl EventHandler {
     ///
     /// Renders the config against the event so per-event templated fields
     /// (`endpoint`, `model`, `credentials_path`) become concrete values, then
-    /// looks the resulting `(provider, model, endpoint, credentials_path)` up
-    /// in the worker-wide client registry. The first event for a given key
-    /// pays the credential-load and client-build cost; subsequent events reuse
-    /// the cached `AgentClient`.
-    ///
-    /// MCP connections are established once in [`connect_mcp_tools`] and held
-    /// for the processor's lifetime; before returning an MCP-backed client,
-    /// this refreshes any OAuth 2.0 connection whose token has rotated (see
-    /// [`McpTools::ensure_fresh`]), since rmcp bakes the `Authorization`
-    /// header into the transport at connect time.
-    async fn resolve_client(&self, event: &Event) -> Result<Arc<crate::agent::AgentClient>, Error> {
+    /// takes the client for them from the current toolset — the task's, or the
+    /// signed-in user's when a server acts on behalf of the user.
+    async fn resolve_client(&self, event: &Event) -> Result<Agent, Error> {
         let event_value = serde_json::value::Value::try_from(event)
             .map_err(|source| Error::EventBuilder { source })?;
         let rendered = self
@@ -585,31 +803,25 @@ impl EventHandler {
             .render(&event_value)
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let key = flowgen_core::client_registry::ClientKeyBuilder::new(self.task_type)
-            .field("provider", &rendered.provider.as_str())
-            .field("model", &rendered.model)
-            .field("endpoint", &rendered.endpoint)
-            .field("credentials_path", &rendered.credentials_path)
-            .build();
-
-        if let Some(mcp_tools) = &self.mcp_tools {
-            mcp_tools.ensure_fresh().await?;
-        }
-        let tool_server_handle = self.mcp_tools.as_ref().map(|t| t.handle.clone());
-        let task_context = Arc::clone(&self.task_context);
-        let static_context = self.config.static_context.clone();
-
-        self.task_context
-            .client_registry
-            .get_or_init(key, || async move {
-                build_agent_client(rendered, tool_server_handle, &task_context, static_context)
-                    .await
-            })
-            .await
-            .map_err(|e| match e {
-                flowgen_core::client_registry::Error::Init { source } => source,
-                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
-            })
+        let toolset = match user_mcp_server(&self.config) {
+            Some(url) => {
+                self.users
+                    .current(&self.config, url, event, std::time::Instant::now())
+                    .await?
+            }
+            None => self.toolset.current(&self.config, None).await?,
+        };
+        let client = toolset
+            .client(
+                rendered,
+                &self.task_context,
+                self.config.static_context.clone(),
+            )
+            .await?;
+        Ok(Agent {
+            client,
+            _toolset: toolset,
+        })
     }
 
     /// Processes an event by generating a completion.
@@ -631,7 +843,7 @@ impl EventHandler {
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle_non_streaming(&self, event: Event) -> Result<(), Error> {
         let started_at = std::time::Instant::now();
-        let client = self.resolve_client(&event).await?;
+        let Agent { client, _toolset } = self.resolve_client(&event).await?;
         let event = Arc::new(event);
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
@@ -931,7 +1143,7 @@ impl EventHandler {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let client = self.resolve_client(&event).await?;
+        let Agent { client, _toolset } = self.resolve_client(&event).await?;
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             let (rendered_prompt, rendered_system_prompt) = self.render_prompts(&event).await?;
@@ -1258,11 +1470,14 @@ impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the processor. Connects to MCP servers once; credentials,
-    /// endpoint, and model resolution are deferred to `resolve_client` for
-    /// per-event templating.
+    /// Connects to the MCP servers unless one acts on behalf of the user, whose
+    /// connections open on their first request.
     async fn init(&self) -> Result<Self::EventHandler, Self::Error> {
-        let mcp_tools = connect_mcp_tools(&self.config).await?.map(Arc::new);
+        validate_mcp_servers(&self.config)?;
+        let toolset = match user_mcp_server(&self.config) {
+            Some(_) => None,
+            None => Some(Arc::new(Toolset::connect(&self.config, None).await?)),
+        };
 
         Ok(EventHandler {
             config: Arc::clone(&self.config),
@@ -1270,7 +1485,11 @@ impl flowgen_core::task::runner::Runner for Processor {
             tx: self.tx.clone(),
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
-            mcp_tools,
+            toolset: ToolsetSlot {
+                toolset: tokio::sync::Mutex::new(toolset),
+                connecting: Default::default(),
+            },
+            users: UserToolsets::default(),
         })
     }
 
@@ -1286,7 +1505,12 @@ impl flowgen_core::task::runner::Runner for Processor {
                     Ok(handler) => Ok(handler),
                     Err(e) => {
                         error!(error = %e, "Failed to initialize completion processor");
-                        Err(tokio_retry::RetryError::transient(e))
+                        match e {
+                            Error::McpUserCredentials { .. } => {
+                                Err(tokio_retry::RetryError::permanent(e))
+                            }
+                            _ => Err(tokio_retry::RetryError::transient(e)),
+                        }
                     }
                 }
             },
@@ -1298,6 +1522,22 @@ impl flowgen_core::task::runner::Runner for Processor {
                 return Err(e);
             }
         };
+
+        let sweeper = user_mcp_server(&self.config).map(|_| {
+            let event_handler = Arc::clone(&event_handler);
+            let cancellation_token = self.task_context.cancellation_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(USER_MCP_SWEEP);
+                loop {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => return,
+                        _ = interval.tick() => {
+                            event_handler.users.close_idle(std::time::Instant::now()).await
+                        }
+                    }
+                }
+            })
+        });
 
         let mut handlers = Vec::new();
 
@@ -1314,7 +1554,13 @@ impl flowgen_core::task::runner::Runner for Processor {
                                     Err(e) => {
                                         error!(error = %e, "Failed to generate completion");
                                         // Upstream 4xx (bad request, auth, quota) won't recover from retry.
-                                        if is_upstream_client_error(&e) {
+                                        if is_upstream_client_error(&e)
+                                            || matches!(
+                                                e,
+                                                Error::McpUserRequired { .. }
+                                                    | Error::McpUserUnauthorized { .. }
+                                            )
+                                        {
                                             Err(tokio_retry::RetryError::permanent(e))
                                         } else {
                                             Err(tokio_retry::RetryError::transient(e))
@@ -1342,6 +1588,9 @@ impl flowgen_core::task::runner::Runner for Processor {
                 }
                 None => {
                     futures_util::future::join_all(handlers).await;
+                    if let Some(sweeper) = sweeper {
+                        sweeper.abort();
+                    }
                     return Ok(());
                 }
             }
@@ -1429,6 +1678,281 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    /// An MCP server that answers the handshake and records the
+    /// `Authorization` header of every request.
+    async fn mcp_server() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let post = move |headers: http::HeaderMap, body: axum::Json<serde_json::Value>| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                if let Some(value) = headers.get(http::header::AUTHORIZATION) {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(value.to_str().unwrap().to_string());
+                }
+                let Some(id) = body.get("id").cloned() else {
+                    return axum::http::StatusCode::ACCEPTED.into_response();
+                };
+                let result = match body["method"].as_str() {
+                    Some("initialize") => json!({
+                        "protocolVersion": body["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "a", "version": "0"}
+                    }),
+                    Some("tools/list") => json!({
+                        "tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]
+                    }),
+                    _ => json!({}),
+                };
+                axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+            }
+        };
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(post)
+                .get(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED })
+                .delete(|| async { axum::http::StatusCode::OK }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (url, seen)
+    }
+
+    fn agent(server: super::super::config::McpServerConfig) -> super::super::config::Processor {
+        super::super::config::Processor {
+            name: "a".to_string(),
+            provider: super::super::config::Provider::Custom,
+            model: "m".to_string(),
+            prompt: flowgen_core::resource::Source::Inline("p".to_string()),
+            credentials_path: None,
+            endpoint: None,
+            headers: None,
+            system_prompt: None,
+            temperature: None,
+            max_tokens: None,
+            static_context: None,
+            max_turns: 10,
+            stream: false,
+            tool_passthrough: false,
+            mcp_servers: vec![server],
+            sandbox: Default::default(),
+            depends_on: None,
+            retry: None,
+            thinking: None,
+        }
+    }
+
+    fn user_server(url: &str) -> super::super::config::McpServerConfig {
+        super::super::config::McpServerConfig {
+            url: url.to_string(),
+            credentials_path: None,
+            headers: None,
+            on_behalf_of_user: true,
+        }
+    }
+
+    fn event_from(user_id: &str, token: &str) -> Event {
+        EventBuilder::new()
+            .data(EventData::Json(json!({})))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .session(Arc::new(flowgen_core::auth::UserSession::with_token(
+                flowgen_core::auth::UserContext {
+                    user_id: user_id.to_string(),
+                    claims: Default::default(),
+                },
+                token,
+            )))
+            .build()
+            .unwrap()
+    }
+
+    async fn tool_count(toolset: &Toolset) -> usize {
+        match &toolset.mcp {
+            Some(mcp) => mcp.handle.get_tool_defs(None).await.unwrap().len(),
+            None => 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_token_opens_new_connections_with_each_tool_once() {
+        let (url, seen) = mcp_server().await;
+        let config = agent(user_server(&url));
+        let slot = ToolsetSlot::default();
+
+        let first = slot.current(&config, Some("t1")).await.unwrap();
+        let connected = seen.lock().unwrap().len();
+        let same = slot.current(&config, Some("t1")).await.unwrap();
+        let unchanged = seen.lock().unwrap().len();
+        let refreshed = slot.current(&config, Some("t2")).await.unwrap();
+        let headers = seen.lock().unwrap().clone();
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert_eq!(unchanged, connected);
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert!(
+            headers[..connected].iter().all(|h| h == "Bearer t1"),
+            "{headers:?}"
+        );
+        assert!(
+            headers[connected..].iter().all(|h| h == "Bearer t2"),
+            "{headers:?}"
+        );
+        assert_eq!(tool_count(&refreshed).await, 1);
+        assert_eq!(tool_count(&first).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_current_toolset_is_handed_out_while_new_connections_open() {
+        let (url, _) = mcp_server().await;
+        let config = agent(user_server(&url));
+        let slot = ToolsetSlot::default();
+        let first = slot.current(&config, Some("t1")).await.unwrap();
+
+        let _opening = slot.connecting.lock().await;
+        let same = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            slot.current(&config, Some("t1")),
+        )
+        .await;
+
+        assert!(Arc::ptr_eq(&first, &same.expect("not blocked").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn callers_with_a_new_token_share_one_new_toolset() {
+        let (url, _) = mcp_server().await;
+        let config = agent(user_server(&url));
+        let slot = ToolsetSlot::default();
+        slot.current(&config, Some("t1")).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            slot.current(&config, Some("t2")),
+            slot.current(&config, Some("t2"))
+        );
+
+        assert!(Arc::ptr_eq(&a.unwrap(), &b.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn each_user_gets_their_own_connections_with_their_own_token() {
+        let (url, seen) = mcp_server().await;
+        let config = agent(user_server(&url));
+        let users = UserToolsets::default();
+        let now = std::time::Instant::now();
+
+        let first = users
+            .current(&config, &url, &event_from("u1", "t1"), now)
+            .await
+            .unwrap();
+        let after_first = seen.lock().unwrap().len();
+        let second = users
+            .current(&config, &url, &event_from("u2", "t2"), now)
+            .await
+            .unwrap();
+        let headers = seen.lock().unwrap().clone();
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(
+            headers[..after_first].iter().all(|h| h == "Bearer t1"),
+            "{headers:?}"
+        );
+        assert!(
+            headers[after_first..].iter().all(|h| h == "Bearer t2"),
+            "{headers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_called_on_behalf_of_the_user_fails_without_a_signed_in_user() {
+        let url = "http://127.0.0.1:9/mcp";
+        let config = agent(user_server(url));
+        let event = EventBuilder::new()
+            .data(EventData::Json(json!({})))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap();
+
+        let error = UserToolsets::default()
+            .current(&config, url, &event, std::time::Instant::now())
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, Error::McpUserRequired { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn idle_users_lose_their_connections() {
+        let user = |last_used: std::time::Instant| {
+            Arc::new(UserToolset {
+                slot: ToolsetSlot::default(),
+                last_used: std::sync::Mutex::new(last_used),
+            })
+        };
+        let start = std::time::Instant::now();
+        let later = start + USER_MCP_IDLE;
+        let users = UserToolsets(tokio::sync::Mutex::new(std::collections::HashMap::from([
+            ("idle".to_string(), user(start)),
+            ("active".to_string(), user(later)),
+        ])));
+
+        users.close_idle(later).await;
+
+        assert_eq!(
+            users.0.lock().await.keys().collect::<Vec<_>>(),
+            vec!["active"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_told_apart_from_other_connect_errors() {
+        let connect = |status: axum::http::StatusCode| async move {
+            let app = axum::Router::new()
+                .route("/mcp", axum::routing::post(move || async move { status }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            connect_mcp_tools(&agent(user_server(&url)), Some("t1"))
+                .await
+                .err()
+                .unwrap()
+        };
+
+        let unauthorized = connect(axum::http::StatusCode::UNAUTHORIZED).await;
+        let forbidden = connect(axum::http::StatusCode::FORBIDDEN).await;
+        let failed = connect(axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+
+        assert!(
+            matches!(unauthorized, Error::McpUserUnauthorized { .. }),
+            "{unauthorized}"
+        );
+        assert!(
+            matches!(forbidden, Error::McpUserUnauthorized { .. }),
+            "{forbidden}"
+        );
+        assert!(matches!(failed, Error::McpConnection { .. }), "{failed}");
+    }
+
+    #[test]
+    fn a_server_called_on_behalf_of_the_user_cannot_have_credentials() {
+        let mut server = user_server("http://127.0.0.1:9/mcp");
+        assert!(validate_mcp_servers(&agent(server.clone())).is_ok());
+        server.credentials_path = Some(std::path::PathBuf::from("/a.json"));
+        assert!(matches!(
+            validate_mcp_servers(&agent(server)),
+            Err(Error::McpUserCredentials { .. })
+        ));
+    }
 
     #[test]
     fn test_completion_response_serialization() {
@@ -1482,8 +2006,6 @@ mod tests {
         assert_eq!(creds, deserialized);
     }
 
-    // --- CompletionResponse ---
-
     #[test]
     fn completion_response_without_usage() {
         let resp = CompletionResponse {
@@ -1521,8 +2043,6 @@ mod tests {
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 150);
     }
-
-    // --- CompletionChunk ---
 
     #[test]
     fn completion_chunk_intermediate() {
@@ -1572,8 +2092,6 @@ mod tests {
         assert_eq!(chunk.index, back.index);
     }
 
-    // --- CompletionUsage ---
-
     #[test]
     fn completion_usage_roundtrip() {
         let usage = CompletionUsage {
@@ -1587,8 +2105,6 @@ mod tests {
         assert_eq!(usage.completion_tokens, back.completion_tokens);
         assert_eq!(usage.total_tokens, back.total_tokens);
     }
-
-    // --- CompletionChunk.usage on final chunk ---
 
     #[test]
     fn completion_chunk_final_carries_usage() {
@@ -1649,8 +2165,6 @@ mod tests {
         assert_eq!(usage.completion_tokens, 20);
         assert_eq!(usage.total_tokens, 30);
     }
-
-    // --- Credentials optional fields ---
 
     #[test]
     fn credentials_minimal_deser() {

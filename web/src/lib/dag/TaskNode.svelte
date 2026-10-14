@@ -1,8 +1,7 @@
 <script lang="ts">
-	import { base } from '$app/paths';
 	import Icon from '@iconify/svelte';
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
-	import { connectorFor } from './moduleMap';
+	import { connectorFor } from '$lib/connectors';
 
 	interface TaskNodeData extends Record<string, unknown> {
 		name: string;
@@ -18,7 +17,7 @@
 	data-task={data.name}
 	class="task-node relative flex w-[250px] items-center gap-2 rounded-md border border-base-300 bg-base-100 px-2 py-1.5 shadow-sm"
 >
-	<img src="{base}/{connector.iconPath}" alt={connector.label} class="h-4 w-4 shrink-0" />
+	<img src={connector.iconUrl} alt={connector.label} class="h-4 w-4 shrink-0" />
 	<div class="min-w-0 flex-1">
 		<div class="truncate font-mono text-xs font-medium leading-tight">{data.name}</div>
 		<div class="truncate text-[10px] leading-tight opacity-60">{data.taskType}</div>

@@ -8,6 +8,8 @@
 //! artifact and pushes it to a registry under one or more tags, in the
 //! layout `oci_sync` reads back.
 
+use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+
 /// OCI push: push files to a registry as an artifact.
 pub mod push {
     /// Artifact packing and the registry push.
@@ -25,4 +27,29 @@ pub mod sync {
     pub mod config;
     /// OCI sync processor implementation.
     pub mod processor;
+}
+
+/// The connector of this crate's task types.
+pub const CONNECTOR: Connector = Connector {
+    name: "oci",
+    label: "OCI",
+    icon: Icon::Svg(include_str!("../icons/oci.svg")),
+    describe_credentials: None,
+};
+
+impl TaskMeta for push::config::Processor {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref())
+            .target(&[&self.repository])]
+    }
+}
+
+impl TaskMeta for sync::config::Processor {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.artifact])]
+    }
 }

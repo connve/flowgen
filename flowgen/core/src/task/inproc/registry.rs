@@ -95,7 +95,7 @@ impl InprocRegistry {
         self.table.remove(flow);
     }
 
-    /// Runs `flow` with `data` and `meta` and returns the result of its last
+    /// Runs `flow` with `data`, `meta` and `session` and returns the result of its last
     /// task. `caller` is the calling flow's identity, `None` for flowgen itself.
     pub async fn call(
         &self,
@@ -103,6 +103,7 @@ impl InprocRegistry {
         flow: &str,
         data: Value,
         meta: Map<String, Value>,
+        session: Option<Arc<crate::auth::UserSession>>,
     ) -> Result<Option<Value>, CallError> {
         if caller == Some(flow) {
             return Err(CallError::Recursive {
@@ -130,13 +131,15 @@ impl InprocRegistry {
             }
         }
         let (completion_tx, completion_rx) = new_completion_channel(registration.leaf_count);
-        let event = EventBuilder::new()
+        let mut builder = EventBuilder::new()
             .data(EventData::Json(data))
             .subject(registration.task_name.clone())
             .task_id(registration.task_id)
             .task_type(registration.task_type)
             .completion_tx(completion_tx)
-            .meta_merge(meta)
+            .meta_merge(meta);
+        builder.session = session;
+        let event = builder
             .build()
             .map_err(|source| CallError::EventBuilder { source })?;
         let delivery = async {
@@ -192,13 +195,15 @@ mod tests {
         });
 
         let same_folder = registry
-            .call(Some("a/c"), "a/b", Value::Null, Map::new())
+            .call(Some("a/c"), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(same_folder.is_ok(), "{same_folder:?}");
-        let flowgen = registry.call(None, "a/b", Value::Null, Map::new()).await;
+        let flowgen = registry
+            .call(None, "a/b", Value::Null, Map::new(), None)
+            .await;
         assert!(flowgen.is_ok(), "{flowgen:?}");
         let other_folder = registry
-            .call(Some("x/y"), "a/b", Value::Null, Map::new())
+            .call(Some("x/y"), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(
             matches!(other_folder, Err(CallError::NotAllowed { caller, .. }) if caller == "x/y")
@@ -226,7 +231,13 @@ mod tests {
         );
         answer_every_call(rx);
         let call = |caller: &'static str| {
-            registry.call(Some(caller), "system/publish", Value::Null, Map::new())
+            registry.call(
+                Some(caller),
+                "system/publish",
+                Value::Null,
+                Map::new(),
+                None,
+            )
         };
 
         assert!(call("system/sync").await.is_ok());
@@ -256,7 +267,7 @@ mod tests {
         answer_every_call(rx);
 
         let result = registry
-            .call(Some("x/y"), "a/b", Value::Null, Map::new())
+            .call(Some("x/y"), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(result.is_ok(), "{result:?}");
     }
@@ -271,7 +282,7 @@ mod tests {
         );
 
         let result = registry
-            .call(Some("a/b"), "a/b", Value::Null, Map::new())
+            .call(Some("a/b"), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(matches!(result, Err(CallError::Recursive { flow }) if flow == "a/b"));
     }
@@ -295,7 +306,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            registry.call(None, "a/b", Value::Null, Map::new()),
+            registry.call(None, "a/b", Value::Null, Map::new(), None),
         )
         .await;
         assert!(
@@ -325,7 +336,7 @@ mod tests {
             completion.signal_completion(Some(serde_json::json!({"echo": data})));
         });
         let result = registry
-            .call(None, "a/b", serde_json::json!({"x": 1}), Map::new())
+            .call(None, "a/b", serde_json::json!({"x": 1}), Map::new(), None)
             .await
             .unwrap();
         assert_eq!(result, Some(serde_json::json!({"echo": {"x": 1}})));
@@ -343,7 +354,9 @@ mod tests {
                 .unwrap()
                 .signal_completion_with_error("conflict".to_string());
         });
-        let result = registry.call(None, "a/b", Value::Null, Map::new()).await;
+        let result = registry
+            .call(None, "a/b", Value::Null, Map::new(), None)
+            .await;
         assert!(matches!(result, Err(CallError::Failed { reason }) if reason == "conflict"));
     }
 
@@ -353,8 +366,37 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         registry.register("a/b".to_string(), registration(tx, None));
         registry.deregister_flow("a/b");
-        let result = registry.call(None, "a/b", Value::Null, Map::new()).await;
+        let result = registry
+            .call(None, "a/b", Value::Null, Map::new(), None)
+            .await;
         assert!(matches!(result, Err(CallError::NotFound { flow }) if flow == "a/b"));
+    }
+
+    #[tokio::test]
+    async fn the_called_flow_acts_for_the_callers_user() {
+        let registry = InprocRegistry::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        registry.register("a/b".to_string(), registration(tx, None));
+        let received = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let user = event.session.as_ref().map(|s| s.user.user_id.clone());
+            event.completion_tx.unwrap().signal_completion(None);
+            user
+        });
+        let session = Arc::new(crate::auth::UserSession {
+            user: crate::auth::UserContext {
+                user_id: "u1".to_string(),
+                claims: Default::default(),
+            },
+            token: None,
+        });
+
+        registry
+            .call(None, "a/b", Value::Null, Map::new(), Some(session))
+            .await
+            .unwrap();
+
+        assert_eq!(received.await.unwrap(), Some("u1".to_string()));
     }
 
     #[tokio::test]
@@ -365,7 +407,9 @@ mod tests {
             "a/b".to_string(),
             registration(tx, Some(Duration::from_millis(10))),
         );
-        let result = registry.call(None, "a/b", Value::Null, Map::new()).await;
+        let result = registry
+            .call(None, "a/b", Value::Null, Map::new(), None)
+            .await;
         assert!(matches!(result, Err(CallError::Timeout { .. })));
     }
 }

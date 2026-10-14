@@ -1,5 +1,6 @@
 import { checkSession } from '$lib/auth.svelte';
 import { agentsEnabled } from '$lib/changes';
+import { loadConnectors } from '$lib/connectors';
 import type { LayoutLoad } from './$types';
 
 // The UI is a single-page app: the backend serves the built files and pages
@@ -11,5 +12,6 @@ export const ssr = false;
 export const load: LayoutLoad = async ({ fetch, route }) => {
 	if (route.id === '/login') return { agents: false, login: true };
 	await checkSession(fetch);
-	return { agents: await agentsEnabled(fetch), login: false };
+	const [agents] = await Promise.all([agentsEnabled(fetch), loadConnectors(fetch)]);
+	return { agents, login: false };
 };

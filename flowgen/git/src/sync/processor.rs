@@ -275,8 +275,6 @@ impl EventHandler {
     }
 }
 
-// --- Git operations (gix-backed) ---
-//
 // All gix calls are blocking and must run on a dedicated thread. We wrap the
 // whole clone/pull/head sequence in a single `spawn_blocking` to avoid
 // re-paying the thread-handoff cost per call.
@@ -348,8 +346,6 @@ fn head_commit(path: &Path) -> Result<String, Error> {
 
     Ok(head_id.to_string())
 }
-
-// --- Processor / Runner ---
 
 /// Git sync processor.
 #[derive(Debug)]

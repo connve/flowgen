@@ -12,9 +12,11 @@
 	import { activitiesFor, allMetrics, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import Icon from '@iconify/svelte';
 	import { m } from '$lib/paraglide/messages.js';
+	import { connectorByName } from '$lib/connectors';
 	import type {
 		AuthoringTarget,
 		ChangeSummary,
+		Connection,
 		FlowStatus,
 		FlowSummary as Flow,
 		FlowDetail
@@ -35,6 +37,10 @@
 	}
 
 	let flows = $state<Flow[]>([]);
+	let connection = $state<Connection | null>(null);
+	let scopedFlows = $derived(
+		connection === null ? flows : flows.filter((f) => connection?.flows.includes(f.path)),
+	);
 	let pending = $state<ChangeSummary[]>([]);
 	let authoring = $state(false);
 	let targets = $state<AuthoringTarget[]>([]);
@@ -61,11 +67,10 @@
 		statusFilter = { ...statusFilter, [s]: !statusFilter[s] };
 	}
 
-	// Unique tag list from the currently-loaded flows. Sorted alphabetically
-	// so the chip row is stable across refreshes.
+	// Sorted so the chip row is stable across refreshes.
 	let allTags = $derived.by(() => {
 		const s = new Set<string>();
-		for (const f of flows) for (const t of f.tags) s.add(t);
+		for (const f of scopedFlows) for (const t of f.tags) s.add(t);
 		return [...s].sort((a, b) => a.localeCompare(b));
 	});
 
@@ -76,8 +81,8 @@
 	let tagCounts = $derived.by(() => {
 		const counts: Record<string, number> = {};
 		const source = selectedFolder === null
-			? flows
-			: flows.filter((f) => f.path.startsWith(selectedFolder + '/'));
+			? scopedFlows
+			: scopedFlows.filter((f) => f.path.startsWith(selectedFolder + '/'));
 		for (const f of source) for (const t of f.tags) counts[t] = (counts[t] ?? 0) + 1;
 		return counts;
 	});
@@ -104,7 +109,7 @@
 	// snapshot so the table stays live without each row wiring its own SSE.
 	let liveMetrics = $derived(allMetrics());
 	let flowsView = $derived(
-		flows.map((f) => {
+		scopedFlows.map((f) => {
 			const metrics = liveMetrics[f.path];
 			if (!metrics) return f;
 			return {
@@ -142,13 +147,9 @@
 		authoringEnabled().then((enabled) => (authoring = enabled));
 		authoringTargets().then((found) => (targets = found));
 
-		fetch(apiUrl('api/flows'))
-			.then(async (r) => {
-				if (!r.ok) throw await failure(r);
-				return r.json();
-			})
-			.then((data) => {
-				flows = data;
+		load<Flow[]>('api/flows')
+			.then((found) => {
+				flows = found;
 			})
 			.catch((err) => {
 				error = errorMessage(err, m.flows_load_failed());
@@ -164,6 +165,54 @@
 			releaseFlowSubscription();
 		};
 	});
+
+	async function load<T>(path: string): Promise<T> {
+		const response = await fetch(apiUrl(path));
+		if (!response.ok) throw await failure(response);
+		return response.json();
+	}
+
+	// Shallow routing leaves `page.url` as is, so opening a preview keeps the filter.
+	let connectionId = $derived(page.url.searchParams.get('connection'));
+	let connectionLoading = $state(false);
+
+	$effect(() => {
+		const id = connectionId;
+		if (id === null) {
+			connection = null;
+			return;
+		}
+		let current = true;
+		connectionLoading = true;
+		loadConnection(id)
+			.then((found) => {
+				if (current) connection = found;
+			})
+			.catch((err) => {
+				if (current) error = errorMessage(err, m.flows_connection_load_failed());
+			})
+			.finally(() => {
+				if (current) connectionLoading = false;
+			});
+		return () => {
+			current = false;
+		};
+	});
+
+	// A link to a connection no loaded flow uses any more shows every flow.
+	async function loadConnection(id: string): Promise<Connection | null> {
+		const response = await fetch(apiUrl(`api/connections/${encodeURIComponent(id)}`));
+		if (response.status === 404) {
+			clearConnection();
+			return null;
+		}
+		if (!response.ok) throw await failure(response);
+		return response.json();
+	}
+
+	function clearConnection() {
+		goto(`${base}/`, { replaceState: true, noScroll: true, keepFocus: true });
+	}
 
 	// Cache lets repeat clicks paint instantly and lets the modal open only
 	// when the payload is ready, so the user never sees the empty-then-loading
@@ -287,7 +336,7 @@
 	let selectedFolders = $derived(selectedSegments.slice(0, -1));
 	let selectedLeaf = $derived(selectedSegments[selectedSegments.length - 1] ?? '');
 	let searchActive = $derived(search.trim().length > 0);
-	let sidebarTree = $derived(buildTree<Flow>(flows, (f) => f.path));
+	let sidebarTree = $derived(buildTree<Flow>(scopedFlows, (f) => f.path));
 
 	// Table rows: `filtered` (already respects status/tag/search) further
 	// narrowed to `selectedFolder` when set. Search overrides folder scope
@@ -372,7 +421,7 @@
 						{/if}
 						<Icon icon="tabler:layout-list" class="h-5 w-5 shrink-0 opacity-70" />
 						<span>{m.flows_all()}</span>
-						<span class="ml-auto text-xs opacity-50">{flows.length}</span>
+						<span class="ml-auto text-xs opacity-50">{scopedFlows.length}</span>
 					</button>
 				</li>
 				{#snippet sidebarNodes(nodes: TreeNode<Flow>[])}
@@ -416,8 +465,8 @@
 											class="h-5 w-5 shrink-0 opacity-70"
 										/>
 										<span
-											class="tooltip tooltip-right min-w-0 flex-1 truncate text-left before:max-w-xs before:whitespace-normal before:break-words"
-											data-tip={node.name}>{node.name}</span>
+											class="tooltip tooltip-right min-w-0 flex-1 text-left before:max-w-xs before:whitespace-normal before:break-words"
+											data-tip={node.name}><span class="block truncate">{node.name}</span></span>
 										<span class="ml-2 shrink-0 text-xs opacity-50">{node.fileCount}</span>
 									</button>
 								</div>
@@ -527,6 +576,20 @@
 					<span class="tabular-nums opacity-60">{statusCounts.error}</span>
 				{/if}
 			</button>
+			{#if connection}
+				{@const connector = connectorByName(connection.connector)}
+				<button
+					type="button"
+					class="chip border-base-300 bg-base-100 hover:bg-base-200"
+					onclick={clearConnection}
+					aria-label={m.flows_connection_filter_remove({ connection: connector.label })}
+				>
+					<img src={connector.iconUrl} alt="" class="h-3.5 w-3.5 shrink-0" />
+					<span>{connector.label}</span>
+					<span class="tabular-nums opacity-60">{scopedFlows.length}</span>
+					<Icon icon="tabler:x" class="h-3 w-3 shrink-0 opacity-60" />
+				</button>
+			{/if}
 		</div>
 		{#if allTags.length > 0}
 			<div class="dropdown">
@@ -646,7 +709,7 @@
 	</div>
 
 	<div class="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
-	{#if loading}
+	{#if loading || connectionLoading}
 		<div class="flex justify-center py-12">
 			<span class="loading loading-spinner loading-lg text-primary"></span>
 		</div>

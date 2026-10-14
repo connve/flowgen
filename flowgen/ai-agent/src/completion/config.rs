@@ -281,6 +281,10 @@ pub struct McpServerConfig {
     /// `X-Flowgen-Client` so the server can scope which tools this agent
     /// can see and call via the tool's `headers` field.
     pub headers: Option<std::collections::HashMap<String, String>>,
+    /// Calls this server with the signed-in user's token as the bearer, so it
+    /// must trust the same identity provider.
+    #[serde(default)]
+    pub on_behalf_of_user: bool,
 }
 
 impl ConfigExt for Processor {}

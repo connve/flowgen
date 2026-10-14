@@ -35,5 +35,8 @@ async-trait.workspace = true
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

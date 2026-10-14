@@ -16,7 +16,7 @@
 /web/.vite
 /web/.env
 /web/.env.*
-# Synced from docs/static/icons/ by npm predev/prebuild — docs owns the source.
-/web/static/icons
+# Copied from flowgen/*/icons/ by the docs' npm predev/prebuild.
+/docs/static/icons
 # Compiled from web/messages/ by the Paraglide Vite plugin and `npm run check`.
 /web/src/lib/paraglide

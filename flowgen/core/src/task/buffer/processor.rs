@@ -87,6 +87,34 @@ struct FlushData {
     partition_key: Option<String>,
 }
 
+/// What a flushed event passes on from the events in its batch.
+#[derive(Default)]
+struct Origin {
+    /// Meta of the batch's first event.
+    meta: Option<Map<String, Value>>,
+    /// The batch's user with their newest token; none once the batch mixes users.
+    session: Option<Arc<crate::auth::UserSession>>,
+}
+
+impl Origin {
+    fn new(
+        meta: Option<Map<String, Value>>,
+        session: Option<Arc<crate::auth::UserSession>>,
+    ) -> Self {
+        Self { meta, session }
+    }
+
+    /// Takes in the session of a later event in the batch.
+    fn add(&mut self, session: Option<&Arc<crate::auth::UserSession>>) {
+        self.session = match (self.session.take(), session) {
+            (Some(current), Some(next)) if current.user.user_id == next.user.user_id => {
+                Some(Arc::clone(next))
+            }
+            _ => None,
+        };
+    }
+}
+
 /// Buffer processor that accumulates events into batches.
 ///
 /// Unlike typical processors that handle events individually, this processor maintains
@@ -166,7 +194,7 @@ impl Processor {
     /// * `buffer` - Vector of accumulated events to flush.
     /// * `reason` - The reason this flush was triggered.
     /// * `partition_key` - Optional key that was used to group these events.
-    /// * `meta` - Optional meta from the first event in the buffer to preserve.
+    /// * `origin` - Meta and session the batch's events pass on.
     /// * `upstream_completions` - Deduped completion channels from every distinct
     ///   source event absorbed into this batch. The buffer attaches a single
     ///   completion to the flushed event downstream; once that completion fires,
@@ -178,7 +206,7 @@ impl Processor {
         buffer: Vec<Value>,
         reason: FlushReason,
         partition_key: Option<String>,
-        meta: Option<Map<String, Value>>,
+        origin: Origin,
         upstream_completions: Vec<SharedCompletionTx>,
     ) {
         if buffer.is_empty() {
@@ -216,9 +244,11 @@ impl Processor {
                     .task_id(task_id)
                     .task_type(task_type);
 
-                // Preserve meta if it exists.
-                if let Some(meta) = meta {
+                if let Some(meta) = origin.meta {
                     event_builder = event_builder.meta(meta);
+                }
+                if let Some(session) = origin.session {
+                    event_builder = event_builder.session(session);
                 }
 
                 let mut event = match event_builder.build() {
@@ -278,7 +308,7 @@ impl Processor {
     /// Processes events with a single buffer (no keying).
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
-        let mut buffer_meta: Option<Map<String, Value>> = None;
+        let mut buffer_origin = Origin::default();
         // Distinct upstream completion handles absorbed by the current batch.
         // Each source event carries its own `CompletionState`; concurrent
         // sources (webhooks, NATS, MCP) produce distinct Arcs. The buffer must
@@ -305,9 +335,12 @@ impl Processor {
                     match result {
                         Some(event) => {
                             // Capture meta and start the timeout on the first event in buffer.
-                            if buffer.is_empty() {
-                                buffer_meta = event.meta.clone();
-                                batch_started = Instant::now();
+                            match buffer.is_empty() {
+                                true => {
+                                    buffer_origin = Origin::new(event.meta.clone(), event.session.clone());
+                                    batch_started = Instant::now();
+                                }
+                                false => buffer_origin.add(event.session.as_ref()),
                             }
 
                             // Extract JSON data from event.
@@ -343,20 +376,20 @@ impl Processor {
                             let reached_size = buffer.len() >= self.config.size;
                             if reached_size || trigger_completion_flush {
                                 let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                                let flush_meta = buffer_meta.take();
+                                let flush_origin = std::mem::take(&mut buffer_origin);
                                 let flush_completions = std::mem::take(&mut buffer_completions);
                                 let reason = if reached_size {
                                     FlushReason::Size
                                 } else {
                                     FlushReason::Completion
                                 };
-                                self.flush_buffer(flush_buffer, reason, None, flush_meta, flush_completions);
+                                self.flush_buffer(flush_buffer, reason, None, flush_origin, flush_completions);
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_meta, buffer_completions);
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_origin, buffer_completions);
                             }
                             return Ok(());
                         }
@@ -366,9 +399,9 @@ impl Processor {
                 // Timeout trigger to flush partial batches.
                 _ = sleep(time_until_flush), if !buffer.is_empty() => {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
-                    let flush_meta = buffer_meta.take();
+                    let flush_origin = std::mem::take(&mut buffer_origin);
                     let flush_completions = std::mem::take(&mut buffer_completions);
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_meta, flush_completions);
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_origin, flush_completions);
                 }
             }
         }
@@ -378,7 +411,7 @@ impl Processor {
     async fn process_events_keyed(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         // Pre-allocate capacity for typical partition count (e.g., 16 partitions).
         let mut buffers: HashMap<String, Vec<Value>> = HashMap::with_capacity(16);
-        let mut buffer_metas: HashMap<String, Map<String, Value>> = HashMap::with_capacity(16);
+        let mut buffer_origins: HashMap<String, Origin> = HashMap::with_capacity(16);
         // Per-key list of distinct upstream completions to ack on flush. See
         // `process_events_single` for why we keep all of them rather than
         // the last.
@@ -451,10 +484,7 @@ impl Processor {
                                     let mut buffer = Vec::with_capacity(buffer_size);
                                     buffer.push(json_data);
                                     vacant.insert(buffer);
-                                    // Capture meta from first event in this keyed buffer.
-                                    if let Some(meta) = event.meta {
-                                        buffer_metas.insert(key.clone(), meta);
-                                    }
+                                    buffer_origins.insert(key.clone(), Origin::new(event.meta, event.session));
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), vec![tx]);
                                     }
@@ -471,6 +501,9 @@ impl Processor {
 
                                     let buffer = occupied.get_mut();
                                     buffer.push(json_data);
+                                    if let Some(origin) = buffer_origins.get_mut(&key) {
+                                        origin.add(event.session.as_ref());
+                                    }
 
                                     if let Some(tx) = completion_tx {
                                         let absorbed = buffer_completions
@@ -482,9 +515,9 @@ impl Processor {
                                     // Flush if this key's buffer reached size limit.
                                     if buffer.len() >= buffer_size {
                                         let buffer_to_flush = occupied.remove();
-                                        let buffer_meta = buffer_metas.remove(&key);
+                                        let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                         let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_meta, buffer_completion);
+                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_origin, buffer_completion);
                                         batch_started_times.remove(&key);
                                         None
                                     } else if trigger_completion_flush {
@@ -497,14 +530,14 @@ impl Processor {
 
                             if let Some(key) = flushed_key {
                                 if let Some(buffer_to_flush) = buffers.remove(&key) {
-                                    let buffer_meta = buffer_metas.remove(&key);
+                                    let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                     let buffer_completion =
                                         buffer_completions.remove(&key).unwrap_or_default();
                                     self.flush_buffer(
                                         buffer_to_flush,
                                         FlushReason::Completion,
                                         Some(key.clone()),
-                                        buffer_meta,
+                                        buffer_origin,
                                         buffer_completion,
                                     );
                                     batch_started_times.remove(&key);
@@ -515,9 +548,9 @@ impl Processor {
                             // Channel closed, flush all remaining buffers and exit.
                             for (key, buffer) in buffers {
                                 if !buffer.is_empty() {
-                                    let buffer_meta = buffer_metas.remove(&key);
+                                    let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                     let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_meta, buffer_completion);
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_origin, buffer_completion);
                                 }
                             }
                             return Ok(());
@@ -541,9 +574,9 @@ impl Processor {
                     for key in keys_to_flush {
                         if let Some(buffer) = buffers.remove(&key) {
                             if !buffer.is_empty() {
-                                let buffer_meta = buffer_metas.remove(&key);
+                                let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                 let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_meta, buffer_completion);
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_origin, buffer_completion);
                             }
                         }
                         batch_started_times.remove(&key);
@@ -682,6 +715,38 @@ mod tests {
     use serde_json::Map;
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    fn session(user_id: &str, token: &str) -> Arc<crate::auth::UserSession> {
+        Arc::new(crate::auth::UserSession::with_token(
+            crate::auth::UserContext {
+                user_id: user_id.to_string(),
+                claims: Default::default(),
+            },
+            token,
+        ))
+    }
+
+    #[test]
+    fn a_batch_from_one_user_acts_for_them_with_their_newest_token() {
+        use secrecy::ExposeSecret;
+        let mut origin = Origin::new(None, Some(session("u1", "t1")));
+
+        origin.add(Some(&session("u1", "t2")));
+
+        let kept = origin.session.expect("session");
+        assert_eq!(kept.user.user_id, "u1");
+        assert_eq!(kept.token.as_ref().unwrap().expose_secret(), "t2");
+    }
+
+    #[test]
+    fn a_batch_from_different_users_acts_for_none_of_them() {
+        let mut origin = Origin::new(None, Some(session("u1", "t1")));
+
+        origin.add(Some(&session("u2", "t2")));
+        origin.add(Some(&session("u1", "t3")));
+
+        assert!(origin.session.is_none());
+    }
 
     fn create_mock_task_context() -> Arc<crate::task::context::TaskContext> {
         let mut labels = Map::new();

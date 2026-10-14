@@ -3,10 +3,9 @@
 	"version": "0.145.0",
 	"private": true,
 	"scripts": {
-		"sync-icons": "node scripts/sync-icons.mjs",
 		"gen-api": "openapi-typescript ../flowgen/api/client/openapi.yaml -o src/lib/api/generated.ts",
-		"predev": "npm run sync-icons && npm run gen-api",
-		"prebuild": "npm run sync-icons && npm run gen-api",
+		"predev": "npm run gen-api",
+		"prebuild": "npm run gen-api",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

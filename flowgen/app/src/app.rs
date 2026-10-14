@@ -31,6 +31,8 @@ pub struct FlowHandle {
     pub require_leader_election: bool,
     /// Number of tasks in the flow.
     pub task_count: usize,
+    /// External systems the flow's tasks connect to, gathered when it loaded.
+    pub connections: Vec<crate::connections::TaskConnection>,
     /// Wall-clock time when the flow's supervisor was spawned. Surfaced on
     /// the web API as `last_run` until per-event tracking replaces it.
     pub started_at: std::time::SystemTime,
@@ -1142,9 +1144,10 @@ impl App {
             );
             let results = futures_util::future::join_all(http_handler_tasks).await;
             for result in results {
-                if let Err(source) = result {
-                    let err = Error::HttpHandlerSetup { source };
-                    error!("{}", err);
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(source)) => error!(error = %source, "Blocking task failed during setup"),
+                    Err(source) => error!("{}", Error::HttpHandlerSetup { source }),
                 }
             }
         }
@@ -1283,6 +1286,7 @@ impl App {
                 .unwrap_or_default();
             let require_leader_election = flow.config.flow.require_leader_election.unwrap_or(false);
             let task_count = flow.config.flow.tasks.len();
+            let connections = crate::connections::of_flow(flow.config.flow.tasks.clone()).await;
             let flow_yaml = match flow.config.raw_source.clone() {
                 Some(source) => source,
                 None => match serde_yaml::to_string(&*flow.config) {
@@ -1315,6 +1319,7 @@ impl App {
                         flow_tags,
                         require_leader_election,
                         task_count,
+                        connections,
                         started_at: std::time::SystemTime::now(),
                         flow_yaml,
                         cancellation_token,
@@ -1335,6 +1340,7 @@ impl App {
             let port = web_config.port;
             let path = web_config.path.clone();
             warn_about_authoring(web_config, system.cache.is_some());
+            warn_about_agents(web_config);
 
             let auth_setup = match &web_config.auth {
                 Some(login_config) => {
@@ -1508,6 +1514,30 @@ fn warn_about_authoring(web_config: &crate::config::WebOptions, system_bucket_pr
     }
     if !system_bucket_present {
         warn!("web.authoring is enabled without a system bucket, so proposed changes are kept in the runtime cache that flow scripts can read and write");
+    }
+}
+
+/// Warns about Agents chat settings that cannot take effect together.
+fn warn_about_agents(web_config: &crate::config::WebOptions) {
+    let on_behalf_of_user = matches!(
+        &web_config.agents,
+        Some(crate::config::AgentsOptions {
+            on_behalf_of_user: true,
+            ..
+        })
+    );
+    if !on_behalf_of_user {
+        return;
+    }
+    if web_config.auth.is_none() {
+        warn!("web.agents.on_behalf_of_user is set without web.auth, so no user is signed in and the chat calls the AI gateway anonymously");
+    }
+    if web_config
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        warn!("web.agents.on_behalf_of_user replaces the Authorization header set in web.headers with the signed-in user's token");
     }
 }
 
@@ -1765,6 +1795,7 @@ mod tests {
             flow_tags: Vec::new(),
             require_leader_election,
             task_count: 1,
+            connections: Vec::new(),
             started_at: std::time::SystemTime::now(),
             flow_yaml: String::new(),
             cancellation_token: tokio_util::sync::CancellationToken::new(),

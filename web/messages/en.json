@@ -24,6 +24,7 @@
 	"nav_agents": "Agents",
 	"nav_flows": "Flows",
 	"nav_resources": "Resources",
+	"nav_connections": "Connections",
 	"nav_monitor": "Monitor",
 	"nav_system": "System",
 	"nav_release_notes": "Release notes",
@@ -76,6 +77,8 @@
 	"flows_tag_filter": "Filter by tag",
 	"flows_tag_filter_remove": "Remove {tag} filter",
 	"flows_tag_filters_clear": "Clear tag filters",
+	"flows_connection_filter_remove": "Remove {connection} filter",
+	"flows_connection_load_failed": "Failed to load the connection",
 	"flows_pending_changes": [
 		{
 			"declarations": [
@@ -357,6 +360,15 @@
 			}
 		}
 	],
+	"connections_page_title": "Connections | Flowgen",
+	"connections_load_failed": "Failed to load connections",
+	"connections_empty_title": "No connections yet",
+	"connections_empty_message": "Add a flow with a task that connects to another system.",
+	"connections_column_connection": "Connection",
+	"connections_column_status": "Status",
+	"connections_column_flows": "Flows",
+	"connections_per_event": "per event",
+	"connections_on_behalf_of_user": "on behalf of user",
 	"pods_page_title": "Pods | Flowgen",
 	"pods_load_failed_title": "Failed to load pods",
 	"pods_load_failed_message": "Failed to load the cluster status. Retrying…",

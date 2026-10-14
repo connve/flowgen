@@ -11,6 +11,8 @@ pub mod app;
 pub mod authoring;
 /// Configuration structures and deserialization.
 pub mod config;
+/// External systems the loaded flows connect to, with their status.
+pub mod connections;
 /// Flow execution and task management.
 pub mod flow;
 /// Browser-facing OIDC login for the web UI.

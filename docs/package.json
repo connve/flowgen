@@ -4,6 +4,9 @@
 	"version": "0.145.0",
 	"type": "module",
 	"scripts": {
+		"sync-icons": "node scripts/sync-icons.mjs",
+		"predev": "npm run sync-icons",
+		"prebuild": "npm run sync-icons",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

@@ -343,8 +343,10 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
     // Await blocking handles (webhook/AI gateway registration) before swapping.
     let results = futures::future::join_all(blocking_handles).await;
     for result in results {
-        if let Err(e) = result {
-            error!(flow = %flow_id, "Blocking task failed during hot-reload: {e}");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!(flow = %flow_id, "Blocking task failed during hot-reload: {e}"),
+            Err(e) => error!(flow = %flow_id, "Blocking task panicked during hot-reload: {e}"),
         }
     }
 
@@ -383,6 +385,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
         .require_leader_election
         .unwrap_or(false);
     let task_count = new_flow.config.flow.tasks.len();
+    let connections = crate::connections::of_flow(new_flow.config.flow.tasks.clone()).await;
     let flow_yaml = match new_flow.config.raw_source.clone() {
         Some(source) => source,
         None => match serde_yaml::to_string(&*new_flow.config) {
@@ -417,6 +420,7 @@ async fn reconcile_put(key: &str, value: bytes::Bytes, ctx: &ReconcilerContext) 
                     flow_tags,
                     require_leader_election,
                     task_count,
+                    connections,
                     started_at: std::time::SystemTime::now(),
                     flow_yaml,
                     cancellation_token,

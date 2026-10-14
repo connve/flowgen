@@ -1096,13 +1096,18 @@ async fn run_publish_flow(
     };
     let data = serde_json::to_value(&publish).map_err(|source| Error::Serialize { source })?;
     let mut meta = serde_json::Map::new();
+    let mut session = None;
     if let Some(user) = user {
         let auth = serde_json::to_value(user).map_err(|source| Error::Serialize { source })?;
         meta.insert(flowgen_core::auth::AUTH.to_string(), auth);
+        session = Some(Arc::new(flowgen_core::auth::UserSession {
+            user: user.clone(),
+            token: None,
+        }));
     }
     match state
         .inproc
-        .call(None, &target.publish_flow, data, meta)
+        .call(None, &target.publish_flow, data, meta, session)
         .await
     {
         Ok(result) => Ok(result),

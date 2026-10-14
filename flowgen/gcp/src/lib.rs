@@ -8,9 +8,10 @@ use flowgen_core::service::{
     DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_KEEP_ALIVE_TIMEOUT_SECS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECS,
 };
+use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon, TaskMeta};
 use gcloud_auth::credentials::CredentialsFile;
 use google_cloud_bigquery::client::{ChannelConfig, ClientConfig, StreamingWriteConfig};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Resolves Google Cloud credentials from an explicit file path or Application Default Credentials.
@@ -70,6 +71,21 @@ mod tests {
     fn http_client_builds_with_the_enabled_feature_set() {
         assert!(http_client().is_ok());
     }
+
+    #[test]
+    fn credentials_are_described_by_their_service_account_only() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type": "service_account", "client_email": "flowgen@p.iam.gserviceaccount.com", "private_key": "secret"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            describe_credentials(file.path()).as_deref(),
+            Some("flowgen@p.iam.gserviceaccount.com")
+        );
+    }
 }
 
 /// BigQuery functionality for data warehousing and analytics.
@@ -84,4 +100,54 @@ pub mod bigquery {
     pub mod storage_read;
     /// BigQuery Storage Write API processor for high-throughput streaming inserts.
     pub mod storage_write;
+}
+
+/// The connector of this crate's task types.
+pub const CONNECTOR: Connector = Connector {
+    name: "gcp",
+    label: "Google Cloud",
+    icon: Icon::Svg(include_str!("../icons/gcp.svg")),
+    describe_credentials: Some(describe_credentials),
+};
+
+/// The service account the credentials file belongs to.
+fn describe_credentials(path: &Path) -> Option<String> {
+    let credentials: CredentialsFile = read_credentials(path)?;
+    credentials.client_email
+}
+
+fn connections(credentials_path: &Option<PathBuf>) -> Vec<Connection> {
+    vec![Connection::new(CONNECTOR, credentials_path.as_deref())]
+}
+
+impl TaskMeta for bigquery::config::Query {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        connections(&self.credentials_path)
+    }
+}
+
+impl TaskMeta for bigquery::config::Job {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        connections(&self.credentials_path)
+    }
+}
+
+impl TaskMeta for bigquery::config::StorageRead {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        connections(&self.credentials_path)
+    }
+}
+
+impl TaskMeta for bigquery::config::StorageWrite {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        connections(&self.credentials_path)
+    }
 }

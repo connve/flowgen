@@ -138,9 +138,11 @@ tokio::task_local! {
     /// Used by EventBuilder::new() to automatically preserve meta fields from the incoming event.
     /// Unlike thread_local!, this stays with the tokio task even when it migrates between threads.
     static CURRENT_EVENT_META: RefCell<Option<Map<String, Value>>>;
+    /// Session of the current event, inherited by events built in its context.
+    static CURRENT_SESSION: Option<Arc<crate::auth::UserSession>>;
 }
 
-/// Runs an async function with event context set for automatic meta preservation.
+/// Runs an async function with event context set for automatic meta and session preservation.
 /// Use this to wrap handler functions that should preserve event meta in EventBuilder::new() calls.
 ///
 /// Takes an Arc<Event> to avoid cloning the event data, only the Arc pointer is cloned inside.
@@ -176,8 +178,11 @@ pub async fn with_event_context<F, R>(event: &Arc<Event>, f: F) -> R
 where
     F: std::future::Future<Output = R>,
 {
-    CURRENT_EVENT_META
-        .scope(RefCell::new(event.meta.clone()), f)
+    CURRENT_SESSION
+        .scope(
+            event.session.clone(),
+            CURRENT_EVENT_META.scope(RefCell::new(event.meta.clone()), f),
+        )
         .await
 }
 
@@ -466,6 +471,8 @@ pub struct Event {
     /// Leaf tasks call `signal_completion` on the shared state; the source is
     /// notified once every leaf has signalled.
     pub completion_tx: Option<SharedCompletionTx>,
+    /// Signed-in user the event acts for, kept out of `meta` so scripts and templates cannot touch it.
+    pub session: Option<Arc<crate::auth::UserSession>>,
 }
 
 impl Clone for Event {
@@ -480,6 +487,7 @@ impl Clone for Event {
             meta: self.meta.clone(),
             error: self.error.clone(),
             completion_tx: self.completion_tx.clone(),
+            session: self.session.clone(),
         }
     }
 }
@@ -633,11 +641,13 @@ pub struct EventBuilder {
     pub meta: Option<Map<String, Value>>,
     /// Completion notifier for end-to-end acknowledgment.
     pub completion_tx: Option<SharedCompletionTx>,
+    /// Signed-in user the event acts for.
+    pub session: Option<Arc<crate::auth::UserSession>>,
 }
 
 impl EventBuilder {
     /// Creates a new EventBuilder.
-    /// Automatically preserves meta from the current event context (if set via with_event_context).
+    /// Automatically preserves meta and session from the current event context (if set via with_event_context).
     /// Generates a correlation_id in meta if one is not already present.
     pub fn new() -> Self {
         let mut meta = CURRENT_EVENT_META
@@ -660,6 +670,7 @@ impl EventBuilder {
         EventBuilder {
             timestamp: Some(Utc::now().timestamp_micros()),
             meta,
+            session: CURRENT_SESSION.try_with(Clone::clone).unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -713,6 +724,11 @@ impl EventBuilder {
         self
     }
 
+    pub fn session(mut self, session: Arc<crate::auth::UserSession>) -> Self {
+        self.session = Some(session);
+        self
+    }
+
     pub fn build(self) -> Result<Event, Error> {
         Ok(Event {
             data: self
@@ -734,6 +750,7 @@ impl EventBuilder {
             meta: self.meta,
             error: None,
             completion_tx: self.completion_tx,
+            session: self.session,
         })
     }
 }
@@ -906,6 +923,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         });
 
         let built = with_event_context(&event, async {
@@ -920,6 +938,56 @@ mod tests {
         .await;
 
         assert_eq!(built.id, None);
+    }
+
+    #[tokio::test]
+    async fn the_session_passes_to_events_built_downstream_but_stays_out_of_view() {
+        let session = Arc::new(crate::auth::UserSession {
+            user: crate::auth::UserContext {
+                user_id: "u1".to_string(),
+                claims: Default::default(),
+            },
+            token: Some(secrecy::SecretString::from("secret-token")),
+        });
+        let event = Arc::new(
+            EventBuilder::new()
+                .data(EventData::Json(json!({})))
+                .subject("a".to_string())
+                .task_id(0)
+                .task_type("test")
+                .session(Arc::clone(&session))
+                .build()
+                .unwrap(),
+        );
+
+        let built = with_event_context(&event, async {
+            EventBuilder::new()
+                .data(EventData::Json(json!({})))
+                .subject("b".to_string())
+                .task_id(1)
+                .task_type("test")
+                .build()
+                .unwrap()
+        })
+        .await;
+        let outside = EventBuilder::new()
+            .data(EventData::Json(json!({})))
+            .subject("c".to_string())
+            .task_id(2)
+            .task_type("test")
+            .build()
+            .unwrap();
+
+        let inherited = built.session.as_ref().expect("session should pass on");
+        assert!(Arc::ptr_eq(inherited, &session));
+        assert!(outside.session.is_none());
+        for rendered in [
+            Value::try_from(&built).unwrap().to_string(),
+            built.to_string(),
+            format!("{built:?}"),
+        ] {
+            assert!(!rendered.contains("secret-token"), "{rendered}");
+        }
     }
 
     #[test]

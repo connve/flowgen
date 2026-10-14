@@ -23,12 +23,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-// --- Field key constants ---
-//
-// Kept as `pub const` so downstream code (Rhai scripts, tests,
-// bigquery_write column mappings) can reach for a single canonical
-// name without hardcoding the string.
-
 /// Wire protocol used to reach the gateway (`"openai"` or `"anthropic"`).
 pub const PROTOCOL: &str = "protocol";
 /// Registered `llm_proxy` task name (the `<name>/<model>` prefix).
@@ -57,8 +51,6 @@ pub const COMPLETION_TOKENS: &str = "completion_tokens";
 pub const TOTAL_TOKENS: &str = "total_tokens";
 /// Wall-clock milliseconds spent in the completion leaf.
 pub const LATENCY_MS: &str = "latency_ms";
-
-// --- Request-side context ---
 
 /// Fields the gateway knows at request entry, before the pipeline runs.
 /// Written into `event.meta` before the event is dispatched into the
@@ -98,8 +90,6 @@ impl GatewayContext {
         }
     }
 }
-
-// --- Response-side context ---
 
 /// Fields the completion leaf knows once the upstream provider has
 /// returned. Written onto the response event's `meta` and attached to

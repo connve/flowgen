@@ -13,6 +13,7 @@
 //! - `dispatch_streaming` without `stream_options`: no usage frame,
 //!   byte-for-byte compatible with clients that never opt in.
 //! - Malformed leaf `usage`: logged and dropped, stream still completes.
+//! - User auth: the verified user and their token reach the event.
 //!
 //! Runs in `cargo test` without `#[ignore]` because no external daemon
 //! is required.
@@ -291,10 +292,6 @@ async fn collect_sse(url: &str, body: Value) -> Vec<String> {
     frames
 }
 
-// ---------------------------------------------------------------------------
-// dispatch_blocking
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn dispatch_blocking_forwards_usage_from_leaf_to_response() {
     let (server, url, _handle) = boot_server().await;
@@ -375,10 +372,6 @@ async fn dispatch_blocking_drops_malformed_usage_and_still_returns_response() {
         "malformed usage must be dropped, not propagated as null-shape"
     );
 }
-
-// ---------------------------------------------------------------------------
-// dispatch_streaming
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn dispatch_streaming_emits_usage_frame_when_client_opts_in() {
@@ -507,10 +500,6 @@ async fn dispatch_streaming_drops_malformed_usage_and_still_terminates() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Anthropic Messages API (`POST /v1/messages`)
-// ---------------------------------------------------------------------------
 
 /// Anthropic streams close on `event: message_stop` instead of `[DONE]`,
 /// so this helper collects `event:` / `data:` pairs until it sees
@@ -731,10 +720,6 @@ async fn openai_registration_on_messages_url_returns_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-// ---------------------------------------------------------------------------
-// Model listing (`GET /models`)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn list_models_returns_registered_proxies_in_openai_shape() {
     let (server, chat_url, _handle) = boot_server().await;
@@ -859,10 +844,6 @@ async fn list_models_headers_filter_scopes_by_matching_header() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Routing failure paths (`UnknownProxy`, `MissingModelField`, `MissingProxyPrefix`)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn unknown_proxy_returns_404() {
     let (_server, url, _handle) = boot_server().await;
@@ -969,10 +950,6 @@ async fn malformed_model_suffix_returns_400() {
     assert_eq!(resp.status(), 400);
 }
 
-// ---------------------------------------------------------------------------
-// Endpoint auth (`credentials.bearer_auth`)
-// ---------------------------------------------------------------------------
-
 /// Registers a proxy with a bearer-token credentials guard so the
 /// endpoint auth path (rather than the flowless `None` variant) is
 /// exercised. Returns the token clients must present in `Authorization`.
@@ -1077,10 +1054,6 @@ async fn endpoint_auth_accepts_correct_bearer_token() {
     assert_eq!(body["choices"][0]["message"]["content"], "authed");
 }
 
-// ---------------------------------------------------------------------------
-// `x-api-key` folding on the Anthropic route
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn anthropic_x_api_key_folds_into_bearer_auth() {
     let (server, chat_url, _handle) = boot_server().await;
@@ -1105,10 +1078,6 @@ async fn anthropic_x_api_key_folds_into_bearer_auth() {
         "x-api-key must fold into Authorization before endpoint auth runs"
     );
 }
-
-// ---------------------------------------------------------------------------
-// GatewayContext meta plumbing
-// ---------------------------------------------------------------------------
 
 /// Registers a proxy that captures the first inbound event's `meta`
 /// object into the returned shared slot so the test can assert on
@@ -1227,4 +1196,96 @@ async fn gateway_meta_carries_stream_true_on_streaming_request() {
         .clone()
         .expect("gateway must populate event.meta before dispatch");
     assert_eq!(meta.get("stream"), Some(&Value::Bool(true)));
+}
+
+/// Sends `Bearer t1` to a proxy whose auth provider accepts it, returning the
+/// response status and the session the flow received.
+async fn session_of_bearer_request(
+    auth: Option<flowgen_core::auth::TaskAuthConfig>,
+    credentials: Option<HttpCredentials>,
+) -> (
+    reqwest::StatusCode,
+    Option<Arc<flowgen_core::auth::UserSession>>,
+) {
+    let (server, url, _handle) = boot_server().await;
+    let (tx, mut rx) = mpsc::channel::<Event>(4);
+    server.register(
+        "gw".to_string(),
+        LlmProxyRegistration {
+            flow_name: "test_flow".to_string(),
+            display_name: None,
+            description: None,
+            protocol: Protocol::Openai,
+            config: Arc::new(GatewayConfig {
+                name: "gw".to_string(),
+                models: Vec::new(),
+                headers: HashMap::new(),
+                protocol: Protocol::Openai,
+                credentials_path: None,
+                auth,
+                ack_timeout: Some(Duration::from_secs(5)),
+                depends_on: None,
+                retry: None,
+            }),
+            credentials,
+            auth_provider: Some(Arc::new(flowgen_core::auth::testing::KnownToken)),
+            tx,
+            task_id: 0,
+            task_type: "llm_proxy",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: CancellationToken::new(),
+        },
+    );
+    let flow = tokio::spawn(async move {
+        let event = rx.recv().await.expect("event");
+        let session = event.session.clone();
+        event
+            .completion_tx
+            .as_ref()
+            .expect("completion")
+            .signal_completion(Some(json!({"text": "ok"})));
+        session
+    });
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth("t1")
+        .json(&json!({
+            "model": "gw/m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .expect("post");
+    let session = timeout(Duration::from_secs(5), flow)
+        .await
+        .expect("flow got the request")
+        .unwrap();
+    (resp.status(), session)
+}
+
+#[tokio::test]
+async fn a_signed_in_users_request_carries_them_and_their_token() {
+    use secrecy::ExposeSecret;
+
+    let (status, session) = session_of_bearer_request(
+        Some(flowgen_core::auth::TaskAuthConfig { required: true }),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    let session = session.expect("session");
+    assert_eq!(session.user.user_id, "u1");
+    assert_eq!(session.token.as_ref().unwrap().expose_secret(), "t1");
+}
+
+#[tokio::test]
+async fn the_proxy_key_is_never_taken_for_a_user() {
+    let (status, session) =
+        session_of_bearer_request(None, Some(HttpCredentials::bearer("t1"))).await;
+
+    assert_eq!(status, 200);
+    assert!(session.is_none());
 }

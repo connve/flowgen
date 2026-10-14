@@ -1295,6 +1295,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         // Drop the original tx so recv can complete
@@ -1407,6 +1408,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
             task_id: 0,
             id: None,
             timestamp: 123456789,
@@ -1547,6 +1549,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -1595,6 +1598,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -1647,6 +1651,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -1708,6 +1713,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         let result = event_handler.handle(input_event).await;
@@ -1757,6 +1763,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler
@@ -1813,6 +1820,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler
@@ -1870,6 +1878,7 @@ mod tests {
                 meta: None,
                 error: None,
                 completion_tx: None,
+                session: None,
             };
             handler
                 .handle(event)
@@ -1935,6 +1944,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler
@@ -2000,6 +2010,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler
@@ -2067,6 +2078,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler
@@ -2134,6 +2146,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -2195,6 +2208,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -2254,6 +2268,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         match event_handler.handle(input_event).await {

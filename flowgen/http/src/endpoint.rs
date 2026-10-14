@@ -87,6 +87,9 @@ impl IntoResponse for Error {
         let status = match &self {
             Error::SerdeJson { .. } => StatusCode::BAD_REQUEST,
             Error::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials => {
+                StatusCode::UNAUTHORIZED
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         status.into_response()
@@ -417,16 +420,14 @@ fn validate_basic_auth(basic_auth: &BasicAuth, decoded_bytes: &[u8]) -> Result<(
     }
 }
 
-/// Validates user-level authentication via the worker auth provider when
-/// `config.auth.required` is true. Returns the resolved user context, or
-/// `None` when user auth is not required.
+/// Validates user-level authentication via the worker auth provider; when not required, a valid bearer still identifies the user.
 async fn validate_user_auth(
     registration: &crate::server::EndpointRegistration,
     headers: &HeaderMap,
-) -> Result<Option<flowgen_core::auth::UserContext>, Error> {
+) -> Result<Option<flowgen_core::auth::UserSession>, Error> {
     match &registration.config.auth {
         Some(config) if config.required => {}
-        _ => return Ok(None),
+        _ => return Ok(optional_user(registration, headers).await),
     }
 
     let provider = match &registration.auth_provider {
@@ -441,11 +442,30 @@ async fn validate_user_auth(
 
     let token = extract_bearer_token(auth_header).ok_or(Error::MalformedCredentials)?;
 
-    provider
-        .validate(token)
-        .await
-        .map(Some)
-        .map_err(|_| Error::InvalidCredentials)
+    match provider.validate(token).await {
+        Ok(user) => Ok(Some(flowgen_core::auth::UserSession::with_token(
+            user, token,
+        ))),
+        Err(_) => Err(Error::InvalidCredentials),
+    }
+}
+
+/// The user a bearer the auth provider accepts belongs to; none when the
+/// endpoint has its own credentials, since the bearer is then its key.
+async fn optional_user(
+    registration: &crate::server::EndpointRegistration,
+    headers: &HeaderMap,
+) -> Option<flowgen_core::auth::UserSession> {
+    let provider = match (&registration.auth_provider, &registration.credentials) {
+        (Some(provider), None) => provider,
+        _ => return None,
+    };
+    let auth_header = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let token = extract_bearer_token(auth_header)?;
+    match provider.validate(token).await {
+        Ok(user) => Some(flowgen_core::auth::UserSession::with_token(user, token)),
+        Err(_) => None,
+    }
 }
 
 /// Reads the request body (bounded by `config.max_body_bytes`), parses it as
@@ -455,13 +475,13 @@ async fn parse_request(
     registration: &crate::server::EndpointRegistration,
     headers: &HeaderMap,
     body: Body,
-) -> Result<(Value, Map<String, Value>), Error> {
+) -> Result<ParsedRequest, Error> {
     if registration.cancellation_token.is_cancelled() {
         return Err(Error::FlowCompletionFailed);
     }
 
     validate_endpoint_auth(registration.credentials.as_ref(), headers)?;
-    let user_context = validate_user_auth(registration, headers).await?;
+    let session = validate_user_auth(registration, headers).await?;
 
     let limit = registration.config.max_body_bytes;
     let body_bytes = axum::body::to_bytes(body, limit)
@@ -491,13 +511,23 @@ async fn parse_request(
 
     let mut meta = Map::new();
     meta.insert(HEADERS_META_KEY.to_string(), Value::Object(headers_map));
-    if let Some(ctx) = user_context {
-        let value =
-            serde_json::to_value(ctx).map_err(|source| Error::UserContextSerialize { source })?;
+    if let Some(session) = &session {
+        let value = serde_json::to_value(&session.user)
+            .map_err(|source| Error::UserContextSerialize { source })?;
         meta.insert(flowgen_core::auth::AUTH.to_string(), value);
     }
 
-    Ok((json_body, meta))
+    Ok(ParsedRequest {
+        data: json_body,
+        meta,
+        session,
+    })
+}
+
+struct ParsedRequest {
+    data: Value,
+    meta: Map<String, Value>,
+    session: Option<flowgen_core::auth::UserSession>,
 }
 
 /// Builds an event with a per-request completion channel sized to the flow's
@@ -505,18 +535,21 @@ async fn parse_request(
 /// dispatcher waits on for flow completion.
 async fn inject_event(
     registration: &crate::server::EndpointRegistration,
-    data: Value,
-    meta: Map<String, Value>,
+    request: ParsedRequest,
 ) -> Result<CompletionRx, Error> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
-    let e = EventBuilder::new()
-        .data(EventData::Json(data))
+    let mut builder = EventBuilder::new()
+        .data(EventData::Json(request.data))
         .subject(registration.config.name.to_owned())
         .task_id(registration.task_id)
         .task_type(registration.task_type)
         .completion_tx(completion_state)
-        .meta_merge(meta)
+        .meta_merge(request.meta);
+    if let Some(session) = request.session {
+        builder = builder.session(Arc::new(session));
+    }
+    let e = builder
         .build()
         .map_err(|source| Error::EventBuilder { source })?;
 
@@ -535,8 +568,8 @@ async fn dispatch_blocking(
     headers: HeaderMap,
     body: Body,
 ) -> Result<StatusCode, Error> {
-    let (data, meta) = match parse_request(registration, &headers, body).await {
-        Ok(result) => result,
+    let request = match parse_request(registration, &headers, body).await {
+        Ok(request) => request,
         Err(Error::FlowCompletionFailed) => return Ok(StatusCode::SERVICE_UNAVAILABLE),
         Err(
             e @ (Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials),
@@ -544,7 +577,7 @@ async fn dispatch_blocking(
         Err(e) => return Err(e),
     };
 
-    let completion_rx = inject_event(registration, data, meta).await?;
+    let completion_rx = inject_event(registration, request).await?;
 
     match registration.config.ack_timeout {
         Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
@@ -572,8 +605,8 @@ async fn dispatch_stream(
     headers: HeaderMap,
     body: Body,
 ) -> Result<axum::response::Response<Body>, Error> {
-    let (data, mut meta) = match parse_request(registration, &headers, body).await {
-        Ok(result) => result,
+    let mut request = match parse_request(registration, &headers, body).await {
+        Ok(request) => request,
         Err(Error::FlowCompletionFailed) => {
             return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
         }
@@ -598,12 +631,12 @@ async fn dispatch_stream(
         )
         .await;
 
-    meta.insert(
+    request.meta.insert(
         flowgen_core::registry::CORRELATION_ID.to_string(),
         Value::String(correlation_id.clone()),
     );
 
-    let completion_rx = inject_event(registration, data, meta).await?;
+    let completion_rx = inject_event(registration, request).await?;
 
     info!(
         endpoint = %registration.config.name,
@@ -859,6 +892,82 @@ mod tests {
         assert!(matches!(event.data, EventData::Json(data) if data == json!({"id": 1})));
         assert_eq!(meta[HEADERS_META_KEY], json!({"x-a": "1"}));
         assert!(meta.contains_key(flowgen_core::registry::CORRELATION_ID));
+    }
+
+    #[tokio::test]
+    async fn a_verified_user_and_their_token_travel_with_the_event() {
+        use flowgen_core::auth::testing::KnownToken;
+        use secrecy::ExposeSecret;
+        let (tx, mut rx) = mpsc::channel(1);
+        let registration = crate::server::EndpointRegistration {
+            flow_name: "f".to_string(),
+            config: Arc::new(crate::config::Processor {
+                name: "receive".to_string(),
+                auth: Some(flowgen_core::auth::TaskAuthConfig { required: true }),
+                ..Default::default()
+            }),
+            credentials: None,
+            auth_provider: Some(Arc::new(KnownToken)),
+            tx,
+            task_id: 0,
+            task_type: "http_endpoint",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        };
+        let bearer = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            headers
+        };
+
+        let leaf = tokio::spawn(async move {
+            let event = rx.recv().await.expect("event");
+            event
+                .completion_tx
+                .as_ref()
+                .expect("completion")
+                .signal_completion(None);
+            event
+        });
+        let status = dispatch_blocking(&registration, bearer("t1"), Body::empty())
+            .await
+            .unwrap();
+        let event = leaf.await.unwrap();
+        let rejected = dispatch_blocking(&registration, bearer("t2"), Body::empty())
+            .await
+            .unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        let session = event.session.expect("session");
+        assert_eq!(session.user.user_id, "u1");
+        let token = session.token.as_ref().expect("token");
+        assert_eq!(token.expose_secret(), "t1");
+        assert_eq!(event.meta.expect("meta")["auth"]["user_id"], "u1");
+        assert_eq!(rejected, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_endpoint_key_is_never_taken_for_a_user() {
+        let registration =
+            |credentials: Option<HttpCredentials>| crate::server::EndpointRegistration {
+                flow_name: "f".to_string(),
+                config: Arc::new(crate::config::Processor::default()),
+                credentials,
+                auth_provider: Some(Arc::new(flowgen_core::auth::testing::KnownToken)),
+                tx: mpsc::channel(1).0,
+                task_id: 0,
+                task_type: "http_endpoint",
+                response_registry: Arc::new(ResponseRegistry::new()),
+                leaf_count: 1,
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+            };
+        let keyed = registration(Some(HttpCredentials::bearer("t1")));
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer t1".parse().unwrap());
+
+        assert!(optional_user(&keyed, &headers).await.is_none());
+        assert!(optional_user(&registration(None), &headers).await.is_some());
     }
 
     #[test]

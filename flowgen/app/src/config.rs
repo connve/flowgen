@@ -3,6 +3,7 @@
 //! Provides configuration structures for the main application and individual
 //! flows. Supports deserialization from TOML files and environment variables.
 
+use flowgen_core::task::meta::{Connection, Connector, TaskMeta};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -173,17 +174,52 @@ pub struct Flow {
     pub parallel_instances: usize,
 }
 
-/// Available task types in the flowgen ecosystem.
-///
-/// Each variant corresponds to a specific processor type from the
-/// various flowgen worker crates. Task configurations are embedded
-/// within each variant.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-// YAML configs reference task types by their lowercase tag (e.g. `convert:`,
-// `script:`). The serde-driven variant naming therefore has to use the same
-// shape — Rust's CamelCase convention does not apply to this public API.
-#[expect(non_camel_case_types, reason = "variant names are YAML tags")]
-pub enum TaskType {
+macro_rules! task_types {
+    ($($(#[$doc:meta])* $tag:ident($config:ty),)+) => {
+        /// Available task types in the flowgen ecosystem.
+        ///
+        /// Each variant corresponds to a specific processor type from the
+        /// various flowgen worker crates. Task configurations are embedded
+        /// within each variant.
+        #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+        // YAML configs reference task types by their lowercase tag (e.g. `convert:`,
+        // `script:`). The serde-driven variant naming therefore has to use the same
+        // shape — Rust's CamelCase convention does not apply to this public API.
+        #[expect(non_camel_case_types, reason = "variant names are YAML tags")]
+        pub enum TaskType {
+            $($(#[$doc])* $tag($config),)+
+        }
+
+        impl TaskType {
+            /// Every task type's YAML tag with its connector.
+            pub const TASK_CONNECTORS: &'static [(&'static str, Connector)] =
+                &[$((stringify!($tag), <$config as TaskMeta>::CONNECTOR),)+];
+
+            /// Returns the task type as a static string for event categorization.
+            pub const fn as_str(&self) -> &'static str {
+                match self {
+                    $(TaskType::$tag(_) => stringify!($tag),)+
+                }
+            }
+
+            /// Returns the task name from its configuration.
+            pub fn name(&self) -> &str {
+                match self {
+                    $(TaskType::$tag(config) => &config.name,)+
+                }
+            }
+
+            /// The external systems the task connects to, declared by its crate.
+            pub fn connections(&self) -> Vec<Connection> {
+                match self {
+                    $(TaskType::$tag(config) => config.connections(),)+
+                }
+            }
+        }
+    };
+}
+
+task_types! {
     /// Data conversion task.
     convert(flowgen_core::task::convert::config::Processor),
     /// Iterate over arrays task.
@@ -271,102 +307,6 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    /// Returns the task type as a static string for event categorization.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            TaskType::convert(_) => "convert",
-            TaskType::iterate(_) => "iterate",
-            TaskType::log(_) => "log",
-            TaskType::script(_) => "script",
-            TaskType::buffer(_) => "buffer",
-            TaskType::object_store(_) => "object_store",
-            TaskType::generate(_) => "generate",
-            TaskType::http_request(_) => "http_request",
-            TaskType::http_endpoint(_) => "http_endpoint",
-            TaskType::html_scrape(_) => "html_scrape",
-            TaskType::nats_jetstream_subscriber(_) => "nats_jetstream_subscriber",
-            TaskType::nats_jetstream_publisher(_) => "nats_jetstream_publisher",
-            TaskType::salesforce_pubsubapi_subscriber(_) => "salesforce_pubsubapi_subscriber",
-            TaskType::salesforce_pubsubapi_publisher(_) => "salesforce_pubsubapi_publisher",
-            TaskType::salesforce_bulkapi_query_job(_) => "salesforce_bulkapi_query_job",
-            TaskType::salesforce_restapi_sobject(_) => "salesforce_restapi_sobject",
-            TaskType::salesforce_restapi_composite(_) => "salesforce_restapi_composite",
-            TaskType::salesforce_restapi_search(_) => "salesforce_restapi_search",
-            TaskType::salesforce_soapapi_merge(_) => "salesforce_soapapi_merge",
-            TaskType::salesforce_toolingapi(_) => "salesforce_toolingapi",
-            TaskType::gcp_bigquery_query(_) => "gcp_bigquery_query",
-            TaskType::gcp_bigquery_storage_read(_) => "gcp_bigquery_storage_read",
-            TaskType::gcp_bigquery_job(_) => "gcp_bigquery_job",
-            TaskType::gcp_bigquery_storage_write(_) => "gcp_bigquery_storage_write",
-            TaskType::mssql_query(_) => "mssql_query",
-            TaskType::nats_kv_store(_) => "nats_kv_store",
-            TaskType::ai_completion(_) => "ai_completion",
-            TaskType::mcp_tool(_) => "mcp_tool",
-            TaskType::mcp_resource(_) => "mcp_resource",
-            TaskType::mcp_prompt(_) => "mcp_prompt",
-            TaskType::llm_proxy(_) => "llm_proxy",
-            TaskType::git_sync(_) => "git_sync",
-            TaskType::oci_sync(_) => "oci_sync",
-            TaskType::git_push(_) => "git_push",
-            TaskType::oci_push(_) => "oci_push",
-            TaskType::braze_export_users_ids(_) => "braze_export_users_ids",
-            TaskType::mongodb_collection(_) => "mongodb_collection",
-            TaskType::mongodb_change_stream(_) => "mongodb_change_stream",
-            TaskType::kafka_produce(_) => "kafka_produce",
-            TaskType::kafka_subscribe(_) => "kafka_subscribe",
-            TaskType::inproc_endpoint(_) => "inproc_endpoint",
-            TaskType::inproc_request(_) => "inproc_request",
-        }
-    }
-
-    /// Returns the task name from its configuration.
-    pub fn name(&self) -> &str {
-        match self {
-            TaskType::convert(c) => &c.name,
-            TaskType::iterate(c) => &c.name,
-            TaskType::log(c) => &c.name,
-            TaskType::script(c) => &c.name,
-            TaskType::buffer(c) => &c.name,
-            TaskType::object_store(c) => &c.name,
-            TaskType::generate(c) => &c.name,
-            TaskType::http_request(c) => &c.name,
-            TaskType::http_endpoint(c) => &c.name,
-            TaskType::html_scrape(c) => &c.name,
-            TaskType::nats_jetstream_subscriber(c) => &c.name,
-            TaskType::nats_jetstream_publisher(c) => &c.name,
-            TaskType::salesforce_pubsubapi_subscriber(c) => &c.name,
-            TaskType::salesforce_pubsubapi_publisher(c) => &c.name,
-            TaskType::salesforce_bulkapi_query_job(c) => &c.name,
-            TaskType::salesforce_restapi_sobject(c) => &c.name,
-            TaskType::salesforce_restapi_composite(c) => &c.name,
-            TaskType::salesforce_restapi_search(c) => &c.name,
-            TaskType::salesforce_soapapi_merge(c) => &c.name,
-            TaskType::salesforce_toolingapi(c) => &c.name,
-            TaskType::gcp_bigquery_query(c) => &c.name,
-            TaskType::gcp_bigquery_storage_read(c) => &c.name,
-            TaskType::gcp_bigquery_job(c) => &c.name,
-            TaskType::gcp_bigquery_storage_write(c) => &c.name,
-            TaskType::mssql_query(c) => &c.name,
-            TaskType::nats_kv_store(c) => &c.name,
-            TaskType::ai_completion(c) => &c.name,
-            TaskType::mcp_tool(c) => &c.name,
-            TaskType::mcp_resource(c) => &c.name,
-            TaskType::mcp_prompt(c) => &c.name,
-            TaskType::llm_proxy(c) => &c.name,
-            TaskType::git_sync(c) => &c.name,
-            TaskType::oci_sync(c) => &c.name,
-            TaskType::git_push(c) => &c.name,
-            TaskType::oci_push(c) => &c.name,
-            TaskType::braze_export_users_ids(c) => &c.name,
-            TaskType::mongodb_collection(c) => &c.name,
-            TaskType::mongodb_change_stream(c) => &c.name,
-            TaskType::kafka_produce(c) => &c.name,
-            TaskType::kafka_subscribe(c) => &c.name,
-            TaskType::inproc_endpoint(c) => &c.name,
-            TaskType::inproc_request(c) => &c.name,
-        }
-    }
-
     /// Whether this task participates in the event pipeline.
     ///
     /// Registration-only tasks (`mcp_prompt`, `mcp_resource`) publish their
@@ -989,6 +929,9 @@ pub struct AgentsOptions {
     /// this cache.
     #[serde(default = "default_conversation_history_ttl", with = "humantime_serde")]
     pub conversation_history_ttl: Option<Duration>,
+    /// Calls the AI gateway as the signed-in user, with their login token as the bearer.
+    #[serde(default)]
+    pub on_behalf_of_user: bool,
 }
 
 /// Default conversation history TTL for the built-in Agents chat: 30 days.

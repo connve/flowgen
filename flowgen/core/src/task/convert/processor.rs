@@ -676,6 +676,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -738,6 +739,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {
@@ -793,6 +795,7 @@ mod tests {
             meta: None,
             error: None,
             completion_tx: None,
+            session: None,
         };
 
         tokio::spawn(async move {

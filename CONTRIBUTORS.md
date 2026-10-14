@@ -30,8 +30,6 @@ it again whenever you're adding a new task type or touching error handling.
   name already makes the intent clear.
 - Don't add comments inside unit tests — the test name and assertions
   should carry the explanation.
-- Every task type needs a working example under `examples/`, demonstrating
-  a realistic use case with a short comment per task, not teaching prose.
 - Only link to URLs that already exist in the repo or were given to you
   directly — don't guess at a plausible-looking path.
   - Docs site: `https://connve.com/docs/flowgen/<route>`, mirroring
@@ -56,6 +54,9 @@ it again whenever you're adding a new task type or touching error handling.
   combinator form. Follow clippy rather than adding `#[allow(...)]` to keep
   the `match` style; `cargo clippy -- -D warnings` is the hard constraint,
   the style preference is soft.
+- Declare a crate's modules inline in `lib.rs`
+  (`pub mod push { pub mod config; pub mod processor; }`), or as
+  `module.rs` next to a `module/` directory. No `mod.rs` files.
 
 ### Testing
 
@@ -144,6 +145,81 @@ shape — e.g. BigQuery's `QueryResponse` becomes an Arrow `RecordBatch` for
   `errorMessage()` from `$lib/api` rather than a bare HTTP status.
 
 ## Architecture reference
+
+### Connectors
+
+A connector is the system a crate's task types talk to: Salesforce, NATS,
+Google Cloud. One crate is one connector. It declares the connector once in
+`lib.rs`, with the logo kept in the crate's own `icons/` directory, and
+implements `TaskMeta` for each of its task configs:
+
+```rust
+use flowgen_core::task::meta::{host, Connection, Connector, Icon, TaskMeta};
+use std::path::Path;
+
+/// The connector of this crate's task types.
+pub const CONNECTOR: Connector = Connector {
+    name: "salesforce",
+    label: "Salesforce",
+    icon: Icon::Svg(include_str!("../icons/salesforce.svg")),
+    describe_credentials: Some(describe_credentials),
+};
+
+/// The host of the org the credentials log in to.
+fn describe_credentials(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let credentials: salesforce_core::client::Credentials = serde_json::from_str(&content).ok()?;
+    Some(host(&credentials.instance_url))
+}
+
+impl TaskMeta for bulkapi::config::QueryJob {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        vec![Connection::new(CONNECTOR, Some(&self.credentials_path))]
+    }
+}
+```
+
+- `connections()` says what the task connects to, from its config alone:
+  the credentials file and a target such as a host, brokers, or an AI
+  provider and model. It reads no files. `Connection::target` leaves out
+  values set per event and passes the rest through `host()`, which drops
+  user info, query strings, and anything after a template's first `/`.
+  Tasks that connect to nothing keep the default, an empty list. A
+  connection to another connector's system names that crate's constant, as
+  `ai_completion` does with `flowgen_mcp::CONNECTOR` for its MCP servers.
+- `describe_credentials` names the account or instance a credentials file
+  points to. It reads the file with the same type the task loads it with
+  and returns only non-secret fields. Leave it `None` when the file holds
+  nothing but a secret.
+
+Task types in `flowgen_core` keep the default connector, `core`, with empty
+`impl TaskMeta` blocks in `flowgen/core/src/task/meta.rs`. `GET
+/api/connectors` lists every connector with its task types, and `GET
+/api/connectors/{name}/icon` serves its logo, which the web UI uses for task
+icons. `GET /api/connections` groups the connections by connector and
+credentials file. The docs copy the logos from `flowgen/*/icons/` when they
+build. No other place maps a task type to its connector or keeps a copy of
+a logo.
+
+Reference implementation: `flowgen/salesforce/src/lib.rs`
+
+### Adding a task type
+
+1. Config and processor in the connector's crate, following the
+   [task pattern](#task-pattern-processorrunner).
+2. `impl TaskMeta` for the config in the crate's `lib.rs`, with
+   `connections()` when the task connects somewhere. A new connector also
+   gets its `CONNECTOR`, `describe_credentials`, and logo in `icons/`.
+3. One variant in `task_types!` in `flowgen/app/src/config.rs`, which
+   derives the YAML tag, `as_str()`, `name()`, and `connections()` from it.
+   `depends_on()` below the macro takes one arm per variant by hand.
+4. Spawn it in `spawn_task` in `flowgen/app/src/flow.rs`.
+5. A working example under `examples/`, demonstrating a realistic use case
+   with a short comment per task, not teaching prose.
+6. A docs page under `docs/src/routes/`, next to its connector's other
+   pages, and its entry in `docs/src/lib/nav.ts`.
 
 ### Retry strategy
 
@@ -247,7 +323,7 @@ for event_data in events {
 A missing event should mean failure, not "nothing to report" — that's what
 lets downstream tasks and observability both trust the chain.
 
-Reference: `flowgen/salesforce/src/bulkapi/job_retrieve.rs`
+Reference: `flowgen/salesforce/src/bulkapi/query_job.rs`
 
 ### Structured logging context
 
@@ -278,13 +354,15 @@ reach for the span instead.
 
 ### Task pattern (Processor/Runner)
 
-Every task follows the same Processor/Runner shape:
+Every task follows the same Processor/Runner shape, declared inline in the
+crate's `lib.rs`:
 
 ```
-task_name/
-├── config.rs    # Configuration struct with serde
-├── processor.rs # or query.rs, subscriber.rs, publisher.rs, etc.
-└── mod.rs       # Module exports
+src/
+├── lib.rs           # pub mod task_name { pub mod config; pub mod processor; }
+└── task_name/
+    ├── config.rs    # Configuration struct with serde
+    └── processor.rs # or query.rs, subscriber.rs, publisher.rs, etc.
 ```
 
 **EventHandler** handles individual events. It holds shared state
@@ -514,7 +592,7 @@ Reference implementations:
   completion_tx, sandboxing
 - `flowgen/gcp/src/bigquery/query.rs` — SQL query with resource loading
 - `flowgen/nats/src/jetstream/publisher.rs` — event publishing
-- `flowgen/object-store/src/reader.rs` — file reading
+- `flowgen/object-store/src/read.rs` — file reading
 
 ### Sandboxing (nsjail)
 

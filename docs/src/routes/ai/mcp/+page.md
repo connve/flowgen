@@ -58,7 +58,7 @@ Registers a flow as an LLM-callable tool. Inbound `tools/call` requests are inje
 |---|---|---|---|
 | `name` | string | required | Tool name. Combined with the flow name as `{flow_name}.{name}` to form the full tool identifier. |
 | `description` | string | required | Human-readable description shown to LLMs for tool selection. |
-| `input_schema` | object | | JSON Schema for the tool's input parameters. |
+| `input_schema` | object | | JSON Schema for the tool's input parameters. A call whose arguments do not match it gets a tool error naming the first problem, such as `Invalid arguments: "project_id" is a required property`, and the flow does not run. The error leaves out argument values. A call without arguments is checked as `{}`. An invalid schema fails the task at startup, and a `$ref` to another file or URL is not fetched. |
 | `credentials_path` | string | | Overrides `mcp_server.credentials_path` for this tool. |
 | `headers` | map of string to string | `{}` | HTTP headers a request must carry, with matching values, for this tool to be listed on `tools/list` and callable at all. All declared headers must match. Empty (the default) means every caller can see and call it. A caller missing a required header gets the same "unknown tool" error as a nonexistent tool name — use this to give an agent only the specific tools it needs, e.g. a marketing agent that should see a BigQuery tool but not a Salesforce tool. |
 | `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before returning a timeout error to the client. |
