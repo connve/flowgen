@@ -227,6 +227,7 @@ fn base_config(url: &str, clone_path: PathBuf) -> GitSyncConfig {
             max_attempts: Some(1),
             ..Default::default()
         }),
+        max_in_flight: None,
     }
 }
 

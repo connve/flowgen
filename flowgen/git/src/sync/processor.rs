@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info, Instrument};
+use tracing::{error, info};
 use walkdir::WalkDir;
 
 /// Rewrites `/`, `:`, `@`, `?`, `=` in a repository URL to hyphens so
@@ -123,7 +123,14 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
     /// Handles a trigger event by syncing the repository and emitting file events.
     #[tracing::instrument(
         skip(self, event),
@@ -403,7 +410,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -425,43 +432,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             Err(e) => return Err(e),
         };
 
-        let mut handlers = Vec::new();
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match handler.handle(event.clone()).await {
-                                    Ok(()) => Ok(()),
-                                    Err(e) => {
-                                        error!(error = %e, "Git sync failed");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(e) = result {
-                                error!(error = %e, "Git sync exhausted all retry attempts");
-                                event
-                                    .forward_failure(handler.tx.as_ref(), e.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -566,6 +545,7 @@ mod tests {
             force_pull: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 

@@ -121,8 +121,7 @@ impl EventHandler {
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
-            let event_value = serde_json::value::Value::try_from(event.as_ref())?;
-            let config = self.config.render(&event_value)?;
+            let config = self.config.render_for_event(&event)?;
 
             let mut publish_payload = match &config.payload {
                 super::config::Payload::FromEvent { from_event } if *from_event => {
@@ -404,16 +403,30 @@ impl flowgen_core::task::runner::Runner for Publisher {
         // reconnects instead — the same "reconnect on event-loop failure"
         // the subscriber already does.
         let needs_reinit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let max_in_flight = match self.config.max_in_flight {
+            Some(max_in_flight) => max_in_flight,
+            None => self.task_context.max_in_flight,
+        };
+        let slots = Arc::new(tokio::sync::Semaphore::new(max_in_flight.get()));
         let mut handlers = Vec::new();
 
         loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                future::join_all(handlers).await;
-                return Ok(());
-            }
+            let slot = tokio::select! {
+                biased;
+                _ = self.task_context.cancellation_token.cancelled() => None,
+                slot = Arc::clone(&slots).acquire_owned() => slot.ok(),
+            };
+            let event = match slot {
+                Some(_) => tokio::select! {
+                    biased;
+                    _ = self.task_context.cancellation_token.cancelled() => None,
+                    event = rx.recv() => event,
+                },
+                None => None,
+            };
 
-            match rx.recv().await {
-                Some(event) => {
+            match (slot, event) {
+                (Some(slot), Some(event)) => {
                     // Only events this task will actually publish are worth a
                     // rebuild; one addressed to a different task is dropped by
                     // the check below and must not trigger a reconnect.
@@ -456,6 +469,7 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         let retry_strategy = retry_config.strategy();
                         let handle = tokio::spawn(
                             async move {
+                                let _slot = slot;
                                 let result = tokio_retry::Retry::spawn(retry_strategy, || async {
                                     match event_handler.handle(event.clone()).await {
                                         Ok(result) => Ok(result),
@@ -503,8 +517,8 @@ impl flowgen_core::task::runner::Runner for Publisher {
                         handlers.retain(|h| !h.is_finished());
                     }
                 }
-                None => {
-                    // Channel closed, wait for all spawned handlers to complete.
+                _ => {
+                    rx.close();
                     future::join_all(handlers).await;
                     return Ok(());
                 }
@@ -626,6 +640,7 @@ mod tests {
             endpoint: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
         let (tx, rx) = mpsc::channel::<Event>(10);
 

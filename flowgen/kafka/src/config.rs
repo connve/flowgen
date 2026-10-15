@@ -122,6 +122,9 @@ pub struct Produce {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for Produce {
@@ -137,6 +140,7 @@ impl Default for Produce {
             ack_timeout: default_ack_timeout(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 }

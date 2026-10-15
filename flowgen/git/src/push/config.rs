@@ -108,6 +108,9 @@ pub struct Processor {
     /// Example: `retry: {max_attempts: 3, initial_backoff: "2s"}`
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to the number of CPUs.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 /// Commit author or committer.

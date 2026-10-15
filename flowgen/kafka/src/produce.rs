@@ -8,7 +8,6 @@
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use futures_util::future;
 use rskafka::client::error::{Error as KafkaError, ProtocolError};
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::record::Record;
@@ -16,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ProduceResult {
@@ -413,6 +412,19 @@ impl EventHandler {
         );
         Ok(clients)
     }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
 
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -592,7 +604,7 @@ impl flowgen_core::task::runner::Runner for Producer {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Self::Error> {
+    async fn run(self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -620,53 +632,15 @@ impl flowgen_core::task::runner::Runner for Producer {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                future::join_all(handlers).await;
-                return Ok(());
-            }
-
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) if e.is_permanent() => {
-                                        error!(error = %e, "Failed to produce message");
-                                        Err(tokio_retry::RetryError::permanent(e))
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to produce message");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "Failed to produce message after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -835,6 +809,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         let parsed: Value = serde_json::from_slice(&bytes).unwrap();
@@ -854,6 +829,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert_eq!(bytes, b"raw data");
@@ -878,6 +854,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert!(!bytes.is_empty());
@@ -900,6 +877,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
         let bytes = serialize_event_to_bytes(&event).unwrap();
         assert_eq!(bytes, vec![0x01]);

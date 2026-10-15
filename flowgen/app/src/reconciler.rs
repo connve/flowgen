@@ -569,7 +569,6 @@ fn test_context(prefix: &str) -> ReconcilerContext {
         web: None,
         health: Default::default(),
         retry: None,
-        event_buffer_size: None,
         telemetry: None,
     };
 
@@ -619,9 +618,6 @@ fn build_flow(
     }
     if let Some(retry) = ctx.app_config.retry.as_ref() {
         builder = builder.retry(retry.clone());
-    }
-    if let Some(buf) = ctx.app_config.event_buffer_size {
-        builder = builder.event_buffer_size(buf);
     }
     if let Some(loader) = &ctx.resource_loader {
         builder = builder.resource_loader(loader.clone());
@@ -675,7 +671,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -807,7 +802,6 @@ flow:
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 

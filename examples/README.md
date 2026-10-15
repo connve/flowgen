@@ -11,6 +11,7 @@ This directory contains example flows demonstrating various flowgen features and
 - **`data/`** - Synthetic test data used by examples
 - **`gcp/`** - Google Cloud Platform integrations (BigQuery, Pub/Sub, ...)
 - **`git/`** - `git_sync` and `git_push` tasks (pull a repository, commit and push files)
+- **`html/`** - `html_scrape` task (fetch a page and extract rows with CSS selectors)
 - **`inproc/`** - `inproc_endpoint` and `inproc_request` tasks (one flow calling another in-process)
 - **`mcp/`** - MCP server tasks (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
 - **`mssql/`** - Microsoft SQL Server integrations

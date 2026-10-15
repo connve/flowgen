@@ -5,7 +5,6 @@ use crate::config::ConfigExt;
 use crate::event::{Event, EventBuilder, EventData, EventExt};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
 
 /// Errors from the in-process request processor.
 #[derive(thiserror::Error, Debug)]
@@ -22,11 +21,6 @@ pub enum Error {
     RenderConfig {
         #[source]
         source: crate::config::Error,
-    },
-    #[error("Failed to serialize event: {source}")]
-    SerializeEvent {
-        #[source]
-        source: crate::event::Error,
     },
     #[error("Error building event: {source}")]
     EventBuilder {
@@ -62,17 +56,30 @@ pub struct EventHandler {
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl crate::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if let Some(error) = event.error.clone() {
+            event.forward_failure(self.tx.as_ref(), error).await;
+            return Ok(());
+        }
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
-        let event_value = serde_json::Value::try_from(&event)
-            .map_err(|source| Error::SerializeEvent { source })?;
         let config = self
             .config
-            .render(&event_value)
+            .render_for_event(&event)
             .map_err(|source| Error::RenderConfig { source })?;
         let data = match event.data_as_json() {
             Ok(data) => data,
@@ -82,16 +89,12 @@ impl EventHandler {
             Some(meta) => meta.clone(),
             None => serde_json::Map::new(),
         };
+        let mut callers = event.call_stack.clone();
+        callers.push(self.task_context.flow.identity().to_string());
         let result = self
             .task_context
             .inproc
-            .call(
-                Some(self.task_context.flow.identity()),
-                &config.flow,
-                data,
-                meta,
-                event.session.clone(),
-            )
+            .call(&callers, &config.flow, data, meta, event.session.clone())
             .await?;
 
         let mut builder = EventBuilder::new()
@@ -108,6 +111,7 @@ impl EventHandler {
         if let Some(session) = &event.session {
             builder = builder.session(Arc::clone(session));
         }
+        builder.call_stack = event.call_stack.clone();
         let mut e = builder
             .build()
             .map_err(|source| Error::EventBuilder { source })?;
@@ -153,43 +157,19 @@ impl crate::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
         let handler = Arc::new(self.init().await?);
 
-        let mut handlers = Vec::new();
-        while let Some(event) = self.rx.recv().await {
-            let handler = Arc::clone(&handler);
-            let retry_strategy = retry_config.strategy();
-            let handle = tokio::spawn(
-                async move {
-                    if let Some(error) = event.error.clone() {
-                        event.forward_failure(handler.tx.as_ref(), error).await;
-                        return;
-                    }
-                    let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                        handler.handle(event.clone()).await.map_err(|e| {
-                            error!(error = %e, "Inproc request failed");
-                            match e.is_permanent() {
-                                true => tokio_retry::RetryError::permanent(e),
-                                false => tokio_retry::RetryError::transient(e),
-                            }
-                        })
-                    })
-                    .await;
-                    if let Err(e) = result {
-                        event
-                            .forward_failure(handler.tx.as_ref(), e.to_string())
-                            .await;
-                    }
-                }
-                .instrument(tracing::Span::current()),
-            );
-            handlers.push(handle);
-            handlers.retain(|h| !h.is_finished());
-        }
-        futures_util::future::join_all(handlers).await;
+        crate::task::runner::process_events(
+            self.rx,
+            handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
         Ok(())
     }
 }
@@ -288,9 +268,6 @@ mod tests {
                 source: event_error(),
             },
             Error::EventBuilder {
-                source: event_error(),
-            },
-            Error::SerializeEvent {
                 source: event_error(),
             },
         ];

@@ -39,6 +39,7 @@ pub const CONNECTOR: Connector = Connector {
 
 impl TaskMeta for push::config::Processor {
     const CONNECTOR: Connector = CONNECTOR;
+    const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, self.credentials_path.as_deref())
@@ -48,6 +49,7 @@ impl TaskMeta for push::config::Processor {
 
 impl TaskMeta for sync::config::Processor {
     const CONNECTOR: Connector = CONNECTOR;
+    const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.artifact])]

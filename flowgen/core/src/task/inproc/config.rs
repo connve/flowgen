@@ -42,6 +42,9 @@ pub struct Request {
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl crate::config::ConfigExt for Request {}

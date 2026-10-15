@@ -211,6 +211,7 @@ async fn write_then_read_round_trips_through_real_mongo() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     write_tx
@@ -239,6 +240,7 @@ async fn write_then_read_round_trips_through_real_mongo() {
         filter: json_filter(serde_json::json!({ "status": "active" })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     read_tx
@@ -276,6 +278,7 @@ async fn read_filter_applies_query_operators_and_value_types() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     for (name, age) in [("Ada", 36), ("Grace", 45), ("Alan", 24)] {
@@ -298,6 +301,7 @@ async fn read_filter_applies_query_operators_and_value_types() {
         filter: json_filter(serde_json::json!({ "age": { "$gt": 30 } })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     read_tx
@@ -341,6 +345,7 @@ async fn read_with_no_matches_emits_no_events() {
         filter: json_filter(serde_json::json!({ "status": "does_not_exist" })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     read_tx
@@ -369,6 +374,7 @@ async fn read_emits_every_matching_document() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     for name in ["Ada", "Grace", "Katherine"] {
@@ -390,6 +396,7 @@ async fn read_emits_every_matching_document() {
         filter: json_filter(serde_json::json!({ "batch": "x" })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     read_tx
@@ -462,6 +469,7 @@ async fn change_stream_emits_event_on_insert() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     write_tx
@@ -601,6 +609,7 @@ async fn upsert_updates_matching_or_inserts_new_document() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     write_tx
@@ -627,6 +636,7 @@ async fn upsert_updates_matching_or_inserts_new_document() {
         filter: json_filter(serde_json::json!({ "email": "ada@example.com" })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
 
@@ -669,6 +679,7 @@ async fn upsert_updates_matching_or_inserts_new_document() {
         filter: json_filter(serde_json::json!({ "email": "grace@example.com" })),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     upsert_insert_tx
@@ -729,6 +740,7 @@ async fn upsert_updates_matching_or_inserts_new_document() {
         filter: Default::default(),
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
     .await;
     read_tx

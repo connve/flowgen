@@ -102,8 +102,6 @@ http_server:
 #   enabled: true
 #   port: 3001
 #   path: "/mcp/v1"
-
-# event_buffer_size: 10000
 ```
 
 Without cache configured, flowgen uses an in-memory cache (single-node). See [Caching](/docs/flowgen/concepts/caching) for details.

@@ -73,6 +73,8 @@ pub enum Error {
     },
     #[error("Flow completion failed or timed out for endpoint request")]
     FlowCompletionFailed,
+    #[error("Server is too busy to process the request")]
+    ServerBusy,
     #[error("Request body exceeds configured max_body_bytes limit of {limit} bytes")]
     BodyTooLarge { limit: usize },
     #[error("Failed to serialize the user context: {source}")]
@@ -87,6 +89,7 @@ impl IntoResponse for Error {
         let status = match &self {
             Error::SerdeJson { .. } => StatusCode::BAD_REQUEST,
             Error::BodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Error::ServerBusy => StatusCode::SERVICE_UNAVAILABLE,
             Error::NoCredentials | Error::InvalidCredentials | Error::MalformedCredentials => {
                 StatusCode::UNAUTHORIZED
             }
@@ -530,12 +533,24 @@ struct ParsedRequest {
     session: Option<flowgen_core::auth::UserSession>,
 }
 
+/// When `ack_timeout` runs out for a request received now.
+fn ack_deadline(
+    registration: &crate::server::EndpointRegistration,
+) -> Option<tokio::time::Instant> {
+    registration
+        .config
+        .ack_timeout
+        .map(|timeout| tokio::time::Instant::now() + timeout)
+}
+
 /// Builds an event with a per-request completion channel sized to the flow's
-/// leaf count and pushes it onto `registration.tx`. Returns the receiver the
+/// leaf count and pushes it onto `registration.tx`, giving up at `deadline`
+/// when the server is too busy to process it. Returns the receiver the
 /// dispatcher waits on for flow completion.
 async fn inject_event(
     registration: &crate::server::EndpointRegistration,
     request: ParsedRequest,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<CompletionRx, Error> {
     let (completion_state, completion_rx) = new_completion_channel(registration.leaf_count);
 
@@ -553,9 +568,18 @@ async fn inject_event(
         .build()
         .map_err(|source| Error::EventBuilder { source })?;
 
-    e.send_with_logging(Some(&registration.tx))
-        .await
-        .map_err(|source| Error::SendMessage { source })?;
+    let sent = match deadline {
+        Some(deadline) => {
+            match tokio::time::timeout_at(deadline, e.send_with_logging(Some(&registration.tx)))
+                .await
+            {
+                Ok(sent) => sent,
+                Err(_) => return Err(Error::ServerBusy),
+            }
+        }
+        None => e.send_with_logging(Some(&registration.tx)).await,
+    };
+    sent.map_err(|source| Error::SendMessage { source })?;
 
     Ok(completion_rx)
 }
@@ -577,10 +601,11 @@ async fn dispatch_blocking(
         Err(e) => return Err(e),
     };
 
-    let completion_rx = inject_event(registration, request).await?;
+    let deadline = ack_deadline(registration);
+    let completion_rx = inject_event(registration, request, deadline).await?;
 
-    match registration.config.ack_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
+    match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, completion_rx).await {
             Ok(Ok(Ok(_))) => Ok(StatusCode::OK),
             Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
                 error!("{}", Error::FlowCompletionFailed);
@@ -636,7 +661,14 @@ async fn dispatch_stream(
         Value::String(correlation_id.clone()),
     );
 
-    let completion_rx = inject_event(registration, request).await?;
+    let deadline = ack_deadline(registration);
+    let completion_rx = match inject_event(registration, request, deadline).await {
+        Ok(completion_rx) => completion_rx,
+        Err(error) => {
+            registration.response_registry.remove(&correlation_id).await;
+            return Err(error);
+        }
+    };
 
     info!(
         endpoint = %registration.config.name,
@@ -646,7 +678,6 @@ async fn dispatch_stream(
 
     let registry = Arc::clone(&registration.response_registry);
     let cid = correlation_id.clone();
-    let ack_timeout = registration.config.ack_timeout;
     let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
 
     tokio::spawn(async move {
@@ -682,9 +713,9 @@ async fn dispatch_stream(
                         }
                     }
                     result = async {
-                        match ack_timeout {
-                            Some(timeout) => {
-                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                        match deadline {
+                            Some(deadline) => {
+                                match tokio::time::timeout_at(deadline, &mut completion_rx).await {
                                     Ok(result) => Some(result),
                                     Err(_) => {
                                         let err = json!({"error": "Flow completion timed out."});
@@ -816,6 +847,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
         let (tx, _rx) = mpsc::channel(100);
 
@@ -945,6 +977,51 @@ mod tests {
         assert_eq!(token.expose_secret(), "t1");
         assert_eq!(event.meta.expect("meta")["auth"]["user_id"], "u1");
         assert_eq!(rejected, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_request_not_taken_within_ack_timeout_gets_503() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.send(
+            EventBuilder::new()
+                .data(EventData::Json(Value::Null))
+                .subject("a".to_string())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let registration = crate::server::EndpointRegistration {
+            flow_name: "f".to_string(),
+            config: Arc::new(crate::config::Processor {
+                name: "receive".to_string(),
+                ack_timeout: Some(std::time::Duration::from_millis(100)),
+                ..Default::default()
+            }),
+            credentials: None,
+            auth_provider: None,
+            tx,
+            task_id: 0,
+            task_type: "http_endpoint",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+        };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_blocking(&registration, HeaderMap::new(), Body::from("{}")),
+        )
+        .await
+        .expect("gives up at ack_timeout");
+
+        assert!(matches!(result, Err(Error::ServerBusy)));
+        assert_eq!(
+            Error::ServerBusy.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]

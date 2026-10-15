@@ -1,0 +1,42 @@
+# Fetch a page, scrape one row per book with CSS selectors, log each row.
+# One-shot: the generate task fires once ten seconds after startup.
+# books.toscrape.com is a public sandbox made for scraping practice.
+flow:
+  labels:
+    display_name: "HTML Scrape Basic"
+    description: "Fetches a public scraping sandbox page, extracts title, link, price and availability of each book with CSS selectors, and logs one event per book."
+    tags: ["html", "scrape", "http", "example"]
+  require_leader_election: true
+  tasks:
+
+    # One-shot trigger, ten seconds after startup.
+    - generate:
+        name: trigger
+        interval: 10s
+        count: 1
+
+    # Fetch the page as a string.
+    - http_request:
+        name: fetch_page
+        endpoint: "https://books.toscrape.com/"
+        method: GET
+        response_type: text
+
+    # One row per book: title and link from attributes, price and stock from text.
+    - html_scrape:
+        name: extract_books
+        row_selector: "article.product_pod"
+        fields:
+          title: "h3 a@title"
+          url: "h3 a@href"
+          price: "p.price_color"
+          availability: "p.availability"
+
+    # Split the rows into one event per book.
+    - iterate:
+        name: split_rows
+
+    # Log each book.
+    - log:
+        name: log
+        level: info

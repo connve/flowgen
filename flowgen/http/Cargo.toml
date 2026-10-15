@@ -13,7 +13,6 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json = { workspace = true }
-futures-util = { workspace = true }
 reqwest = { workspace = true }
 flowgen_core = { path = "../core" }
 handlebars = { workspace = true }

@@ -124,6 +124,14 @@ export const navigation: NavSection[] = [
 		]
 	},
 	{
+		title: 'HTML',
+		icon: '/icons/html.svg',
+		items: [
+			{ title: 'Overview', href: '/html' },
+			{ title: 'Scrape', href: '/html/scrape' }
+		]
+	},
+	{
 		title: 'HTTP',
 		icon: '/icons/http.svg',
 		items: [

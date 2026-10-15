@@ -58,6 +58,9 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to the number of CPUs.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Processor {}
@@ -101,6 +104,7 @@ mod tests {
             html_field: Some("body".to_string()),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&processor).unwrap();

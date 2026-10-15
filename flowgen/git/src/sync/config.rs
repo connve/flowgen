@@ -60,6 +60,9 @@ pub struct Processor {
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to the number of CPUs.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Processor {}

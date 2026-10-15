@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Errors that can occur during loop processing operations.
 #[derive(thiserror::Error, Debug)]
@@ -122,7 +122,14 @@ pub struct EventHandler {
     task_context: Arc<crate::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl crate::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
     /// Processes an event by iterating over a JSON array and emitting individual events.
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -281,7 +288,7 @@ impl crate::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -305,49 +312,15 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                futures_util::future::join_all(handlers).await;
-                return Ok(());
-            }
-
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to iterate event");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "Iterate failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        crate::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -428,6 +401,7 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::runner::Handler;
     use serde_json::{json, Map};
     use tokio::sync::mpsc;
 
@@ -462,6 +436,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
         let (tx, rx) = mpsc::channel(100);
 
@@ -498,6 +473,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -521,6 +497,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -551,6 +528,7 @@ mod tests {
             iterate_key: Some("items".to_string()),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -577,6 +555,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -607,6 +586,7 @@ mod tests {
             iterate_key: Some("missing".to_string()),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, _rx) = mpsc::channel(100);
@@ -630,6 +610,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         let result = event_handler.handle(input_event).await;
@@ -648,6 +629,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -673,6 +655,7 @@ mod tests {
             error: None,
             completion_tx: Some(Arc::clone(&upstream_state)),
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -731,6 +714,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let event_handler = EventHandler {
@@ -754,6 +738,7 @@ mod tests {
             error: None,
             completion_tx: Some(upstream_state),
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -772,6 +757,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, _rx) = mpsc::channel(100);
@@ -795,6 +781,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         let result = event_handler.handle(input_event).await;
@@ -817,6 +804,7 @@ mod tests {
             iterate_key: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (tx, mut rx) = mpsc::channel(100);
@@ -844,6 +832,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {

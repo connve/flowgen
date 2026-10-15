@@ -36,11 +36,9 @@ use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info, warn, Instrument};
 
-// Event buffer size for MPSC channels. This needs to be large enough to handle
-// bursts from tasks like iterate that fan-out large arrays (e.g., 100k+ rows).
-// Set to 10M (~1.2 GB memory) to provide ample headroom for high-volume processing.
-// With MPSC, this buffer is distributed across N-1 channels for N tasks.
-const DEFAULT_EVENT_BUFFER_SIZE: usize = 10_000_000;
+/// Room for one event between two tasks. Each task limits itself with
+/// `max_in_flight`, so a slow task makes the ones before it wait.
+const CHANNEL_CAPACITY: usize = 1;
 
 /// Errors that can occur during flow execution.
 #[derive(thiserror::Error, Debug)]
@@ -341,11 +339,8 @@ pub struct TaskHandles {
 
 impl TaskRegistry {
     /// Creates a new builder for constructing a task registry.
-    fn builder(flow_config: Arc<FlowConfig>, buffer_size: usize) -> TaskRegistryBuilder {
-        TaskRegistryBuilder {
-            flow_config,
-            buffer_size,
-        }
+    fn builder(flow_config: Arc<FlowConfig>) -> TaskRegistryBuilder {
+        TaskRegistryBuilder { flow_config }
     }
 
     /// Separates tasks into blocking (setup) and background tasks.
@@ -369,7 +364,6 @@ impl TaskRegistry {
 #[derive(Debug)]
 struct TaskRegistryBuilder {
     flow_config: Arc<FlowConfig>,
-    buffer_size: usize,
 }
 
 impl TaskRegistryBuilder {
@@ -401,7 +395,7 @@ impl TaskRegistryBuilder {
         let task_count = tasks_config.len();
         let mut channels: Vec<(mpsc::Sender<Event>, mpsc::Receiver<Event>)> = (0..task_count
             .saturating_sub(1))
-            .map(|_| mpsc::channel(self.buffer_size))
+            .map(|_| mpsc::channel(CHANNEL_CAPACITY))
             .collect();
 
         let mut task_descriptors = Vec::with_capacity(task_count);
@@ -476,7 +470,7 @@ impl TaskRegistryBuilder {
             (0..task_count).map(|_| None).collect();
         for (idx, parents) in parent_indices.iter().enumerate() {
             if !parents.is_empty() {
-                let (tx, rx) = mpsc::channel(self.buffer_size);
+                let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
                 inbound_tx[idx] = Some(tx);
                 child_rx[idx] = Some(rx);
             }
@@ -500,7 +494,7 @@ impl TaskRegistryBuilder {
                 })?;
                 parent_tx[parent_idx] = Some(child_inbound);
             } else {
-                let (dispatcher_tx, dispatcher_rx) = mpsc::channel(self.buffer_size);
+                let (dispatcher_tx, dispatcher_rx) = mpsc::channel(CHANNEL_CAPACITY);
                 parent_tx[parent_idx] = Some(dispatcher_tx);
 
                 let mut child_senders = Vec::with_capacity(children.len());
@@ -513,16 +507,7 @@ impl TaskRegistryBuilder {
                     child_senders.push(child_inbound);
                 }
 
-                tokio::spawn(async move {
-                    let mut rx = dispatcher_rx;
-                    while let Some(event) = rx.recv().await {
-                        for tx in &child_senders {
-                            if tx.send(event.clone()).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                });
+                tokio::spawn(fan_out(dispatcher_rx, child_senders));
             }
         }
         // Drop the sender side of inbound channels held only by the wiring
@@ -593,8 +578,6 @@ pub struct Flow {
     /// or in-memory deployments this is the same `Arc` as `cache`; the
     /// separation is enforced only by the operator in the main config.
     system_cache: Arc<dyn flowgen_core::cache::Cache>,
-    /// Event channel buffer size for this flow (from app config or DEFAULT).
-    event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration, passed in from the main application.
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Optional resource loader for loading external files, passed in from the main application.
@@ -808,8 +791,7 @@ impl Flow {
         let task_context = self.create_task_context()?;
 
         // Build task registry with all tasks properly wired.
-        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
-        let registry = TaskRegistry::builder(self.config.clone(), buffer_size).build()?;
+        let registry = TaskRegistry::builder(self.config.clone()).build()?;
 
         // Separate blocking (setup) tasks from background tasks.
         let (blocking_tasks, background_tasks) = registry.partition();
@@ -855,14 +837,13 @@ impl Flow {
     /// All instances share the same cancellation token for coordinated shutdown.
     async fn spawn_parallel_instances(&self, count: usize) -> Result<TaskHandles, Error> {
         let task_context = self.create_task_context()?;
-        let buffer_size = self.event_buffer_size.unwrap_or(DEFAULT_EVENT_BUFFER_SIZE);
 
         let mut all_blocking_tasks = Vec::new();
         let mut all_background_tasks = Vec::new();
 
         // Build all task registries and collect task descriptors.
         for _ in 0..count {
-            let registry = TaskRegistry::builder(self.config.clone(), buffer_size).build()?;
+            let registry = TaskRegistry::builder(self.config.clone()).build()?;
             let (blocking_tasks, background_tasks) = registry.partition();
             all_blocking_tasks.extend(blocking_tasks);
             all_background_tasks.extend(background_tasks);
@@ -1174,6 +1155,19 @@ impl Flow {
     }
 }
 
+/// Sends each event to every branch that still takes events, and stops once none do.
+async fn fan_out(mut rx: mpsc::Receiver<Event>, mut branches: Vec<mpsc::Sender<Event>>) {
+    while let Some(event) = rx.recv().await {
+        branches.retain(|branch| !branch.is_closed());
+        if branches.is_empty() {
+            return;
+        }
+        for branch in &branches {
+            let _ = branch.send(event.clone()).await;
+        }
+    }
+}
+
 /// Spawns a single task based on its descriptor with proper channel wiring.
 ///
 /// Returns a JoinHandle for the spawned task.
@@ -1197,6 +1191,8 @@ async fn spawn_task(
     let task_context = {
         let mut ctx = (*task_context).clone();
         ctx.leaf_count = task_desc.downstream_leaves;
+        ctx.max_in_flight =
+            flowgen_core::task::runner::max_in_flight(task_desc.task_type.cpu_intensive());
         // Stagger init for background tasks to avoid thundering-herd on
         // external services. Blocking tasks (webhooks) and generate (cron)
         // must start immediately.
@@ -2163,8 +2159,6 @@ pub struct FlowBuilder {
     /// System cache instance. Backs the executor's lease store and is kept
     /// out of user-script reach. Required at build time.
     system_cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
-    /// Optional event channel buffer size.
-    event_buffer_size: Option<usize>,
     /// Optional app-level retry configuration.
     retry: Option<flowgen_core::retry::RetryConfig>,
     /// Resource loader for loading external files.
@@ -2225,12 +2219,6 @@ impl FlowBuilder {
     /// share the same underlying `Arc`.
     pub fn system_cache(mut self, cache: Arc<dyn flowgen_core::cache::Cache>) -> Self {
         self.system_cache = Some(cache);
-        self
-    }
-
-    /// Sets the event channel buffer size.
-    pub fn event_buffer_size(mut self, size: usize) -> Self {
-        self.event_buffer_size = Some(size);
         self
     }
 
@@ -2297,7 +2285,6 @@ impl FlowBuilder {
             system_cache: self
                 .system_cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("system_cache".to_string()))?,
-            event_buffer_size: self.event_buffer_size,
             retry: self.retry,
             resource_loader: self.resource_loader,
             client_registry: match self.client_registry {
@@ -2320,6 +2307,52 @@ impl FlowBuilder {
 mod tests {
     use super::*;
     use crate::config::{Flow, FlowConfig, FlowConfigRaw};
+
+    fn event() -> Event {
+        flowgen_core::event::EventBuilder::new()
+            .data(flowgen_core::event::EventData::Json(
+                serde_json::Value::Null,
+            ))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_keeps_feeding_the_other_branches_when_one_stops() {
+        let (parent, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (stopped, stopped_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (running, mut running_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        drop(stopped_rx);
+        tokio::spawn(fan_out(rx, vec![stopped, running]));
+
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                parent.send(event()).await.unwrap();
+            }
+        });
+
+        let mut received = 0;
+        while running_rx.recv().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, 3);
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_with_no_branches_left_stops_taking_events() {
+        let (parent, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (stopped, stopped_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        drop(stopped_rx);
+        let dispatcher = tokio::spawn(fan_out(rx, vec![stopped]));
+
+        parent.send(event()).await.unwrap();
+        dispatcher.await.unwrap();
+
+        assert!(parent.send(event()).await.is_err());
+    }
 
     #[test]
     fn test_flow_builder_new() {
@@ -2490,7 +2523,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         assert_eq!(registry.tasks.len(), 3);
 
@@ -2539,7 +2572,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         assert_eq!(registry.tasks.len(), 1);
 
@@ -2585,7 +2618,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
         let (blocking, background) = registry.partition();
 
         assert_eq!(blocking.len(), 1, "Should have 1 blocking task (webhook)");
@@ -2630,7 +2663,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         assert_eq!(registry.tasks.len(), 0);
     }
@@ -2669,7 +2702,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         assert_eq!(registry.tasks[0].id, 0);
         assert_eq!(registry.tasks[1].id, 1);
@@ -2714,7 +2747,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         let leaves = |name: &str| {
             registry
@@ -2772,7 +2805,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         let leaves = |name: &str| {
             registry
@@ -2825,7 +2858,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         let leaves = |name: &str| {
             registry
@@ -2886,7 +2919,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         let leaves = |name: &str| {
             registry
@@ -2944,7 +2977,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         for task in &registry.tasks {
             assert_eq!(
@@ -2993,7 +3026,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         for task in &registry.tasks {
             assert!(
@@ -3053,7 +3086,7 @@ mod tests {
             .expect("test fixture must have valid identity"),
         );
 
-        let registry = TaskRegistry::builder(flow_config, 100).build().unwrap();
+        let registry = TaskRegistry::builder(flow_config).build().unwrap();
 
         let prompt = registry
             .tasks

@@ -78,6 +78,9 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Processor {}
@@ -100,6 +103,7 @@ impl Default for Processor {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 }
@@ -215,6 +219,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(processor.name, "test_processor".to_string());
@@ -246,6 +251,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&processor).unwrap();
@@ -271,6 +277,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let cloned = processor.clone();
@@ -432,6 +439,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&processor).unwrap();

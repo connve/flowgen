@@ -89,6 +89,9 @@ pub struct Config {
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Config {}
@@ -380,9 +383,24 @@ pub struct EventHandler {
     prune_lock: tokio::sync::Mutex<()>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if let Some(error) = event.error.clone() {
+            event.forward_failure(self.tx.as_ref(), error).await;
+            return Ok(());
+        }
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
@@ -391,11 +409,9 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            let event_value = serde_json::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
             let rendered = self
                 .config
-                .render(&event_value)
+                .render_for_event(event.as_ref())
                 .map_err(|source| Error::ConfigRender { source })?;
 
             let result = match rendered.operation {
@@ -440,7 +456,9 @@ impl EventHandler {
         })
         .await
     }
+}
 
+impl EventHandler {
     async fn handle_put(
         &self,
         key: &str,
@@ -683,7 +701,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -705,43 +723,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             Err(e) => return Err(e),
         };
 
-        let mut handlers = Vec::new();
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(async move {
-                        if let Some(error) = event.error.clone() {
-                            event.forward_failure(handler.tx.as_ref(), error).await;
-                            return;
-                        }
-                        let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                            handler.handle(event.clone()).await.map_err(|e| {
-                                error!(error = %e, "KV store operation failed");
-                                match e.is_permanent() {
-                                    true => tokio_retry::RetryError::permanent(e),
-                                    false => tokio_retry::RetryError::transient(e),
-                                }
-                            })
-                        })
-                        .await;
-
-                        if let Err(e) = result {
-                            event
-                                .forward_failure(handler.tx.as_ref(), e.to_string())
-                                .await;
-                        }
-                    });
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -926,6 +916,7 @@ mod tests {
             include_values: false,
             depends_on: Some(vec!["a".to_string()]),
             retry: None,
+            max_in_flight: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();

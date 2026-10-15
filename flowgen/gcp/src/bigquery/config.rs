@@ -247,6 +247,9 @@ pub struct Query {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Query {}
@@ -434,6 +437,9 @@ pub struct Job {
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for Job {}
@@ -717,6 +723,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(query.name, "test_query");
@@ -747,6 +754,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&query).unwrap();
@@ -834,6 +842,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert!(query.parameters.is_some());
@@ -874,6 +883,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let cloned = query.clone();
@@ -900,6 +910,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(query.get_job_project_id(), "billing-project");
@@ -925,6 +936,7 @@ mod tests {
             use_storage_read: false,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(query.get_job_project_id(), "my-project");
@@ -1132,6 +1144,9 @@ pub struct StorageRead {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl ConfigExt for StorageRead {}
@@ -1242,6 +1257,9 @@ pub struct StorageWrite {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 /// BigQuery CDC change type for Storage Write API.

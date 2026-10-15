@@ -6,7 +6,7 @@ use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// SOSL reserved characters that must be backslash-escaped inside a phrase
 /// search (`FIND {"..."}`). Hyphens, ampersands, and the like otherwise abort
@@ -120,8 +120,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
-    async fn handle(&self, event: Event) -> Result<(), Error> {
+    async fn process(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
@@ -130,10 +129,9 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let event_value = serde_json::value::Value::try_from(event.as_ref())?;
             let config = self
                 .config
-                .render(&event_value)
+                .render_for_event(&event)
                 .map_err(|e| Error::ConfigRender { source: e })?;
 
             let query = escape_sosl_phrases(&config.query);
@@ -174,6 +172,55 @@ impl EventHandler {
             Ok(())
         })
         .await
+    }
+
+    async fn reconnect_on_auth_error(&self, error: Error) -> Error {
+        let needs_reconnect = match &error {
+            Error::SalesforceAuth { .. } => true,
+            Error::SearchOperation { source } => matches!(
+                source.as_ref(),
+                salesforce_core::restapi::search::Error::Auth { .. }
+            ),
+            _ => false,
+        };
+        match needs_reconnect {
+            true => match self.sfdc_client.lock().await.reconnect().await {
+                Ok(()) => error,
+                Err(source) => {
+                    error!(error = %error, "Reconnecting after an authentication error failed");
+                    Error::SalesforceAuth { source }
+                }
+            },
+            false => error,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        match error {
+            Error::SearchOperation { source } => source.is_retryable(),
+            _ => true,
+        }
+    }
+
+    /// Ignores events addressed to another task.
+    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
+    async fn handle(&self, event: Event) -> Result<(), Error> {
+        if Some(event.task_id) != self.current_task_id.checked_sub(1) {
+            return Ok(());
+        }
+        match self.process(event).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.reconnect_on_auth_error(error).await),
+        }
     }
 }
 
@@ -242,7 +289,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Self::Error> {
+    async fn run(self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -266,73 +313,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    if Some(event.task_id) == event_handler.current_task_id.checked_sub(1) {
-                        let event_handler = Arc::clone(&event_handler);
-                        let retry_strategy = retry_config.strategy();
-                        let event_clone = event.clone();
-                        let handle = tokio::spawn(
-                            async move {
-                                let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                    match event_handler.handle(event_clone.clone()).await {
-                                        Ok(result) => Ok(result),
-                                        Err(e) => {
-                                            error!(error = %e, "Failed to process SOSL search");
-                                            let needs_reconnect = matches!(&e, Error::SalesforceAuth { .. })
-                                                || matches!(&e,
-                                                    Error::SearchOperation { source }
-                                                        if matches!(source.as_ref(), salesforce_core::restapi::search::Error::Auth { .. })
-                                                );
-
-                                            if needs_reconnect {
-                                                let mut sfdc_client =
-                                                    event_handler.sfdc_client.lock().await;
-                                                if let Err(reconnect_err) =
-                                                    (*sfdc_client).reconnect().await
-                                                {
-                                                    error!(error = %reconnect_err, "Failed to reconnect");
-                                                    return Err(tokio_retry::RetryError::transient(Error::SalesforceAuth {
-                                                        source: reconnect_err,
-                                                    }));
-                                                }
-                                            }
-
-                                            let retryable = match &e {
-                                                Error::SearchOperation { source } => source.is_retryable(),
-                                                _ => true,
-                                            };
-                                            if retryable {
-                                                Err(tokio_retry::RetryError::transient(e))
-                                            } else {
-                                                Err(tokio_retry::RetryError::permanent(e))
-                                            }
-                                        }
-                                    }
-                                })
-                                .await;
-
-                                if let Err(err) = result {
-                                    error!(error = %err, "SOSL search failed after all retry attempts");
-                                    event_clone
-                                        .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                        .await;
-                                }
-                            }
-                            .instrument(tracing::Span::current()),
-                        );
-                        handlers.push(handle);
-                        handlers.retain(|h| !h.is_finished());
-                    }
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 

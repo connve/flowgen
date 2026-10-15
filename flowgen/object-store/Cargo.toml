@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 flowgen_core = { path = "../core" }
 tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io", "io-util"] }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
@@ -28,6 +29,9 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 async-trait.workspace = true
 tokio-retry = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

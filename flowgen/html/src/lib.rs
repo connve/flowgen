@@ -24,4 +24,5 @@ pub const CONNECTOR: Connector = Connector {
 
 impl TaskMeta for scrape::config::Processor {
     const CONNECTOR: Connector = CONNECTOR;
+    const CPU_INTENSIVE: bool = true;
 }

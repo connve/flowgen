@@ -1,50 +1,80 @@
 # Changelog
 
+## 0.147.0
+
+### Breaking
+
+- **Backpressure.** Each processor handles up to `max_in_flight` events at a
+  time and picks up the next one when a slot frees up. The default is 64 for
+  tasks that mostly wait on an external service, and the number of CPUs for
+  tasks that parse, encode or batch data. A slow task slows down everything upstream, so memory depends on
+  `max_in_flight` and event size, not on input size. `buffer` waits until its
+  batch is picked up before taking more events. Set `max_in_flight` per task
+  to change the limit; `max_in_flight: 1` keeps events in order. An event
+  being retried keeps its slot, so while an external service is down, the
+  flow stops taking new input.
+- `http_endpoint`, `llm_proxy` and `mcp_tool` count the wait for the flow to
+  take a request as part of `ack_timeout`. If the flow is too busy to take it
+  in time, HTTP clients get `503` and MCP clients a "Server is too busy" error.
+- `event_buffer_size` is removed. It's ignored if set.
+
+### Fixed
+
+- `object_store` streams CSV files in 8 MB ranges, all from the same version
+  of the file: one pass infers the schema, a second one emits batches. Memory
+  holds one batch, not the whole file, and a slow next task can't make the
+  download time out.
+- Stopping or reloading a flow doesn't hang on tasks waiting to send events,
+  and events in progress aren't retried, so their side effects don't repeat.
+- When one branch of a fan-out stops, the other branches keep getting events.
+- `inproc_request` rejects a call to a flow that is already waiting further up
+  the chain, such as `a` → `b` → `a`, which would otherwise wait on itself.
+- Config templates convert the event's data to JSON only when they use it, so
+  big batches aren't copied for every event.
+
 ## 0.146.0
 
 ### Breaking
 
-- **`mcp_tool` checks call arguments against its `input_schema`.** A call
-  that does not match gets a tool error naming the first problem, and the
-  flow does not run. A call without
-  `arguments` reaches the flow as `{}`. An invalid schema fails the task at
-  startup, and a `$ref` to another file or URL is not fetched.
+- **`mcp_tool` validates arguments against `input_schema`.** Invalid calls
+  get a tool error with the first problem, and the flow doesn't run. Missing
+  `arguments` are passed as `{}`. An invalid schema stops the task at startup.
+  `$ref`s to other files or URLs aren't fetched.
 
 ### Features
 
-- Events carry the signed-in user verified by `http_endpoint`, `llm_proxy` or
-  `mcp_tool`, through the flow and into `inproc_request` calls. Scripts and
-  templates cannot read or change it. Without `auth.required`, a bearer the
-  auth provider accepts identifies the user, unless it is the task's own key
-  from `credentials_path`. A `buffer` keeps the user
-  when every event in a batch comes from them.
-- `web.agents.on_behalf_of_user: true` makes the Agents chat call the AI
-  gateway as the signed-in user.
-- `on_behalf_of_user: true` on an `ai_completion` MCP server calls it as the
-  signed-in user. A server that answers their token with 401 or 403 fails the
-  event with an error saying the token was rejected.
-- The web UI's Connections tab and `GET /api/connections` list the systems
-  the flows connect to, one per connector and credentials file, with a
-  status from the latest log records of the tasks using each. The flow count
-  opens the Flows tab filtered to that connection. Each row shows what its
-  credentials point to and where its tasks connect.
-- `GET /api/connectors` lists each connector with its label and task types,
-  and `GET /api/connectors/{name}/icon` serves its logo. Each crate declares
-  its connector through the `TaskMeta` trait and keeps its logo in `icons/`.
-  The web UI and the docs take icons from there.
+- The signed-in user travels with the event. `http_endpoint`, `llm_proxy` and
+  `mcp_tool` attach the verified user, and it stays on the event through the
+  flow and into `inproc_request` calls. Scripts and templates can't read or
+  change it. Without `auth.required`, any bearer the auth provider accepts
+  identifies the user, except the task's own `credentials_path` key. `buffer`
+  keeps the user if the whole batch comes from them.
+- `web.agents.on_behalf_of_user: true`: the Agents chat calls the AI gateway
+  as the signed-in user.
+- `on_behalf_of_user: true` on an `ai_completion` MCP server: the agent calls
+  the server as the signed-in user. If the server answers with 401 or 403, the
+  event fails with a "token rejected" error.
+- Connections tab in the web UI, also at `GET /api/connections`: one row per
+  connector and credentials file, showing what the credentials point to, where
+  the tasks connect, and a status from the tasks' latest logs. The flow count
+  opens the Flows tab filtered to that connection.
+- `GET /api/connectors` lists connectors with their labels and task types, and
+  `GET /api/connectors/{name}/icon` serves the logo. Each crate declares its
+  connector with the `TaskMeta` trait and keeps its logo in `icons/`; the web
+  UI and the docs use those.
 - `mcp_tool`, `mcp_prompt`, `mcp_resource` and `ai_completion` MCP servers
   belong to the `mcp` connector, and `html_scrape` to `html`, each with its
   own icon.
 
 ### Fixed
 
-- `http_endpoint` answers 401 to a missing or invalid token.
-- `ai_completion` tasks with the same provider and model keep their own MCP
-  tools and static context.
-- An `ai_completion` MCP server whose OAuth 2.0 token rotates gets new
-  connections that list each tool once.
-- Errors of `http_endpoint`, `mcp_tool` and other registering tasks are
-  logged at startup and on hot reload.
+- `http_endpoint` returns 401 for a missing or invalid token.
+- `ai_completion` tasks keep their own MCP tools and static context, even with
+  the same provider and model.
+- When an `ai_completion` MCP server's OAuth 2.0 token rotates, the new
+  connection lists each tool once.
+- Startup and hot-reload errors from `http_endpoint`, `mcp_tool` and other
+  registering tasks show up in the logs.
 - `quinn-proto` 0.11.19 fixes RUSTSEC-2026-0338 to RUSTSEC-2026-0342.
 - `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to RUSTSEC-2026-0349.
 

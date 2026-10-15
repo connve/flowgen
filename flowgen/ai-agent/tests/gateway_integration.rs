@@ -1289,3 +1289,64 @@ async fn the_proxy_key_is_never_taken_for_a_user() {
     assert_eq!(status, 200);
     assert!(session.is_none());
 }
+
+#[tokio::test]
+async fn a_request_not_taken_within_ack_timeout_gets_503() {
+    let (server, url, _handle) = boot_server().await;
+    let (tx, _rx) = mpsc::channel::<Event>(1);
+    tx.send(
+        flowgen_core::event::EventBuilder::new()
+            .data(flowgen_core::event::EventData::Json(Value::Null))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    server.register(
+        "gw".to_string(),
+        LlmProxyRegistration {
+            flow_name: "test_flow".to_string(),
+            display_name: None,
+            description: None,
+            protocol: Protocol::Openai,
+            config: Arc::new(GatewayConfig {
+                name: "gw".to_string(),
+                models: Vec::new(),
+                headers: HashMap::new(),
+                protocol: Protocol::Openai,
+                credentials_path: None,
+                auth: None,
+                ack_timeout: Some(Duration::from_millis(100)),
+                depends_on: None,
+                retry: None,
+            }),
+            credentials: None,
+            auth_provider: None,
+            tx,
+            task_id: 0,
+            task_type: "llm_proxy",
+            response_registry: Arc::new(ResponseRegistry::new()),
+            leaf_count: 1,
+            cancellation_token: CancellationToken::new(),
+        },
+    );
+
+    let resp = timeout(
+        Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(&url)
+            .json(&json!({
+                "model": "gw/m",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .send(),
+    )
+    .await
+    .expect("gives up at ack_timeout")
+    .expect("post");
+
+    assert_eq!(resp.status(), 503);
+}

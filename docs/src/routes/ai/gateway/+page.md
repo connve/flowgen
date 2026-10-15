@@ -52,7 +52,7 @@ Registers a flow as a backend on the shared AI gateway server. Inbound chat comp
 | `protocol` | string | `openai` | Wire protocol exposed for this proxy. One of `openai` or `anthropic`. |
 | `credentials_path` | string | | Overrides `ai_gateway.credentials_path` for this proxy. |
 | `auth` | object | | Per-proxy authentication. When `auth.required` is true, requests must include a valid bearer token validated by the shared auth provider. |
-| `ack_timeout` | duration | wait indefinitely | Max time to wait for the pipeline to complete before returning a timeout error to the client. |
+| `ack_timeout` | duration | wait indefinitely | Max time for the flow to take the request and finish it. If the flow is too busy to take it in time, the client gets `503`; if it doesn't finish in time, a timeout error. |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 

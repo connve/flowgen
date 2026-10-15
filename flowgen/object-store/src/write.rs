@@ -8,12 +8,11 @@ use flowgen_core::buffer::ToWriter;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use futures_util::future;
 use object_store::{ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc::Receiver, Mutex};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Status of an object store write operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +121,14 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&tokio::sync::mpsc::Sender<Event>> {
+        self.tx.as_ref()
+    }
+
     /// Processes an event and writes it to the configured object store.
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -134,11 +140,9 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
-            let event_value = serde_json::value::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
             let config = self
                 .config
-                .render(&event_value)
+                .render_for_event(event.as_ref())
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
@@ -330,7 +334,9 @@ impl EventHandler {
         })
         .await
     }
+}
 
+impl EventHandler {
     /// Formats date into Hive partition format (year=YYYY/month=MM/day=DD).
     fn format_date_partition(&self, date: &DateTime<Utc>) -> String {
         format!(
@@ -450,46 +456,15 @@ impl flowgen_core::task::runner::Runner for WriteProcessor {
             }
         };
 
-        // Process incoming events, filtering by task ID.
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to write object");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "Write failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    // Channel closed, wait for all spawned handlers to complete.
-                    future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 

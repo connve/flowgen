@@ -35,39 +35,36 @@ docker run \
 
 ### Local Development
 
-Building flowgen needs:
+You need:
 
-- Rust via [`rustup`](https://rustup.rs)
+- Rust via [`rustup`](https://rustup.rs) (`rust-toolchain.toml` picks the version)
 - a C compiler (macOS: `xcode-select --install`; Debian/Ubuntu: `build-essential`)
-- `protoc` (macOS: `brew install protobuf`; Debian/Ubuntu: `protobuf-compiler`)
 - on Linux, `pkg-config` and the OpenSSL headers (Debian/Ubuntu: `libssl-dev`)
-- Node.js and npm for the embedded web UI; set `FLOWGEN_SKIP_WEB_BUILD=1` to build without it
+- [`mise`](https://mise.jdx.dev): `curl https://mise.run | sh`, then add `eval "$(mise activate zsh)"` to your shell profile
+- Docker, only for the integration tests
 
-Docker is needed only for the integration tests.
+Then run:
+
+```bash
+mise install      # node, protoc, helm, kind, kubectl and cargo-audit, pinned in mise.toml
+mise run setup    # pre-commit hook and the MSRV toolchain
+```
+
+`mise run msrv` checks that the workspace builds on the minimum supported Rust
+version. To build without the web UI, set `FLOWGEN_SKIP_WEB_BUILD=1`.
 
 1. Copy `config.example.yaml` to `config.yaml` and configure as needed
 2. Create flow definitions in the flows directory
 3. Update the flow path in `config.yaml`
 4. Run with `cargo run`
 
-The repo pins its Rust toolchain via `rust-toolchain.toml` — `rustup`
-picks it up automatically, so `cargo` in this checkout uses the same
-`stable` version CI enforces (no need to remember `+stable` flags).
+The pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit)) runs
+fmt, clippy, the tests and `cargo audit`, so everyone runs the same checks.
 
-Enable the shared pre-commit hook (fmt + clippy + tests + audit) after
-cloning:
-
-```bash
-git config --local core.hooksPath .githooks
-```
-
-The hook lives in [`.githooks/pre-commit`](.githooks/pre-commit) and is
-versioned with the repo so all contributors run the same checks.
-
-A release changes only `version` under `[workspace.package]` in `Cargo.toml`.
-The hook copies it to `web/` and `docs/` (`package.json` and
-`package-lock.json`) and to `info.version` in the API spec, and a test fails
-when they differ.
+To release, change `version` under `[workspace.package]` in `Cargo.toml`. The
+hook copies it into `web/` and `docs/` (`package.json` and
+`package-lock.json`) and the API spec's `info.version`, and a test fails if
+they drift apart.
 
 ### Testing
 

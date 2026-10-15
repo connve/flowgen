@@ -271,6 +271,9 @@ pub struct Publisher {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 /// Replay preset options for Salesforce Pub/Sub subscriptions.
@@ -456,6 +459,7 @@ mod tests {
             endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&publisher).unwrap();
@@ -473,6 +477,7 @@ mod tests {
             endpoint: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let json = serde_json::to_string(&publisher).unwrap();

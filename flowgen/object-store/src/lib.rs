@@ -29,6 +29,7 @@ fn bucket(path: &Path) -> Option<String> {
 
 impl TaskMeta for config::Processor {
     const CONNECTOR: Connector = CONNECTOR;
+    const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         let mut connection = Connection::new(CONNECTOR, self.credentials_path.as_deref());

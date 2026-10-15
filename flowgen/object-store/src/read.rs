@@ -2,20 +2,21 @@ use super::config::{
     DEFAULT_AVRO_EXTENSION, DEFAULT_CSV_EXTENSION, DEFAULT_JSON_EXTENSION,
     DEFAULT_PARQUET_EXTENSION,
 };
-use bytes::BytesMut;
 use flowgen_core::buffer::{ContentType, FromReader};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventExt};
 use flowgen_core::{client::Client, event::EventData};
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use futures::StreamExt;
-use object_store::{GetResultPayload, ObjectStoreExt};
+use object_store::{GetOptions, GetRange, ObjectMeta, ObjectStoreExt};
 use std::io::{BufReader, Cursor};
 use std::sync::Arc;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, warn};
 
 /// Default batch size for files.
 const DEFAULT_BATCH_SIZE: usize = 10000;
@@ -111,10 +112,76 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
+    /// Sends the previously held event and holds this one, so the last event can carry
+    /// the completion handle.
+    async fn emit(
+        &self,
+        pending: &mut Option<(Event, usize)>,
+        data: EventData,
+    ) -> Result<(), Error> {
+        let records = match &data {
+            EventData::ArrowRecordBatch(batch) => batch.num_rows(),
+            _ => 1,
+        };
+        if let Some((previous, previous_records)) = pending.take() {
+            previous
+                .send_with_logging(self.tx.as_ref())
+                .context("num_records", previous_records)
+                .await
+                .map_err(|source| Error::SendMessage { source })?;
+        }
+        let event = EventBuilder::new()
+            .subject(self.config.name.to_owned())
+            .data(data)
+            .task_id(self.task_id)
+            .task_type(self.task_type)
+            .build()
+            .map_err(|source| Error::EventBuilder { source })?;
+        *pending = Some((event, records));
+        Ok(())
+    }
+
+    /// Emits the CSV batch by batch while it downloads, so only one batch is in memory.
+    async fn read_csv(
+        &self,
+        mut stream: BoxStream<'static, Result<bytes::Bytes, Error>>,
+        mut decoder: arrow::csv::reader::Decoder,
+        pending: &mut Option<(Event, usize)>,
+    ) -> Result<(), Error> {
+        let mut chunk = bytes::Bytes::new();
+        let mut finished = false;
+        loop {
+            loop {
+                if chunk.is_empty() && !finished {
+                    match stream.next().await {
+                        Some(next) => {
+                            chunk = next?;
+                            continue;
+                        }
+                        None => finished = true,
+                    }
+                }
+                let decoded = decoder
+                    .decode(&chunk)
+                    .map_err(|source| Error::Arrow { source })?;
+                bytes::Buf::advance(&mut chunk, decoded);
+                if decoded == 0 || decoder.capacity() == 0 {
+                    break;
+                }
+            }
+            match decoder.flush().map_err(|source| Error::Arrow { source })? {
+                Some(batch) => {
+                    self.emit(pending, EventData::ArrowRecordBatch(batch))
+                        .await?
+                }
+                None => return Ok(()),
+            }
+        }
+    }
+
     async fn flush_pending(
         &self,
         pending: Option<(Event, usize)>,
-        had_data: bool,
         completion_tx_arc: &Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         if let Some((mut last, last_n)) = pending {
@@ -132,18 +199,109 @@ impl EventHandler {
                 .context("num_records", last_n)
                 .await
                 .map_err(|source| Error::SendMessage { source })?;
-        } else if !had_data {
-            if let Some(arc) = completion_tx_arc.as_ref() {
-                let upstream_leaf_share = self.task_context.leaf_count.max(1);
-                for _ in 0..upstream_leaf_share {
-                    arc.signal_completion(None);
-                }
+        } else if let Some(arc) = completion_tx_arc.as_ref() {
+            let upstream_leaf_share = self.task_context.leaf_count.max(1);
+            for _ in 0..upstream_leaf_share {
+                arc.signal_completion(None);
             }
         }
         Ok(())
     }
+}
 
-    /// Processes an event and writes it to the configured object store.
+fn store(client: &super::client::Client) -> Result<&dyn object_store::ObjectStore, Error> {
+    match client.context.as_ref() {
+        Some(context) => Ok(context.object_store.as_ref()),
+        None => Err(Error::NoObjectStoreContext),
+    }
+}
+
+/// Runs `op` against the store, reconnecting once if the credentials expired.
+async fn call<T>(
+    client: &Mutex<super::client::Client>,
+    op: impl for<'a> Fn(&'a dyn object_store::ObjectStore) -> BoxFuture<'a, object_store::Result<T>>,
+) -> Result<T, Error> {
+    let mut client = client.lock().await;
+    match op(store(&client)?).await {
+        Err(error) if super::client::Client::is_auth_error(&error) => {
+            client
+                .reconnect()
+                .await
+                .map_err(|source| Error::ObjectStoreClient { source })?;
+            op(store(&client)?)
+                .await
+                .map_err(|source| Error::ObjectStore { source })
+        }
+        result => result.map_err(|source| Error::ObjectStore { source }),
+    }
+}
+
+/// Bytes per ranged GET while reading a CSV, so a slow consumer never keeps a
+/// request open long enough to hit the client timeout.
+const CSV_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The object as consecutive ranged GETs, each fetched once the previous one
+/// is used up and pinned to the version in `meta`, so both CSV passes read the
+/// same object.
+fn ranges(
+    client: Arc<Mutex<super::client::Client>>,
+    meta: ObjectMeta,
+) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+    futures::stream::try_unfold(0, move |start| {
+        let client = Arc::clone(&client);
+        let meta = meta.clone();
+        async move {
+            if start >= meta.size {
+                return Ok(None);
+            }
+            let end = (start + CSV_RANGE_BYTES).min(meta.size);
+            let options = GetOptions {
+                range: Some(GetRange::Bounded(start..end)),
+                if_match: meta.e_tag.clone(),
+                version: meta.version.clone(),
+                ..Default::default()
+            };
+            let result = call(&client, |store| {
+                let location = meta.location.clone();
+                let options = options.clone();
+                Box::pin(async move { store.get_opts(&location, options).await })
+            })
+            .await?;
+            let bytes = result
+                .bytes()
+                .await
+                .map_err(|source| Error::ObjectStore { source })?;
+            Ok(Some((bytes, end)))
+        }
+    })
+    .boxed()
+}
+
+/// Infers the CSV schema from every row while the file downloads, without
+/// keeping the file in memory.
+async fn infer_csv_schema(
+    stream: BoxStream<'static, Result<bytes::Bytes, Error>>,
+    format: arrow::csv::reader::Format,
+) -> Result<arrow::datatypes::Schema, Error> {
+    let stream = futures::TryStreamExt::map_err(stream, std::io::Error::other);
+    let reader = tokio_util::io::SyncIoBridge::new(tokio_util::io::StreamReader::new(stream));
+    match tokio::task::spawn_blocking(move || format.infer_schema(reader, None)).await {
+        Ok(Ok((schema, _))) => Ok(schema),
+        Ok(Err(source)) => Err(Error::Arrow { source }),
+        Err(source) => Err(Error::IO {
+            source: std::io::Error::other(source),
+        }),
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
@@ -154,11 +312,9 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
-            let event_value = serde_json::value::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
             let config = self
                 .config
-                .render(&event_value)
+                .render_for_event(event.as_ref())
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Parse the rendered path to extract just the path part (not the URL scheme/bucket).
@@ -168,39 +324,7 @@ impl EventHandler {
                 url::Url::parse(&config_path_str).map_err(|source| Error::ParseUrl { source })?;
             let path = object_store::path::Path::from(url.path());
 
-            // Automatically reconnects on auth failure to refresh expired credentials.
-            let mut client_guard = self.client.lock().await;
-            let mut result = {
-                let context = client_guard
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| Error::NoObjectStoreContext)?;
-                context.object_store.get(&path).await
-            };
-
-            // Retries once on authentication failure after reconnecting.
-            if let Err(ref e) = result {
-                if super::client::Client::is_auth_error(e) {
-                    client_guard
-                        .reconnect()
-                        .await
-                        .map_err(|source| Error::ObjectStoreClient { source })?;
-
-                    let context = client_guard
-                        .context
-                        .as_ref()
-                        .ok_or_else(|| Error::NoObjectStoreContext)?;
-                    result = context.object_store.get(&path).await;
-                }
-            }
-
-            let result = result.map_err(|e| Error::ObjectStore { source: e })?;
-
-            let extension = result
-                .meta
-                .location
-                .extension()
-                .ok_or_else(|| Error::NoFileExtension)?;
+            let extension = path.extension().ok_or(Error::NoFileExtension)?;
 
             // Determine content type from file extension.
             let content_type = match extension {
@@ -231,91 +355,64 @@ impl EventHandler {
                 }
             };
 
-            // Materialise a seekable reader from the payload.
-            // Both File and Stream paths need seek for CSV schema
-            // inference and Parquet random access.
-            let seekable_reader: BufReader<Cursor<bytes::Bytes>> = match result.payload {
-                GetResultPayload::File(mut file, _) => {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut file, &mut buf)
-                        .map_err(|source| Error::IO { source })?;
-                    BufReader::new(Cursor::new(bytes::Bytes::from(buf)))
+            let mut pending = None;
+            match content_type {
+                ContentType::Csv {
+                    batch_size,
+                    has_header,
+                    delimiter,
+                    ..
+                } => {
+                    let format = arrow::csv::reader::Format::default()
+                        .with_header(has_header)
+                        .with_delimiter(delimiter.unwrap_or(b','));
+                    let meta = call(&self.client, |store| {
+                        let path = path.clone();
+                        Box::pin(async move { store.head(&path).await })
+                    })
+                    .await?;
+                    let schema =
+                        infer_csv_schema(ranges(Arc::clone(&self.client), meta.clone()), format)
+                            .await?;
+                    let decoder = arrow::csv::ReaderBuilder::new(Arc::new(schema))
+                        .with_header(has_header)
+                        .with_delimiter(delimiter.unwrap_or(b','))
+                        .with_batch_size(batch_size)
+                        .build_decoder();
+                    self.read_csv(
+                        ranges(Arc::clone(&self.client), meta),
+                        decoder,
+                        &mut pending,
+                    )
+                    .await?;
                 }
-                GetResultPayload::Stream(mut stream) => {
-                    let mut buffer = BytesMut::new();
-                    while let Some(chunk) = stream.next().await {
-                        let chunk = chunk.map_err(|e| Error::ObjectStore { source: e })?;
-                        buffer.extend_from_slice(&chunk);
+                content_type => {
+                    let bytes = call(&self.client, |store| {
+                        let path = path.clone();
+                        Box::pin(async move { store.get(&path).await })
+                    })
+                    .await?
+                    .bytes()
+                    .await
+                    .map_err(|source| Error::ObjectStore { source })?;
+                    let items =
+                        EventData::from_reader(BufReader::new(Cursor::new(bytes)), content_type)
+                            .map_err(|source| Error::EventBuilder { source })?;
+                    for item in items {
+                        let data = item.map_err(|source| Error::EventBuilder { source })?;
+                        self.emit(&mut pending, data).await?;
                     }
-                    BufReader::new(Cursor::new(buffer.freeze()))
                 }
-            };
-
-            // Parse the file using the centralized format reader. The iterator
-            // yields one item at a time so only one parsed item lives in memory
-            // alongside the raw bytes.
-            let iter = EventData::from_reader(seekable_reader, content_type)
-                .map_err(|source| Error::EventBuilder { source })?;
-
-            let mut pending: Option<(Event, usize)> = None;
-            let mut had_data = false;
-
-            for item_result in iter {
-                let event_data = item_result.map_err(|source| Error::EventBuilder { source })?;
-                let num_records = match &event_data {
-                    EventData::ArrowRecordBatch(batch) => batch.num_rows(),
-                    _ => 1,
-                };
-                had_data = true;
-
-                if let Some((prev, prev_n)) = pending.take() {
-                    prev.send_with_logging(self.tx.as_ref())
-                        .context("num_records", prev_n)
-                        .await
-                        .map_err(|source| Error::SendMessage { source })?;
-                }
-
-                let e = EventBuilder::new()
-                    .subject(self.config.name.to_owned())
-                    .data(event_data)
-                    .task_id(self.task_id)
-                    .task_type(self.task_type)
-                    .build()
-                    .map_err(|source| Error::EventBuilder { source })?;
-
-                pending = Some((e, num_records));
             }
 
-            self.flush_pending(pending, had_data, &completion_tx_arc)
-                .await?;
+            self.flush_pending(pending, &completion_tx_arc).await?;
 
-            // Delete file from object store if configured.
             if self.config.delete_after_read.unwrap_or(false) {
-                let mut delete_result = {
-                    let context = client_guard
-                        .context
-                        .as_ref()
-                        .ok_or_else(|| Error::NoObjectStoreContext)?;
-                    context.object_store.delete(&path).await
-                };
-
-                // Retries once on authentication failure after reconnecting.
-                if let Err(ref e) = delete_result {
-                    if super::client::Client::is_auth_error(e) {
-                        client_guard
-                            .reconnect()
-                            .await
-                            .map_err(|source| Error::ObjectStoreClient { source })?;
-
-                        let context = client_guard
-                            .context
-                            .as_ref()
-                            .ok_or_else(|| Error::NoObjectStoreContext)?;
-                        delete_result = context.object_store.delete(&path).await;
-                    }
-                }
-
-                delete_result.map_err(|e| Error::ObjectStore { source: e })?;
+                call(&self.client, |store| {
+                    let path = path.clone();
+                    Box::pin(async move { store.delete(&path).await })
+                })
+                .await?;
                 info!("Successfully deleted file: {}", path.as_ref());
             }
 
@@ -404,7 +501,7 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Self::Error> {
+    async fn run(self) -> Result<(), Self::Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -428,44 +525,15 @@ impl flowgen_core::task::runner::Runner for ReadProcessor {
             }
         };
 
-        // Process incoming events, filtering by task ID.
-        let mut handlers = Vec::new();
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to read object");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "Read failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -619,5 +687,90 @@ mod tests {
             result.unwrap_err(),
             Error::MissingBuilderAttribute(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_csv_file_streams_in_batches_typed_by_every_record() {
+        let batches = read_csv_file("id,value\n1,1\n2,2\n3,2.5", 2).await;
+
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            batches[0]
+                .schema()
+                .field_with_name("value")
+                .unwrap()
+                .data_type(),
+            &arrow::datatypes::DataType::Float64
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_cut_by_a_range_boundary_are_read_whole() {
+        let row = format!("{}\n", "a".repeat(99));
+        let rows = (CSV_RANGE_BYTES as usize / row.len()) + 100;
+        let csv = format!("value\n{}", row.repeat(rows));
+
+        let batches = read_csv_file(&csv, 10_000).await;
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            rows
+        );
+    }
+
+    async fn read_csv_file(content: &str, batch_size: usize) -> Vec<arrow::array::RecordBatch> {
+        use flowgen_core::task::runner::Handler;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.csv");
+        std::fs::write(&file, content).unwrap();
+        let path = PathBuf::from(format!("file://{}", file.display()));
+        let client = crate::client::ClientBuilder::new()
+            .path(path.clone())
+            .build()
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(10);
+        let handler = EventHandler {
+            config: Arc::new(crate::config::Processor {
+                name: "read".to_string(),
+                operation: crate::config::Operation::Read,
+                path: Some(path),
+                batch_size: Some(batch_size),
+                ..Default::default()
+            }),
+            client: Arc::new(Mutex::new(client)),
+            tx: Some(tx),
+            task_id: 0,
+            task_type: "test",
+            task_context: create_mock_task_context(),
+        };
+        let event = EventBuilder::new()
+            .data(EventData::Json(Value::Null))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap();
+        let collected = tokio::spawn(async move {
+            let mut batches = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if let EventData::ArrowRecordBatch(batch) = event.data {
+                    batches.push(batch);
+                }
+            }
+            batches
+        });
+
+        handler.handle(event).await.unwrap();
+        drop(handler);
+        collected.await.unwrap()
     }
 }

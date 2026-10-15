@@ -232,9 +232,3 @@ http_server:
 #   enabled: true
 #   port: 8081
 
-# Event channel buffer size (optional, defaults to 10,000).
-# Capacity of each inter-task event channel (in events). When full the
-# upstream task blocks until downstream drains a slot (backpressure).
-# No events are dropped. Increase for bursty fan-out workloads.
-# event_buffer_size: 10000
-

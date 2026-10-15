@@ -248,7 +248,6 @@ fn app_config_with_cache(url: String) -> flowgen::config::AppConfig {
         web: None,
         health: Default::default(),
         retry: None,
-        event_buffer_size: None,
         telemetry: None,
     }
 }

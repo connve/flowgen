@@ -35,6 +35,7 @@ fn iterate_task(name: &str) -> TaskType {
         iterate_key: None,
         depends_on: None,
         retry: None,
+        max_in_flight: None,
     })
 }
 

@@ -21,7 +21,6 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 humantime-serde = { workspace = true }
-futures-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -27,7 +27,7 @@ http_server:
 | `method` | string | `GET` | HTTP method: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`. |
 | `headers` | map | | Request headers to copy into `event.meta.headers`, by name. Names match case-insensitively; values are ignored. |
 | `credentials_path` | string | | Path to credentials for request authentication. |
-| `ack_timeout` | duration | wait indefinitely | Max time to wait for flow completion before responding. |
+| `ack_timeout` | duration | wait indefinitely | Max time for the flow to take the request and finish it. If the flow is too busy to take it in time, the endpoint answers `503`. |
 | `max_body_bytes` | int | `10485760` | Maximum accepted request body size in bytes (10 MiB default). Larger requests are rejected with HTTP 413 before being read into memory. |
 | `stream` | bool | false | Stream responses as Server-Sent Events. |
 | `auth` | object | | User authentication configuration. |

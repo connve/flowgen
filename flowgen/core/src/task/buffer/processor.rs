@@ -94,14 +94,21 @@ struct Origin {
     meta: Option<Map<String, Value>>,
     /// The batch's user with their newest token; none once the batch mixes users.
     session: Option<Arc<crate::auth::UserSession>>,
+    /// Call stack of the batch's first event.
+    call_stack: Vec<String>,
 }
 
 impl Origin {
     fn new(
         meta: Option<Map<String, Value>>,
         session: Option<Arc<crate::auth::UserSession>>,
+        call_stack: Vec<String>,
     ) -> Self {
-        Self { meta, session }
+        Self {
+            meta,
+            session,
+            call_stack,
+        }
     }
 
     /// Takes in the session of a later event in the batch.
@@ -187,8 +194,8 @@ fn spawn_completion_proxy(
 impl Processor {
     /// Flushes the buffer by emitting a single event containing all buffered events.
     ///
-    /// This function spawns a background task to perform the flush asynchronously,
-    /// allowing the buffer to continue receiving events without blocking.
+    /// Waits until the next task takes the batch, so a slow task also slows
+    /// down the buffer and everything before it.
     ///
     /// # Arguments
     /// * `buffer` - Vector of accumulated events to flush.
@@ -201,7 +208,7 @@ impl Processor {
     ///   it is fanned back out to every absorbed upstream so every source gets
     ///   acked. When the buffer is itself a leaf, all upstreams are signalled
     ///   directly.
-    fn flush_buffer(
+    async fn flush_buffer(
         &self,
         buffer: Vec<Value>,
         reason: FlushReason,
@@ -219,70 +226,68 @@ impl Processor {
         let task_type = self.task_type;
         let leaf_count = self.task_context.leaf_count;
 
-        // Spawn flush as background task to avoid blocking event receives.
-        tokio::spawn(
-            async move {
-                let batch_size = buffer.len();
-                let flush_data = FlushData {
-                    batch: buffer,
-                    batch_size,
-                    flush_reason: reason,
-                    partition_key,
-                };
+        async move {
+            let batch_size = buffer.len();
+            let flush_data = FlushData {
+                batch: buffer,
+                batch_size,
+                flush_reason: reason,
+                partition_key,
+            };
 
-                let flush_result = match serde_json::to_value(flush_data) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!(error = %e, "Failed to serialize flush data");
-                        return;
-                    }
-                };
-
-                let mut event_builder = EventBuilder::new()
-                    .data(EventData::Json(flush_result))
-                    .subject(config_name)
-                    .task_id(task_id)
-                    .task_type(task_type);
-
-                if let Some(meta) = origin.meta {
-                    event_builder = event_builder.meta(meta);
+            let flush_result = match serde_json::to_value(flush_data) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(error = %e, "Failed to serialize flush data");
+                    return;
                 }
-                if let Some(session) = origin.session {
-                    event_builder = event_builder.session(session);
+            };
+
+            let mut event_builder = EventBuilder::new()
+                .data(EventData::Json(flush_result))
+                .subject(config_name)
+                .task_id(task_id)
+                .task_type(task_type);
+
+            if let Some(meta) = origin.meta {
+                event_builder = event_builder.meta(meta);
+            }
+            if let Some(session) = origin.session {
+                event_builder = event_builder.session(session);
+            }
+            event_builder.call_stack = origin.call_stack;
+
+            let mut event = match event_builder.build() {
+                Ok(e) => e,
+                Err(e) => {
+                    error!(error = %e, "Failed to build flush event");
+                    return;
                 }
+            };
 
-                let mut event = match event_builder.build() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        error!(error = %e, "Failed to build flush event");
-                        return;
-                    }
-                };
-
-                match tx {
-                    Some(_) => {
-                        event.completion_tx =
-                            spawn_completion_proxy(upstream_completions, leaf_count);
-                    }
-                    None => {
-                        // Leaf task: signal every absorbed upstream directly.
-                        let payload = event.data_as_json().ok();
-                        for arc in &upstream_completions {
-                            arc.signal_completion(payload.clone());
-                        }
-                    }
+            match tx {
+                Some(_) => {
+                    event.completion_tx = spawn_completion_proxy(upstream_completions, leaf_count);
                 }
-
-                if let Err(e) = event.send_with_logging(tx.as_ref()).await {
-                    error!(error = %e, "Failed to send flush event");
+                None => {
+                    // Leaf task: signal every absorbed upstream directly.
+                    let payload = event.data_as_json().ok();
+                    for arc in &upstream_completions {
+                        arc.signal_completion(payload.clone());
+                    }
                 }
             }
-            .instrument(tracing::info_span!(
-                parent: tracing::Span::current(),
-                "task.handle",
-                duration_ms = tracing::field::Empty,
-            )),
-        );
+
+            if let Err(e) = event.send_with_logging(tx.as_ref()).await {
+                error!(error = %e, "Failed to send flush event");
+            }
+        }
+        .instrument(tracing::info_span!(
+            parent: tracing::Span::current(),
+            "task.handle",
+            duration_ms = tracing::field::Empty,
+        ))
+        .await
     }
 
     /// Processes the main event loop with buffer accumulation and flush triggers.
@@ -337,7 +342,7 @@ impl Processor {
                             // Capture meta and start the timeout on the first event in buffer.
                             match buffer.is_empty() {
                                 true => {
-                                    buffer_origin = Origin::new(event.meta.clone(), event.session.clone());
+                                    buffer_origin = Origin::new(event.meta.clone(), event.session.clone(), event.call_stack.clone());
                                     batch_started = Instant::now();
                                 }
                                 false => buffer_origin.add(event.session.as_ref()),
@@ -383,13 +388,13 @@ impl Processor {
                                 } else {
                                     FlushReason::Completion
                                 };
-                                self.flush_buffer(flush_buffer, reason, None, flush_origin, flush_completions);
+                                self.flush_buffer(flush_buffer, reason, None, flush_origin, flush_completions).await;
                             }
                         }
                         None => {
                             // Channel closed, flush remaining events and exit.
                             if !buffer.is_empty() {
-                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_origin, buffer_completions);
+                                self.flush_buffer(buffer, FlushReason::Shutdown, None, buffer_origin, buffer_completions).await;
                             }
                             return Ok(());
                         }
@@ -401,7 +406,7 @@ impl Processor {
                     let flush_buffer = std::mem::replace(&mut buffer, Vec::with_capacity(self.config.size));
                     let flush_origin = std::mem::take(&mut buffer_origin);
                     let flush_completions = std::mem::take(&mut buffer_completions);
-                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_origin, flush_completions);
+                    self.flush_buffer(flush_buffer, FlushReason::Timeout, None, flush_origin, flush_completions).await;
                 }
             }
         }
@@ -444,9 +449,7 @@ impl Processor {
                     match result {
                         Some(mut event) => {
                             // Render the config with event data to get the rendered buffer key.
-                            let event_value = serde_json::value::Value::try_from(&event)
-                                .map_err(|source| Error::EventBuilder { source })?;
-                            let rendered_config = self.config.render(&event_value)
+                            let rendered_config = self.config.render_for_event(&event)
                                 .map_err(|source| Error::Render { source })?;
 
                             // Extract the rendered key from the config.
@@ -484,7 +487,7 @@ impl Processor {
                                     let mut buffer = Vec::with_capacity(buffer_size);
                                     buffer.push(json_data);
                                     vacant.insert(buffer);
-                                    buffer_origins.insert(key.clone(), Origin::new(event.meta, event.session));
+                                    buffer_origins.insert(key.clone(), Origin::new(event.meta, event.session, event.call_stack));
                                     if let Some(tx) = completion_tx {
                                         buffer_completions.insert(key.clone(), vec![tx]);
                                     }
@@ -517,7 +520,7 @@ impl Processor {
                                         let buffer_to_flush = occupied.remove();
                                         let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                         let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_origin, buffer_completion);
+                                        self.flush_buffer(buffer_to_flush, FlushReason::Size, Some(key.clone()), buffer_origin, buffer_completion).await;
                                         batch_started_times.remove(&key);
                                         None
                                     } else if trigger_completion_flush {
@@ -539,7 +542,8 @@ impl Processor {
                                         Some(key.clone()),
                                         buffer_origin,
                                         buffer_completion,
-                                    );
+                                    )
+                                    .await;
                                     batch_started_times.remove(&key);
                                 }
                             }
@@ -550,7 +554,7 @@ impl Processor {
                                 if !buffer.is_empty() {
                                     let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                     let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_origin, buffer_completion);
+                                    self.flush_buffer(buffer, FlushReason::Shutdown, Some(key), buffer_origin, buffer_completion).await;
                                 }
                             }
                             return Ok(());
@@ -576,7 +580,7 @@ impl Processor {
                             if !buffer.is_empty() {
                                 let buffer_origin = buffer_origins.remove(&key).unwrap_or_default();
                                 let buffer_completion = buffer_completions.remove(&key).unwrap_or_default();
-                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_origin, buffer_completion);
+                                self.flush_buffer(buffer, FlushReason::Timeout, Some(key.clone()), buffer_origin, buffer_completion).await;
                             }
                         }
                         batch_started_times.remove(&key);
@@ -729,7 +733,7 @@ mod tests {
     #[test]
     fn a_batch_from_one_user_acts_for_them_with_their_newest_token() {
         use secrecy::ExposeSecret;
-        let mut origin = Origin::new(None, Some(session("u1", "t1")));
+        let mut origin = Origin::new(None, Some(session("u1", "t1")), Vec::new());
 
         origin.add(Some(&session("u1", "t2")));
 
@@ -740,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_batch_from_different_users_acts_for_none_of_them() {
-        let mut origin = Origin::new(None, Some(session("u1", "t1")));
+        let mut origin = Origin::new(None, Some(session("u1", "t1")), Vec::new());
 
         origin.add(Some(&session("u2", "t2")));
         origin.add(Some(&session("u1", "t3")));

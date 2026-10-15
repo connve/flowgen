@@ -69,6 +69,8 @@ pub enum Error {
     },
     #[error("Failed to send event to pipeline: {0}")]
     PipelineSend(String),
+    #[error("Server is too busy to process the request")]
+    ServerBusy,
     #[error(
         "MCP tool name collision: '{name}' is already registered. Use distinct names across flows."
     )]
@@ -1514,10 +1516,23 @@ async fn execute_tool_call(
     // than the generic event line, so the event itself goes through
     // `send_silent` to avoid two near-duplicate entries per call.
     use flowgen_core::event::EventExt;
-    event
-        .send_silent(Some(&tool_tx))
-        .await
-        .map_err(|e| Error::PipelineSend(e.to_string()))?;
+    let deadline = ack_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+    let sent = match deadline {
+        Some(deadline) => {
+            match tokio::time::timeout_at(deadline, event.send_silent(Some(&tool_tx))).await {
+                Ok(sent) => sent.map_err(|e| Error::PipelineSend(e.to_string())),
+                Err(_) => Err(Error::ServerBusy),
+            }
+        }
+        None => event
+            .send_silent(Some(&tool_tx))
+            .await
+            .map_err(|e| Error::PipelineSend(e.to_string())),
+    };
+    if let Err(error) = sent {
+        state.extras.response_registry.remove(&correlation_id).await;
+        return Err(error);
+    }
 
     // task.run > task.handle so the activity layer attributes this info
     // to the source task; MCP handlers run in axum's span scope which
@@ -1583,9 +1598,9 @@ async fn execute_tool_call(
                         }
                     }
                     result = async {
-                        match ack_timeout {
-                            Some(timeout) => {
-                                match tokio::time::timeout(timeout, &mut completion_rx).await {
+                        match (ack_timeout, deadline) {
+                            (Some(timeout), Some(deadline)) => {
+                                match tokio::time::timeout_at(deadline, &mut completion_rx).await {
                                     Ok(result) => Some(result),
                                     Err(_) => {
                                         let duration = humantime::format_duration(timeout).to_string();
@@ -1603,7 +1618,7 @@ async fn execute_tool_call(
                                     }
                                 }
                             }
-                            None => Some((&mut completion_rx).await),
+                            _ => Some((&mut completion_rx).await),
                         }
                     } => {
                         response_registry.remove(&cid_for_cleanup).await;
@@ -2037,6 +2052,52 @@ mod tests {
 
         assert_eq!(session.user.user_id, "u1");
         assert_eq!(session.token.as_ref().unwrap().expose_secret(), "t1");
+    }
+
+    #[tokio::test]
+    async fn a_call_not_taken_within_ack_timeout_gets_a_busy_error() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.send(
+            flowgen_core::event::EventBuilder::new()
+                .data(flowgen_core::event::EventData::Json(
+                    serde_json::Value::Null,
+                ))
+                .subject("a".to_string())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let table = Arc::new(DashMap::new());
+        table.insert(
+            "lookup".to_string(),
+            ToolRegistration {
+                tx,
+                ack_timeout: Some(std::time::Duration::from_millis(100)),
+                ..test_tool_registration("f", "Look up")
+            },
+        );
+        let state = build_test_state(&test_server(), table);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "lookup", "arguments": {}}
+        });
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send_jsonrpc_with_state(state, body, None),
+        )
+        .await
+        .expect("gives up at ack_timeout");
+
+        assert_eq!(
+            response["error"]["message"],
+            "Server is too busy to process the request"
+        );
     }
 
     #[tokio::test]

@@ -1746,7 +1746,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         });
         let flow_registry = Arc::new(RwLock::new(HashMap::new()));

@@ -37,9 +37,11 @@ Read, write, list, and move files on S3, GCS, Azure Blob Storage, or local files
 
 Read requires a concrete file path (e.g. `gs://bucket/dir/file.csv`). It does not support wildcards or directory listing. To process multiple files, chain `list → iterate → read` and template the path from the list output.
 
+CSV files are streamed: the file is read once to infer the schema from all rows, then again to emit batches of `batch_size` rows, so only one batch is in memory. Parquet, Avro, and JSON files are loaded whole.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `batch_size` | int | 8192 | Records per batch for CSV/Parquet reading. |
+| `batch_size` | int | 10000 | Records per batch for CSV/Parquet reading. |
 | `has_header` | bool | true | Whether CSV has a header row. |
 | `delimiter` | string | `,` | CSV delimiter character. |
 | `delete_after_read` | bool | false | Delete the file after reading. |

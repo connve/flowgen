@@ -9,7 +9,6 @@ use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
 };
-use futures_util::future;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -17,7 +16,7 @@ use tokio::{
     fs,
     sync::mpsc::{Receiver, Sender},
 };
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Formats an error and every entry in its `source()` chain into a single
 /// colon-separated string.
@@ -137,7 +136,21 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !matches!(
+            error,
+            Error::HttpError { status, .. } if (400..500).contains(status) && *status != 429
+        )
+    }
+
     /// Processes an event by making an HTTP request.
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -386,7 +399,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -410,58 +423,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        // 4xx client errors (except 429) are permanent — the
-                                        // request data is invalid and retrying will not help.
-                                        let is_permanent = matches!(
-                                            &e,
-                                            Error::HttpError { status, .. }
-                                                if (400..500).contains(status) && *status != 429
-                                        );
-
-                                        if is_permanent {
-                                            error!(error = %e, "HTTP request failed with client error, skipping retries");
-                                            Err(tokio_retry::RetryError::permanent(e))
-                                        } else {
-                                            error!(error = %e, "Failed to process HTTP request");
-                                            Err(tokio_retry::RetryError::transient(e))
-                                        }
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "HTTP request failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    // Channel closed, wait for all spawned handlers to complete.
-                    future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -664,6 +634,7 @@ mod tests {
             auth: None,
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
         let (tx, rx) = mpsc::channel(100);
 

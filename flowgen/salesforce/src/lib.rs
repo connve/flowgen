@@ -85,6 +85,7 @@ impl TaskMeta for pubsubapi::config::Publisher {
 
 impl TaskMeta for bulkapi::config::QueryJob {
     const CONNECTOR: Connector = CONNECTOR;
+    const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         connections(&self.credentials_path)

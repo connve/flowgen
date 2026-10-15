@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, warn, Instrument};
+use tracing::{error, warn};
 
 /// Errors from the git push processor.
 #[derive(thiserror::Error, Debug)]
@@ -200,10 +200,25 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
+
     /// Commits and pushes the event's files, emitting every file under `path`.
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
+        if let Some(error) = event.error.clone() {
+            event.forward_failure(self.tx.as_ref(), error).await;
+            return Ok(());
+        }
         if self.task_context.cancellation_token.is_cancelled() {
             return Ok(());
         }
@@ -211,11 +226,9 @@ impl EventHandler {
         let completion_tx = event.completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async {
-            let event_value = serde_json::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
             let config: ProcessorConfig = self
                 .config
-                .render(&event_value)
+                .render_for_event(&event)
                 .map_err(|source| Error::RenderConfig { source })?;
             let data = event
                 .data_as_json()
@@ -351,7 +364,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -367,38 +380,14 @@ impl flowgen_core::task::runner::Runner for Processor {
         .await
         .map(Arc::new)?;
 
-        let mut handlers = Vec::new();
-        while let Some(event) = self.rx.recv().await {
-            let handler = Arc::clone(&handler);
-            let retry_strategy = retry_config.strategy();
-            let handle = tokio::spawn(
-                async move {
-                    if let Some(error) = event.error.clone() {
-                        event.forward_failure(handler.tx.as_ref(), error).await;
-                        return;
-                    }
-                    let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                        handler.handle(event.clone()).await.map_err(|e| {
-                            error!(error = %e, "Git push failed");
-                            match e.is_permanent() {
-                                true => tokio_retry::RetryError::permanent(e),
-                                false => tokio_retry::RetryError::transient(e),
-                            }
-                        })
-                    })
-                    .await;
-                    if let Err(e) = result {
-                        event
-                            .forward_failure(handler.tx.as_ref(), e.to_string())
-                            .await;
-                    }
-                }
-                .instrument(tracing::Span::current()),
-            );
-            handlers.push(handle);
-            handlers.retain(|h| !h.is_finished());
-        }
-        futures_util::future::join_all(handlers).await;
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
         Ok(())
     }
 }

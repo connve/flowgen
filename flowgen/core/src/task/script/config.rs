@@ -54,6 +54,9 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<crate::retry::RetryConfig>,
+    /// Events handled at once; defaults to the number of CPUs.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for Processor {
@@ -66,6 +69,7 @@ impl Default for Processor {
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 }
@@ -180,6 +184,7 @@ mod tests {
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(config.name, "test_script");
@@ -216,6 +221,7 @@ mod tests {
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
@@ -233,6 +239,7 @@ mod tests {
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         let cloned = config.clone();
@@ -251,6 +258,7 @@ mod tests {
             limits: RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         };
 
         assert_eq!(config.name, "resource_script");

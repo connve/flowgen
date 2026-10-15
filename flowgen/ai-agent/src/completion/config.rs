@@ -136,6 +136,9 @@ pub struct Processor {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
     /// Optional extended-thinking / reasoning configuration.
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
@@ -383,6 +386,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
 
@@ -425,6 +429,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
 
@@ -473,6 +478,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
         let _: &dyn ConfigExt = &processor;
@@ -499,6 +505,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
 
@@ -532,6 +539,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
 
@@ -569,6 +577,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         };
 

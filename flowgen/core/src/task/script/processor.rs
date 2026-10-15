@@ -9,7 +9,7 @@ use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Errors that can occur during script execution.
 #[derive(thiserror::Error, Debug)]
@@ -131,7 +131,24 @@ struct ResourceHandle {
     resource_loader: crate::resource::ResourceLoader,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl crate::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !matches!(
+            error,
+            Error::ScriptExecution { .. }
+                | Error::Thrown(_)
+                | Error::InvalidReturnType(_)
+                | Error::ResourceLoad { .. }
+        )
+    }
+
     /// Processes an event by executing the script on its data.
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
@@ -318,7 +335,9 @@ impl EventHandler {
         })
         .await
     }
+}
 
+impl EventHandler {
     /// Generates a new event from the script result by comparing with the original event.
     ///
     /// Preserves the original data format (Avro, Arrow, or JSON) when the script has not
@@ -708,7 +727,7 @@ impl crate::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             crate::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -732,60 +751,15 @@ impl crate::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                futures_util::future::join_all(handlers).await;
-                return Ok(());
-            }
-
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        let is_retriable = !matches!(
-                                            &e,
-                                            Error::ScriptExecution { .. }
-                                                | Error::Thrown(_)
-                                                | Error::InvalidReturnType(_)
-                                                | Error::ResourceLoad { .. }
-                                        );
-
-                                        if is_retriable {
-                                            Err(tokio_retry::RetryError::transient(e))
-                                        } else {
-                                            error!(error = %e, "Script error, skipping event");
-                                            Err(tokio_retry::RetryError::permanent(e))
-                                        }
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        crate::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -1111,7 +1085,7 @@ pub(crate) fn register_helpers(engine: &mut Engine) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::runner::Runner;
+    use crate::task::runner::{Handler, Runner};
     use serde_json::{json, Map, Value};
     use tokio::sync::mpsc;
 
@@ -1243,6 +1217,7 @@ mod tests {
             limits: crate::task::script::config::RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
         let (tx, rx) = mpsc::channel(100);
 
@@ -1296,6 +1271,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         // Drop the original tx so recv can complete
@@ -1409,6 +1385,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
             task_id: 0,
             id: None,
             timestamp: 123456789,
@@ -1550,6 +1527,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -1599,6 +1577,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -1652,6 +1631,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -1714,6 +1694,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         let result = event_handler.handle(input_event).await;
@@ -1740,6 +1721,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -1764,6 +1746,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler
@@ -1797,6 +1780,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -1821,6 +1805,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler
@@ -1856,6 +1841,7 @@ mod tests {
                     limits: crate::task::script::config::RhaiLimits::default(),
                     depends_on: None,
                     retry: None,
+                    max_in_flight: None,
                 }),
                 tx: Some(tx),
                 rx: mpsc::channel(100).1,
@@ -1879,6 +1865,7 @@ mod tests {
                 error: None,
                 completion_tx: None,
                 session: None,
+                call_stack: Vec::new(),
             };
             handler
                 .handle(event)
@@ -1921,6 +1908,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -1945,6 +1933,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler
@@ -1987,6 +1976,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2011,6 +2001,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler
@@ -2055,6 +2046,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2079,6 +2071,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler
@@ -2120,6 +2113,7 @@ mod tests {
             limits: crate::task::script::config::RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (_event_tx, rx_in) = mpsc::channel(100);
@@ -2147,6 +2141,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -2182,6 +2177,7 @@ mod tests {
             limits: crate::task::script::config::RhaiLimits::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         });
 
         let (_event_tx, rx_in) = mpsc::channel(100);
@@ -2209,6 +2205,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         event_handler.handle(input_event).await.unwrap();
@@ -2245,6 +2242,7 @@ mod tests {
                 limits: crate::task::script::config::RhaiLimits::default(),
                 depends_on: None,
                 retry: None,
+                max_in_flight: None,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2269,6 +2267,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         };
 
         match event_handler.handle(input_event).await {

@@ -54,6 +54,9 @@ pub struct Processor {
     /// Optional retry configuration.
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to the number of CPUs.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 fn default_max_file_size() -> u64 {
@@ -75,6 +78,7 @@ impl Default for Processor {
             max_total_size: default_max_total_size(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 }

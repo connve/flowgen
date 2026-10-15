@@ -22,6 +22,33 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    /// The event a template reads could not be converted to JSON.
+    #[error("Event conversion error: {source}")]
+    Event {
+        #[source]
+        source: Box<crate::event::Error>,
+    },
+}
+
+/// Collects every string in `value` that contains a template.
+fn templates(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if text.contains("{{") => found.push(text.clone()),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| templates(item, found)),
+        serde_json::Value::Object(fields) => {
+            fields.values().for_each(|field| templates(field, found))
+        }
+        _ => {}
+    }
+}
+
+/// True if `template` might read the event's data: it mentions `data`, or uses
+/// the whole event instead of one of its fields.
+fn reads_event_data(template: &str) -> bool {
+    template.contains("data")
+        || template
+            .match_indices("event")
+            .any(|(at, _)| !template[at + "event".len()..].starts_with('.'))
 }
 
 /// Extract a simple path from a template string like "{{event.data}}" or "{{event.data.batch}}".
@@ -201,6 +228,29 @@ pub trait ConfigExt {
 
         serde_json::from_value(config_value).map_err(|e| Error::SerdeJson { source: e })
     }
+
+    /// Like `render`, but only converts the event when the config has templates,
+    /// and only includes its data when a template might use it. This avoids
+    /// turning a large batch into JSON for every event.
+    fn render_for_event(&self, event: &crate::event::Event) -> Result<Self, Error>
+    where
+        Self: Serialize + DeserializeOwned + Sized,
+    {
+        let config_value =
+            serde_json::to_value(self).map_err(|e| Error::SerdeJson { source: e })?;
+        let mut found = Vec::new();
+        templates(&config_value, &mut found);
+        if found.is_empty() {
+            return serde_json::from_value(config_value)
+                .map_err(|e| Error::SerdeJson { source: e });
+        }
+        let with_data = found.iter().any(|template| reads_event_data(template));
+        let event_value =
+            crate::event::template_value(event, with_data).map_err(|source| Error::Event {
+                source: Box::new(source),
+            })?;
+        self.render(&event_value)
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +286,48 @@ mod tests {
         assert_eq!(rendered.name, "john");
         assert_eq!(rendered.value, 42);
         assert_eq!(rendered.url, "https://example.com/api");
+    }
+
+    fn event(data: serde_json::Value) -> crate::event::Event {
+        crate::event::EventBuilder::new()
+            .data(crate::event::EventData::Json(data))
+            .subject("orders".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_template_renders_against_the_event_and_reads_its_data_only_when_named() {
+        let config = TestConfig {
+            name: "{{event.subject}}".to_string(),
+            value: 1,
+            url: "https://a/{{event.data.id}}".to_string(),
+        };
+        let without_data = TestConfig {
+            name: "{{event.subject}}".to_string(),
+            value: 1,
+            url: "https://a/{{event.subject}}".to_string(),
+        };
+
+        let rendered = config.render_for_event(&event(json!({"id": 7}))).unwrap();
+        let rendered_without_data = without_data
+            .render_for_event(&event(json!({"id": 7})))
+            .unwrap();
+
+        assert_eq!(rendered.name, "orders");
+        assert_eq!(rendered.url, "https://a/7");
+        assert_eq!(rendered_without_data.url, "https://a/orders");
+    }
+
+    #[test]
+    fn only_a_template_naming_data_or_the_whole_event_reads_the_data() {
+        assert!(reads_event_data("{{event.data.id}}"));
+        assert!(reads_event_data("{{#each event.data}}{{this}}{{/each}}"));
+        assert!(reads_event_data("{{json event}}"));
+        assert!(!reads_event_data("{{event.subject}}/{{event.meta.key}}"));
+        assert!(!reads_event_data("{{env.BUCKET}}"));
     }
 
     #[test]

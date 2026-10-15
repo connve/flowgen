@@ -140,6 +140,8 @@ tokio::task_local! {
     static CURRENT_EVENT_META: RefCell<Option<Map<String, Value>>>;
     /// Session of the current event, inherited by events built in its context.
     static CURRENT_SESSION: Option<Arc<crate::auth::UserSession>>;
+    /// Call stack of the current event, inherited by events built in its context.
+    static CURRENT_CALL_STACK: Vec<String>;
 }
 
 /// Runs an async function with event context set for automatic meta and session preservation.
@@ -178,10 +180,13 @@ pub async fn with_event_context<F, R>(event: &Arc<Event>, f: F) -> R
 where
     F: std::future::Future<Output = R>,
 {
-    CURRENT_SESSION
+    CURRENT_CALL_STACK
         .scope(
-            event.session.clone(),
-            CURRENT_EVENT_META.scope(RefCell::new(event.meta.clone()), f),
+            event.call_stack.clone(),
+            CURRENT_SESSION.scope(
+                event.session.clone(),
+                CURRENT_EVENT_META.scope(RefCell::new(event.meta.clone()), f),
+            ),
         )
         .await
 }
@@ -473,6 +478,8 @@ pub struct Event {
     pub completion_tx: Option<SharedCompletionTx>,
     /// Signed-in user the event acts for, kept out of `meta` so scripts and templates cannot touch it.
     pub session: Option<Arc<crate::auth::UserSession>>,
+    /// Flows waiting on the in-process calls that led to this event, outermost first.
+    pub call_stack: Vec<String>,
 }
 
 impl Clone for Event {
@@ -488,6 +495,7 @@ impl Clone for Event {
             error: self.error.clone(),
             completion_tx: self.completion_tx.clone(),
             session: self.session.clone(),
+            call_stack: self.call_stack.clone(),
         }
     }
 }
@@ -495,20 +503,28 @@ impl Clone for Event {
 impl TryFrom<&Event> for Value {
     type Error = Error;
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
-        let event_data = serde_json::Value::try_from(&event.data)?;
-        Ok(serde_json::json!({
-            "event": {
-                "subject": event.subject,
-                "data": event_data,
-                "id": event.id,
-                "timestamp": event.timestamp,
-                "task_id": event.task_id,
-                "task_type": event.task_type,
-                "meta": event.meta,
-                "error": event.error,
-            }
-        }))
+        template_value(event, true)
     }
+}
+
+/// The event as templates see it, under `event`. `data` is null unless `with_data` is set.
+pub fn template_value(event: &Event, with_data: bool) -> Result<Value, Error> {
+    let event_data = match with_data {
+        true => serde_json::Value::try_from(&event.data)?,
+        false => Value::Null,
+    };
+    Ok(serde_json::json!({
+        "event": {
+            "subject": event.subject,
+            "data": event_data,
+            "id": event.id,
+            "timestamp": event.timestamp,
+            "task_id": event.task_id,
+            "task_type": event.task_type,
+            "meta": event.meta,
+            "error": event.error,
+        }
+    }))
 }
 
 impl std::fmt::Display for Event {
@@ -643,6 +659,8 @@ pub struct EventBuilder {
     pub completion_tx: Option<SharedCompletionTx>,
     /// Signed-in user the event acts for.
     pub session: Option<Arc<crate::auth::UserSession>>,
+    /// Flows waiting on the in-process calls that led to the event.
+    pub call_stack: Vec<String>,
 }
 
 impl EventBuilder {
@@ -671,6 +689,9 @@ impl EventBuilder {
             timestamp: Some(Utc::now().timestamp_micros()),
             meta,
             session: CURRENT_SESSION.try_with(Clone::clone).unwrap_or_default(),
+            call_stack: CURRENT_CALL_STACK
+                .try_with(Clone::clone)
+                .unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -751,6 +772,7 @@ impl EventBuilder {
             error: None,
             completion_tx: self.completion_tx,
             session: self.session,
+            call_stack: self.call_stack,
         })
     }
 }
@@ -924,6 +946,7 @@ mod tests {
             error: None,
             completion_tx: None,
             session: None,
+            call_stack: Vec::new(),
         });
 
         let built = with_event_context(&event, async {
@@ -949,16 +972,14 @@ mod tests {
             },
             token: Some(secrecy::SecretString::from("secret-token")),
         });
-        let event = Arc::new(
-            EventBuilder::new()
-                .data(EventData::Json(json!({})))
-                .subject("a".to_string())
-                .task_id(0)
-                .task_type("test")
-                .session(Arc::clone(&session))
-                .build()
-                .unwrap(),
-        );
+        let mut builder = EventBuilder::new()
+            .data(EventData::Json(json!({})))
+            .subject("a".to_string())
+            .task_id(0)
+            .task_type("test")
+            .session(Arc::clone(&session));
+        builder.call_stack = vec!["a/b".to_string()];
+        let event = Arc::new(builder.build().unwrap());
 
         let built = with_event_context(&event, async {
             EventBuilder::new()
@@ -981,6 +1002,8 @@ mod tests {
         let inherited = built.session.as_ref().expect("session should pass on");
         assert!(Arc::ptr_eq(inherited, &session));
         assert!(outside.session.is_none());
+        assert_eq!(built.call_stack, vec!["a/b".to_string()]);
+        assert!(outside.call_stack.is_empty());
         for rendered in [
             Value::try_from(&built).unwrap().to_string(),
             built.to_string(),

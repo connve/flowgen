@@ -74,6 +74,8 @@ pub struct TaskContext {
     /// Defaults to one for linear flows where a single terminal task signals
     /// completion.
     pub leaf_count: usize,
+    /// Events the task handles at once when its config doesn't set `max_in_flight`.
+    pub max_in_flight: std::num::NonZeroUsize,
     /// Optional startup delay for staggering task initialization across replicas.
     pub startup_delay: Option<std::time::Duration>,
     /// Shared client registry for deduplicating connections to external services.
@@ -102,6 +104,7 @@ impl std::fmt::Debug for TaskContext {
             .field("retry", &self.retry)
             .field("cancellation_token", &"<CancellationToken>")
             .field("leaf_count", &self.leaf_count)
+            .field("max_in_flight", &self.max_in_flight)
             .field("client_registry", &"<ClientRegistry>")
             .finish()
     }
@@ -286,6 +289,7 @@ impl TaskContextBuilder {
                 None => tokio_util::sync::CancellationToken::new(),
             },
             leaf_count: self.leaf_count.unwrap_or(1),
+            max_in_flight: crate::task::runner::max_in_flight(true),
             startup_delay: None,
             client_registry: match self.client_registry {
                 Some(registry) => registry,

@@ -167,6 +167,9 @@ pub struct Config {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Publisher only: events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for Config {
@@ -190,6 +193,7 @@ impl Default for Config {
             depends_on: None,
             msg_id: None,
             retry: None,
+            max_in_flight: None,
         }
     }
 }

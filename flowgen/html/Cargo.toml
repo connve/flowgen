@@ -21,7 +21,6 @@ serde = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
 scraper = { workspace = true }
-futures-util = { workspace = true }
 
 [lints]
 workspace = true

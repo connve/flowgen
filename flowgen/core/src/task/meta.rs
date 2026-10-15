@@ -147,6 +147,10 @@ pub trait TaskMeta {
     /// The connector the task type belongs to.
     const CONNECTOR: Connector = CONNECTOR;
 
+    /// Whether the task mostly uses the CPU, such as parsing or encoding
+    /// batches, rather than waiting on an external service.
+    const CPU_INTENSIVE: bool = false;
+
     /// The external systems the task connects to.
     fn connections(&self) -> Vec<Connection> {
         Vec::new()
@@ -154,13 +158,21 @@ pub trait TaskMeta {
 }
 
 impl TaskMeta for super::buffer::config::Processor {}
-impl TaskMeta for super::convert::config::Processor {}
+impl TaskMeta for super::convert::config::Processor {
+    const CPU_INTENSIVE: bool = true;
+}
 impl TaskMeta for super::generate::config::Subscriber {}
 impl TaskMeta for super::inproc::config::Endpoint {}
 impl TaskMeta for super::inproc::config::Request {}
-impl TaskMeta for super::iterate::config::Processor {}
-impl TaskMeta for super::log::config::Processor {}
-impl TaskMeta for super::script::config::Processor {}
+impl TaskMeta for super::iterate::config::Processor {
+    const CPU_INTENSIVE: bool = true;
+}
+impl TaskMeta for super::log::config::Processor {
+    const CPU_INTENSIVE: bool = true;
+}
+impl TaskMeta for super::script::config::Processor {
+    const CPU_INTENSIVE: bool = true;
+}
 
 #[cfg(test)]
 mod tests {

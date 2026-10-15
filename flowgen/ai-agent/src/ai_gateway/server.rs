@@ -664,6 +664,30 @@ async fn optional_user(
     }
 }
 
+/// When `ack_timeout` runs out for a request received now.
+fn ack_deadline(registration: &LlmProxyRegistration) -> Option<tokio::time::Instant> {
+    registration
+        .config
+        .ack_timeout
+        .map(|timeout| tokio::time::Instant::now() + timeout)
+}
+
+/// Sends the event, giving up at `deadline` when the server is too busy to
+/// process it.
+async fn send_by(
+    sending: flowgen_core::event::EventLogger<'_>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<(), DispatchError> {
+    let sent = match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, sending).await {
+            Ok(sent) => sent,
+            Err(_) => return Err(DispatchError::ServerBusy),
+        },
+        None => sending.await,
+    };
+    sent.map_err(|source| DispatchError::SendMessage { source })
+}
+
 /// Non-streaming dispatch: send event, await leaf completion, hand
 /// off to the adapter to shape the wire response.
 async fn dispatch_blocking<A: ProtocolAdapter>(
@@ -699,12 +723,11 @@ async fn dispatch_blocking<A: ProtocolAdapter>(
         Some(id) => logger.context(meta::USER_ID, id),
         None => logger,
     };
-    logger
-        .await
-        .map_err(|source| DispatchError::SendMessage { source })?;
+    let deadline = ack_deadline(registration);
+    send_by(logger, deadline).await?;
 
-    let result = match registration.config.ack_timeout {
-        Some(timeout) => tokio::time::timeout(timeout, completion_rx)
+    let result = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, completion_rx)
             .await
             .map_err(|_| DispatchError::FlowCompletionFailed)?
             .map_err(|_| DispatchError::FlowCompletionFailed)?,
@@ -847,13 +870,14 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
         Some(id) => logger.context(meta::USER_ID, id),
         None => logger,
     };
-    logger
-        .await
-        .map_err(|source| DispatchError::SendMessage { source })?;
+    let deadline = ack_deadline(registration);
+    if let Err(error) = send_by(logger, deadline).await {
+        registration.response_registry.remove(&correlation_id).await;
+        return Err(error);
+    }
 
     let registry = Arc::clone(&registration.response_registry);
     let cid = correlation_id.clone();
-    let ack_timeout = registration.config.ack_timeout;
     let (sse_tx, sse_rx) = mpsc::channel::<Result<String, std::convert::Infallible>>(32);
 
     tokio::spawn(async move {
@@ -905,9 +929,9 @@ async fn dispatch_streaming<A: ProtocolAdapter>(
                     }
                 }
                 completion = async {
-                    match ack_timeout {
-                        Some(timeout) => {
-                            match tokio::time::timeout(timeout, &mut completion_rx).await {
+                    match deadline {
+                        Some(deadline) => {
+                            match tokio::time::timeout_at(deadline, &mut completion_rx).await {
                                 Ok(r) => Some(r),
                                 Err(_) => { registry.remove(&cid).await; None }
                             }
@@ -1065,6 +1089,8 @@ enum DispatchError {
     },
     #[error("Flow completion failed or timed out")]
     FlowCompletionFailed,
+    #[error("Server is too busy to process the request")]
+    ServerBusy,
     #[error("Flow error: {message}")]
     FlowError { message: String },
     #[error("Downstream tool_calls payload is malformed: {source}")]
@@ -1110,6 +1136,7 @@ impl DispatchError {
             DispatchError::EventBuilder { .. }
             | DispatchError::SendMessage { .. }
             | DispatchError::FlowCompletionFailed
+            | DispatchError::ServerBusy
             | DispatchError::FlowError { .. }
             | DispatchError::MalformedToolCalls { .. }
             | DispatchError::PayloadSerialization { .. } => "server_error",
@@ -1135,6 +1162,7 @@ impl IntoResponse for DispatchError {
             | DispatchError::FlowCompletionFailed
             | DispatchError::MalformedToolCalls { .. }
             | DispatchError::PayloadSerialization { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            DispatchError::ServerBusy => StatusCode::SERVICE_UNAVAILABLE,
             DispatchError::FlowError { .. } => StatusCode::BAD_GATEWAY,
         };
         let body = OpenAiErrorResponse {

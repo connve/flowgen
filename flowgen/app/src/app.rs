@@ -1101,10 +1101,6 @@ impl App {
                 flow_builder = flow_builder.retry(retry_config.clone());
             }
 
-            if let Some(buffer_size) = app_config.event_buffer_size {
-                flow_builder = flow_builder.event_buffer_size(buffer_size);
-            }
-
             if let Some(ref loader) = resource_loader {
                 flow_builder = flow_builder.resource_loader(loader.clone());
             }

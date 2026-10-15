@@ -6,12 +6,11 @@
 
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use futures_util::future;
 use scraper::{Html, Selector};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Selector literal that refers to the row element itself rather than a
 /// descendant. Combined with `@attr` to read an attribute off the row.
@@ -159,6 +158,15 @@ impl EventHandler {
     /// processor's pre-compiled selectors.
     fn scrape(&self, html: &str) -> Vec<Value> {
         scrape_document(html, &self.selectors)
+    }
+}
+
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
     }
 
     /// Processes a single event: extract HTML, scrape, and emit results.
@@ -319,7 +327,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -336,42 +344,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             .await?,
         );
 
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                event_handler.handle(event.clone()).await.map_err(|e| {
-                                    error!(error = %e, "Failed to scrape HTML");
-                                    tokio_retry::RetryError::transient(e)
-                                })
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "HTML scrape failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    // Channel closed, wait for all spawned handlers to complete.
-                    future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 

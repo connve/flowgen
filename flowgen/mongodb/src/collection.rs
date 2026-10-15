@@ -9,7 +9,7 @@ use mongodb::Collection;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 use super::config::Operation;
 
@@ -121,7 +121,18 @@ pub struct EventHandler {
     task_type: &'static str,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         let event = Arc::new(event);
@@ -136,7 +147,9 @@ impl EventHandler {
         })
         .await
     }
+}
 
+impl EventHandler {
     /// Queries the configured collection with `filter` and emits each
     /// matching document as an event.
     async fn read(
@@ -440,54 +453,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             Err(e) => return Err(e),
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            if self.task_context.cancellation_token.is_cancelled() {
-                futures::future::join_all(handlers).await;
-                return Ok(());
-            }
-
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) if e.is_permanent() => {
-                                        error!(error = %e, "Failed to process MongoDB event");
-                                        Err(tokio_retry::RetryError::permanent(e))
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to process MongoDB event");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "MongoDB collection processor failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), err.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 
@@ -618,7 +592,7 @@ impl ProcessorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flowgen_core::task::runner::Runner;
+    use flowgen_core::task::runner::{Handler, Runner};
     use serde_json::json;
     use std::path::PathBuf;
     use tokio::sync::mpsc::channel;
@@ -633,6 +607,7 @@ mod tests {
             credentials_path: None,
             depends_on: Some(Vec::new()),
             retry: Default::default(),
+            max_in_flight: None,
         }
     }
 

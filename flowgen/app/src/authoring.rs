@@ -1107,7 +1107,7 @@ async fn run_publish_flow(
     }
     match state
         .inproc
-        .call(None, &target.publish_flow, data, meta, session)
+        .call(&[], &target.publish_flow, data, meta, session)
         .await
     {
         Ok(result) => Ok(result),

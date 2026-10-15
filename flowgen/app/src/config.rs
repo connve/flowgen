@@ -215,6 +215,13 @@ macro_rules! task_types {
                     $(TaskType::$tag(config) => config.connections(),)+
                 }
             }
+
+            /// Whether the task mostly uses the CPU, declared by its crate.
+            pub const fn cpu_intensive(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::CPU_INTENSIVE,)+
+                }
+            }
         }
     };
 }
@@ -418,9 +425,6 @@ pub struct AppConfig {
     pub health: HealthOptions,
     /// Optional app-level retry configuration (can be overridden per task).
     pub retry: Option<flowgen_core::retry::RetryConfig>,
-    /// Per-edge event channel capacity in events (defaults to 10,000).
-    /// When full the upstream task blocks until downstream drains a slot.
-    pub event_buffer_size: Option<usize>,
     /// Optional OpenTelemetry configuration for metrics and tracing.
     pub telemetry: Option<TelemetryOptions>,
 }
@@ -1338,7 +1342,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -1348,7 +1351,6 @@ mod tests {
         assert!(app_config.telemetry.is_none());
         assert!(app_config.http_server.is_none());
         assert!(app_config.retry.is_none());
-        assert!(app_config.event_buffer_size.is_none());
         assert!(app_config.resources.is_none());
     }
 
@@ -1367,7 +1369,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -1402,7 +1403,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -1436,7 +1436,6 @@ mod tests {
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -1732,7 +1731,6 @@ flows:
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: None,
         };
 
@@ -1848,7 +1846,6 @@ flows:
             web: None,
             health: Default::default(),
             retry: None,
-            event_buffer_size: None,
             telemetry: Some(TelemetryOptions {
                 enabled: true,
                 backend: Some(TelemetryBackendOptions::Remote {

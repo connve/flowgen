@@ -12,7 +12,6 @@ ai_gateway:        # OpenAI-compatible LLM gateway (optional).
 web:               # Web UI (optional).
 health:            # k8s liveness/readiness listener (defaults on).
 retry:             # Default retry policy for every task (optional).
-event_buffer_size: # Per-edge channel capacity (optional).
 telemetry:         # OpenTelemetry export (optional).
 ```
 
@@ -87,8 +86,6 @@ health:
 retry:
   max_attempts: 10
   initial_backoff: "1s"
-
-event_buffer_size: 10000
 
 telemetry:
   enabled: true
@@ -253,12 +250,6 @@ Sets the default retry policy for every task. Individual tasks can override via 
 | `initial_backoff` | duration | `1s` | Delay before first retry. Each subsequent retry doubles, with jitter. |
 
 See [Retry](/docs/flowgen/concepts/retry) for the two retry patterns (circuit breaker for processors, infinite reconnect for subscribers).
-
-## `event_buffer_size`
-
-Each pair of connected tasks shares a bounded mpsc channel. `event_buffer_size` sets the channel capacity (in events). When the channel fills, the upstream task blocks until the downstream task drains a slot — this is how backpressure propagates through the flow. No events are dropped.
-
-The default (10,000) is sufficient for most workloads. The buffer only needs to absorb the gap between producer and consumer processing rates; downstream throughput is determined by task processing speed, not channel depth. Increase it if you observe producer stalls in flows with very bursty fan-out patterns and fast consumers.
 
 ## `telemetry`
 

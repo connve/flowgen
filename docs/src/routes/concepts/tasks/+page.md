@@ -33,6 +33,7 @@ Processors receive events, do something with them, and emit events to the next t
 | `buffer` | Accumulates events into batches before forwarding. |
 | `log` | Logs event data for debugging. |
 | `http_request` | Makes outbound HTTP calls. |
+| `html_scrape` | Extracts rows from HTML with CSS selectors. |
 | `nats_jetstream_publisher` | Publishes events to a NATS JetStream subject. |
 | `nats_kv_store` | Read, write, list, and delete keys in a NATS KV bucket. |
 | `salesforce_pubsubapi_publisher` | Publishes Salesforce Platform Events. |
@@ -70,9 +71,22 @@ All tasks share these optional fields:
     retry:                     # optional: overrides app-level retry
       max_attempts: 5
       initial_backoff: "2s"
+    max_in_flight: 4           # optional: events processed at a time (processors)
     code: |
       event.data
 ```
+
+## Backpressure
+
+Each processor works on at most `max_in_flight` events at a time and picks up the next one only when one finishes. Only one event can wait between two tasks, so when a task is slow, the tasks before it wait too, all the way back to the source. Memory depends on `max_in_flight` and how big each event is (for example the `batch_size` of an `object_store` read), not on how much data comes in.
+
+`max_in_flight` defaults to 64 for tasks that mostly wait on an external service, and to the number of CPUs for tasks that parse, encode or batch data.
+
+Set it to `1` when order matters, for example for updates to the same record: the task then handles one event at a time and passes them on in the order they arrived. Each task has its own limit, so every task that could reorder events needs it. After a fan-out, each branch gets events in the order the parent sent them. Where branches merge, each branch's events stay in order, but events from different branches can arrive in any order.
+
+An event that is being retried keeps its slot until it succeeds or runs out of attempts. When an external service is down, its task fills up with retrying events and the flow stops taking new input until the service is back, instead of piling up events in memory.
+
+`http_endpoint`, `llm_proxy`, and `mcp_tool` count the wait for the flow to take a request as part of `ack_timeout`. If the flow is too busy to take it in time, HTTP clients get `503` and MCP clients a "Server is too busy" error.
 
 ## Event data formats
 

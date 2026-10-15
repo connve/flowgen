@@ -22,7 +22,7 @@ use google_cloud_bigquery::http::types::{QueryParameter, QueryParameterType, Que
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Errors that can occur during BigQuery query operations.
 #[derive(thiserror::Error, Debug)]
@@ -154,7 +154,18 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    fn is_retryable(&self, error: &Error) -> bool {
+        !error.is_permanent()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
@@ -346,48 +357,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) if e.is_permanent() => {
-                                        error!(error = %e, "Query failed with a permanent error, skipping retries");
-                                        Err(tokio_retry::RetryError::permanent(e))
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to execute query");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(e) = result {
-                                error!(error = %e, "Query failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), e.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 

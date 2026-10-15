@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, Instrument};
+use tracing::error;
 
 /// Response for delete operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +147,14 @@ pub struct EventHandler {
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
-impl EventHandler {
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
     #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
     async fn handle(&self, event: Event) -> Result<(), Error> {
         if self.task_context.cancellation_token.is_cancelled() {
@@ -159,11 +166,9 @@ impl EventHandler {
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
             // Render config to support templates inside configuration.
-            let event_value = serde_json::value::Value::try_from(event.as_ref())
-                .map_err(|source| Error::EventBuilder { source })?;
             let config = self
                 .config
-                .render(&event_value)
+                .render_for_event(event.as_ref())
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute operation based on type.
@@ -246,7 +251,9 @@ impl EventHandler {
         })
         .await
     }
+}
 
+impl EventHandler {
     /// Creates a BigQuery job and returns the complete job response.
     async fn create_job(&self, config: &super::config::Job) -> Result<BqJob, Error> {
         let source_uris_value = config
@@ -524,44 +531,15 @@ impl flowgen_core::task::runner::Runner for Processor {
             }
         };
 
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to process job");
-                                        Err(tokio_retry::RetryError::transient(e))
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(e) = result {
-                                error!(error = %e, "Job failed after all retry attempts");
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), e.to_string())
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    return Ok(());
-                }
-            }
-        }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        Ok(())
     }
 }
 

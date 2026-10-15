@@ -9,6 +9,8 @@ Use it for sub-flows shared by several flows, a common error-handling flow, or f
 
 A flow with an `inproc_endpoint` runs on every pod, like a flow with an `http_endpoint`, and ignores `require_leader_election`; a call reaches the copy on the caller's pod. Calls are not queued: a call to a flow that is not running, or a flow restarting, fails and the caller's `retry` applies. For delivery that survives restarts, publish to NATS instead.
 
+A flow can't call itself, directly or through other flows: if `a` calls `b` and `b` calls `a`, the second call fails right away, because `a` is still waiting on the first one.
+
 ## inproc_endpoint
 
 ```yaml

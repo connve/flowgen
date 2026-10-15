@@ -16,7 +16,7 @@ pub enum CallError {
     NotFound { flow: String },
     #[error("The flow '{caller}' is not allowed to call '{flow}'; see the callers of its inproc_endpoint")]
     NotAllowed { caller: String, flow: String },
-    #[error("The flow '{flow}' cannot call itself")]
+    #[error("The flow '{flow}' would end up calling itself")]
     Recursive { flow: String },
     #[error("Error building event: {source}")]
     EventBuilder {
@@ -96,16 +96,18 @@ impl InprocRegistry {
     }
 
     /// Runs `flow` with `data`, `meta` and `session` and returns the result of its last
-    /// task. `caller` is the calling flow's identity, `None` for flowgen itself.
+    /// task. `callers` are the flows waiting on this call, outermost first, the
+    /// direct caller last; empty for flowgen itself. Calling a flow already on
+    /// that stack fails, since it would wait on itself.
     pub async fn call(
         &self,
-        caller: Option<&str>,
+        callers: &[String],
         flow: &str,
         data: Value,
         meta: Map<String, Value>,
         session: Option<Arc<crate::auth::UserSession>>,
     ) -> Result<Option<Value>, CallError> {
-        if caller == Some(flow) {
+        if callers.iter().any(|caller| caller == flow) {
             return Err(CallError::Recursive {
                 flow: flow.to_string(),
             });
@@ -118,7 +120,7 @@ impl InprocRegistry {
                 })
             }
         };
-        if let Some(caller) = caller {
+        if let Some(caller) = callers.last() {
             if !registration
                 .callers
                 .iter()
@@ -139,6 +141,7 @@ impl InprocRegistry {
             .completion_tx(completion_tx)
             .meta_merge(meta);
         builder.session = session;
+        builder.call_stack = callers.to_vec();
         let event = builder
             .build()
             .map_err(|source| CallError::EventBuilder { source })?;
@@ -195,19 +198,23 @@ mod tests {
         });
 
         let same_folder = registry
-            .call(Some("a/c"), "a/b", Value::Null, Map::new(), None)
+            .call(&stack(&["a/c"]), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(same_folder.is_ok(), "{same_folder:?}");
         let flowgen = registry
-            .call(None, "a/b", Value::Null, Map::new(), None)
+            .call(&[], "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(flowgen.is_ok(), "{flowgen:?}");
         let other_folder = registry
-            .call(Some("x/y"), "a/b", Value::Null, Map::new(), None)
+            .call(&stack(&["x/y"]), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(
             matches!(other_folder, Err(CallError::NotAllowed { caller, .. }) if caller == "x/y")
         );
+    }
+
+    fn stack(flows: &[&str]) -> Vec<String> {
+        flows.iter().map(|flow| flow.to_string()).collect()
     }
 
     fn answer_every_call(mut rx: mpsc::Receiver<Event>) {
@@ -230,14 +237,17 @@ mod tests {
             },
         );
         answer_every_call(rx);
-        let call = |caller: &'static str| {
-            registry.call(
-                Some(caller),
-                "system/publish",
-                Value::Null,
-                Map::new(),
-                None,
-            )
+        let registry = &registry;
+        let call = |caller: &'static str| async move {
+            registry
+                .call(
+                    &stack(&[caller]),
+                    "system/publish",
+                    Value::Null,
+                    Map::new(),
+                    None,
+                )
+                .await
         };
 
         assert!(call("system/sync").await.is_ok());
@@ -267,13 +277,13 @@ mod tests {
         answer_every_call(rx);
 
         let result = registry
-            .call(Some("x/y"), "a/b", Value::Null, Map::new(), None)
+            .call(&stack(&["x/y"]), "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
-    async fn a_flow_cannot_call_itself() {
+    async fn a_flow_cannot_call_itself_directly_or_through_another_flow() {
         let registry = InprocRegistry::new();
         let (tx, _rx) = mpsc::channel(1);
         registry.register(
@@ -281,10 +291,47 @@ mod tests {
             registration(tx, Some(Duration::from_millis(10))),
         );
 
-        let result = registry
-            .call(Some("a/b"), "a/b", Value::Null, Map::new(), None)
+        let direct = registry
+            .call(&stack(&["a/b"]), "a/b", Value::Null, Map::new(), None)
             .await;
-        assert!(matches!(result, Err(CallError::Recursive { flow }) if flow == "a/b"));
+        let through_another = registry
+            .call(
+                &stack(&["a/b", "a/c"]),
+                "a/b",
+                Value::Null,
+                Map::new(),
+                None,
+            )
+            .await;
+
+        assert!(matches!(direct, Err(CallError::Recursive { flow }) if flow == "a/b"));
+        assert!(matches!(through_another, Err(CallError::Recursive { flow }) if flow == "a/b"));
+    }
+
+    #[tokio::test]
+    async fn the_called_flow_gets_the_stack_of_flows_waiting_on_it() {
+        let registry = InprocRegistry::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        registry.register("a/b".to_string(), registration(tx, None));
+        let received = tokio::spawn(async move {
+            let event = rx.recv().await.unwrap();
+            let call_stack = event.call_stack.clone();
+            event.completion_tx.unwrap().signal_completion(None);
+            call_stack
+        });
+
+        registry
+            .call(
+                &stack(&["a/x", "a/c"]),
+                "a/b",
+                Value::Null,
+                Map::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(received.await.unwrap(), stack(&["a/x", "a/c"]));
     }
 
     #[tokio::test]
@@ -306,7 +353,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            registry.call(None, "a/b", Value::Null, Map::new(), None),
+            registry.call(&[], "a/b", Value::Null, Map::new(), None),
         )
         .await;
         assert!(
@@ -336,7 +383,7 @@ mod tests {
             completion.signal_completion(Some(serde_json::json!({"echo": data})));
         });
         let result = registry
-            .call(None, "a/b", serde_json::json!({"x": 1}), Map::new(), None)
+            .call(&[], "a/b", serde_json::json!({"x": 1}), Map::new(), None)
             .await
             .unwrap();
         assert_eq!(result, Some(serde_json::json!({"echo": {"x": 1}})));
@@ -355,7 +402,7 @@ mod tests {
                 .signal_completion_with_error("conflict".to_string());
         });
         let result = registry
-            .call(None, "a/b", Value::Null, Map::new(), None)
+            .call(&[], "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(matches!(result, Err(CallError::Failed { reason }) if reason == "conflict"));
     }
@@ -367,7 +414,7 @@ mod tests {
         registry.register("a/b".to_string(), registration(tx, None));
         registry.deregister_flow("a/b");
         let result = registry
-            .call(None, "a/b", Value::Null, Map::new(), None)
+            .call(&[], "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(matches!(result, Err(CallError::NotFound { flow }) if flow == "a/b"));
     }
@@ -392,7 +439,7 @@ mod tests {
         });
 
         registry
-            .call(None, "a/b", Value::Null, Map::new(), Some(session))
+            .call(&[], "a/b", Value::Null, Map::new(), Some(session))
             .await
             .unwrap();
 
@@ -408,7 +455,7 @@ mod tests {
             registration(tx, Some(Duration::from_millis(10))),
         );
         let result = registry
-            .call(None, "a/b", Value::Null, Map::new(), None)
+            .call(&[], "a/b", Value::Null, Map::new(), None)
             .await;
         assert!(matches!(result, Err(CallError::Timeout { .. })));
     }

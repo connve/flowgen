@@ -12,7 +12,7 @@ use rig::tool::{rmcp::McpClientHandler, server::ToolServer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info, Instrument};
+use tracing::{error, info};
 
 /// Errors that can occur during completion processing.
 #[derive(thiserror::Error, Debug)]
@@ -776,13 +776,50 @@ struct Agent {
     _toolset: Arc<Toolset>,
 }
 
+#[async_trait::async_trait]
+impl flowgen_core::task::runner::Handler for EventHandler {
+    type Error = Error;
+
+    fn sender(&self) -> Option<&Sender<Event>> {
+        self.tx.as_ref()
+    }
+
+    /// Retrying doesn't help with upstream 4xx errors or a missing or rejected user token.
+    fn is_retryable(&self, error: &Error) -> bool {
+        !(is_upstream_client_error(error)
+            || matches!(
+                error,
+                Error::McpUserRequired { .. } | Error::McpUserUnauthorized { .. }
+            ))
+    }
+
+    /// Includes the provider and model, so it's clear which backend failed.
+    fn failure_message(&self, event: &Event, error: &Error) -> String {
+        match self.render_error_context(event, error) {
+            Some(message) => message,
+            None => error.to_string(),
+        }
+    }
+
+    async fn handle(&self, event: Event) -> Result<(), Error> {
+        if self.task_context.cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+
+        if self.config.stream {
+            self.handle_streaming(event).await
+        } else {
+            self.handle_non_streaming(event).await
+        }
+    }
+}
+
 impl EventHandler {
     /// Builds an error message tagged with the rendered provider/model/endpoint
     /// so the caller can tell which backend failed. Returns `None` if rendering
     /// itself errors — the caller then falls back to the raw error string.
     fn render_error_context(&self, event: &Event, err: &Error) -> Option<String> {
-        let event_value = serde_json::value::Value::try_from(event).ok()?;
-        let rendered = self.config.render(&event_value).ok()?;
+        let rendered = self.config.render_for_event(event).ok()?;
         let endpoint = rendered.endpoint.as_deref().unwrap_or("default");
         Some(format!(
             "{:?}/{} @ {}: {}",
@@ -797,11 +834,9 @@ impl EventHandler {
     /// takes the client for them from the current toolset — the task's, or the
     /// signed-in user's when a server acts on behalf of the user.
     async fn resolve_client(&self, event: &Event) -> Result<Agent, Error> {
-        let event_value = serde_json::value::Value::try_from(event)
-            .map_err(|source| Error::EventBuilder { source })?;
         let rendered = self
             .config
-            .render(&event_value)
+            .render_for_event(event)
             .map_err(|source| Error::ConfigRender { source })?;
 
         let toolset = match user_mcp_server(&self.config) {
@@ -823,21 +858,6 @@ impl EventHandler {
             client,
             _toolset: toolset,
         })
-    }
-
-    /// Processes an event by generating a completion.
-    ///
-    /// Dispatches to streaming or non-streaming path based on config.
-    async fn handle(&self, event: Event) -> Result<(), Error> {
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        if self.config.stream {
-            self.handle_streaming(event).await
-        } else {
-            self.handle_non_streaming(event).await
-        }
     }
 
     /// Non-streaming completion: waits for the full response and emits a single event.
@@ -1495,7 +1515,7 @@ impl flowgen_core::task::runner::Runner for Processor {
     }
 
     #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run(self) -> Result<(), Error> {
         let retry_config =
             flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
 
@@ -1540,62 +1560,18 @@ impl flowgen_core::task::runner::Runner for Processor {
             })
         });
 
-        let mut handlers = Vec::new();
-
-        loop {
-            match self.rx.recv().await {
-                Some(event) => {
-                    let event_handler = Arc::clone(&event_handler);
-                    let retry_strategy = retry_config.strategy();
-                    let handle = tokio::spawn(
-                        async move {
-                            let result = tokio_retry::Retry::spawn(retry_strategy, || async {
-                                match event_handler.handle(event.clone()).await {
-                                    Ok(result) => Ok(result),
-                                    Err(e) => {
-                                        error!(error = %e, "Failed to generate completion");
-                                        // Upstream 4xx (bad request, auth, quota) won't recover from retry.
-                                        if is_upstream_client_error(&e)
-                                            || matches!(
-                                                e,
-                                                Error::McpUserRequired { .. }
-                                                    | Error::McpUserUnauthorized { .. }
-                                            )
-                                        {
-                                            Err(tokio_retry::RetryError::permanent(e))
-                                        } else {
-                                            Err(tokio_retry::RetryError::transient(e))
-                                        }
-                                    }
-                                }
-                            })
-                            .await;
-
-                            if let Err(err) = result {
-                                error!(error = %err, "Completion failed after all retry attempts");
-                                // Tag with provider/model so multi-backend proxies show which one failed.
-                                let context_msg = event_handler
-                                    .render_error_context(&event, &err)
-                                    .unwrap_or_else(|| err.to_string());
-                                event
-                                    .forward_failure(event_handler.tx.as_ref(), context_msg)
-                                    .await;
-                            }
-                        }
-                        .instrument(tracing::Span::current()),
-                    );
-                    handlers.push(handle);
-                    handlers.retain(|h| !h.is_finished());
-                }
-                None => {
-                    futures_util::future::join_all(handlers).await;
-                    if let Some(sweeper) = sweeper {
-                        sweeper.abort();
-                    }
-                    return Ok(());
-                }
-            }
+        flowgen_core::task::runner::process_events(
+            self.rx,
+            event_handler,
+            &retry_config,
+            self.config.max_in_flight,
+            &self.task_context,
+        )
+        .await;
+        if let Some(sweeper) = sweeper {
+            sweeper.abort();
         }
+        Ok(())
     }
 }
 
@@ -1745,6 +1721,7 @@ mod tests {
             sandbox: Default::default(),
             depends_on: None,
             retry: None,
+            max_in_flight: None,
             thinking: None,
         }
     }
