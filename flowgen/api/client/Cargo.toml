@@ -26,5 +26,8 @@ progenitor = { workspace = true }
 openapiv3 = { workspace = true }
 serde_yaml = { workspace = true }
 
+[dev-dependencies]
+serde_yaml = { workspace = true }
+
 [lints]
 workspace = true

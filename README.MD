@@ -64,6 +64,11 @@ git config --local core.hooksPath .githooks
 The hook lives in [`.githooks/pre-commit`](.githooks/pre-commit) and is
 versioned with the repo so all contributors run the same checks.
 
+A release changes only `version` under `[workspace.package]` in `Cargo.toml`.
+The hook copies it to `web/` and `docs/` (`package.json` and
+`package-lock.json`) and to `info.version` in the API spec, and a test fails
+when they differ.
+
 ### Testing
 
 ```bash

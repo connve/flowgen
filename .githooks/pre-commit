@@ -14,6 +14,23 @@ cargo "+$TOOLCHAIN" fmt --all
 # Add any formatted files back to the commit
 git diff --name-only --cached | grep '\.rs$' | xargs git add
 
+# Copies the workspace version in Cargo.toml to the web UI, the docs and the
+# API spec, and stages each file it changes.
+echo "Syncing the version from Cargo.toml..."
+PKGID=$(cargo "+$TOOLCHAIN" pkgid -p flowgen)
+VERSION=${PKGID##*[@#]}
+for dir in web docs; do
+    if ! grep -qF "\"version\": \"$VERSION\"" "$dir/package.json"; then
+        (cd "$dir" && npm version "$VERSION" --no-git-tag-version >/dev/null) || exit 1
+        git add "$dir/package.json" "$dir/package-lock.json"
+    fi
+done
+SPEC=flowgen/api/client/openapi.yaml
+if ! grep -qxF "  version: $VERSION" "$SPEC"; then
+    sed "1,/^  version: /s/^  version: .*/  version: $VERSION/" "$SPEC" > "$SPEC.tmp" && mv "$SPEC.tmp" "$SPEC"
+    git add "$SPEC"
+fi
+
 echo "Running cargo clippy (+$TOOLCHAIN)..."
 cargo "+$TOOLCHAIN" clippy --workspace --all-targets --all-features -- -D warnings
 if [ $? -ne 0 ]; then

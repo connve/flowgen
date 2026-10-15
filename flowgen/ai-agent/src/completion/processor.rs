@@ -372,15 +372,13 @@ async fn connect_mcp_tools(
             })?;
             headers.insert(http::header::AUTHORIZATION, value);
         }
-        let transport = build_mcp_transport(&mcp_config.url, headers);
+        let transport = build_mcp_transport(&mcp_config.url, headers.clone());
 
         let service = match handler.connect(transport).await {
             Ok(service) => service,
             Err(e) => {
-                let rejected = match (mcp_config.on_behalf_of_user, &header_value) {
-                    (true, Some(authorization)) => rejects(&mcp_config.url, authorization).await,
-                    _ => false,
-                };
+                let rejected =
+                    mcp_config.on_behalf_of_user && rejects(&mcp_config.url, headers).await;
                 return Err(match rejected {
                     true => Error::McpUserUnauthorized {
                         url: mcp_config.url.clone(),
@@ -418,12 +416,15 @@ struct Ping {
     method: &'static str,
 }
 
-/// Whether the server answers `authorization` with 401 or 403; asked again
-/// because rig turns connect errors into text.
-async fn rejects(url: &str, authorization: &str) -> bool {
+/// Whether the server answers the connection's `headers` with 401 or 403;
+/// asked again because rig turns connect errors into text.
+async fn rejects(
+    url: &str,
+    headers: std::collections::HashMap<http::HeaderName, http::HeaderValue>,
+) -> bool {
     let response = reqwest::Client::new()
         .post(url)
-        .header(reqwest::header::AUTHORIZATION, authorization)
+        .headers(headers.into_iter().collect())
         .header(
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
