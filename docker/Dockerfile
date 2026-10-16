@@ -22,9 +22,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust build tooling. Kept in its own layer so cargo-chef/sccache version
-# bumps do not invalidate the (much slower) apt layers.
-RUN cargo install cargo-chef --version 0.1.68
-RUN cargo install sccache --version 0.8.2
+# bumps do not invalidate the (much slower) apt layers. `--locked` builds
+# each tool against its own Cargo.lock, so yanked dependencies still resolve.
+RUN cargo install cargo-chef --version 0.1.68 --locked
+RUN cargo install sccache --version 0.8.2 --locked
 ENV RUSTC_WRAPPER=sccache
 ENV SCCACHE_DIR=/sccache
 WORKDIR /app
