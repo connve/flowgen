@@ -771,15 +771,13 @@ pub struct WebOptions {
     pub headers: std::collections::HashMap<String, String>,
     /// OIDC login for the web UI (Okta, Zitadel, Auth0, or any
     /// standard-compliant IdP). Omit to leave the web UI unauthenticated.
-    /// When set, a cookie secret is required — see [`Self::cookie_secret`].
     #[serde(default)]
     pub auth: Option<crate::login::LoginConfig>,
     /// Key used to encrypt the browser session cookie (holds the IdP's
     /// tokens — flowgen keeps no server-side session store, see
-    /// `crate::login`). At least 64 bytes recommended; shorter values are
-    /// expanded via HKDF, but a short secret is still a short secret.
-    /// Required when `auth` is set, unless `auth.credentials_path` carries a
-    /// `cookie_secret` instead.
+    /// `crate::login`). At least 32 bytes. Unset, flowgen generates the key
+    /// and keeps it in the system bucket; `auth.credentials_path` can carry
+    /// a `cookie_secret` instead.
     #[serde(default, serialize_with = "serialize_redacted_cookie_secret")]
     pub cookie_secret: Option<secrecy::SecretString>,
     /// Whether the login cookies carry the `Secure` attribute, which browsers

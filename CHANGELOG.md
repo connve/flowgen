@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.148.0
+
+### Changed
+
+- Web UI login generates its cookie key on the first start and keeps it in
+  the system bucket, so `cookie_secret` is optional. Every pod uses the same
+  key, and sessions survive restarts. Without a cache, the key lives in
+  memory and flowgen logs a warning. A `cookie_secret` that is already set
+  keeps working, along with the sessions it encrypted.
+
+### Fixed
+
+- A `cookie_secret` shorter than 32 bytes is reported at startup and keeps
+  only the web UI down, with flows still running.
+
 ## 0.147.0
 
 ### Breaking

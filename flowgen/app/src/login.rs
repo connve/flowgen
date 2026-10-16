@@ -37,6 +37,96 @@ use tokio::time::Instant;
 /// How long one session refresh is shared with in-flight requests still sending the old refresh token.
 const REFRESH_REUSE_WINDOW: Duration = Duration::from_secs(30);
 
+/// System cache key of the generated session cookie key.
+pub const COOKIE_KEY_CACHE_KEY: &str = "web.cookie_key";
+
+/// Shortest `cookie_secret` the key can be derived from.
+const MIN_COOKIE_SECRET_BYTES: usize = 32;
+
+/// Errors setting up the key that encrypts the session cookie.
+#[derive(thiserror::Error, Debug)]
+pub enum CookieKeyError {
+    #[error("The cookie secret is {0} bytes, it needs at least {MIN_COOKIE_SECRET_BYTES}.")]
+    SecretTooShort(usize),
+    #[error("Failed to read or store the session cookie key in the system cache: {0}")]
+    Cache(#[source] flowgen_core::cache::CacheError),
+    #[error("The operating system did not provide randomness for the session cookie key.")]
+    Random,
+    #[error("The session cookie key in the system cache is {0} bytes, which is too short.")]
+    InvalidStoredKey(usize),
+    #[error("Another pod created the session cookie key, but it could not be read back.")]
+    Vanished,
+}
+
+/// Key encrypting the session cookie: derived from the configured secret,
+/// otherwise generated once and kept in the system cache so every pod uses
+/// the same one, otherwise generated for this process alone.
+pub async fn cookie_key(
+    configured: Option<&secrecy::SecretString>,
+    system_cache: Option<&Arc<dyn flowgen_core::cache::Cache>>,
+) -> Result<axum_extra::extract::cookie::Key, CookieKeyError> {
+    use secrecy::ExposeSecret;
+
+    match (configured, system_cache) {
+        (Some(secret), _) => {
+            let secret = secret.expose_secret().as_bytes();
+            match secret.len() {
+                len if len < MIN_COOKIE_SECRET_BYTES => Err(CookieKeyError::SecretTooShort(len)),
+                _ => Ok(axum_extra::extract::cookie::Key::derive_from(secret)),
+            }
+        }
+        (None, Some(cache)) => shared_cookie_key(cache.as_ref()).await,
+        (None, None) => {
+            axum_extra::extract::cookie::Key::try_generate().ok_or(CookieKeyError::Random)
+        }
+    }
+}
+
+async fn shared_cookie_key(
+    cache: &dyn flowgen_core::cache::Cache,
+) -> Result<axum_extra::extract::cookie::Key, CookieKeyError> {
+    if let Some(key) = stored_cookie_key(cache).await? {
+        return Ok(key);
+    }
+    let key = axum_extra::extract::cookie::Key::try_generate().ok_or(CookieKeyError::Random)?;
+    match cache
+        .create(
+            COOKIE_KEY_CACHE_KEY,
+            bytes::Bytes::copy_from_slice(key.master()),
+            None,
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!("Generated the session cookie key");
+            Ok(key)
+        }
+        Err(flowgen_core::cache::CacheError::AlreadyExists) => {
+            match stored_cookie_key(cache).await? {
+                Some(key) => Ok(key),
+                None => Err(CookieKeyError::Vanished),
+            }
+        }
+        Err(source) => Err(CookieKeyError::Cache(source)),
+    }
+}
+
+async fn stored_cookie_key(
+    cache: &dyn flowgen_core::cache::Cache,
+) -> Result<Option<axum_extra::extract::cookie::Key>, CookieKeyError> {
+    match cache
+        .get(COOKIE_KEY_CACHE_KEY)
+        .await
+        .map_err(CookieKeyError::Cache)?
+    {
+        Some(stored) => match axum_extra::extract::cookie::Key::try_from(stored.as_ref()) {
+            Ok(key) => Ok(Some(key)),
+            Err(_) => Err(CookieKeyError::InvalidStoredKey(stored.len())),
+        },
+        None => Ok(None),
+    }
+}
+
 /// Errors from the interactive login flow. Separate from
 /// `flowgen_core::auth::AuthError` — that type covers token *validation*
 /// only and is `#[non_exhaustive]` from outside its crate; this flow has
@@ -650,5 +740,90 @@ mod tests {
 
         assert_eq!(first.as_deref(), Ok("first"));
         assert_eq!(second.as_deref(), Ok("second"));
+    }
+
+    fn system_cache() -> Arc<dyn flowgen_core::cache::Cache> {
+        Arc::new(flowgen_core::cache::MemoryCache::new())
+    }
+
+    fn secret(value: &str) -> secrecy::SecretString {
+        secrecy::SecretString::from(value.to_string())
+    }
+
+    #[tokio::test]
+    async fn pods_sharing_a_system_cache_use_the_same_cookie_key() {
+        let cache = system_cache();
+
+        let first = cookie_key(None, Some(&cache)).await.unwrap();
+        let second = cookie_key(None, Some(&cache)).await.unwrap();
+
+        assert_eq!(first.master(), second.master());
+        assert_eq!(
+            cache.get(COOKIE_KEY_CACHE_KEY).await.unwrap().as_deref(),
+            Some(first.master())
+        );
+    }
+
+    #[tokio::test]
+    async fn pods_starting_at_once_agree_on_one_cookie_key() {
+        let cache = system_cache();
+
+        let keys = futures::future::join_all((0..8).map(|_| {
+            let cache = Arc::clone(&cache);
+            async move { cookie_key(None, Some(&cache)).await.unwrap() }
+        }))
+        .await;
+
+        assert!(keys.iter().all(|key| key.master() == keys[0].master()));
+    }
+
+    #[tokio::test]
+    async fn a_configured_secret_wins_over_the_stored_cookie_key() {
+        let cache = system_cache();
+        let stored = cookie_key(None, Some(&cache)).await.unwrap();
+        let configured = secret("a long random string of at least 32 bytes");
+
+        let key = cookie_key(Some(&configured), Some(&cache)).await.unwrap();
+
+        assert_eq!(
+            key.master(),
+            axum_extra::extract::cookie::Key::derive_from(
+                b"a long random string of at least 32 bytes"
+            )
+            .master()
+        );
+        assert_ne!(key.master(), stored.master());
+    }
+
+    #[tokio::test]
+    async fn a_short_cookie_secret_is_rejected() {
+        let result = cookie_key(Some(&secret("short")), None).await;
+
+        assert!(matches!(result, Err(CookieKeyError::SecretTooShort(5))));
+    }
+
+    #[tokio::test]
+    async fn a_damaged_stored_cookie_key_is_reported() {
+        let cache = system_cache();
+        cache
+            .put(
+                COOKIE_KEY_CACHE_KEY,
+                bytes::Bytes::from_static(b"0123456789"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result = cookie_key(None, Some(&cache)).await;
+
+        assert!(matches!(result, Err(CookieKeyError::InvalidStoredKey(10))));
+    }
+
+    #[tokio::test]
+    async fn without_a_system_cache_each_process_generates_its_own_cookie_key() {
+        let first = cookie_key(None, None).await.unwrap();
+        let second = cookie_key(None, None).await.unwrap();
+
+        assert_ne!(first.master(), second.master());
     }
 }

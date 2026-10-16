@@ -222,13 +222,12 @@ pub enum Error {
         #[source]
         source: flowgen_core::telemetry::cluster::Error,
     },
-    /// Web UI login is enabled but has no cookie secret from either source.
-    #[error(
-        "Web UI login is enabled (web.auth) but no cookie secret is set. Put a random \
-         string in web.cookie_secret, or a `cookie_secret` key in the JSON file at \
-         web.auth.credentials_path, so logged-in sessions survive a restart."
-    )]
-    MissingCookieSecret,
+    /// Web UI login could not set up the key encrypting the session cookie.
+    #[error("Web UI login could not set up the session cookie key: {source}")]
+    CookieKey {
+        #[source]
+        source: crate::login::CookieKeyError,
+    },
     /// Web UI could not reach or was rejected by the configured identity provider.
     #[error("Web UI login could not start: {source}")]
     LoginClientStart {
@@ -1340,7 +1339,12 @@ impl App {
 
             let auth_setup = match &web_config.auth {
                 Some(login_config) => {
-                    setup_web_login(login_config, web_config.cookie_secret.as_ref()).await
+                    setup_web_login(
+                        login_config,
+                        web_config.cookie_secret.as_ref(),
+                        system.cache.as_ref(),
+                    )
+                    .await
                 }
                 None => Some((None, axum_extra::extract::cookie::Key::generate())),
             };
@@ -1679,12 +1683,11 @@ fn route_source(bind: &str, target: &str) -> std::io::Result<std::net::IpAddr> {
 async fn setup_web_login(
     login_config: &crate::login::LoginConfig,
     cookie_secret: Option<&secrecy::SecretString>,
+    system_cache: Option<&Arc<dyn flowgen_core::cache::Cache>>,
 ) -> Option<(
     Option<Arc<crate::login::LoginClient>>,
     axum_extra::extract::cookie::Key,
 )> {
-    use secrecy::ExposeSecret;
-
     let secrets = match login_config.resolve_secrets().await {
         Ok(secrets) => secrets,
         Err(source) => {
@@ -1693,21 +1696,20 @@ async fn setup_web_login(
         }
     };
 
-    let cookie_secret = match secrets.cookie_secret.as_ref().or(cookie_secret) {
-        Some(secret) => secret,
-        None => {
-            error!("{}", Error::MissingCookieSecret);
+    let cookie_secret = secrets.cookie_secret.as_ref().or(cookie_secret);
+    if cookie_secret.is_none() && system_cache.is_none() {
+        warn!("Web UI login has no system bucket to keep its session cookie key in, so logins end when this process restarts and other replicas can't read them");
+    }
+    let key = match crate::login::cookie_key(cookie_secret, system_cache).await {
+        Ok(key) => key,
+        Err(source) => {
+            error!("{}", Error::CookieKey { source });
             return None;
         }
     };
 
     match crate::login::LoginClient::new(login_config.clone(), &secrets.client_secret).await {
-        Ok(client) => {
-            let key = axum_extra::extract::cookie::Key::derive_from(
-                cookie_secret.expose_secret().as_bytes(),
-            );
-            Some((Some(Arc::new(client)), key))
-        }
+        Ok(client) => Some((Some(Arc::new(client)), key)),
         Err(source) => {
             error!("{}", Error::LoginClientStart { source });
             None

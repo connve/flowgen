@@ -109,8 +109,7 @@ pub struct WebState {
     pub login_client: Option<Arc<crate::login::LoginClient>>,
     /// Key encrypting the browser session cookie — see `crate::login` for
     /// why there's no server-side session store to protect instead.
-    /// `app.rs` refuses to start the web server if `web.auth` is set
-    /// without `web.cookie_secret` to derive this from.
+    /// See [`crate::login::cookie_key`] for where it comes from.
     pub cookie_key: axum_extra::extract::cookie::Key,
     /// Whether login cookies carry `Secure` (browsers require HTTPS to send
     /// them). From `web.cookie_secure`, default `true`.
