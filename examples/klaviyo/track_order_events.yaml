@@ -1,0 +1,42 @@
+# Sends every order from a shop webhook to Klaviyo as a "Placed Order" event,
+# which Klaviyo flows and segments can react to.
+#
+# Request: POST {"order_id": "1001", "email": "ada@example.com",
+#                "total": 129.9, "currency": "EUR", "items": [...]}
+#
+# Required:
+#   - Klaviyo credentials at /etc/klaviyo/credentials.json
+flow:
+  labels:
+    display_name: "Klaviyo Order Events"
+    description: "Receives orders over an HTTP webhook and tracks each one in Klaviyo as a Placed Order event with its value and items."
+    tags: ["klaviyo", "events", "webhook", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/klaviyo/orders
+    - http_endpoint:
+        name: receive_orders
+        method: POST
+        endpoint: /klaviyo/orders
+
+    # The order as a Klaviyo event; unique_id makes a resent order count once.
+    - script:
+        name: to_event
+        code: |
+          let order = event.data;
+          #{
+            metric: #{ data: #{ "type": "metric", attributes: #{ name: "Placed Order" } } },
+            profile: #{ data: #{ "type": "profile", attributes: #{ email: order.email } } },
+            properties: #{ order_id: order.order_id, items: order.items },
+            value: order.total,
+            value_currency: order.currency,
+            unique_id: order.order_id
+          }
+
+    # Track the event.
+    - klaviyo_events:
+        name: track_order
+        operation: create
+        credentials_path: /etc/klaviyo/credentials.json
+        payload:
+          from_event: true

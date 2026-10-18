@@ -194,6 +194,9 @@ pub enum Error {
     /// Error in Braze export user IDs task.
     #[error(transparent)]
     BrazeExportUsersIds(#[from] flowgen_braze::export::users::processor::Error),
+    /// Error in a Klaviyo task.
+    #[error(transparent)]
+    Klaviyo(#[from] flowgen_klaviyo::processor::Error),
     /// Error in MongoDB collection task.
     #[error(transparent)]
     MongoDbCollection(#[from] flowgen_mongodb::collection::Error),
@@ -2028,6 +2031,111 @@ async fn spawn_task(
                         builder = builder.sender(tx);
                     }
                     builder.build().await?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::klaviyo_templates(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::klaviyo_campaigns(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::klaviyo_lists(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::klaviyo_events(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::klaviyo_profiles(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
                     Ok(())
                 }
                 .instrument(span),

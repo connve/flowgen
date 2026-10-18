@@ -2,6 +2,16 @@
 
 ## 0.148.0
 
+### Added
+
+- Klaviyo tasks: `klaviyo_templates`, `klaviyo_campaigns`, `klaviyo_lists`,
+  `klaviyo_events` and `klaviyo_profiles`. `payload` holds a resource's
+  attributes and is checked against the Klaviyo request before it's sent.
+  Templates can be upserted by name, and a template can be assigned to every
+  message of a campaign at once. List operations emit one event per page.
+  Campaign sends are never retried. A missing field stops the task at
+  startup.
+
 ### Changed
 
 - Web UI login generates its cookie key on the first start and keeps it in

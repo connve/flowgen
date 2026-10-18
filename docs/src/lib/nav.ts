@@ -150,6 +150,18 @@ export const navigation: NavSection[] = [
 		]
 	},
 	{
+		title: 'Klaviyo',
+		icon: '/icons/klaviyo.png',
+		items: [
+			{ title: 'Overview', href: '/klaviyo' },
+			{ title: 'Templates', href: '/klaviyo/templates' },
+			{ title: 'Campaigns', href: '/klaviyo/campaigns' },
+			{ title: 'Lists', href: '/klaviyo/lists' },
+			{ title: 'Events', href: '/klaviyo/events' },
+			{ title: 'Profiles', href: '/klaviyo/profiles' }
+		]
+	},
+	{
 		title: 'MongoDB',
 		icon: '/icons/mongodb.svg',
 		items: [

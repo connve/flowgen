@@ -1,0 +1,41 @@
+# Keeps Klaviyo profiles in line with customer records from another system:
+# each record creates the profile, or updates the one with the same email.
+#
+# Request: POST {"email": "ada@example.com", "first_name": "Ada",
+#                "last_name": "Lovelace", "city": "London", "tier": "gold"}
+#
+# Required:
+#   - Klaviyo credentials at /etc/klaviyo/credentials.json
+flow:
+  labels:
+    display_name: "Klaviyo Profile Sync"
+    description: "Receives customer records over an HTTP webhook and creates or updates the matching Klaviyo profile, including custom properties."
+    tags: ["klaviyo", "profiles", "webhook", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/klaviyo/profiles
+    - http_endpoint:
+        name: receive_customers
+        method: POST
+        endpoint: /klaviyo/profiles
+
+    # The record as profile attributes; anything Klaviyo doesn't model goes in properties.
+    - script:
+        name: to_profile
+        code: |
+          let customer = event.data;
+          #{
+            email: customer.email,
+            first_name: customer.first_name,
+            last_name: customer.last_name,
+            location: #{ city: customer.city },
+            properties: #{ tier: customer.tier }
+          }
+
+    # Create the profile, or update the one with this email.
+    - klaviyo_profiles:
+        name: save_profile
+        operation: upsert
+        credentials_path: /etc/klaviyo/credentials.json
+        payload:
+          from_event: true

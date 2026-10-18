@@ -299,6 +299,16 @@ task_types! {
     oci_push(flowgen_oci::push::config::Processor),
     /// Braze export user IDs task.
     braze_export_users_ids(flowgen_braze::export::users::config::Processor),
+    /// Klaviyo email templates task.
+    klaviyo_templates(flowgen_klaviyo::templates::Templates),
+    /// Klaviyo campaigns task.
+    klaviyo_campaigns(flowgen_klaviyo::campaigns::Campaigns),
+    /// Klaviyo lists task.
+    klaviyo_lists(flowgen_klaviyo::lists::Lists),
+    /// Klaviyo events task.
+    klaviyo_events(flowgen_klaviyo::events::Events),
+    /// Klaviyo profiles task.
+    klaviyo_profiles(flowgen_klaviyo::profiles::Profiles),
     /// MongoDB collection read/write task.
     mongodb_collection(flowgen_mongodb::config::Collection),
     /// MongoDB change stream reader task.
@@ -379,6 +389,11 @@ impl TaskType {
             TaskType::git_push(c) => c.depends_on.as_ref(),
             TaskType::oci_push(c) => c.depends_on.as_ref(),
             TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
+            TaskType::klaviyo_templates(c) => c.depends_on.as_ref(),
+            TaskType::klaviyo_campaigns(c) => c.depends_on.as_ref(),
+            TaskType::klaviyo_lists(c) => c.depends_on.as_ref(),
+            TaskType::klaviyo_events(c) => c.depends_on.as_ref(),
+            TaskType::klaviyo_profiles(c) => c.depends_on.as_ref(),
             TaskType::mongodb_collection(c) => c.depends_on.as_ref(),
             TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
             TaskType::kafka_produce(c) => c.depends_on.as_ref(),

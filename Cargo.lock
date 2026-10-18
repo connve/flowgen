@@ -2251,6 +2251,7 @@ dependencies = [
  "flowgen_html",
  "flowgen_http",
  "flowgen_kafka",
+ "flowgen_klaviyo",
  "flowgen_mcp",
  "flowgen_mongodb",
  "flowgen_mssql",
@@ -2537,6 +2538,23 @@ dependencies = [
  "tokio-retry2",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "flowgen_klaviyo"
+version = "0.148.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "flowgen_core",
+ "klaviyo",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-retry2",
+ "tracing",
 ]
 
 [[package]]
@@ -5228,6 +5246,38 @@ dependencies = [
  "serde_json",
  "signature",
  "simple_asn1",
+]
+
+[[package]]
+name = "klaviyo"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e0fc9fbd90006d26fc9e9d887dc8f9e14d3e7fa1f0b182a4a9b0310fe8a81d"
+dependencies = [
+ "chrono",
+ "klaviyo_generated",
+ "reqwest 0.13.2",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "klaviyo_generated"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b2caf621c27a0ed53eaa15502152600979ac3b31dc581ff17e4fe19bc78bbb"
+dependencies = [
+ "chrono",
+ "heck",
+ "openapiv3",
+ "progenitor",
+ "progenitor-client",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

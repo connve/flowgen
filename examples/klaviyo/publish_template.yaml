@@ -1,0 +1,39 @@
+# Publishes email templates to Klaviyo from another system, such as a CMS:
+# each request updates the template with that name, or creates it.
+#
+# Request: POST {"name": "Order confirmation", "html": "<html>...</html>",
+#                "text": "..."}
+#
+# Required:
+#   - Klaviyo credentials at /etc/klaviyo/credentials.json
+flow:
+  labels:
+    display_name: "Klaviyo Template Publishing"
+    description: "Receives email templates over an HTTP webhook and saves each one in Klaviyo, updating the template with the same name or creating it."
+    tags: ["klaviyo", "templates", "webhook", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/klaviyo/templates
+    - http_endpoint:
+        name: receive_templates
+        method: POST
+        endpoint: /klaviyo/templates
+
+    # The request as template attributes, kept in the event so Klaviyo's tags pass untouched.
+    - script:
+        name: to_template
+        code: |
+          #{
+            name: event.data.name,
+            editor_type: "CODE",
+            html: event.data.html,
+            text: event.data.text
+          }
+
+    # Update the template with this name, or create it.
+    - klaviyo_templates:
+        name: save_template
+        operation: upsert
+        credentials_path: /etc/klaviyo/credentials.json
+        payload:
+          from_event: true

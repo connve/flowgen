@@ -13,6 +13,7 @@ This directory contains example flows demonstrating various flowgen features and
 - **`git/`** - `git_sync` and `git_push` tasks (pull a repository, commit and push files)
 - **`html/`** - `html_scrape` task (fetch a page and extract rows with CSS selectors)
 - **`inproc/`** - `inproc_endpoint` and `inproc_request` tasks (one flow calling another in-process)
+- **`klaviyo/`** - Klaviyo tasks (order events, profile sync, template publishing, a draft campaign)
 - **`mcp/`** - MCP server tasks (`mcp_tool`, `mcp_prompt`, `mcp_resource`)
 - **`mssql/`** - Microsoft SQL Server integrations
 - **`object-store/`** - Reading/writing files (local, S3, GCS)

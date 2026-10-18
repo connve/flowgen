@@ -46,6 +46,11 @@ Processors receive events, do something with them, and emit events to the next t
 | `gcp_bigquery_storage_write` | BigQuery Storage Write API. |
 | `gcp_bigquery_job` | BigQuery async jobs (load, monitor, cancel). |
 | `mssql_query` | Microsoft SQL Server queries. |
+| `klaviyo_templates` | Reads and writes Klaviyo email templates. |
+| `klaviyo_campaigns` | Creates, updates, and sends Klaviyo campaigns. |
+| `klaviyo_lists` | Reads Klaviyo lists. |
+| `klaviyo_events` | Sends events to Klaviyo. |
+| `klaviyo_profiles` | Reads and writes Klaviyo profiles. |
 | `mongodb_collection` | Reads or writes documents in a MongoDB collection. |
 | `object_store` | Object storage operations (read, write, list, move) on S3, GCS, Azure, local. |
 | `git_sync` | Clone/pull a Git repository and emit one event per file. |

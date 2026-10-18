@@ -102,6 +102,13 @@ flate2 = { version = "1.0", default-features = false, features = [
 ] }
 tar = { version = "0.4", default-features = false }
 braze = { version = "0.1.0" }
+klaviyo = { version = "0.1.0", features = [
+    "campaigns",
+    "events",
+    "lists",
+    "profiles",
+    "templates",
+] }
 async-nats = { version = "0.50" }
 bincode = { version = "1.3" }
 tonic = { version = "0.14", features = ["tls-native-roots"] }
