@@ -140,6 +140,9 @@ pub enum Error {
     /// Error in Salesforce REST API SOSL search operations.
     #[error(transparent)]
     SalesforceRestApiSearch(#[from] flowgen_salesforce::restapi::search::Error),
+    /// Error in Salesforce REST API SOQL query operations.
+    #[error(transparent)]
+    SalesforceRestApiQuery(#[from] flowgen_salesforce::restapi::query::Error),
     /// Error in Salesforce SOAP API merge operations.
     #[error(transparent)]
     SalesforceSoapApiMerge(#[from] flowgen_salesforce::soapapi::merge::Error),
@@ -191,9 +194,9 @@ pub enum Error {
     /// Error in OCI push task.
     #[error(transparent)]
     OciPush(#[from] flowgen_oci::push::processor::Error),
-    /// Error in Braze export user IDs task.
+    /// Error in a Braze task.
     #[error(transparent)]
-    BrazeExportUsersIds(#[from] flowgen_braze::export::users::processor::Error),
+    Braze(#[from] flowgen_braze::processor::Error),
     /// Error in a Klaviyo task.
     #[error(transparent)]
     Klaviyo(#[from] flowgen_klaviyo::processor::Error),
@@ -1602,6 +1605,27 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
+        TaskType::salesforce_restapi_query(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_salesforce::restapi::query::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
         TaskType::salesforce_soapapi_merge(config) => {
             let config = Arc::new(config);
             tokio::spawn(
@@ -2141,23 +2165,43 @@ async fn spawn_task(
                 .instrument(span),
             )
         }
-        TaskType::braze_export_users_ids(config) => {
+        TaskType::braze_export_user_data(config) => {
             let config = Arc::new(config);
             tokio::spawn(
                 async move {
-                    let mut builder =
-                        flowgen_braze::export::users::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
+                    let mut builder = flowgen_braze::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
                     if let Some(rx) = rx {
                         builder = builder.receiver(rx);
                     }
                     if let Some(tx) = tx {
                         builder = builder.sender(tx);
                     }
-                    builder.build().await?.run().await?;
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+                .instrument(span),
+            )
+        }
+        TaskType::braze_messaging(config) => {
+            let config = Arc::new(config);
+            tokio::spawn(
+                async move {
+                    let mut builder = flowgen_braze::processor::ProcessorBuilder::new()
+                        .config(config)
+                        .task_id(task_id)
+                        .task_type(task_type_str)
+                        .task_context(task_context);
+                    if let Some(rx) = rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
                     Ok(())
                 }
                 .instrument(span),

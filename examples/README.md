@@ -7,6 +7,7 @@ This directory contains example flows demonstrating various flowgen features and
 - **`ai-completion/`** - `ai_completion` task (RAG, resource-loaded prompts)
 - **`ai-gateway/`** - `llm_proxy` fronting OpenAI + Anthropic clients
 - **`authoring/`** - Publish and release flows for approved changes, operator agent and its tools
+- **`braze/`** - Braze tasks (user data export, a triggered campaign, a transactional email)
 - **`cloudflare/`** - Cloudflare integrations
 - **`data/`** - Synthetic test data used by examples
 - **`gcp/`** - Google Cloud Platform integrations (BigQuery, Pub/Sub, ...)

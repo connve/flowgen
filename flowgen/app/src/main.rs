@@ -6,6 +6,7 @@ use flowgen_core::flow::activity::{MetricsStore, OtlpMetricsStore};
 use flowgen_core::flow::activity_layer::FlowActivityLayer;
 use flowgen_core::telemetry::query::MemoryLogsStoreWriter;
 use std::env;
+use std::io::IsTerminal;
 use std::process;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -35,7 +36,7 @@ fn determine_log_format() -> LogFormat {
         };
     }
 
-    match atty::is(atty::Stream::Stdout) {
+    match std::io::stdout().is_terminal() {
         true => LogFormat::Compact,
         false => LogFormat::Json,
     }

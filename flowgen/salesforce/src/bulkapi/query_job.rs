@@ -2,7 +2,7 @@
 //!
 //! Handles query job operations: create, get, delete, abort, and get_results.
 
-use flowgen_core::buffer::{ContentType, FromReader};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
 use salesforce_core::bulkapi::{
@@ -10,7 +10,9 @@ use salesforce_core::bulkapi::{
     LineEnding as SdkLineEnding, QueryOperation as SdkQueryOperation,
 };
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_stream::StreamExt;
@@ -40,6 +42,19 @@ pub enum Error {
     SalesforceAuth {
         #[source]
         source: salesforce_core::client::Error,
+    },
+    #[error(transparent)]
+    Connect(#[from] crate::client::Error),
+    #[error("Failed to describe {object} for the results schema: {source}")]
+    Describe {
+        object: String,
+        #[source]
+        source: Box<salesforce_core::restapi::SObjectError>,
+    },
+    #[error("Failed to bind the query parameters: {source}")]
+    Bind {
+        #[source]
+        source: crate::soql::Error,
     },
     #[error("Bulk API query error: {source}")]
     BulkApiQuery {
@@ -87,10 +102,11 @@ pub enum Error {
         #[source]
         source: salesforce_core::bulkapi::ClientError,
     },
-    #[error(
-        "Client registry type mismatch — same credentials used with incompatible client types"
-    )]
-    ClientRegistryMismatch,
+    #[error("Failed to build REST API client: {source}")]
+    RestClientBuild {
+        #[source]
+        source: salesforce_core::restapi::ClientError,
+    },
 }
 
 /// Converts config QueryOperation to SDK QueryOperation.
@@ -131,6 +147,8 @@ fn to_sdk_line_ending(le: &super::config::LineEnding) -> Option<SdkLineEnding> {
 /// Event handler for processing individual query job operation requests.
 pub struct EventHandler {
     client: Arc<salesforce_core::bulkapi::Client>,
+    rest_client: Arc<salesforce_core::restapi::Client>,
+    retry: flowgen_core::retry::RetryConfig,
     config: Arc<super::config::QueryJob>,
     tx: Option<Sender<Event>>,
     current_task_id: usize,
@@ -173,17 +191,15 @@ impl EventHandler {
         let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
 
         flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let event_value = serde_json::value::Value::try_from(event.as_ref())?;
             let config = self
                 .config
-                .render(&event_value)
+                .render_for_event(&event)
                 .map_err(|source| Error::ConfigRender { source })?;
 
             // Execute operation based on type.
             match config.operation {
                 super::config::QueryJobOperation::Create => {
-                    self.create_job(&config, &event_value, completion_tx_arc)
-                        .await?
+                    self.create_job(&config, &event, completion_tx_arc).await?
                 }
                 super::config::QueryJobOperation::Get => {
                     self.get_job(&config, completion_tx_arc).await?
@@ -205,23 +221,15 @@ impl EventHandler {
     }
 
     async fn reconnect_on_auth_error(&self, error: Error) -> Error {
-        let needs_reconnect = match &error {
-            Error::SalesforceAuth { .. } => true,
-            Error::BulkApiQuery { source } => matches!(
-                source.as_ref(),
-                salesforce_core::bulkapi::QueryError::Auth { .. }
-            ),
-            _ => false,
-        };
-        match needs_reconnect {
-            true => match self.sfdc_client.lock().await.reconnect().await {
+        match failure(&error) {
+            crate::page::Failure::Auth => match self.sfdc_client.lock().await.reconnect().await {
                 Ok(()) => error,
                 Err(source) => {
                     error!(error = %error, "Reconnecting after an authentication error failed");
                     Error::SalesforceAuth { source }
                 }
             },
-            false => error,
+            crate::page::Failure::Transient | crate::page::Failure::Permanent => error,
         }
     }
 
@@ -229,16 +237,26 @@ impl EventHandler {
     async fn create_job(
         &self,
         config: &super::config::QueryJob,
-        event_value: &serde_json::Value,
+        event: &Event,
         completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
-        // Render query (inline queries already rendered, resource files need rendering).
-        let query_string = match &config.query {
+        // An inline query was rendered with the config; a resource file is rendered here.
+        let query = match &config.query {
+            Some(flowgen_core::resource::Source::Inline(query)) => query.clone(),
             Some(source) => source
-                .render(self.task_context.resource_loader.as_ref(), event_value)
+                .render(
+                    self.task_context.resource_loader.as_ref(),
+                    &flowgen_core::event::template_value(event, true)?,
+                )
                 .await
                 .map_err(|source| Error::ResourceLoad { source })?,
             None => return Err(Error::MissingQuery),
+        };
+        let query_string = match &config.parameters {
+            Some(parameters) => {
+                crate::soql::bind(&query, parameters).map_err(|source| Error::Bind { source })?
+            }
+            None => query,
         };
 
         // Build SDK request.
@@ -391,78 +409,98 @@ impl EventHandler {
         self.send_final_event(e, &completion_tx_arc).await
     }
 
-    /// Retrieves Salesforce bulk query job results using the SDK.
+    /// Emits every result page of a bulk query job as Arrow batches, typed
+    /// from the describe of the queried object. A page holds at most
+    /// `batch_size` records and is retried on its own, so a page already sent
+    /// downstream is never sent again.
     async fn get_results(
         &self,
         config: &super::config::QueryJob,
         completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobId)?;
-
-        // Get results using SDK.
         let query_client = self.client.query();
-        let mut byte_stream = query_client
-            .get_results(job_id, None, None)
+        let job = query_client
+            .get_job(job_id)
             .await
-            .map_err(|e| Error::BulkApiQuery {
-                source: Box::new(e),
+            .map_err(|source| Error::BulkApiQuery {
+                source: Box::new(source),
             })?;
+        let delimiter = column_delimiter(job.column_delimiter.as_ref());
+        let max_records = u64::try_from(config.batch_size)
+            .ok()
+            .and_then(NonZeroU64::new);
 
-        // Buffer the full CSV response for schema inference (requires seek).
-        let mut csv_bytes = Vec::new();
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk.map_err(|e| Error::Stream {
-                source: Box::new(e),
-            })?;
-            csv_bytes.extend_from_slice(&chunk);
-        }
-
-        let content_type = ContentType::Csv {
-            batch_size: config.batch_size,
-            has_header: config.has_header,
-            delimiter: None,
-            infer_schema_max_records: None,
-        };
-
-        let iter = EventData::from_reader(Cursor::new(csv_bytes), content_type)?;
-
-        // Emit batches one at a time. Hold the previous event so we can
-        // attach completion_tx to the final one (count unknown upfront).
+        let mut known_schema: Option<SchemaRef> = None;
+        let mut locator: Option<String> = None;
         let mut pending_event: Option<(Event, usize)> = None;
-
-        for (batch_index, item_result) in iter.enumerate() {
-            let event_data = item_result?;
-            let num_records = match &event_data {
-                EventData::ArrowRecordBatch(batch) => batch.num_rows(),
-                _ => 1,
+        let mut batch_index = 0;
+        loop {
+            if self.task_context.cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+            let (page, next) = crate::page::fetch(
+                &self.retry,
+                &self.task_context.cancellation_token,
+                &self.sfdc_client,
+                failure,
+                || read_page(&query_client, job_id, max_records, locator.as_deref()),
+            )
+            .await
+            .map_err(|source| Error::RetryExhausted {
+                source: Box::new(source),
+            })?;
+            let schema = match &known_schema {
+                Some(schema) => Arc::clone(schema),
+                None => Arc::new(
+                    self.results_schema(&job.object, &page, delimiter, config.has_header)
+                        .await?,
+                ),
             };
+            known_schema = Some(Arc::clone(&schema));
 
-            if let Some((prev, prev_records)) = pending_event.take() {
-                prev.send_with_logging(self.tx.as_ref())
-                    .context("num_records", prev_records)
-                    .await
-                    .map_err(|e| Error::SendMessage { source: e })?;
+            let batches = arrow::csv::ReaderBuilder::new(schema)
+                .with_header(config.has_header)
+                .with_delimiter(delimiter)
+                .with_batch_size(config.batch_size)
+                .build(std::io::Cursor::new(page))
+                .map_err(|source| Error::Arrow { source })?;
+            for batch in batches {
+                let batch = batch.map_err(|source| Error::Arrow { source })?;
+                if let Some((prev, prev_records)) = pending_event.take() {
+                    prev.send_with_logging(self.tx.as_ref())
+                        .context("num_records", prev_records)
+                        .await
+                        .map_err(|e| Error::SendMessage { source: e })?;
+                }
+
+                let num_records = batch.num_rows();
+                let e = EventBuilder::new()
+                    .data(EventData::ArrowRecordBatch(batch))
+                    .subject(config.name.to_owned())
+                    .id(format!("{job_id}-{batch_index}"))
+                    .task_id(self.current_task_id)
+                    .task_type(self.task_type)
+                    .build()?;
+                pending_event = Some((e, num_records));
+                batch_index += 1;
             }
 
-            let event_id = format!("{job_id}-{batch_index}");
-            let e = EventBuilder::new()
-                .data(event_data)
-                .subject(config.name.to_owned())
-                .id(event_id)
-                .task_id(self.current_task_id)
-                .task_type(self.task_type)
-                .build()?;
-
-            pending_event = Some((e, num_records));
+            locator = match next {
+                Some(next) => Some(next),
+                None => break,
+            };
         }
 
         // Send the final event (or an empty batch if no data) with completion_tx.
         let final_event = match pending_event.take() {
             Some((e, _num_records)) => e,
             None => {
-                let empty_batch = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(
-                    arrow::datatypes::Schema::empty(),
-                ));
+                let schema = match known_schema {
+                    Some(schema) => schema,
+                    None => Arc::new(Schema::empty()),
+                };
+                let empty_batch = arrow::record_batch::RecordBatch::new_empty(schema);
                 EventBuilder::new()
                     .data(EventData::ArrowRecordBatch(empty_batch))
                     .subject(config.name.to_owned())
@@ -475,6 +513,154 @@ impl EventHandler {
 
         self.send_final_event(final_event, &completion_tx_arc).await
     }
+
+    /// The schema of a job's results: each column typed from the describe of
+    /// `object`, following relationships for columns such as `Owner.Name`.
+    /// Columns that can't be resolved, and all columns without a header row,
+    /// are strings.
+    async fn results_schema(
+        &self,
+        object: &str,
+        page: &[u8],
+        delimiter: u8,
+        has_header: bool,
+    ) -> Result<Schema, Error> {
+        let (header, _) = arrow::csv::reader::Format::default()
+            .with_header(has_header)
+            .with_delimiter(delimiter)
+            .infer_schema(page, Some(0))
+            .map_err(|source| Error::Arrow { source })?;
+        let mut describes = HashMap::new();
+        let mut fields = Vec::with_capacity(header.fields().len());
+        for column in header.fields() {
+            let data_type = match has_header {
+                true => {
+                    self.column_type(&mut describes, object, column.name())
+                        .await?
+                }
+                false => DataType::Utf8,
+            };
+            fields.push(Field::new(column.name(), data_type, true));
+        }
+        Ok(Schema::new(fields))
+    }
+
+    /// The type of `column` (a field, or a relationship path to one) of
+    /// `object`. A polymorphic relationship or an unknown field is a string.
+    async fn column_type(
+        &self,
+        describes: &mut HashMap<String, salesforce_core::restapi::SObjectDescribe>,
+        object: &str,
+        column: &str,
+    ) -> Result<DataType, Error> {
+        let mut object = object.to_string();
+        let mut path = column.split('.').peekable();
+        while let Some(name) = path.next() {
+            let describe = match describes.entry(object.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let describe = self
+                        .rest_client
+                        .describe(object.as_str())
+                        .send()
+                        .await
+                        .map_err(|source| Error::Describe {
+                            object: object.clone(),
+                            source: Box::new(source),
+                        })?;
+                    entry.insert(describe)
+                }
+            };
+            if path.peek().is_none() {
+                let field = describe
+                    .fields
+                    .iter()
+                    .find(|field| field.name.eq_ignore_ascii_case(name));
+                return Ok(match field {
+                    Some(field) => arrow_type(&field.type_),
+                    None => DataType::Utf8,
+                });
+            }
+            let relationship = describe.fields.iter().find(|field| {
+                field
+                    .relationship_name
+                    .as_deref()
+                    .is_some_and(|relationship| relationship.eq_ignore_ascii_case(name))
+            });
+            object = match relationship.map(|field| field.reference_to.as_slice()) {
+                Some([related]) => related.clone(),
+                _ => return Ok(DataType::Utf8),
+            };
+        }
+        Ok(DataType::Utf8)
+    }
+}
+
+/// Downloads one page of a job's results and the locator of the next page.
+async fn read_page(
+    query_client: &salesforce_core::bulkapi::query::QueryClient,
+    job_id: &str,
+    max_records: Option<NonZeroU64>,
+    locator: Option<&str>,
+) -> Result<(Vec<u8>, Option<String>), Error> {
+    let mut page = query_client
+        .get_results(job_id, max_records, locator)
+        .await
+        .map_err(|source| Error::BulkApiQuery {
+            source: Box::new(source),
+        })?;
+    let mut body = Vec::new();
+    while let Some(chunk) = page.body.next().await {
+        let chunk = chunk.map_err(|source| Error::Stream {
+            source: Box::new(source),
+        })?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, page.locator))
+}
+
+/// The Arrow type a Salesforce field type is read as.
+fn arrow_type(field_type: &str) -> DataType {
+    match field_type {
+        "boolean" => DataType::Boolean,
+        "int" | "long" => DataType::Int64,
+        "double" | "currency" | "percent" => DataType::Float64,
+        "date" => DataType::Date32,
+        "datetime" => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+        _ => DataType::Utf8,
+    }
+}
+
+/// The byte separating columns in a job's CSV results.
+fn column_delimiter(delimiter: Option<&SdkColumnDelimiter>) -> u8 {
+    match delimiter {
+        Some(SdkColumnDelimiter::Tab) => b'\t',
+        Some(SdkColumnDelimiter::Semicolon) => b';',
+        Some(SdkColumnDelimiter::Pipe) => b'|',
+        Some(SdkColumnDelimiter::Caret) => b'^',
+        Some(SdkColumnDelimiter::Backquote) => b'`',
+        Some(SdkColumnDelimiter::Comma) | None => b',',
+    }
+}
+
+/// How a failed request is retried.
+fn failure(error: &Error) -> crate::page::Failure {
+    use crate::page::Failure;
+    match error {
+        Error::SalesforceAuth { .. } => Failure::Auth,
+        Error::BulkApiQuery { source } => match source.as_ref() {
+            salesforce_core::bulkapi::QueryError::Auth { .. } => Failure::Auth,
+            source if source.is_retryable() => Failure::Transient,
+            _ => Failure::Permanent,
+        },
+        Error::Describe { source, .. } => match source.as_ref() {
+            salesforce_core::restapi::SObjectError::Auth { .. } => Failure::Auth,
+            source if source.is_retryable() => Failure::Transient,
+            _ => Failure::Permanent,
+        },
+        Error::Stream { .. } => Failure::Transient,
+        _ => Failure::Permanent,
+    }
 }
 
 #[async_trait::async_trait]
@@ -486,10 +672,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
     }
 
     fn is_retryable(&self, error: &Error) -> bool {
-        match error {
-            Error::BulkApiQuery { source } => source.is_retryable(),
-            _ => true,
-        }
+        !matches!(failure(error), crate::page::Failure::Permanent)
     }
 
     /// Ignores events addressed to another task.
@@ -527,34 +710,22 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|source| Error::ConfigRender { source })?;
 
-        let credentials_path = init_config.credentials_path.clone();
-        let sfdc_client = self
-            .task_context
-            .client_registry
-            .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path),
-                || async {
-                    let client = salesforce_core::client::Builder::new()
-                        .credentials_path(credentials_path)
-                        .build()
-                        .map_err(|e| Error::SalesforceAuth { source: e })?
-                        .connect()
-                        .await
-                        .map_err(|e| Error::SalesforceAuth { source: e })?;
-                    Ok(tokio::sync::Mutex::new(client))
-                },
-            )
-            .await
-            .map_err(|e| match e {
-                flowgen_core::client_registry::Error::Init { source } => source,
-                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
-            })?;
+        let sfdc_client = crate::client::connect(
+            &self.task_context,
+            self.task_type,
+            &init_config.credentials_path,
+        )
+        .await?;
 
-        let bulk_client = {
+        let (bulk_client, rest_client) = {
             let guard = sfdc_client.lock().await;
-            salesforce_core::bulkapi::ClientBuilder::new(guard.clone())
+            let bulk_client = salesforce_core::bulkapi::ClientBuilder::new(guard.clone())
                 .build()
-                .map_err(|e| Error::BulkClientBuild { source: e })?
+                .map_err(|e| Error::BulkClientBuild { source: e })?;
+            let rest_client = salesforce_core::restapi::ClientBuilder::new(guard.clone())
+                .build()
+                .map_err(|source| Error::RestClientBuild { source })?;
+            (bulk_client, rest_client)
         };
 
         let event_handler = EventHandler {
@@ -562,6 +733,11 @@ impl flowgen_core::task::runner::Runner for Processor {
             current_task_id: self.task_id,
             tx: self.tx.clone(),
             client: Arc::new(bulk_client),
+            rest_client: Arc::new(rest_client),
+            retry: flowgen_core::retry::RetryConfig::merge(
+                &self.task_context.retry,
+                &self.config.retry,
+            ),
             sfdc_client,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),

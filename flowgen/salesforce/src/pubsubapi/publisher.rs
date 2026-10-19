@@ -31,11 +31,8 @@ pub enum Error {
         #[source]
         source: PubSubError,
     },
-    #[error("Authentication error: {source}")]
-    Auth {
-        #[source]
-        source: salesforce_core::client::Error,
-    },
+    #[error(transparent)]
+    Connect(#[from] crate::client::Error),
     #[error("Serialization error: {source}")]
     SerdeExt {
         #[source]
@@ -315,27 +312,13 @@ impl flowgen_core::task::runner::Runner for Publisher {
             })?;
         let channel = (*channel).clone();
 
-        let credentials_path = init_config.credentials_path.clone();
-        let client_key =
-            flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path);
-        let sfdc_client = self
-            .task_context
-            .client_registry
-            .get_or_init(client_key.clone(), || async {
-                let client = salesforce_core::client::Builder::new()
-                    .credentials_path(credentials_path)
-                    .build()
-                    .map_err(|e| Error::Auth { source: e })?
-                    .connect()
-                    .await
-                    .map_err(|e| Error::Auth { source: e })?;
-                Ok(tokio::sync::Mutex::new(client))
-            })
-            .await
-            .map_err(|e| match e {
-                flowgen_core::client_registry::Error::Init { source } => source,
-                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
-            })?;
+        let client_key = crate::client::key(self.task_type, &init_config.credentials_path);
+        let sfdc_client = crate::client::connect(
+            &self.task_context,
+            self.task_type,
+            &init_config.credentials_path,
+        )
+        .await?;
 
         let pubsub = {
             let guard = sfdc_client.lock().await;

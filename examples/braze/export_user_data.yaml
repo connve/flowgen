@@ -1,0 +1,43 @@
+# Exports Braze user profiles by external ID on request, for example to
+# check what Braze holds before a sync.
+#
+# Request: POST {"user_ids": ["user-1", "user-2"]}
+#
+# Required:
+#   - Braze credentials at /etc/braze/credentials.json: {"api_key": "..."}
+#   - BRAZE_REST_ENDPOINT, the REST endpoint of your Braze instance
+flow:
+  labels:
+    display_name: "Braze User Data Export"
+    description: "Receives user IDs over an HTTP webhook, exports those users' profiles from Braze, and logs them."
+    tags: ["braze", "export", "webhook", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/braze/users
+    - http_endpoint:
+        name: receive_requests
+        method: POST
+        endpoint: /braze/users
+
+    # The export request: which users, and which of their fields.
+    - script:
+        name: to_request
+        code: |
+          #{
+            external_ids: event.data.user_ids,
+            fields_to_export: ["external_id", "email", "first_name", "last_name"]
+          }
+
+    # Export the profiles.
+    - braze_export_user_data:
+        name: export_users
+        operation: users_by_ids
+        credentials_path: /etc/braze/credentials.json
+        base_url: "{{env.BRAZE_REST_ENDPOINT}}"
+        payload:
+          from_event: true
+
+    # Log what Braze returned.
+    - log:
+        name: log_users
+        level: info

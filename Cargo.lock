@@ -563,17 +563,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "atty"
-version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
-dependencies = [
- "hermit-abi",
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -981,30 +970,28 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "braze"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1077535170a9af56e04237d1e9418911a1e95e4f35217069ff18b542bdcd0a99"
+checksum = "f1460f9dd770d3dce3f3a58b7fcdfa630c326f4718426d57163829303ad8d5d4"
 dependencies = [
  "braze_generated",
  "chrono",
  "reqwest 0.13.2",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
- "tracing",
  "url",
 ]
 
 [[package]]
 name = "braze_generated"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d000cb384f97486eaa5d14215b1235147326b04d13f94384dc27973d7d83aa88"
+checksum = "7e948c2300a0b12b858b6698352d72e1488bb7eb1bb6c7cad89c1c164c3faae2"
 dependencies = [
  "bytes",
  "chrono",
- "futures",
  "openapiv3",
  "progenitor",
  "progenitor-client",
@@ -2235,7 +2222,6 @@ version = "0.148.0"
 dependencies = [
  "arrow",
  "async-trait",
- "atty",
  "axum 0.8.9",
  "axum-extra",
  "bytes",
@@ -2337,9 +2323,9 @@ name = "flowgen_braze"
 version = "0.148.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "braze",
  "flowgen_core",
- "humantime-serde",
  "serde",
  "serde_json",
  "tempfile",
@@ -2725,6 +2711,7 @@ dependencies = [
  "apache-avro",
  "arrow",
  "async-trait",
+ "axum 0.8.9",
  "bincode",
  "bytes",
  "chrono",
@@ -4441,15 +4428,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hermit-abi"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5250,9 +5228,9 @@ dependencies = [
 
 [[package]]
 name = "klaviyo"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e0fc9fbd90006d26fc9e9d887dc8f9e14d3e7fa1f0b182a4a9b0310fe8a81d"
+checksum = "c8e3627aefe3d933eb8297314f1beee77e88c0acb8e6c320f9143f2c912f4c81"
 dependencies = [
  "chrono",
  "klaviyo_generated",
@@ -5266,9 +5244,9 @@ dependencies = [
 
 [[package]]
 name = "klaviyo_generated"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0b2caf621c27a0ed53eaa15502152600979ac3b31dc581ff17e4fe19bc78bbb"
+checksum = "d13c03c6b893f9152846e7e45369c876d06408ec4edc88bef9f3f1fe8e551ff7"
 dependencies = [
  "chrono",
  "heck",
@@ -7799,9 +7777,9 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salesforce_core"
-version = "0.18.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc8f1a7da5d79be3084ab4cfc172e8c3b2fe9133e2759b765a0ff554cd415835"
+checksum = "264f9fdfc96d4d26385e0151b669c345fcfb56b5340f1f35997547740b5c3d8e"
 dependencies = [
  "chrono",
  "futures-util",
@@ -7811,6 +7789,7 @@ dependencies = [
  "salesforce_core_pubsubapi",
  "salesforce_core_restapi",
  "salesforce_core_toolingapi",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -7823,86 +7802,67 @@ dependencies = [
 
 [[package]]
 name = "salesforce_core_bulkapi"
-version = "0.18.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bab3e47f6dd91562c3c1fbbe9b4a7c179cdd6b980ae8f4d78cd414fa29936aa"
+checksum = "09f377df7934d4f4bc9eb19405dbcdffb8fbe6c6788feae8ca43f2eea78ffc72"
 dependencies = [
- "bytes",
  "chrono",
- "futures-util",
  "openapiv3",
  "progenitor",
  "progenitor-client",
  "reqwest 0.13.2",
  "serde",
- "serde_json",
  "serde_yaml",
- "thiserror 2.0.18",
  "url",
 ]
 
 [[package]]
 name = "salesforce_core_pubsubapi"
-version = "0.18.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47c6d7653cb28fdf263431abcc447c883db241a5609cfd5e4c60e67c236c1af1"
+checksum = "f940bb00a302b2338925819707118c2da0d2bd4ec1afc96ea0655dc811348c22"
 dependencies = [
  "bytes",
- "futures-util",
- "oauth2",
  "prost 0.14.3",
  "prost-build",
- "prost-types",
  "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
  "tokio-stream",
- "tokio-util",
  "tonic 0.14.5",
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
- "url",
 ]
 
 [[package]]
 name = "salesforce_core_restapi"
-version = "0.18.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98aafb5314dbe4a56c15f8c00f80513dc3b8e084998cc844dae918a0e90af9d1"
+checksum = "b089865193b0d42fbb91dae2aa8d27d4be901c2c1c5dc70345d88b24780e31ee"
 dependencies = [
- "bytes",
  "chrono",
- "futures-util",
  "openapiv3",
  "progenitor",
  "progenitor-client",
+ "quote",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "serde_yaml",
- "thiserror 2.0.18",
  "url",
 ]
 
 [[package]]
 name = "salesforce_core_toolingapi"
-version = "0.18.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2905cbbb9dc27cd79ce537f913fd62c53c12dcbb1f0937be71e9651b623749f0"
+checksum = "90364ba5fa9f2c13be85b5e283bb8b0721f8958236993e2af8a5870810116b86"
 dependencies = [
- "bytes",
- "chrono",
- "futures-util",
  "openapiv3",
  "progenitor",
  "progenitor-client",
  "reqwest 0.13.2",
  "serde",
- "serde_json",
  "serde_yaml",
- "thiserror 2.0.18",
  "url",
 ]
 

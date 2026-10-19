@@ -1,6 +1,6 @@
 # Salesforce REST API
 
-CRUD operations on Salesforce SObjects, composite batch operations, and SOSL search.
+CRUD operations on Salesforce SObjects, composite batch operations, SOSL search, and SOQL queries.
 
 ## Output
 
@@ -20,7 +20,7 @@ CRUD operations on Salesforce SObjects, composite batch operations, and SOSL sea
 
 | Format | Crate | Description |
 |---|---|---|
-| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Salesforce SOSL/SOQL response with `searchRecords` or `records` array. |
+| [JSON](https://docs.rs/serde_json/latest/serde_json/enum.Value.html) | [salesforce_core](https://crates.io/crates/salesforce_core) | Salesforce SOSL response with a `searchRecords` array, or one SOQL page with `records`, `totalSize`, and `done`. |
 
 ## SObject operations
 
@@ -250,4 +250,61 @@ flow:
         name: log_results
         level: info
 ```
+
+## SOQL Query
+
+Execute a [SOQL](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_soql.htm) query against any queryable object, including custom settings and custom metadata types. Emits one event per page of results, following `nextRecordsUrl` until the last page. Salesforce returns up to 2,000 records per page.
+
+```yaml
+- salesforce_restapi_query:
+    name: recent_accounts
+    credentials_path: /etc/salesforce/credentials.json
+    query: "SELECT Id, Name FROM Account WHERE LastModifiedDate = TODAY"
+```
+
+Each event holds one page as Salesforce returns it: `records` (each with an `attributes` object), `totalSize` across all pages, and `done`, which is `true` on the last page.
+
+### Query fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | required | Task name. |
+| `credentials_path` | string | required | Path to Salesforce credentials. |
+| `query` | string or `{resource: <path>}` | required | SOQL query, inline or from a resource file. Supports templating. |
+| `parameters` | map | | Values bound to `:name` in the query. See [Query parameters](#query-parameters). |
+| `query_operation` | string | `query` | `query`, or `queryAll` to include deleted and archived records. |
+| `depends_on` | list | | Upstream task names. |
+| `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
+
+A failed page is retried on its own, following `retry`, so pages already emitted are not emitted again. When the task is the last in the flow, the caller of an `http_endpoint` or `mcp_tool` receives the last page; keep such queries to one page with `LIMIT 2000`.
+
+For results too large to page through the REST API, use a [Bulk API query job](/docs/flowgen/salesforce/bulk).
+
+### Query parameters
+
+Put values from events into a query with `parameters`, not by templating them into `query`. Each `:name` in the query is replaced by its parameter as a SOQL literal, so a value can't change the query around it:
+
+```yaml
+- salesforce_restapi_query:
+    name: contact_by_email
+    credentials_path: /etc/salesforce/credentials.json
+    query: "SELECT Id, Name FROM Contact WHERE Email = :email AND LastModifiedDate > :since AND AccountId IN :accounts"
+    parameters:
+      email: "{{event.data.email}}"
+      since: { datetime: "{{event.data.since}}" }
+      accounts: "{{event.data.account_ids}}"
+```
+
+| Value | Bound as |
+|---|---|
+| string | Quoted literal with `'`, `"`, `\` and control characters escaped. |
+| number, `true`, `false`, `null` | Unquoted. |
+| list | `('a', 'b')` for `IN`. An empty list is an error. |
+| `{ date: <YYYY-MM-DD> }` | Unquoted date, checked before the query is sent. |
+| `{ datetime: <RFC 3339> }` | Unquoted UTC datetime, checked before the query is sent. |
+| `{ contains: <text> }`, `{ starts_with: <text> }`, `{ ends_with: <text> }` | `LIKE` pattern, with `%` and `_` in the text matched literally. |
+
+A plain string compared with `LIKE` keeps `%` and `_` as wildcards; use the `contains`, `starts_with` or `ends_with` forms for text from events.
+
+`:name` inside a string literal in the query is left as is, and so are date literals such as `LAST_N_DAYS:7`. A `:name` with no parameter fails the event before the query is sent.
 

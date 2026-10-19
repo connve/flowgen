@@ -1,0 +1,26 @@
+# Query Salesforce records using SOQL.
+#
+# Runs a SOQL query for the industry posted to the webhook and emits one
+# event per page of results.
+#
+# Required:
+#   - /etc/sfdc/credentials.json
+flow:
+  labels:
+    display_name: "Salesforce SOQL Query (HTTP)"
+    description: "Runs a SOQL query for Account records in the industry posted to an HTTP webhook, via the REST API."
+    tags: ["salesforce", "soql", "query", "http", "example"]
+  tasks:
+
+    - http_endpoint:
+        name: receive_request
+        method: POST
+        endpoint: /salesforce/query
+
+    # :industry is bound as a quoted, escaped SOQL literal.
+    - salesforce_restapi_query:
+        name: soql_query
+        credentials_path: /etc/sfdc/credentials.json
+        query: "SELECT Id, Name, Industry FROM Account WHERE Industry = :industry"
+        parameters:
+          industry: "{{event.data.industry}}"

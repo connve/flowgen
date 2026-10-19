@@ -95,7 +95,8 @@ export const navigation: NavSection[] = [
 		icon: '/icons/braze.png',
 		items: [
 			{ title: 'Overview', href: '/braze' },
-			{ title: 'Export Users by IDs', href: '/braze/export/users' }
+			{ title: 'Export User Data', href: '/braze/export-user-data' },
+			{ title: 'Messaging', href: '/braze/messaging' }
 		]
 	},
 	{

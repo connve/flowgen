@@ -1,0 +1,36 @@
+# Sends an order confirmation as a Braze transactional email the moment an
+# order is placed. Transactional campaigns send one message to one user.
+#
+# Request: POST {"user_id": "user-1", "order_id": "1001", "total": "129.90"}
+#
+# Required:
+#   - Braze credentials at /etc/braze/credentials.json: {"api_key": "..."}
+#   - BRAZE_REST_ENDPOINT, the REST endpoint of your Braze instance
+#   - BRAZE_CONFIRMATION_CAMPAIGN_ID, a transactional email campaign
+flow:
+  labels:
+    display_name: "Braze Order Confirmation"
+    description: "Receives placed orders over an HTTP webhook and sends each customer a Braze transactional email with the order's details."
+    tags: ["braze", "messaging", "transactional", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/braze/orders
+    - http_endpoint:
+        name: receive_orders
+        method: POST
+        endpoint: /braze/orders
+
+    # Send the confirmation, tagged with the order ID as the external send ID.
+    - braze_messaging:
+        name: send_confirmation
+        operation: send_transactional
+        credentials_path: /etc/braze/credentials.json
+        base_url: "{{env.BRAZE_REST_ENDPOINT}}"
+        campaign_id: "{{env.BRAZE_CONFIRMATION_CAMPAIGN_ID}}"
+        payload:
+          external_send_id: "{{event.data.order_id}}"
+          recipient:
+            external_user_id: "{{event.data.user_id}}"
+          trigger_properties:
+            order_id: "{{event.data.order_id}}"
+            total: "{{event.data.total}}"

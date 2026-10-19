@@ -272,6 +272,46 @@ pub struct Search {
 
 impl ConfigExt for Search {}
 
+/// Configuration for Salesforce REST API SOQL queries.
+///
+/// Emits one event per page of results.
+///
+/// # Examples
+///
+/// ```yaml
+/// salesforce_restapi_query:
+///   name: recent_accounts
+///   credentials_path: /path/to/salesforce_creds.json
+///   query: "SELECT Id, Name FROM Account WHERE LastModifiedDate = TODAY"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Query {
+    /// Unique task identifier.
+    pub name: String,
+    /// Path to Salesforce authentication credentials.
+    pub credentials_path: PathBuf,
+    /// SOQL query, inline or from a resource file (supports Handlebars templating).
+    pub query: flowgen_core::resource::Source,
+    /// Values bound to `:name` in the query as SOQL literals.
+    #[serde(default)]
+    pub parameters: Option<std::collections::HashMap<String, crate::soql::Parameter>>,
+    /// `query` (default) or `queryAll`, which also returns deleted and archived records.
+    #[serde(default)]
+    pub query_operation: Option<crate::bulkapi::config::QueryOperation>,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Query {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

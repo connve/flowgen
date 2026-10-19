@@ -263,6 +263,8 @@ task_types! {
     salesforce_restapi_composite(flowgen_salesforce::restapi::config::Composite),
     /// Salesforce REST API SOSL search operations.
     salesforce_restapi_search(flowgen_salesforce::restapi::config::Search),
+    /// Salesforce REST API SOQL queries, following every page of results.
+    salesforce_restapi_query(flowgen_salesforce::restapi::config::Query),
     /// Salesforce SOAP API merge operation for combining duplicate records.
     salesforce_soapapi_merge(flowgen_salesforce::soapapi::config::Merge),
     /// Salesforce Tooling API operations for metadata management.
@@ -297,8 +299,10 @@ task_types! {
     git_push(flowgen_git::push::config::Processor),
     /// OCI push task for releasing files to an OCI registry as an artifact.
     oci_push(flowgen_oci::push::config::Processor),
-    /// Braze export user IDs task.
-    braze_export_users_ids(flowgen_braze::export::users::config::Processor),
+    /// Braze user data export task.
+    braze_export_user_data(flowgen_braze::export_user_data::ExportUserData),
+    /// Braze messaging task.
+    braze_messaging(flowgen_braze::messaging::Messaging),
     /// Klaviyo email templates task.
     klaviyo_templates(flowgen_klaviyo::templates::Templates),
     /// Klaviyo campaigns task.
@@ -371,6 +375,7 @@ impl TaskType {
             TaskType::salesforce_restapi_sobject(c) => c.depends_on.as_ref(),
             TaskType::salesforce_restapi_composite(c) => c.depends_on.as_ref(),
             TaskType::salesforce_restapi_search(c) => c.depends_on.as_ref(),
+            TaskType::salesforce_restapi_query(c) => c.depends_on.as_ref(),
             TaskType::salesforce_soapapi_merge(c) => c.depends_on.as_ref(),
             TaskType::salesforce_toolingapi(c) => c.depends_on.as_ref(),
             TaskType::gcp_bigquery_query(c) => c.depends_on.as_ref(),
@@ -388,7 +393,8 @@ impl TaskType {
             TaskType::oci_sync(c) => c.depends_on.as_ref(),
             TaskType::git_push(c) => c.depends_on.as_ref(),
             TaskType::oci_push(c) => c.depends_on.as_ref(),
-            TaskType::braze_export_users_ids(c) => c.depends_on.as_ref(),
+            TaskType::braze_export_user_data(c) => c.depends_on.as_ref(),
+            TaskType::braze_messaging(c) => c.depends_on.as_ref(),
             TaskType::klaviyo_templates(c) => c.depends_on.as_ref(),
             TaskType::klaviyo_campaigns(c) => c.depends_on.as_ref(),
             TaskType::klaviyo_lists(c) => c.depends_on.as_ref(),

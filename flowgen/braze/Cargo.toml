@@ -20,10 +20,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 tokio-retry = { workspace = true }
-humantime-serde = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true

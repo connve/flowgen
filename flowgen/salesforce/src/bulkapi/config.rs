@@ -78,6 +78,9 @@ pub struct QueryJob {
     /// SOQL query string (create only).
     #[serde(default)]
     pub query: Option<flowgen_core::resource::Source>,
+    /// Values bound to `:name` in the query as SOQL literals (create only).
+    #[serde(default)]
+    pub parameters: Option<std::collections::HashMap<String, crate::soql::Parameter>>,
     /// Type of query operation (query or queryAll) (create only).
     #[serde(default, rename = "query_operation")]
     pub query_operation: Option<QueryOperation>,

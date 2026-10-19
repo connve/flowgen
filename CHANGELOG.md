@@ -2,7 +2,26 @@
 
 ## 0.148.0
 
+### Breaking
+
+- **Salesforce Bulk API result types.** `salesforce_bulkapi_query_job`
+  `get_results` types each column from the describe of the job's object:
+  `boolean`, `int`/`long`, `double`/`currency`/`percent`, `date` and
+  `datetime` fields become Boolean, Int64, Float64, Date32 and UTC
+  timestamps, and every other field Utf8. Text fields that hold digits, such
+  as postal codes, stay strings with their leading zeros.
+
+- **Braze tasks.** `braze_export_user_data` replaces `braze_export_users_ids`,
+  with an `operation` (`users_by_ids`, `users_by_segment`,
+  `users_by_global_control_group`) and the request body in `payload`. The
+  instance's REST endpoint moves from `rest_endpoint` in the credentials file
+  to `base_url` in the task config; the credentials file holds only
+  `api_key`.
+
 ### Added
+
+- `braze_messaging` sends messages, triggers campaigns and Canvases, creates
+  send IDs, and sends transactional emails. Sends are never retried.
 
 - Klaviyo tasks: `klaviyo_templates`, `klaviyo_campaigns`, `klaviyo_lists`,
   `klaviyo_events` and `klaviyo_profiles`. `payload` holds a resource's
@@ -12,7 +31,26 @@
   Campaign sends are never retried. A missing field stops the task at
   startup.
 
+- `salesforce_restapi_query` runs a SOQL query, or `queryAll` with
+  `query_operation: queryAll`, and emits one event per page of results up to
+  the last one. The query is inline or a resource file.
+- `parameters` on `salesforce_restapi_query` and on
+  `salesforce_bulkapi_query_job` `create` binds values to `:name` in the
+  query as quoted and escaped SOQL literals, so event data can't change the
+  query. Dates and datetimes are checked before the query is sent, and
+  `contains`, `starts_with` and `ends_with` write `LIKE` patterns that match
+  `%` and `_` literally.
+
 ### Changed
+
+- Salesforce tasks call API version 68.0 (Winter '27), up from 65.0.
+  `tenant_id` in the Salesforce credentials file is needed only by the
+  Pub/Sub tasks.
+- Salesforce query tasks retry a failed result page on its own, so pages
+  already emitted are not emitted again, and stop paging when the flow
+  stops. `salesforce_bulkapi_query_job` and `salesforce_restapi_query` retry
+  only errors that retrying can fix, such as timeouts, 429 and 5xx
+  responses, and expired sessions.
 
 - Web UI login generates its cookie key on the first start and keeps it in
   the system bucket, so `cookie_secret` is optional. Every pod uses the same
@@ -24,6 +62,14 @@
 
 - A `cookie_secret` shorter than 32 bytes is reported at startup and keeps
   only the web UI down, with flows still running.
+- `salesforce_bulkapi_query_job` `get_results` reads every result page; it
+  read only the first, so results spanning several pages lost the rest. Each
+  page holds `batch_size` records, so memory stays at one batch.
+- `salesforce_bulkapi_query_job` `get_results` reads the column delimiter
+  from the job, so results created with `tab`, `semicolon` or another
+  delimiter parse into columns.
+- An inline Salesforce query is rendered once, so event data containing
+  `{{` reaches the query unchanged.
 
 ## 0.147.0
 

@@ -1,0 +1,37 @@
+# Sends a shipping notification through an API-triggered Braze campaign
+# whenever an order ships. The campaign's message uses the trigger
+# properties, such as {{api_trigger_properties.${tracking_url}}}.
+#
+# Request: POST {"user_id": "user-1", "order_id": "1001",
+#                "tracking_url": "https://example.com/track/1001"}
+#
+# Required:
+#   - Braze credentials at /etc/braze/credentials.json: {"api_key": "..."}
+#   - BRAZE_REST_ENDPOINT, the REST endpoint of your Braze instance
+#   - BRAZE_SHIPPING_CAMPAIGN_ID, an API-triggered campaign
+flow:
+  labels:
+    display_name: "Braze Shipping Notification"
+    description: "Receives shipped orders over an HTTP webhook and triggers a Braze campaign for each customer, passing the order and tracking link as trigger properties."
+    tags: ["braze", "messaging", "webhook", "example"]
+  tasks:
+
+    # POST /api/flowgen/workers/braze/shipments
+    - http_endpoint:
+        name: receive_shipments
+        method: POST
+        endpoint: /braze/shipments
+
+    # Trigger the campaign for the customer, with the order's details.
+    - braze_messaging:
+        name: notify_customer
+        operation: trigger_campaign
+        credentials_path: /etc/braze/credentials.json
+        base_url: "{{env.BRAZE_REST_ENDPOINT}}"
+        payload:
+          campaign_id: "{{env.BRAZE_SHIPPING_CAMPAIGN_ID}}"
+          recipients:
+            - external_user_id: "{{event.data.user_id}}"
+              trigger_properties:
+                order_id: "{{event.data.order_id}}"
+                tracking_url: "{{event.data.tracking_url}}"

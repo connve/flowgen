@@ -8,6 +8,13 @@
 use flowgen_core::task::meta::{host, read_credentials, Connection, Connector, Icon, TaskMeta};
 use std::path::Path;
 
+/// The logged-in client every task shares per credentials file.
+pub mod client;
+/// Fetching one page of query results, retried in place.
+mod page;
+/// Binding `:name` parameters into SOQL queries.
+pub mod soql;
+
 /// Salesforce Pub/Sub API functionality for real-time messaging.
 pub mod pubsubapi {
     /// Configuration structures for Salesforce Pub/Sub publishers and subscribers.
@@ -25,10 +32,11 @@ pub mod bulkapi {
     pub mod query_job;
 }
 
-/// Salesforce REST API operations (create, get, update, upsert, delete, get_deleted, search).
+/// Salesforce REST API operations (create, get, update, upsert, delete, get_deleted, search, query).
 pub mod restapi {
     pub mod composite;
     pub mod config;
+    pub mod query;
     pub mod search;
     pub mod sobject;
 }
@@ -109,6 +117,14 @@ impl TaskMeta for restapi::config::Composite {
 }
 
 impl TaskMeta for restapi::config::Search {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        connections(&self.credentials_path)
+    }
+}
+
+impl TaskMeta for restapi::config::Query {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {

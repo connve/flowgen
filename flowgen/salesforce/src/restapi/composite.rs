@@ -25,6 +25,8 @@ pub enum Error {
         #[source]
         source: salesforce_core::client::Error,
     },
+    #[error(transparent)]
+    Connect(#[from] crate::client::Error),
     #[error("Salesforce Composite API operation failed: {source}")]
     CompositeApiOperation {
         #[source]
@@ -72,10 +74,6 @@ pub enum Error {
          each record in the payload."
     )]
     MissingAttributes { index: usize },
-    #[error(
-        "Client registry type mismatch — same credentials used with incompatible client types"
-    )]
-    ClientRegistryMismatch,
 }
 
 pub struct EventHandler {
@@ -693,28 +691,12 @@ impl flowgen_core::task::runner::Runner for Processor {
             .render(&serde_json::json!({}))
             .map_err(|e| Error::ConfigRender { source: e })?;
 
-        let credentials_path = init_config.credentials_path.clone();
-        let sfdc_client = self
-            .task_context
-            .client_registry
-            .get_or_init(
-                flowgen_core::client_registry::ClientKey::new(self.task_type, &credentials_path),
-                || async {
-                    let client = salesforce_core::client::Builder::new()
-                        .credentials_path(credentials_path)
-                        .build()
-                        .map_err(|e| Error::SalesforceAuth { source: e })?
-                        .connect()
-                        .await
-                        .map_err(|e| Error::SalesforceAuth { source: e })?;
-                    Ok(tokio::sync::Mutex::new(client))
-                },
-            )
-            .await
-            .map_err(|e| match e {
-                flowgen_core::client_registry::Error::Init { source } => source,
-                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
-            })?;
+        let sfdc_client = crate::client::connect(
+            &self.task_context,
+            self.task_type,
+            &init_config.credentials_path,
+        )
+        .await?;
 
         let rest_client = {
             let guard = sfdc_client.lock().await;

@@ -46,7 +46,6 @@ native-tls = { workspace = true }
 humantime-serde = { workspace = true }
 url = { workspace = true }
 rustls = { workspace = true }
-atty = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
 rhai = { workspace = true }

@@ -30,7 +30,7 @@ rust-version = "1.88"
 publish = false
 
 [workspace.dependencies]
-salesforce_core = { version = "0.18.0" }
+salesforce_core = { version = "0.23.0" }
 google-cloud-bigquery = { package = "gcloud-bigquery", git = "https://github.com/connve/google-cloud-rust" }
 gcloud-auth = { git = "https://github.com/connve/google-cloud-rust" }
 gcloud-gax = { git = "https://github.com/connve/google-cloud-rust" }
@@ -101,8 +101,8 @@ flate2 = { version = "1.0", default-features = false, features = [
     "rust_backend",
 ] }
 tar = { version = "0.4", default-features = false }
-braze = { version = "0.1.0" }
-klaviyo = { version = "0.1.0", features = [
+braze = { version = "0.3.1", features = ["export", "messaging"] }
+klaviyo = { version = "0.2.0", features = [
     "campaigns",
     "events",
     "lists",
@@ -149,7 +149,6 @@ opentelemetry = { version = "0.27" }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
 tracing-opentelemetry = { version = "0.28" }
-atty = { version = "0.2" }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = { version = "3.8" }
 rig-core = { version = "0.35", features = ["rmcp"] }
