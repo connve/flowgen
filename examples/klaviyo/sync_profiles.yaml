@@ -13,7 +13,7 @@ flow:
     tags: ["klaviyo", "profiles", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/klaviyo/profiles
+    # POST /api/flowgen/workers/v1/klaviyo/profiles
     - http_endpoint:
         name: receive_customers
         method: POST

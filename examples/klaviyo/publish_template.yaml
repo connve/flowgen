@@ -13,7 +13,7 @@ flow:
     tags: ["klaviyo", "templates", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/klaviyo/templates
+    # POST /api/flowgen/workers/v1/klaviyo/templates
     - http_endpoint:
         name: receive_templates
         method: POST

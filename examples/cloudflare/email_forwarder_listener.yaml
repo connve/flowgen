@@ -11,7 +11,7 @@ flow:
     tags: ["cloudflare", "email", "webhook", "nats", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/webhook/cloudflare/emails
+    # POST /api/flowgen/workers/v1/cloudflare/emails
     - http_endpoint:
         name: receive_requests
         credentials_path: /etc/cloudflare-emails/credentials.json

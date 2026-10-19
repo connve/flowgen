@@ -13,7 +13,7 @@ flow:
     tags: ["braze", "export", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/braze/users
+    # POST /api/flowgen/workers/v1/braze/users
     - http_endpoint:
         name: receive_requests
         method: POST

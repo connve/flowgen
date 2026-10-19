@@ -13,7 +13,7 @@ flow:
     tags: ["klaviyo", "campaigns", "templates", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/klaviyo/campaigns
+    # POST /api/flowgen/workers/v1/klaviyo/campaigns
     - http_endpoint:
         name: receive_requests
         method: POST

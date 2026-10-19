@@ -13,7 +13,7 @@ flow:
     tags: ["klaviyo", "events", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/klaviyo/orders
+    # POST /api/flowgen/workers/v1/klaviyo/orders
     - http_endpoint:
         name: receive_orders
         method: POST

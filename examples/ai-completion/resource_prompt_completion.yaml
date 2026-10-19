@@ -13,7 +13,7 @@ flow:
     tags: ["ai", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/webhook/analyze with the payload to analyse.
+    # POST /api/flowgen/workers/v1/analyze with the payload to analyse.
     - http_endpoint:
         name: receive_data
         method: POST

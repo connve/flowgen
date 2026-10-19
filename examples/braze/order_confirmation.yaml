@@ -14,7 +14,7 @@ flow:
     tags: ["braze", "messaging", "transactional", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/braze/orders
+    # POST /api/flowgen/workers/v1/braze/orders
     - http_endpoint:
         name: receive_orders
         method: POST

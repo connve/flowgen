@@ -16,7 +16,7 @@ flow:
     tags: ["braze", "messaging", "webhook", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/braze/shipments
+    # POST /api/flowgen/workers/v1/braze/shipments
     - http_endpoint:
         name: receive_shipments
         method: POST

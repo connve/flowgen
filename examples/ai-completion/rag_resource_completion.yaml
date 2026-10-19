@@ -15,7 +15,7 @@ flow:
     tags: ["ai", "rag", "openai", "example"]
   tasks:
 
-    # POST /api/flowgen/workers/webhook/ask_question with { "question": "..." }
+    # POST /api/flowgen/workers/v1/ask_question with { "question": "..." }
     - http_endpoint:
         name: receive_question
         method: POST
