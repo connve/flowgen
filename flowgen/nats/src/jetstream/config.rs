@@ -94,10 +94,9 @@ pub struct Config {
     pub stream: Option<StreamOptions>,
     /// Durable consumer name (subscriber only).
     pub durable_name: Option<String>,
-    /// Maximum number of messages per batch request for the continuous pull
-    /// stream (subscriber only). Higher values improve throughput; lower
-    /// values reduce the number of messages buffered in memory and the time
-    /// before a shutdown cleanly finishes the current batch.
+    /// Most messages one pull request asks for (subscriber only). The
+    /// subscriber asks only for as many as it has free `max_in_flight` slots,
+    /// up to this limit.
     #[serde(default = "default_max_messages_per_batch")]
     pub max_messages_per_batch: usize,
     /// How long each batch request waits on the server before returning empty
@@ -132,8 +131,10 @@ pub struct Config {
     pub throttle: Option<Duration>,
     /// Acknowledgment timeout used for both publisher and subscriber contexts.
     /// For publishers: timeout for receiving publish acknowledgments from the server.
-    /// For subscribers: sets the NATS consumer Ack Wait duration and the internal
-    /// flow completion timeout. If not specified, uses the NATS default (30s).
+    /// For subscribers: sets the NATS consumer Ack Wait duration and how long
+    /// the flow may take for one message; while it runs, the subscriber tells
+    /// NATS the message is in progress so it isn't redelivered. If not
+    /// specified, NATS waits 30s and the flow has no time limit.
     /// Accepts duration strings: "5s", "30s", "1m", "2m", etc.
     #[serde(default, with = "humantime_serde")]
     pub ack_timeout: Option<Duration>,
@@ -168,7 +169,8 @@ pub struct Config {
     /// Optional retry configuration (overrides app-level retry config).
     #[serde(default)]
     pub retry: Option<flowgen_core::retry::RetryConfig>,
-    /// Publisher only: events handled at once; defaults to 64.
+    /// Events handled at once; defaults to 64. For a subscriber, messages in
+    /// the flow at once; `1` keeps them in order.
     #[serde(default)]
     pub max_in_flight: Option<std::num::NonZeroUsize>,
 }

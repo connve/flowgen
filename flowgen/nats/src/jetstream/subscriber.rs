@@ -1,17 +1,23 @@
 use super::message::NatsMessageExt;
-use async_nats::jetstream::{self};
+use async_nats::jetstream::{self, AckKind};
 use flowgen_core::{
     client::Client,
     config::ConfigExt,
-    event::{new_completion_channel, Event, EventExt},
+    event::{new_completion_channel, CompletionRx, Event, EventExt},
     task::TaskConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::pin;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
-use tracing::{error, warn};
+use tracing::{error, warn, Instrument};
+
+/// How often a message in the flow is reported as in progress when the
+/// consumer's ack wait is unknown.
+const DEFAULT_PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 
 /// `nats_jetstream_subscriber` task config.
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
@@ -42,10 +48,10 @@ pub enum Error {
         #[source]
         source: async_nats::jetstream::stream::ConsumerError,
     },
-    #[error("Consumer stream error: {source}")]
-    ConsumerStream {
+    #[error("Failed to request messages: {source}")]
+    Batch {
         #[source]
-        source: async_nats::jetstream::consumer::StreamError,
+        source: async_nats::jetstream::consumer::pull::BatchError,
     },
     #[error("Stream management error: {source}")]
     StreamManagement {
@@ -106,122 +112,194 @@ pub struct EventHandler {
     /// the exact entry that may be stale rather than recomputing it (and
     /// risking drift if `credentials_path`/`url` are templated).
     client_key: flowgen_core::client_registry::ClientKey,
+    config: Arc<super::config::Config>,
+    delivery: Arc<Delivery>,
+}
+
+/// What each message needs from its delivery to its ack.
+struct Delivery {
     tx: Option<Sender<Event>>,
     task_id: usize,
-    config: Arc<super::config::Config>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
+    /// The consumer's ack wait: how long NATS waits for an ack before redelivering.
+    ack_wait: Duration,
+    /// How long the flow may take before the message is redelivered.
+    ack_timeout: Option<Duration>,
+    backoff: Vec<Duration>,
 }
 
 impl EventHandler {
-    /// Processes a single message result. Wrapped in a `task.handle`
-    /// span so the web UI's activity feed reports per-message
-    /// duration, matching how processors expose it.
-    #[tracing::instrument(
-        skip(self, message_result),
-        name = "task.handle",
-        fields(duration_ms = tracing::field::Empty)
-    )]
-    async fn process_message(
-        &self,
-        message_result: Result<
-            async_nats::jetstream::Message,
-            async_nats::error::Error<async_nats::jetstream::consumer::pull::MessagesErrorKind>,
-        >,
-    ) -> Result<(), Error> {
-        match message_result {
-            Ok(message) => {
-                // Size the completion channel to the number of leaves in this
-                // flow's directed acyclic graph. The NATS message is acked
-                // only after every leaf has signalled completion.
-                let (completion_state, completion_rx) =
-                    new_completion_channel(self.task_context.leaf_count);
+    /// Pulls messages only into free `max_in_flight` slots and hands each to
+    /// its own task, so the next message is read while earlier ones are still
+    /// in the flow and no pulled message waits unacknowledged in a buffer.
+    async fn handle(self) -> Result<(), Error> {
+        let max_in_flight = match self.config.max_in_flight {
+            Some(max_in_flight) => max_in_flight,
+            None => self.delivery.task_context.max_in_flight,
+        };
+        let slots = Arc::new(Semaphore::new(max_in_flight.get()));
+        let cancellation = self.delivery.task_context.cancellation_token.clone();
+        let mut throttle = self.config.throttle.map(|period| {
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval
+        });
+        let mut in_flight = JoinSet::new();
 
-                let mut e = message
-                    .to_event(self.task_type, self.task_id)
-                    .map_err(|source| Error::MessageConversion { source })?;
-
-                e.completion_tx = Some(completion_state);
-
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|source| Error::SendMessage { source })?;
-
-                // Wait for flow completion with configured ack_timeout.
-                // Failed flows skip message acknowledgment, allowing JetStream to automatically redeliver.
-                match self.config.ack_timeout {
-                    Some(timeout) => match tokio::time::timeout(timeout, completion_rx).await {
-                        Ok(Ok(Ok(_))) => {
-                            message.ack().await.ok();
-                        }
-                        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                            warn!("Flow completion failed or timed out");
-                        }
-                    },
-                    None => match completion_rx.await {
-                        Ok(Ok(_)) => {
-                            message.ack().await.ok();
-                        }
-                        Ok(Err(_)) | Err(_) => {
-                            warn!("Flow completion failed or timed out");
-                        }
-                    },
+        loop {
+            let first = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(()),
+                slot = Arc::clone(&slots).acquire_owned() => match slot {
+                    Ok(slot) => slot,
+                    Err(_) => return Ok(()),
+                },
+            };
+            let mut permits = vec![first];
+            while permits.len() < self.config.max_messages_per_batch {
+                match Arc::clone(&slots).try_acquire_owned() {
+                    Ok(permit) => permits.push(permit),
+                    Err(_) => break,
                 }
-
-                Ok(())
             }
-            Err(err) => Err(Error::Other(Box::new(err))),
+
+            let mut batch = self
+                .consumer
+                .batch()
+                .max_messages(permits.len())
+                .expires(self.config.batch_expires)
+                .heartbeat(self.config.batch_expires / 4)
+                .messages()
+                .await
+                .map_err(|source| Error::Batch { source })?;
+
+            let mut received = 0;
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    next = batch.next() => next,
+                };
+                let message = match next {
+                    Some(Ok(message)) => message,
+                    Some(Err(source)) => {
+                        while in_flight.join_next().await.is_some() {}
+                        return Err(Error::Other(source));
+                    }
+                    None => break,
+                };
+                let Some(permit) = permits.pop() else {
+                    break;
+                };
+                if let Some(throttle) = throttle.as_mut() {
+                    throttle.tick().await;
+                }
+                received += 1;
+                let span = tracing::info_span!("task.handle", duration_ms = tracing::field::Empty);
+                in_flight.spawn(
+                    Arc::clone(&self.delivery)
+                        .process(message, permit)
+                        .instrument(span),
+                );
+            }
+            while in_flight.try_join_next().is_some() {}
+
+            if received == 0
+                && self.client.connection_state() == async_nats::connection::State::Disconnected
+            {
+                while in_flight.join_next().await.is_some() {}
+                return Err(Error::StreamEnded);
+            }
+        }
+    }
+}
+
+impl Delivery {
+    /// Sends the message into the flow and acks it once every leaf has
+    /// completed, sending progress acks meanwhile so NATS doesn't redeliver
+    /// it while the flow is still running.
+    async fn process(self: Arc<Self>, message: jetstream::Message, _slot: OwnedSemaphorePermit) {
+        // The completion channel waits for every leaf of the flow's graph.
+        let (completion_state, completion_rx) =
+            new_completion_channel(self.task_context.leaf_count);
+        let mut event = match message.to_event(self.task_type, self.task_id) {
+            Ok(event) => event,
+            Err(source) => {
+                error!(error = %Error::MessageConversion { source }, "Failed to read the NATS message");
+                self.nak(&message).await;
+                return;
+            }
+        };
+        event.completion_tx = Some(completion_state);
+        if let Err(source) = event.send_with_logging(self.tx.as_ref()).await {
+            error!(error = %Error::SendMessage { source }, "Failed to send the event to the next task");
+            return;
+        }
+
+        match self.completed(&message, completion_rx).await {
+            Some(true) => {
+                if let Err(source) = message.double_ack().await {
+                    error!(error = %source, "NATS did not confirm the ack, the message will be redelivered");
+                }
+            }
+            Some(false) => {
+                warn!("Flow completion failed or timed out");
+                self.nak(&message).await;
+            }
+            None => {}
         }
     }
 
-    /// Processes messages from the NATS JetStream consumer.
-    ///
-    /// Uses a continuous pull stream rather than looping over `fetch()` calls.
-    /// `fetch()` returns immediately when no messages are available, which
-    /// caused empty requests to spin at hundreds of round-trips per second on
-    /// an idle consumer. The stream keeps a batch request outstanding with a
-    /// server-side expiry, so the consumer waits on NATS instead of polling.
-    async fn handle(self) -> Result<(), Error> {
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        let mut messages = self
-            .consumer
-            .stream()
-            .max_messages_per_batch(self.config.max_messages_per_batch)
-            .expires(self.config.batch_expires)
-            .messages()
-            .await
-            .map_err(|e| Error::ConsumerStream { source: e })?;
-
-        match self.config.throttle {
-            Some(throttle_duration) => {
-                let throttled = messages.throttle(throttle_duration);
-                pin!(throttled);
-                while let Some(message_result) = throttled.next().await {
-                    if self.task_context.cancellation_token.is_cancelled() {
-                        return Ok(());
+    /// Whether the flow completed for this message; `None` when the task is stopping.
+    async fn completed(
+        &self,
+        message: &jetstream::Message,
+        mut completion_rx: CompletionRx,
+    ) -> Option<bool> {
+        let every = match self.ack_wait / 2 {
+            every if every.is_zero() => DEFAULT_PROGRESS_INTERVAL,
+            every => every,
+        };
+        let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        let deadline = tokio::time::sleep(match self.ack_timeout {
+            Some(ack_timeout) => ack_timeout,
+            None => Duration::ZERO,
+        });
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.task_context.cancellation_token.cancelled() => return None,
+                result = &mut completion_rx => return Some(matches!(result, Ok(Ok(_)))),
+                _ = &mut deadline, if self.ack_timeout.is_some() => return Some(false),
+                _ = progress.tick() => {
+                    if let Err(source) = message.ack_with(AckKind::Progress).await {
+                        warn!(error = %source, "Failed to tell NATS the message is still in progress");
                     }
-                    self.process_message(message_result).await?;
-                }
-            }
-            None => {
-                while let Some(message_result) = messages.next().await {
-                    if self.task_context.cancellation_token.is_cancelled() {
-                        return Ok(());
-                    }
-                    self.process_message(message_result).await?;
                 }
             }
         }
+    }
 
-        // The continuous stream only ends on an error or a lost connection.
-        if self.client.connection_state() == async_nats::connection::State::Disconnected {
-            return Err(Error::StreamEnded);
+    /// Asks NATS to redeliver the message after the `backoff` delay for this
+    /// delivery, or after the ack wait without a `backoff`.
+    async fn nak(&self, message: &jetstream::Message) {
+        let delivered = match message.info() {
+            Ok(info) => usize::try_from(info.delivered).unwrap_or(1),
+            Err(_) => 1,
+        };
+        let delay = match self
+            .backoff
+            .get(delivered.saturating_sub(1))
+            .or(self.backoff.last())
+        {
+            Some(delay) => *delay,
+            None => self.ack_wait,
+        };
+        if let Err(source) = message.ack_with(AckKind::Nak(Some(delay))).await {
+            warn!(error = %source, "Failed to ask NATS to redeliver the message");
         }
-
-        Ok(())
     }
 }
 
@@ -370,15 +448,21 @@ impl flowgen_core::task::runner::Runner for Processor {
                     .map_err(|e| Error::Consumer { source: e })?,
             };
 
+            let delivery = Delivery {
+                tx: self.tx.clone(),
+                task_id: self.task_id,
+                task_type: self.task_type,
+                task_context: Arc::clone(&self.task_context),
+                ack_wait: consumer.cached_info().config.ack_wait,
+                ack_timeout: init_config.ack_timeout,
+                backoff: init_config.backoff.clone(),
+            };
             Ok(EventHandler {
                 client: jetstream_ctx.client(),
                 client_key: nats_key,
                 consumer,
-                tx: self.tx.clone(),
-                task_id: self.task_id,
                 config: Arc::clone(&self.config),
-                task_type: self.task_type,
-                task_context: Arc::clone(&self.task_context),
+                delivery: Arc::new(delivery),
             })
         }
     }

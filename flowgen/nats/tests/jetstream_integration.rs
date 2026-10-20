@@ -727,6 +727,100 @@ async fn subscriber_delivers_every_message_when_the_flow_is_slow() {
     sub_handle.abort();
 }
 
+/// A flow that takes longer than the consumer's ack wait must not get its
+/// message again: the subscriber reports it in progress, and pulls only as
+/// many messages as it is working on, so none waits unacknowledged.
+#[tokio::test]
+#[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
+async fn a_message_in_a_flow_longer_than_the_ack_wait_is_delivered_once() {
+    let _lock = lock_nats_test().await;
+
+    let (_nats, url) = start_nats().await;
+    let stream = stream_options("progress_stream", "progress.subject");
+
+    let pub_config = Arc::new(JsConfig {
+        name: "publisher".to_string(),
+        url: url.clone(),
+        subject: "progress.subject".to_string(),
+        stream: Some(stream.clone()),
+        ..Default::default()
+    });
+    let (pub_tx, mut pub_out_rx, pub_handle) = spawn_publisher(pub_config).await;
+    let total = 3;
+    for n in 0..total {
+        let event = EventBuilder::new()
+            .data(EventData::Json(serde_json::json!({ "n": n })))
+            .subject("progress.subject".to_string())
+            .task_id(0)
+            .task_type("test")
+            .build()
+            .expect("build event");
+        pub_tx.send(event).await.expect("publish event");
+    }
+    for _ in 0..total {
+        tokio::time::timeout(Duration::from_secs(10), pub_out_rx.recv())
+            .await
+            .expect("publish acked")
+            .expect("publisher output open");
+    }
+
+    let client = async_nats::connect(&url).await.expect("connect");
+    async_nats::jetstream::new(client)
+        .get_stream("progress_stream")
+        .await
+        .expect("get stream")
+        .create_consumer(async_nats::jetstream::consumer::pull::Config {
+            durable_name: Some("progress_consumer".to_string()),
+            filter_subject: "progress.subject".to_string(),
+            ack_wait: Duration::from_secs(2),
+            ..Default::default()
+        })
+        .await
+        .expect("create consumer");
+
+    let sub_config = Arc::new(JsConfig {
+        name: "subscriber".to_string(),
+        url: url.clone(),
+        subject: "progress.subject".to_string(),
+        stream: Some(stream),
+        durable_name: Some("progress_consumer".to_string()),
+        batch_expires: Duration::from_secs(2),
+        ..Default::default()
+    });
+    let (sub_out_tx, mut sub_out_rx) = mpsc::channel(16);
+    let subscriber = subscriber::ProcessorBuilder::new()
+        .config(sub_config)
+        .sender(sub_out_tx)
+        .task_id(1)
+        .task_type("nats_jetstream_subscriber")
+        .task_context(test_task_context())
+        .build()
+        .await
+        .expect("build subscriber");
+    let sub_handle = tokio::spawn(async move {
+        use flowgen_core::task::runner::Runner;
+        let _ = subscriber.run().await;
+    });
+
+    let mut delivered = Vec::new();
+    let window = tokio::time::Instant::now() + Duration::from_secs(14);
+    while let Ok(Some(event)) = tokio::time::timeout_at(window, sub_out_rx.recv()).await {
+        delivered.push(event.data_as_json().expect("json data"));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+            if let Some(completion) = event.completion_tx.as_ref() {
+                completion.signal_completion(None);
+            }
+        });
+    }
+
+    assert_eq!(delivered.len(), total, "delivered: {delivered:?}");
+
+    drop(pub_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pub_handle).await;
+    sub_handle.abort();
+}
+
 /// `max_messages_per_subject` is a retention limit, not an admission limit:
 /// without `discard_new_per_subject`, `discard: new` applies to the stream's
 /// own limits, so per-subject overflow evicts the oldest message after it was
