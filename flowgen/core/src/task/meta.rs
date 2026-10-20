@@ -1,4 +1,11 @@
+use crate::event::Event;
+use crate::task::context::{Services, TaskContext};
+use crate::task::runner::Runner;
+use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 /// A system task types connect to, as shown in the web UI and docs.
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +149,9 @@ pub const CONNECTOR: Connector = Connector {
     describe_credentials: None,
 };
 
+/// The error a task returns, typed by the crate that owns the task.
+pub type TaskError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Implemented by each task type's config, in the crate that owns it.
 pub trait TaskMeta {
     /// The connector the task type belongs to.
@@ -151,27 +161,229 @@ pub trait TaskMeta {
     /// batches, rather than waiting on an external service.
     const CPU_INTENSIVE: bool = false;
 
+    /// Takes and sends events. False for registration-only tasks.
+    const PIPELINE_IO: bool = true;
+
+    /// Registers its flow with a shared server: runs on every pod, never leader elected.
+    const REGISTERS: bool = false;
+
+    /// Starts without the startup jitter.
+    const STARTS_AT_ONCE: bool = Self::REGISTERS;
+
     /// The external systems the task connects to.
     fn connections(&self) -> Vec<Connection> {
         Vec::new()
     }
+
+    /// Checks the config at load time, before anything runs.
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(())
+    }
 }
 
-impl TaskMeta for super::buffer::config::Processor {}
-impl TaskMeta for super::convert::config::Processor {
+/// The fields every task config has, implemented with `#[derive(TaskConfig)]`.
+pub trait TaskConfig {
+    /// The task's name, unique within its flow.
+    fn name(&self) -> &str;
+    /// The tasks this one takes events from; `None` means the previous one.
+    fn depends_on(&self) -> Option<&[String]>;
+    /// Retry settings that override the app's.
+    fn retry(&self) -> Option<&crate::retry::RetryConfig>;
+    /// Events handled at once, overriding the default.
+    fn max_in_flight(&self) -> Option<NonZeroUsize>;
+}
+
+/// A task's place in the flow: its id and the channels it is wired to.
+pub struct TaskIo {
+    pub task_id: usize,
+    pub task_type: &'static str,
+    pub rx: Option<Receiver<Event>>,
+    pub tx: Option<Sender<Event>>,
+}
+
+/// How a task runs, implemented by each task type's config.
+pub trait Task: TaskConfig + TaskMeta + Send + Sync + 'static {
+    /// Fails when a shared server the task needs isn't running; called when the flow loads.
+    fn check(&self, _services: &Services) -> Result<(), TaskError> {
+        Ok(())
+    }
+
+    /// Runs the task until its input ends or the flow is cancelled.
+    fn run(
+        self,
+        io: TaskIo,
+        context: Arc<TaskContext>,
+    ) -> impl Future<Output = Result<(), TaskError>> + Send;
+}
+
+impl TaskMeta for super::buffer::Buffer {}
+impl TaskMeta for super::convert::Convert {
     const CPU_INTENSIVE: bool = true;
 }
-impl TaskMeta for super::generate::config::Subscriber {}
-impl TaskMeta for super::inproc::config::Endpoint {}
-impl TaskMeta for super::inproc::config::Request {}
-impl TaskMeta for super::iterate::config::Processor {
+impl TaskMeta for super::generate::Generate {
+    const STARTS_AT_ONCE: bool = true;
+
+    fn validate(&self) -> Result<(), TaskError> {
+        Ok(super::generate::Generate::validate(self)?)
+    }
+}
+impl TaskMeta for super::inproc::endpoint::Endpoint {
+    const REGISTERS: bool = true;
+}
+impl TaskMeta for super::inproc::request::Request {}
+impl TaskMeta for super::iterate::Iterate {
     const CPU_INTENSIVE: bool = true;
 }
-impl TaskMeta for super::log::config::Processor {
+impl TaskMeta for super::log::Log {
     const CPU_INTENSIVE: bool = true;
 }
-impl TaskMeta for super::script::config::Processor {
+impl TaskMeta for super::script::Script {
     const CPU_INTENSIVE: bool = true;
+
+    fn validate(&self) -> Result<(), TaskError> {
+        match &self.code {
+            crate::resource::Source::Inline(code) => Ok(self.limits.compile(code)?),
+            crate::resource::Source::Resource { .. } => Ok(()),
+        }
+    }
+}
+
+impl Task for super::buffer::Buffer {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::buffer::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::convert::Convert {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::convert::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::generate::Generate {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::generate::SubscriberBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::inproc::endpoint::Endpoint {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::inproc::endpoint::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::inproc::request::Request {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::inproc::request::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::iterate::Iterate {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::iterate::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::log::Log {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::log::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for super::script::Script {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = super::script::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

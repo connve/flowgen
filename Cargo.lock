@@ -2253,7 +2253,6 @@ dependencies = [
  "native-tls",
  "oauth2",
  "reqwest 0.13.2",
- "rhai",
  "rust-embed",
  "rustls",
  "secrecy",
@@ -2370,6 +2369,7 @@ dependencies = [
  "chrono-tz",
  "croner",
  "dashmap",
+ "flowgen_macros",
  "futures-util",
  "getrandom 0.3.4",
  "handlebars",
@@ -2541,6 +2541,15 @@ dependencies = [
  "tokio",
  "tokio-retry2",
  "tracing",
+]
+
+[[package]]
+name = "flowgen_macros"
+version = "0.148.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

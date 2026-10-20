@@ -1,342 +1,194 @@
-//! Salesforce SOAP API merge processor.
-//!
-//! Merges duplicate SObject records (Account, Contact, Lead, Individual) into a
-//! single master record via the Salesforce SOAP API. Related records from the
-//! victim records are automatically reparented to the master.
+//! The `salesforce_soapapi_merge` task: merges duplicate records (Account,
+//! Contact, Lead, Individual) into a master record through the SOAP API.
+//! Related records of the merged ones are reparented to the master.
 
+use crate::processor::{to_json, Call, Emitter, Error, Operation, Output};
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::error;
+use flowgen_core::task::TaskConfig;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 
-/// Errors for Salesforce SOAP API merge operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    #[error("Failed to send event message to next task: {source}")]
-    SendMessage {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-    #[error("Missing required builder attribute: {}", _0)]
-    MissingBuilderAttribute(String),
-    #[error("Salesforce authentication error: {source}")]
-    SalesforceAuth {
-        #[source]
-        source: salesforce_core::client::Error,
-    },
-    #[error(transparent)]
-    Connect(#[from] crate::client::Error),
-    #[error("Salesforce SOAP merge operation failed: {source}")]
-    MergeOperation {
-        #[source]
-        source: salesforce_core::soapapi::MergeError,
-    },
-    #[error(transparent)]
-    EventError(#[from] flowgen_core::event::Error),
-    #[error("Failed to render configuration template: {source}")]
-    ConfigRender {
-        #[source]
-        source: flowgen_core::config::Error,
-    },
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
-    #[error("record_ids_to_merge must contain one or two IDs, got {count}")]
-    InvalidMergeCount { count: usize },
-    #[error("Failed to build SOAP API client: {source}")]
-    SoapClientBuild {
-        #[source]
-        source: salesforce_core::soapapi::ClientError,
-    },
+/// Configuration for Salesforce SOAP API record merge operations.
+///
+/// Merges up to three duplicate SObject records (Account, Contact, Lead, or
+/// Individual) into a single master record, reparenting related records to the
+/// master and optionally overriding field values on the surviving record.
+///
+/// # Examples
+///
+/// Merge two duplicate accounts into a master:
+/// ```yaml
+/// salesforce_soapapi_merge:
+///   name: merge_accounts
+///   credentials_path: /etc/salesforce/credentials.json
+///   sobject_type: Account
+///   master_record_id: "{{event.data.master_id}}"
+///   record_ids_to_merge:
+///     - "{{event.data.duplicate_id}}"
+/// ```
+///
+/// Merge with field overrides and duplicate detection bypass:
+/// ```yaml
+/// salesforce_soapapi_merge:
+///   name: merge_contacts
+///   credentials_path: /etc/salesforce/credentials.json
+///   sobject_type: Contact
+///   master_record_id: "{{event.data.master_id}}"
+///   record_ids_to_merge:
+///     - "{{event.data.dup_1}}"
+///     - "{{event.data.dup_2}}"
+///   master_field_overrides:
+///     Email: "{{event.data.preferred_email}}"
+///     Phone: "{{event.data.preferred_phone}}"
+///   allow_duplicate_save: true
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Merge {
+    /// Unique task identifier.
+    pub name: String,
+    /// Path to Salesforce authentication credentials.
+    pub credentials_path: PathBuf,
+    /// SObject type to merge (Account, Contact, Lead, or Individual).
+    pub sobject_type: String,
+    /// Salesforce ID of the master (winning) record.
+    pub master_record_id: String,
+    /// IDs of records to merge into the master (one or two).
+    pub record_ids_to_merge: Vec<String>,
+    /// Optional field values to override on the master record after merge.
+    #[serde(default)]
+    pub master_field_overrides: Option<Map<String, Value>>,
+    /// Bypass duplicate detection rules during merge.
+    #[serde(default)]
+    pub allow_duplicate_save: bool,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
-/// Event handler for processing individual merge requests.
-pub struct EventHandler {
-    client: Arc<salesforce_core::soapapi::Client>,
-    config: Arc<super::config::Merge>,
-    tx: Option<Sender<Event>>,
-    current_task_id: usize,
-    sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
-    task_type: &'static str,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-}
+impl ConfigExt for Merge {}
 
-impl EventHandler {
-    async fn process(&self, event: Event) -> Result<(), Error> {
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        let event = Arc::new(event);
-        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
-
-        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let config = self
-                .config
-                .render_for_event(&event)
-                .map_err(|e| Error::ConfigRender { source: e })?;
-
-            let count = config.record_ids_to_merge.len();
-            if count == 0 || count > 2 {
-                return Err(Error::InvalidMergeCount { count });
-            }
-
-            let response = self
-                .client
-                .merge(
-                    &config.sobject_type,
-                    &config.master_record_id,
-                    &config.record_ids_to_merge,
-                    config.master_field_overrides.as_ref(),
-                    config.allow_duplicate_save,
-                )
-                .await
-                .map_err(|e| Error::MergeOperation { source: e })?;
-
-            let resp = serde_json::json!({
-                "success": response.success,
-                "merged_record_ids": response.merged_record_ids,
-                "updated_related_ids": response.updated_related_ids,
-            });
-
-            let mut e = EventBuilder::new()
-                .data(EventData::Json(resp))
-                .subject(config.name.to_owned())
-                .id(config.master_record_id.clone())
-                .task_id(self.current_task_id)
-                .task_type(self.task_type)
-                .build()?;
-
-            match self.tx {
-                Some(_) => {
-                    e.completion_tx = completion_tx_arc.clone();
-                }
-                None => {
-                    if let Some(arc) = completion_tx_arc.as_ref() {
-                        arc.signal_completion(e.data_as_json().ok());
-                    }
-                }
-            }
-
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|e| Error::SendMessage { source: e })?;
-
-            Ok(())
-        })
-        .await
-    }
-
-    async fn reconnect_on_auth_error(&self, error: Error) -> Error {
-        match error {
-            Error::SalesforceAuth { .. } => match self.sfdc_client.lock().await.reconnect().await {
-                Ok(()) => error,
-                Err(source) => {
-                    error!(error = %error, "Reconnecting after an authentication error failed");
-                    Error::SalesforceAuth { source }
-                }
-            },
-            _ => error,
-        }
-    }
+/// The result of a merge.
+#[derive(Serialize)]
+struct Merged<'a> {
+    success: bool,
+    merged_record_ids: &'a [String],
+    updated_related_ids: &'a [String],
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Handler for EventHandler {
-    type Error = Error;
+impl Operation for Merge {
+    type Client = salesforce_core::soapapi::Client;
 
-    fn sender(&self) -> Option<&Sender<Event>> {
-        self.tx.as_ref()
+    fn client(auth: &salesforce_core::client::Client) -> Result<Self::Client, Error> {
+        salesforce_core::soapapi::ClientBuilder::new(auth.clone())
+            .build()
+            .map_err(|source| Error::SoapClient { source })
     }
 
-    fn is_retryable(&self, error: &Error) -> bool {
-        match error {
-            Error::MergeOperation { source } => source.is_retryable(),
-            _ => true,
-        }
+    fn credentials_path(&self) -> &Path {
+        &self.credentials_path
     }
 
-    /// Ignores events addressed to another task.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
-    async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.current_task_id.checked_sub(1) {
-            return Ok(());
+    fn retries_safely(&self) -> bool {
+        false
+    }
+
+    async fn call(
+        &self,
+        client: &Self::Client,
+        _call: &Call<'_>,
+        emitter: &mut Emitter<'_>,
+    ) -> Result<(), Error> {
+        let count = self.record_ids_to_merge.len();
+        if count == 0 || count > 2 {
+            return Err(Error::InvalidMergeCount { count });
         }
-        match self.process(event).await {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.reconnect_on_auth_error(error).await),
-        }
+        let response = client
+            .merge(
+                &self.sobject_type,
+                &self.master_record_id,
+                &self.record_ids_to_merge,
+                self.master_field_overrides.as_ref(),
+                self.allow_duplicate_save,
+            )
+            .await
+            .map_err(|source| Error::Merge { source })?;
+        let merged = Merged {
+            success: response.success,
+            merged_record_ids: &response.merged_record_ids,
+            updated_related_ids: &response.updated_related_ids,
+        };
+        emitter
+            .emit(Output::json(to_json(&merged)?).id(self.master_record_id.clone()))
+            .await
     }
 }
 
-/// Salesforce SOAP API merge processor.
-#[derive(Debug)]
-pub struct Processor {
-    config: Arc<super::config::Merge>,
-    rx: Receiver<Event>,
-    tx: Option<Sender<Event>>,
-    task_id: usize,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-    task_type: &'static str,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Processor {
-    type Error = Error;
-    type EventHandler = EventHandler;
-
-    async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
-            .config
-            .render(&serde_json::json!({}))
-            .map_err(|e| Error::ConfigRender { source: e })?;
-
-        let sfdc_client = crate::client::connect(
-            &self.task_context,
-            self.task_type,
-            &init_config.credentials_path,
-        )
-        .await?;
-
-        let soap_client = {
-            let guard = sfdc_client.lock().await;
-            salesforce_core::soapapi::ClientBuilder::new(guard.clone())
-                .build()
-                .map_err(|e| Error::SoapClientBuild { source: e })?
-        };
-
-        let event_handler = EventHandler {
-            config: Arc::clone(&self.config),
-            current_task_id: self.task_id,
-            tx: self.tx.clone(),
-            client: Arc::new(soap_client),
-            sfdc_client,
-            task_type: self.task_type,
-            task_context: Arc::clone(&self.task_context),
-        };
-        Ok(event_handler)
+    #[test]
+    fn test_merge_config_deserialization() {
+        let json = r#"{
+            "name": "merge_accounts",
+            "credentials_path": "/etc/salesforce/credentials.json",
+            "sobject_type": "Account",
+            "master_record_id": "001000000000001",
+            "record_ids_to_merge": ["001000000000002"],
+            "allow_duplicate_save": false
+        }"#;
+        let config: Merge = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "merge_accounts");
+        assert_eq!(config.sobject_type, "Account");
+        assert_eq!(config.master_record_id, "001000000000001");
+        assert_eq!(config.record_ids_to_merge.len(), 1);
+        assert!(!config.allow_duplicate_save);
+        assert!(config.master_field_overrides.is_none());
     }
 
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(self) -> Result<(), Self::Error> {
-        let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
-                match self.init().await {
-                    Ok(handler) => Ok(handler),
-                    Err(e) => {
-                        error!(error = %e, "Failed to initialize SOAP API merge processor");
-                        Err(tokio_retry::RetryError::transient(e))
-                    }
-                }
+    #[test]
+    fn test_merge_config_with_overrides() {
+        let json = r#"{
+            "name": "merge_contacts",
+            "credentials_path": "/etc/salesforce/credentials.json",
+            "sobject_type": "Contact",
+            "master_record_id": "003000000000001",
+            "record_ids_to_merge": ["003000000000002", "003000000000003"],
+            "master_field_overrides": {
+                "Email": "preferred@example.com",
+                "Phone": "+1234567890"
             },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
+            "allow_duplicate_save": true
+        }"#;
+        let config: Merge = serde_json::from_str(json).unwrap();
+        assert_eq!(config.record_ids_to_merge.len(), 2);
+        assert!(config.allow_duplicate_save);
+        let overrides = config.master_field_overrides.unwrap();
+        assert_eq!(overrides.get("Email").unwrap(), "preferred@example.com");
+    }
+
+    #[test]
+    fn the_result_keeps_its_field_names() {
+        let ids = vec!["001".to_string()];
+        let merged = Merged {
+            success: true,
+            merged_record_ids: &ids,
+            updated_related_ids: &[],
         };
 
-        flowgen_core::task::runner::process_events(
-            self.rx,
-            event_handler,
-            &retry_config,
-            self.config.max_in_flight,
-            &self.task_context,
+        let expected: Value = serde_json::from_str(
+            r#"{"success":true,"merged_record_ids":["001"],"updated_related_ids":[]}"#,
         )
-        .await;
-        Ok(())
-    }
-}
-
-/// Builder for creating merge Processor instances.
-pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Merge>>,
-    rx: Option<Receiver<Event>>,
-    tx: Option<Sender<Event>>,
-    task_id: Option<usize>,
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
-    task_type: Option<&'static str>,
-}
-
-impl Default for ProcessorBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ProcessorBuilder {
-    pub fn new() -> Self {
-        Self {
-            config: None,
-            rx: None,
-            tx: None,
-            task_id: None,
-            task_context: None,
-            task_type: None,
-        }
-    }
-
-    pub fn config(mut self, config: Arc<super::config::Merge>) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
-        self.rx = Some(receiver);
-        self
-    }
-
-    pub fn sender(mut self, sender: Sender<Event>) -> Self {
-        self.tx = Some(sender);
-        self
-    }
-
-    pub fn task_id(mut self, task_id: usize) -> Self {
-        self.task_id = Some(task_id);
-        self
-    }
-
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
-    pub fn task_type(mut self, task_type: &'static str) -> Self {
-        self.task_type = Some(task_type);
-        self
-    }
-
-    pub fn build(self) -> Result<Processor, Error> {
-        Ok(Processor {
-            config: self
-                .config
-                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
-            tx: self.tx,
-            task_id: self
-                .task_id
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
-            task_type: self
-                .task_type
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
-        })
+        .unwrap();
+        assert_eq!(to_json(&merged).unwrap(), expected);
     }
 }

@@ -3,16 +3,19 @@
 //! Provides SQL Server query execution with Arrow RecordBatch output, connection pooling,
 //! and template rendering for parameterized queries.
 
-use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::Path;
+use std::sync::Arc;
 
 pub mod client;
 pub mod config;
 pub mod query;
 
 pub use client::Client;
-pub use config::Query;
-pub use query::Processor;
+pub use query::{Processor, Query};
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -31,10 +34,28 @@ fn describe_credentials(path: &Path) -> Option<String> {
     ))
 }
 
-impl TaskMeta for config::Query {
+impl TaskMeta for query::Query {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, Some(&self.credentials_path))]
+    }
+}
+
+impl Task for query::Query {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = query::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }

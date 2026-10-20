@@ -3,6 +3,8 @@
 //! This crate contains shared types, traits, and utilities used across all flowgen workers
 //! including event handling, content buffering, caching, and task execution frameworks.
 
+extern crate self as flowgen_core;
+
 /// Authentication providers for user identity resolution (JWT, OIDC, session).
 pub mod auth;
 /// Content format handling and reader/writer abstractions.
@@ -60,65 +62,28 @@ pub mod flow {
 pub mod validate;
 /// Task execution framework with runner trait, context, and manager.
 pub mod task {
+    pub use flowgen_macros::TaskConfig;
+    pub use meta::{Task, TaskConfig, TaskError, TaskIo, TaskMeta};
+
+    pub mod buffer;
     /// Task execution context providing metadata and runtime configuration.
     pub mod context;
+    pub mod convert;
+    pub mod generate;
     /// Task manager for leader election and coordination.
     pub mod manager;
     /// What a task type says about itself.
     pub mod meta;
     /// Base runner trait for all task implementations.
     pub mod runner;
-    /// Data conversion and transformation processor.
-    pub mod convert {
-        /// Configuration for convert processor.
-        pub mod config;
-        /// Processor implementation for data conversion.
-        pub mod processor;
-    }
-    /// Event generation processor that produces data streams.
-    pub mod generate {
-        /// Configuration for generate processor.
-        pub mod config;
-        /// Subscriber implementation for event generation.
-        pub mod subscriber;
-    }
-    /// Iterate processor for iterating over JSON arrays.
-    pub mod iterate {
-        /// Configuration for iterate processor.
-        pub mod config;
-        /// Processor implementation for array iteration.
-        pub mod processor;
-    }
-    /// Script processor for executing Rhai scripts on events.
-    pub mod script {
-        /// Configuration for script processor.
-        pub mod config;
-        /// Processor implementation for script execution.
-        pub mod processor;
-    }
-    /// Log processor for outputting event data to logs.
-    pub mod log {
-        /// Configuration for log processor.
-        pub mod config;
-        /// Processor implementation for logging.
-        pub mod processor;
-    }
-    /// Buffer processor for accumulating events into batches.
-    pub mod buffer {
-        /// Configuration for buffer processor.
-        pub mod config;
-        /// Processor implementation for event buffering.
-        pub mod processor;
-    }
     /// In-process flow calls: `inproc_endpoint` and `inproc_request`.
     pub mod inproc {
-        /// Configuration for both inproc tasks.
-        pub mod config;
-        /// Source that makes a flow callable at its identity.
         pub mod endpoint;
         /// Registry of callable flows.
         pub mod registry;
-        /// Processor that calls a flow and emits its result.
         pub mod request;
     }
+    pub mod iterate;
+    pub mod log;
+    pub mod script;
 }

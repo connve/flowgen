@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.149.0
+
+### Changed
+
+- Salesforce tasks retry only `429`, `5xx`, connection errors, timeouts and
+  expired sessions. Creates, upserts, merges and Bulk API job creation are
+  retried only after an expired session.
+- `salesforce_pubsubapi_publisher` logs in again when its session expires.
+- `llm_proxy` needs `ai_gateway` enabled, not `http_server`. Without it, the
+  flow fails to load and a hot reload keeps the running version.
+- Log targets follow the new module paths, e.g.
+  `flowgen_salesforce::restapi::composite`. Update `RUST_LOG` filters that
+  name the old ones.
+
+### Fixed
+
+- Salesforce tasks take events from every task in `depends_on`, not only
+  from the one directly before them.
+
 ## 0.148.0
 
 ### Breaking

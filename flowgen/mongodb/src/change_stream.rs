@@ -1,12 +1,40 @@
+//! The `mongodb_change_stream` task: change data capture from a database.
+
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{new_completion_channel, Event, EventBuilder, EventData, EventExt};
+use flowgen_core::task::TaskConfig;
 use futures_util::StreamExt;
 use mongodb::options::FullDocumentType;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::{error, warn};
+
+/// MongoDB Change Data Capture reader configuration.
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeStream {
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Path to credentials file containing MongoDB authentication details.
+    /// Omit to connect to `localhost:27017` without authentication.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// The Database Name from MongoDB.
+    pub db_name: String,
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl ConfigExt for ChangeStream {}
 
 /// Errors that can occur during MongoDB change stream operations.
 #[derive(thiserror::Error, Debug)]
@@ -128,7 +156,7 @@ fn change_document(change_event: &ChangeEvent) -> Option<&mongodb::bson::Documen
 #[derive(Debug)]
 pub struct EventHandler {
     /// Change stream configuration.
-    config: Arc<super::config::ChangeStream>,
+    config: Arc<ChangeStream>,
     client: Arc<mongodb::Client>,
     /// Same key `init()` used to cache the MongoDB client, so `run()` can
     /// evict it if the cached client turns out to be permanently broken.
@@ -204,7 +232,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct ChangeStreamReader {
     /// Reader configuration settings.
-    config: Arc<super::config::ChangeStream>,
+    config: Arc<ChangeStream>,
     /// Optional channel sender for downstream events.
     tx: Option<Sender<Event>>,
     /// Current task identifier for event tracking.
@@ -340,7 +368,7 @@ impl flowgen_core::task::runner::Runner for ChangeStreamReader {
 /// Builder for constructing ChangeStreamReader instances.
 #[derive(Default)]
 pub struct ChangeStreamReaderBuilder {
-    config: Option<Arc<super::config::ChangeStream>>,
+    config: Option<Arc<ChangeStream>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
@@ -354,7 +382,7 @@ impl ChangeStreamReaderBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::ChangeStream>) -> Self {
+    pub fn config(mut self, config: Arc<ChangeStream>) -> Self {
         self.config = Some(config);
         self
     }
@@ -443,8 +471,8 @@ mod tests {
         assert_eq!(change_document(&update), Some(&doc! { "_id": 1, "n": 2 }));
     }
 
-    fn create_mock_config() -> super::super::config::ChangeStream {
-        super::super::config::ChangeStream {
+    fn create_mock_config() -> ChangeStream {
+        ChangeStream {
             name: "test_change_stream".to_string(),
             db_name: "test_database".to_string(),
             credentials_path: Some(PathBuf::from("/mock/path/credentials.json")),
@@ -672,7 +700,7 @@ mod tests {
     async fn test_init_auth_failure() {
         use flowgen_core::task::runner::Runner;
 
-        let config = Arc::new(super::super::config::ChangeStream {
+        let config = Arc::new(ChangeStream {
             name: "auth_fail_test".to_string(),
             db_name: "test_db".to_string(),
             credentials_path: Some(PathBuf::from("/invalid/credentials/path.json")),
@@ -739,7 +767,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let config = Arc::new(super::super::config::ChangeStream {
+        let config = Arc::new(ChangeStream {
             name: "run_test".to_string(),
             db_name: "test_db".to_string(),
             credentials_path: Some(PathBuf::from("/mock/path/creds.json")),

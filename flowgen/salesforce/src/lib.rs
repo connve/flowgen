@@ -1,61 +1,38 @@
-//! Salesforce integration for the flowgen worker system.
-//!
-//! This crate provides Salesforce connectivity and Pub/Sub API support for
-//! real-time data streaming. It handles authentication, connection management,
-//! and provides both publisher and subscriber implementations that integrate
-//! with the flowgen event system.
+//! Salesforce tasks: Pub/Sub API subscribe and publish, Bulk API query jobs,
+//! REST API SObject, Composite, SOSL search and SOQL query, SOAP API merge,
+//! and Tooling API operations.
 
-use flowgen_core::task::meta::{host, read_credentials, Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{host, read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::Path;
+use std::sync::Arc;
 
-/// The logged-in client every task shares per credentials file.
-pub mod client;
-/// Fetching one page of query results, retried in place.
-mod page;
-/// Binding `:name` parameters into SOQL queries.
-pub mod soql;
-
-/// Salesforce Pub/Sub API functionality for real-time messaging.
-pub mod pubsubapi {
-    /// Configuration structures for Salesforce Pub/Sub publishers and subscribers.
-    pub mod config;
-    /// Salesforce Pub/Sub publisher implementation for event publishing.
-    pub mod publisher;
-    /// Salesforce Pub/Sub subscriber implementation for event consumption.
-    pub mod subscriber;
-}
-
+/// Bulk API 2.0 tasks.
 pub mod bulkapi {
-    /// Configuration structures for Salesforce Bulk API operations.
-    pub mod config;
-    /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
     pub mod query_job;
 }
-
-/// Salesforce REST API operations (create, get, update, upsert, delete, get_deleted, search, query).
+pub mod processor;
+/// Pub/Sub API tasks.
+pub mod pubsubapi {
+    pub mod publisher;
+    pub mod subscriber;
+}
+/// REST API tasks.
 pub mod restapi {
     pub mod composite;
-    pub mod config;
     pub mod query;
     pub mod search;
     pub mod sobject;
 }
-
-/// Salesforce SOAP API operations (merge).
+/// SOAP API tasks.
 pub mod soapapi {
-    /// Configuration structures for SOAP API operations.
-    pub mod config;
-    /// Record merge processor for combining duplicate SObject records.
     pub mod merge;
 }
-
-/// Salesforce Tooling API operations for metadata management.
-pub mod toolingapi {
-    /// Configuration structures for Salesforce Tooling API operations.
-    pub mod config;
-    /// Salesforce Tooling API processor implementation.
-    pub mod processor;
-}
+/// Binding `:name` parameters into SOQL queries.
+pub mod soql;
+pub mod toolingapi;
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -71,80 +48,97 @@ fn describe_credentials(path: &Path) -> Option<String> {
     Some(host(&credentials.instance_url))
 }
 
-fn connections(credentials_path: &Path) -> Vec<Connection> {
-    vec![Connection::new(CONNECTOR, Some(credentials_path))]
+macro_rules! salesforce_task_meta {
+    ($($config:ty $({ $($meta:tt)* })?),+ $(,)?) => {
+        $(
+            impl TaskMeta for $config {
+                const CONNECTOR: Connector = CONNECTOR;
+                $($($meta)*)?
+
+                fn connections(&self) -> Vec<Connection> {
+                    vec![Connection::new(CONNECTOR, Some(&self.credentials_path))]
+                }
+            }
+        )+
+    };
 }
 
-impl TaskMeta for pubsubapi::config::Subscriber {
-    const CONNECTOR: Connector = CONNECTOR;
+salesforce_task_meta!(
+    pubsubapi::subscriber::Subscriber,
+    pubsubapi::publisher::Publisher,
+    bulkapi::query_job::QueryJob { const CPU_INTENSIVE: bool = true; },
+    restapi::sobject::SObject,
+    restapi::composite::Composite,
+    restapi::search::Search,
+    restapi::query::Query,
+    soapapi::merge::Merge,
+    toolingapi::Tooling,
+);
 
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
+macro_rules! salesforce_task {
+    ($($config:ty),+ $(,)?) => {
+        $(
+            impl Task for $config {
+                async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+                    let mut builder = processor::ProcessorBuilder::new()
+                        .config(Arc::new(self))
+                        .task_id(io.task_id)
+                        .task_type(io.task_type)
+                        .task_context(context);
+                    if let Some(rx) = io.rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = io.tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+            }
+        )+
+    };
+}
+
+salesforce_task!(
+    bulkapi::query_job::QueryJob,
+    restapi::sobject::SObject,
+    restapi::composite::Composite,
+    restapi::search::Search,
+    restapi::query::Query,
+    soapapi::merge::Merge,
+    toolingapi::Tooling,
+);
+
+impl Task for pubsubapi::subscriber::Subscriber {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = pubsubapi::subscriber::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build()?.run().await?;
+        Ok(())
     }
 }
 
-impl TaskMeta for pubsubapi::config::Publisher {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for bulkapi::config::QueryJob {
-    const CONNECTOR: Connector = CONNECTOR;
-    const CPU_INTENSIVE: bool = true;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for restapi::config::SObject {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for restapi::config::Composite {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for restapi::config::Search {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for restapi::config::Query {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for soapapi::config::Merge {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
-    }
-}
-
-impl TaskMeta for toolingapi::config::Tooling {
-    const CONNECTOR: Connector = CONNECTOR;
-
-    fn connections(&self) -> Vec<Connection> {
-        connections(&self.credentials_path)
+impl Task for pubsubapi::publisher::Publisher {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = pubsubapi::publisher::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build()?.run().await?;
+        Ok(())
     }
 }
 

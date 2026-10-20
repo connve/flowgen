@@ -172,7 +172,7 @@ fn describe_credentials(path: &Path) -> Option<String> {
     Some(host(&credentials.instance_url))
 }
 
-impl TaskMeta for bulkapi::config::QueryJob {
+impl TaskMeta for restapi::query::Query {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -180,6 +180,13 @@ impl TaskMeta for bulkapi::config::QueryJob {
     }
 }
 ```
+
+`TaskMeta` also declares how the flow wires the task, each with a default:
+`CPU_INTENSIVE`, `PIPELINE_IO` (false for tasks that only register, such as
+`mcp_prompt`), `REGISTERS` (the task registers its flow with a shared
+server, so the flow runs on every pod and is never leader elected),
+`STARTS_AT_ONCE` (no startup jitter), and `validate()`, which checks the
+config when the flow is loaded.
 
 - `connections()` says what the task connects to, from its config alone:
   the credentials file and a target such as a host, brokers, or an AI
@@ -208,17 +215,22 @@ Reference implementation: `flowgen/salesforce/src/lib.rs`
 ### Adding a task type
 
 1. Config and processor in the connector's crate, following the
-   [task pattern](#task-pattern-processorrunner).
-2. `impl TaskMeta` for the config in the crate's `lib.rs`, with
-   `connections()` when the task connects somewhere. A new connector also
-   gets its `CONNECTOR`, `describe_credentials`, and logo in `icons/`.
-3. One variant in `task_types!` in `flowgen/app/src/config.rs`, which
-   derives the YAML tag, `as_str()`, `name()`, and `connections()` from it.
-   `depends_on()` below the macro takes one arm per variant by hand.
-4. Spawn it in `spawn_task` in `flowgen/app/src/flow.rs`.
-5. A working example under `examples/`, demonstrating a realistic use case
+   [task pattern](#task-pattern-processorrunner). The config derives
+   `flowgen_core::task::TaskConfig`, which reads `name`, `depends_on`,
+   `retry`, and `max_in_flight` from its fields.
+2. `impl TaskMeta` and `impl Task` for the config in the crate's `lib.rs`.
+   `Task::run` builds the processor from its builder and runs it. A task
+   that registers with a shared server takes it from
+   `context.service::<T>()` and implements `Task::check`, so a flow that
+   needs a disabled server fails before it replaces a running one. A new
+   connector also gets its `CONNECTOR`, `describe_credentials`, and logo in
+   `icons/`.
+3. One variant in `task_types!` in `flowgen/app/src/config.rs`. The macro
+   derives everything `app` needs from the traits, including spawning, so
+   `app` has no other per-task code.
+4. A working example under `examples/`, demonstrating a realistic use case
    with a short comment per task, not teaching prose.
-6. A docs page under `docs/src/routes/`, next to its connector's other
+5. A docs page under `docs/src/routes/`, next to its connector's other
    pages, and its entry in `docs/src/lib/nav.ts`.
 
 ### Retry strategy
@@ -354,16 +366,29 @@ reach for the span instead.
 
 ### Task pattern (Processor/Runner)
 
-Every task follows the same Processor/Runner shape, declared inline in the
-crate's `lib.rs`:
+Every task follows the same Processor/Runner shape. A connector crate keeps
+one file per task type. Its path is the YAML tag without the connector
+prefix, with a group level such as the API as a directory
+(`salesforce_restapi_query` → `restapi/query.rs`, `git_push` → `push.rs`).
+The config lives in the task's file and is named after the task (`Query`,
+`Merge`); types several tasks share stay in a shared module:
 
 ```
 src/
-├── lib.rs           # pub mod task_name { pub mod config; pub mod processor; }
-└── task_name/
-    ├── config.rs    # Configuration struct with serde
-    └── processor.rs # or query.rs, subscriber.rs, publisher.rs, etc.
+├── lib.rs           # CONNECTOR, module declarations, TaskMeta + Task impls
+├── processor.rs     # Shared: Error, Operation, Emitter, generic Processor<C>
+└── restapi/
+    └── query.rs     # One task type: config struct and its Operation
 ```
+
+Request/response tasks share one generic `Processor<C: Operation>` in
+`processor.rs`: it handles init with retry, the client registry, per-event
+config rendering and the completion signal, and each task implements only
+`Operation::call`. A call that isn't idempotent (create, merge, send)
+returns `false` from `retries_safely()`, so a transient failure isn't
+retried. Streaming tasks with a reconnect loop, such as subscribers, keep
+their own `Runner`, the crate's `Error`, and a flat file. The sections
+below show the parts of the shape.
 
 **EventHandler** handles individual events. It holds shared state
 (`client`, `config`, `task_id`, `tx`, `task_type`, `task_context`) and does
@@ -588,7 +613,10 @@ A few patterns come up often enough to call out explicitly:
    serialization.
 
 Reference implementations:
-- `flowgen/ai-agent/src/completion/processor.rs` — resource loading, RAG,
+- `flowgen/salesforce/src/processor.rs` — generic `Processor<C: Operation>`,
+  one error type with its retry classification, pages retried in place
+- `flowgen/braze/src/processor.rs` — generic `Processor<C: Operation>`
+- `flowgen/ai-agent/src/completion.rs` — resource loading, RAG,
   completion_tx, sandboxing
 - `flowgen/gcp/src/bigquery/query.rs` — SQL query with resource loading
 - `flowgen/nats/src/jetstream/publisher.rs` — event publishing
@@ -640,5 +668,5 @@ untrusted code — the `sandbox` field already accepts a full
 
 Reference implementations:
 - `flowgen/core/src/nsjail/sandbox.rs` — nsjail executor with proper error handling
-- `flowgen/core/src/task/script/config.rs` — script task with optional sandbox
-- `flowgen/ai-agent/src/completion/config.rs` — AI completion with optional sandbox
+- `flowgen/core/src/task/script.rs` — script task with optional sandbox
+- `flowgen/ai-agent/src/completion.rs` — AI completion with optional sandbox

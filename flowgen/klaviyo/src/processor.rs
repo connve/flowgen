@@ -4,6 +4,7 @@
 
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt, SharedCompletionTx};
+use flowgen_core::task::TaskConfig;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -101,21 +102,14 @@ pub enum Payload {
 
 /// A Klaviyo task: its config, and the call it makes for one event.
 #[async_trait::async_trait]
-pub trait Operation: ConfigExt + Serialize + DeserializeOwned + Send + Sync + 'static {
-    /// The task's name, used as the subject of the events it emits.
-    fn name(&self) -> &str;
-
+pub trait Operation:
+    TaskConfig + ConfigExt + Serialize + DeserializeOwned + Send + Sync + 'static
+{
     /// The JSON file with the account's private API key.
     fn credentials_path(&self) -> &Path;
 
     /// The Klaviyo API address, when it isn't Klaviyo's own.
     fn base_url(&self) -> Option<&str>;
-
-    /// The task's retry configuration, overriding the app-level one.
-    fn retry(&self) -> Option<&flowgen_core::retry::RetryConfig>;
-
-    /// How many events the task handles at once.
-    fn max_in_flight(&self) -> Option<std::num::NonZeroUsize>;
 
     /// Checks at startup that the operation has the fields it needs.
     fn validate(&self) -> Result<(), Error> {

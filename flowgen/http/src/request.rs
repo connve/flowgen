@@ -5,11 +5,13 @@
 //! and publishing the responses as new events.
 
 use flowgen_core::credentials::HttpCredentials;
+use flowgen_core::task::TaskConfig;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::{
@@ -17,6 +19,11 @@ use tokio::{
     sync::mpsc::{Receiver, Sender},
 };
 use tracing::error;
+
+/// `http_request` task config.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(transparent)]
+pub struct Request(pub super::config::Processor);
 
 /// Formats an error and every entry in its `source()` chain into a single
 /// colon-separated string.

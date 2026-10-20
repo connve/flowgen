@@ -13,10 +13,12 @@ use flowgen_core::event::{
     new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
 };
 use flowgen_core::registry::{ProgressEvent, ResponseRegistry, ResponseSender};
+use flowgen_core::task::TaskConfig;
 use reqwest::{
     header::{HeaderMap, AUTHORIZATION},
     StatusCode,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{fs, sync::Arc};
 use subtle::ConstantTimeEq;
@@ -24,6 +26,11 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, Instrument};
+
+/// `http_endpoint` task config.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(transparent)]
+pub struct Endpoint(pub super::config::Processor);
 
 /// Key under `event.meta` holding the configured request headers.
 const HEADERS_META_KEY: &str = "headers";
@@ -61,6 +68,8 @@ pub enum Error {
     MalformedCredentials,
     #[error("Missing required builder attribute: {}", _0)]
     MissingBuilderAttribute(String),
+    #[error("http_endpoint needs the HTTP server: enable `http_server` in the app config")]
+    HttpServerNotEnabled,
     #[error("Task failed after all retry attempts: {source}")]
     RetryExhausted {
         #[source]
@@ -106,7 +115,7 @@ impl IntoResponse for Error {
 /// resolution requires file I/O or trait downcasts at init time; everything
 /// else needed by the dispatcher already lives on the `Processor` itself.
 ///
-/// Mirrors the role of `flowgen_mcp::processor::EventHandler`: a lightweight
+/// Mirrors the role of `flowgen_mcp::tool::EventHandler`: a lightweight
 /// carrier returned by `Runner::init` so `run()` can hand the values off to
 /// the server's dispatch table. The actual request-handling logic lives in
 /// the free-function `dispatch_*` family at the bottom of this module.

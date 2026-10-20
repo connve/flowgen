@@ -9,8 +9,9 @@ use arrow::datatypes::{DataType, TimeUnit};
 use flowgen_core::event::{Event, EventBuilder, EventData};
 use flowgen_core::resource::Source;
 use flowgen_core::task::runner::Runner;
-use flowgen_salesforce::bulkapi::config::{QueryJob, QueryJobOperation};
-use flowgen_salesforce::restapi::config::Query;
+use flowgen_salesforce::bulkapi::query_job::{QueryJob, QueryJobOperation};
+use flowgen_salesforce::processor::ProcessorBuilder;
+use flowgen_salesforce::restapi::query::Query;
 use flowgen_salesforce::soql::Parameter;
 use salesforce_core::bulkapi::{
     ColumnDelimiter, ConcurrencyMode, ContentType, JobState, QueryJobInfo, QueryOperation,
@@ -338,7 +339,7 @@ async fn bulk_results_are_typed_from_describe_and_a_failed_page_is_retried_alone
     let credentials = credentials(&url);
     let (input_tx, input_rx) = mpsc::channel(1);
     let (output_tx, output_rx) = mpsc::channel(16);
-    let processor = flowgen_salesforce::bulkapi::query_job::ProcessorBuilder::new()
+    let processor = ProcessorBuilder::new()
         .config(Arc::new(bulk_config(&credentials)))
         .receiver(input_rx)
         .sender(output_tx)
@@ -415,6 +416,45 @@ async fn bulk_results_are_typed_from_describe_and_a_failed_page_is_retried_alone
     );
 }
 
+#[tokio::test]
+async fn a_task_takes_events_from_an_upstream_task_that_is_not_the_previous_one() {
+    let (url, _log) = serve(vec![Route::new(
+        api("/query"),
+        &QueryResponse {
+            done: true,
+            next_records_url: None,
+            records: vec![record("a")],
+            total_size: 1,
+        },
+    )])
+    .await;
+    let credentials = credentials(&url);
+    let (input_tx, input_rx) = mpsc::channel(1);
+    let (output_tx, output_rx) = mpsc::channel(16);
+    let processor = ProcessorBuilder::new()
+        .config(Arc::new(Query {
+            name: "accounts".to_string(),
+            credentials_path: credentials.path().to_path_buf(),
+            query: Source::Inline("SELECT Id FROM Account".to_string()),
+            parameters: None,
+            query_operation: None,
+            depends_on: Some(vec!["a".to_string()]),
+            retry: None,
+            max_in_flight: None,
+        }))
+        .receiver(input_rx)
+        .sender(output_tx)
+        .task_id(3)
+        .task_type("salesforce_restapi_query")
+        .task_context(task_context())
+        .build()
+        .unwrap();
+
+    let emitted = run(processor, input_tx, output_rx).await;
+
+    assert_eq!(emitted.len(), 1);
+}
+
 fn record(id: &str) -> Map<String, Value> {
     Map::from_iter([("Id".to_string(), Value::String(id.to_string()))])
 }
@@ -447,7 +487,7 @@ async fn soql_query_binds_parameters_and_retries_a_failed_page_alone() {
     let credentials = credentials(&url);
     let (input_tx, input_rx) = mpsc::channel(1);
     let (output_tx, output_rx) = mpsc::channel(16);
-    let processor = flowgen_salesforce::restapi::query::ProcessorBuilder::new()
+    let processor = ProcessorBuilder::new()
         .config(Arc::new(Query {
             name: "accounts".to_string(),
             credentials_path: credentials.path().to_path_buf(),

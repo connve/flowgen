@@ -48,7 +48,6 @@ url = { workspace = true }
 rustls = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
-rhai = { workspace = true }
 similar = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }

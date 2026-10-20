@@ -2,8 +2,36 @@
 
 use super::registry::{default_callers, InprocRegistry, Registration};
 use crate::event::Event;
+use crate::task::TaskConfig;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
+
+/// How long an in-process call may take when `ack_timeout` is not set.
+pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn default_ack_timeout() -> Duration {
+    DEFAULT_ACK_TIMEOUT
+}
+
+/// Source that makes its flow callable in-process at the flow's identity.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Endpoint {
+    /// The unique name of the task.
+    pub name: String,
+    /// How long a call may take, from handing its event to the flow until the
+    /// flow finishes.
+    #[serde(default = "default_ack_timeout", with = "humantime_serde")]
+    pub ack_timeout: Duration,
+    /// Flows allowed to call, e.g. `["user/", "platform/"]`: each entry admits the
+    /// flow of that identity and every flow in it as a folder, and `""` admits
+    /// every flow. Defaults to the flow's own top-level folder; flowgen itself may
+    /// always call.
+    #[serde(default)]
+    pub callers: Option<Vec<String>>,
+}
 
 /// Errors from the in-process endpoint.
 #[derive(thiserror::Error, Debug)]
@@ -16,7 +44,7 @@ pub enum Error {
 /// Registers the flow in the in-process registry; calls enter the flow after this task.
 #[derive(Debug)]
 pub struct Processor {
-    config: Arc<super::config::Endpoint>,
+    config: Arc<Endpoint>,
     tx: Sender<Event>,
     task_id: usize,
     task_type: &'static str,
@@ -59,7 +87,7 @@ impl crate::task::runner::Runner for Processor {
 /// Builder for the in-process endpoint.
 #[derive(Debug, Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Endpoint>>,
+    config: Option<Arc<Endpoint>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: Option<&'static str>,
@@ -71,7 +99,7 @@ impl ProcessorBuilder {
         Self::default()
     }
 
-    pub fn config(mut self, config: Arc<super::config::Endpoint>) -> Self {
+    pub fn config(mut self, config: Arc<Endpoint>) -> Self {
         self.config = Some(config);
         self
     }
@@ -112,5 +140,20 @@ impl ProcessorBuilder {
                 .task_context
                 .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_ack_timeout_is_a_duration() {
+        let endpoint: Endpoint =
+            serde_json::from_str(r#"{"name": "on_call", "ack_timeout": "2m"}"#).unwrap();
+        assert_eq!(endpoint.ack_timeout, Duration::from_secs(120));
+
+        let endpoint: Endpoint = serde_json::from_str(r#"{"name": "on_call"}"#).unwrap();
+        assert_eq!(endpoint.ack_timeout, DEFAULT_ACK_TIMEOUT);
     }
 }

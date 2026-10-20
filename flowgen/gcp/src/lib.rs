@@ -8,10 +8,14 @@ use flowgen_core::service::{
     DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_KEEP_ALIVE_TIMEOUT_SECS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECS,
 };
-use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{read_credentials, Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use gcloud_auth::credentials::CredentialsFile;
 use google_cloud_bigquery::client::{ChannelConfig, ClientConfig, StreamingWriteConfig};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Resolves Google Cloud credentials from an explicit file path or Application Default Credentials.
@@ -90,8 +94,6 @@ mod tests {
 
 /// BigQuery functionality for data warehousing and analytics.
 pub mod bigquery {
-    /// Configuration structures for BigQuery operations.
-    pub mod config;
     /// Unified BigQuery job processor for all job operations (create, get, cancel, delete).
     pub mod job;
     /// BigQuery query processor implementation for executing SQL queries.
@@ -120,7 +122,7 @@ fn connections(credentials_path: &Option<PathBuf>) -> Vec<Connection> {
     vec![Connection::new(CONNECTOR, credentials_path.as_deref())]
 }
 
-impl TaskMeta for bigquery::config::Query {
+impl TaskMeta for bigquery::query::Query {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -128,7 +130,7 @@ impl TaskMeta for bigquery::config::Query {
     }
 }
 
-impl TaskMeta for bigquery::config::Job {
+impl TaskMeta for bigquery::job::Job {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -136,7 +138,7 @@ impl TaskMeta for bigquery::config::Job {
     }
 }
 
-impl TaskMeta for bigquery::config::StorageRead {
+impl TaskMeta for bigquery::storage_read::StorageRead {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -144,10 +146,82 @@ impl TaskMeta for bigquery::config::StorageRead {
     }
 }
 
-impl TaskMeta for bigquery::config::StorageWrite {
+impl TaskMeta for bigquery::storage_write::StorageWrite {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
         connections(&self.credentials_path)
+    }
+}
+
+impl Task for bigquery::query::Query {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = bigquery::query::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for bigquery::job::Job {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = bigquery::job::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for bigquery::storage_read::StorageRead {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = bigquery::storage_read::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for bigquery::storage_write::StorageWrite {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = bigquery::storage_write::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }

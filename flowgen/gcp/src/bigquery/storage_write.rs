@@ -9,6 +9,7 @@ use base64::Engine;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
+    task::TaskConfig,
 };
 use futures_util::StreamExt;
 
@@ -18,11 +19,137 @@ use google_cloud_bigquery::{
     storage_write::{stream::default::DefaultStream, AppendRowsRequestBuilder},
 };
 use prost_types::{field_descriptor_proto, DescriptorProto, FieldDescriptorProto};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, warn};
+
+/// Configuration structure for BigQuery Storage Write API operations.
+///
+/// The Storage Write API provides high-throughput, low-latency streaming writes to BigQuery
+/// tables. It uses protocol buffers for efficient data transfer and supports both default
+/// streams (immediate availability) and committed streams (exactly-once semantics).
+///
+/// # Key Benefits
+/// - Low latency writes (sub-second vs minutes for LOAD jobs)
+/// - High throughput streaming (100k+ rows/sec)
+/// - Exactly-once semantics with committed streams
+/// - No intermediate storage required
+/// - Automatic schema evolution
+///
+/// # Stream Types
+/// - **Default Stream**: Immediate data availability, suitable for real-time dashboards and webhooks
+/// - **Committed Stream**: Exactly-once guarantees with deduplication (not yet implemented)
+/// - **Pending Stream**: Batch commits for transactional writes (not yet implemented)
+///
+/// # Fields
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to GCP service account credentials JSON file.
+/// - `project_id`: GCP project ID where BigQuery resources are located.
+/// - `dataset_id`: BigQuery dataset ID containing the table.
+/// - `table_id`: BigQuery table ID to write to.
+/// - `stream_name`: Optional custom stream name (uses default stream if not specified).
+/// - `trace_id`: Optional trace ID for debugging and monitoring.
+/// - `retry`: Optional retry configuration (overrides app-level retry config).
+///
+/// # Examples
+///
+/// Basic write to table:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_events
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: analytics
+///   table_id: events
+/// ```
+///
+/// Write with retry configuration:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_with_retry
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: landing
+///   table_id: webhook_events
+///   retry:
+///     max_attempts: 5
+///     initial_backoff: 2s
+/// ```
+///
+/// Write to custom stream:
+/// ```yaml
+/// bigquery_storage_write:
+///   name: write_to_custom_stream
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: realtime
+///   table_id: metrics
+///   stream_name: "projects/my-project/datasets/realtime/tables/metrics/streams/stream1"
+///   trace_id: "webhook-{{event.id}}"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct StorageWrite {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to GCP service account credentials JSON file.
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// GCP project ID where BigQuery resources are located.
+    pub project_id: String,
+    /// BigQuery dataset ID containing the table.
+    pub dataset_id: String,
+    /// BigQuery table ID to write to.
+    pub table_id: String,
+    /// Optional custom stream name. If not specified, uses the default stream.
+    /// Format: "projects/{project}/datasets/{dataset}/tables/{table}/streams/{stream}".
+    #[serde(default)]
+    pub stream_name: Option<String>,
+    /// Optional trace ID for debugging and request tracking.
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    /// Optional CDC change type for BigQuery Change Data Capture.
+    /// Requires the target table to have a primary key defined.
+    #[serde(default)]
+    pub change_type: Option<ChangeType>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+/// BigQuery CDC change type for Storage Write API.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeType {
+    /// Insert or update row by primary key.
+    Upsert,
+    /// Delete row by primary key.
+    Delete,
+}
+
+impl std::fmt::Display for ChangeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangeType::Upsert => write!(f, "UPSERT"),
+            ChangeType::Delete => write!(f, "DELETE"),
+        }
+    }
+}
+
+impl ConfigExt for StorageWrite {}
 
 /// Errors that can occur during BigQuery Storage Write operations.
 #[derive(thiserror::Error, Debug)]
@@ -435,7 +562,7 @@ pub struct EventHandler {
     stream: Arc<DefaultStream>,
     task_id: usize,
     tx: Option<Sender<Event>>,
-    config: Arc<super::config::StorageWrite>,
+    config: Arc<StorageWrite>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
     proto_descriptor: DescriptorProto,
@@ -634,7 +761,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 #[derive(Debug)]
 pub struct Processor {
     /// Storage Write configuration including credentials and table details.
-    config: Arc<super::config::StorageWrite>,
+    config: Arc<StorageWrite>,
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
@@ -777,7 +904,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
 /// Builder for creating BigQuery Storage Write processor instances.
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::StorageWrite>>,
+    config: Option<Arc<StorageWrite>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: Option<usize>,
@@ -797,7 +924,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::StorageWrite>) -> Self {
+    pub fn config(mut self, config: Arc<StorageWrite>) -> Self {
         self.config = Some(config);
         self
     }

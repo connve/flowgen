@@ -4,27 +4,16 @@
 //! commits the files of an event onto a branch and pushes the commit over
 //! HTTPS.
 
-use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
+use std::sync::Arc;
 
-/// Git push: commit file changes and push them over smart HTTP.
-pub mod push {
-    /// Commit building and the receive-pack exchange.
-    pub mod client;
-    /// Configuration for the git push task.
-    pub mod config;
-    /// Git push processor implementation.
-    pub mod processor;
-}
+pub mod push;
 /// HTTPS credentials and shallow clones shared by the git tasks.
 pub mod remote;
-
-/// Git sync: clone a branch and emit its files as events.
-pub mod sync {
-    /// Configuration for the git sync task.
-    pub mod config;
-    /// Git sync processor implementation.
-    pub mod processor;
-}
+pub mod sync;
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -34,7 +23,7 @@ pub const CONNECTOR: Connector = Connector {
     describe_credentials: None,
 };
 
-impl TaskMeta for push::config::Processor {
+impl TaskMeta for push::GitPush {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
@@ -44,12 +33,48 @@ impl TaskMeta for push::config::Processor {
     }
 }
 
-impl TaskMeta for sync::config::Processor {
+impl TaskMeta for sync::GitSync {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, self.credentials_path.as_deref())
             .target(&[&self.repository_url])]
+    }
+}
+
+impl Task for push::GitPush {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = push::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for sync::GitSync {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = sync::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }

@@ -8,8 +8,7 @@
 //! with a blanket impl over `rig::client::CompletionClient`, so the enum dispatch is
 //! one call per variant instead of a duplicated body per provider.
 
-use crate::completion::config::Provider;
-use crate::completion::processor::Credentials;
+use crate::completion::{Credentials, Provider};
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use rig::agent::{Agent, MultiTurnStreamItem};
@@ -1061,7 +1060,7 @@ impl AgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::completion::processor::CompletionUsage;
+    use crate::completion::CompletionUsage;
 
     fn make_usage(input: u64, output: u64) -> Usage {
         Usage {

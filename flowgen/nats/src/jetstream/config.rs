@@ -1,4 +1,5 @@
 use flowgen_core::config::ConfigExt;
+use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{path::PathBuf, time::Duration};
 
@@ -73,7 +74,7 @@ fn default_batch_expires() -> Duration {
 }
 
 /// Unified configuration for both NATS JetStream publisher and subscriber tasks.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The unique name / identifier of the task.
@@ -198,12 +199,6 @@ impl Default for Config {
     }
 }
 
-/// Type alias for backward compatibility with publisher code.
-pub type Publisher = Config;
-
-/// Type alias for backward compatibility with subscriber code.
-pub type Subscriber = Config;
-
 impl ConfigExt for Config {}
 
 #[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
@@ -305,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_subscriber_creation() {
-        let subscriber = Subscriber {
+        let subscriber = Config {
             name: "test_subscriber".to_string(),
             credentials_path: Some(PathBuf::from("/path/to/nats.creds")),
             subject: "test.subject".to_string(),
@@ -337,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_subscriber_serialization() {
-        let subscriber = Subscriber {
+        let subscriber = Config {
             name: "serial_sub".to_string(),
             credentials_path: Some(PathBuf::from("/credentials/nats.jwt")),
             subject: "my.subject.*".to_string(),
@@ -356,13 +351,13 @@ mod tests {
         };
 
         let json = serde_json::to_string(&subscriber).unwrap();
-        let deserialized: Subscriber = serde_json::from_str(&json).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(subscriber, deserialized);
     }
 
     #[test]
     fn test_subscriber_clone() {
-        let subscriber = Subscriber {
+        let subscriber = Config {
             name: "clone_sub".to_string(),
             credentials_path: Some(PathBuf::from("/test/creds.jwt")),
             subject: "clone.subject".to_string(),
@@ -386,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_publisher_default() {
-        let publisher = Publisher::default();
+        let publisher = Config::default();
         assert_eq!(publisher.name, String::new());
         assert_eq!(publisher.credentials_path, None);
         assert_eq!(publisher.subject, String::new());
@@ -413,7 +408,7 @@ mod tests {
             ..Default::default()
         };
 
-        let publisher = Publisher {
+        let publisher = Config {
             name: "test_publisher".to_string(),
             credentials_path: Some(PathBuf::from("/path/to/pub.creds")),
             subject: "pub.subject.1".to_string(),
@@ -440,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_publisher_serialization() {
-        let publisher = Publisher {
+        let publisher = Config {
             name: "serial_pub".to_string(),
             credentials_path: Some(PathBuf::from("/creds/publisher.jwt")),
             subject: "test.serialize".to_string(),
@@ -460,13 +455,13 @@ mod tests {
         };
 
         let json = serde_json::to_string(&publisher).unwrap();
-        let deserialized: Publisher = serde_json::from_str(&json).unwrap();
+        let deserialized: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(publisher, deserialized);
     }
 
     #[test]
     fn test_publisher_clone() {
-        let publisher = Publisher {
+        let publisher = Config {
             name: "clone_pub".to_string(),
             credentials_path: Some(PathBuf::from("/test/pub.creds")),
             subject: "clone.subject".to_string(),
@@ -491,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_publisher_without_stream() {
-        let publisher = Publisher {
+        let publisher = Config {
             name: "no_stream_pub".to_string(),
             credentials_path: Some(PathBuf::from("/no/stream.creds")),
             subject: "simple.subject".to_string(),
@@ -521,7 +516,7 @@ mod tests {
             ..Default::default()
         };
 
-        let publisher = Publisher {
+        let publisher = Config {
             name: "multi_pub".to_string(),
             credentials_path: Some(PathBuf::from("/multi/subjects.creds")),
             subject: "subject.1".to_string(),
@@ -540,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_config_equality() {
-        let sub1 = Subscriber {
+        let sub1 = Config {
             name: "eq_sub".to_string(),
             credentials_path: Some(PathBuf::from("/path/creds.jwt")),
             subject: "subject1".to_string(),
@@ -558,7 +553,7 @@ mod tests {
             ..Default::default()
         };
 
-        let sub2 = Subscriber {
+        let sub2 = Config {
             name: "eq_sub".to_string(),
             credentials_path: Some(PathBuf::from("/path/creds.jwt")),
             subject: "subject1".to_string(),

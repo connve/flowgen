@@ -3,6 +3,7 @@
 use crate::processor::{present, request, Emitter, Error, Operation, Payload};
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::Event;
+use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -30,7 +31,7 @@ pub enum ExportOperation {
 ///       external_ids: ["{{event.data.user_id}}"]
 ///       fields_to_export: [external_id, email]
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct ExportUserData {
     /// Task name.
@@ -59,24 +60,12 @@ impl ConfigExt for ExportUserData {}
 
 #[async_trait::async_trait]
 impl Operation for ExportUserData {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn credentials_path(&self) -> &Path {
         &self.credentials_path
     }
 
     fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    fn retry(&self) -> Option<&flowgen_core::retry::RetryConfig> {
-        self.retry.as_ref()
-    }
-
-    fn max_in_flight(&self) -> Option<std::num::NonZeroUsize> {
-        self.max_in_flight
     }
 
     fn validate(&self) -> Result<(), Error> {

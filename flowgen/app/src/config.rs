@@ -3,11 +3,16 @@
 //! Provides configuration structures for the main application and individual
 //! flows. Supports deserialization from TOML files and environment variables.
 
-use flowgen_core::task::meta::{Connection, Connector, TaskMeta};
+use flowgen_core::task::context::{Services, TaskContext};
+use flowgen_core::task::meta::{Connection, Connector};
+use flowgen_core::task::{Task, TaskConfig, TaskError, TaskIo, TaskMeta};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 /// Environment overrides for any config key, layered over the config file.
 ///
@@ -205,7 +210,14 @@ macro_rules! task_types {
             /// Returns the task name from its configuration.
             pub fn name(&self) -> &str {
                 match self {
-                    $(TaskType::$tag(config) => &config.name,)+
+                    $(TaskType::$tag(config) => config.name(),)+
+                }
+            }
+
+            /// The tasks this one takes events from; `None` means the previous one.
+            pub fn depends_on(&self) -> Option<&[String]> {
+                match self {
+                    $(TaskType::$tag(config) => config.depends_on(),)+
                 }
             }
 
@@ -216,10 +228,69 @@ macro_rules! task_types {
                 }
             }
 
+            /// Checks the task's config, as its crate defines it.
+            pub fn validate(&self) -> Result<(), TaskError> {
+                match self {
+                    $(TaskType::$tag(config) => TaskMeta::validate(config),)+
+                }
+            }
+
+            /// Checks that the shared servers the task needs are started.
+            pub fn check(&self, services: &Services) -> Result<(), TaskError> {
+                match self {
+                    $(TaskType::$tag(config) => config.check(services),)+
+                }
+            }
+
             /// Whether the task mostly uses the CPU, declared by its crate.
             pub const fn cpu_intensive(&self) -> bool {
                 match self {
                     $(TaskType::$tag(_) => <$config as TaskMeta>::CPU_INTENSIVE,)+
+                }
+            }
+
+            /// Whether this task takes and sends events. Registration-only
+            /// tasks have no channels and no implicit parent.
+            pub const fn has_pipeline_io(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::PIPELINE_IO,)+
+                }
+            }
+
+            /// Whether this task registers its flow with a shared server, so the
+            /// flow must run on every pod and is never leader elected.
+            pub const fn is_blocking(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::REGISTERS,)+
+                }
+            }
+
+            /// Whether this task starts without the startup jitter.
+            pub const fn starts_at_once(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(_) => <$config as TaskMeta>::STARTS_AT_ONCE,)+
+                }
+            }
+
+            /// Spawns the task in the current span.
+            pub fn spawn(
+                self,
+                io: TaskIo,
+                context: Arc<TaskContext>,
+            ) -> JoinHandle<Result<(), crate::flow::Error>> {
+                let span = tracing::Span::current();
+                match self {
+                    $(TaskType::$tag(config) => tokio::spawn(
+                        async move {
+                            config.run(io, context).await.map_err(|source| {
+                                crate::flow::Error::Task {
+                                    task_type: stringify!($tag),
+                                    source,
+                                }
+                            })
+                        }
+                        .instrument(span),
+                    ),)+
                 }
             }
         }
@@ -228,77 +299,77 @@ macro_rules! task_types {
 
 task_types! {
     /// Data conversion task.
-    convert(flowgen_core::task::convert::config::Processor),
+    convert(flowgen_core::task::convert::Convert),
     /// Iterate over arrays task.
-    iterate(flowgen_core::task::iterate::config::Processor),
+    iterate(flowgen_core::task::iterate::Iterate),
     /// Log output task.
-    log(flowgen_core::task::log::config::Processor),
+    log(flowgen_core::task::log::Log),
     /// Script execution task.
-    script(flowgen_core::task::script::config::Processor),
+    script(flowgen_core::task::script::Script),
     /// Buffer task for accumulating events into batches.
-    buffer(flowgen_core::task::buffer::config::Processor),
+    buffer(flowgen_core::task::buffer::Buffer),
     /// Object store operations (read, write, list, move).
     object_store(flowgen_object_store::config::Processor),
     /// Data generation task.
-    generate(flowgen_core::task::generate::config::Subscriber),
+    generate(flowgen_core::task::generate::Generate),
     /// HTTP request task.
-    http_request(flowgen_http::config::Processor),
+    http_request(flowgen_http::request::Request),
     /// HTTP endpoint task: exposes a route on the worker HTTP server.
-    http_endpoint(flowgen_http::config::Processor),
+    http_endpoint(flowgen_http::endpoint::Endpoint),
     /// HTML scrape task for extracting structured data using CSS selectors.
-    html_scrape(flowgen_html::scrape::config::Processor),
+    html_scrape(flowgen_html::scrape::Scrape),
     /// NATS JetStream subscriber task.
-    nats_jetstream_subscriber(flowgen_nats::jetstream::config::Subscriber),
+    nats_jetstream_subscriber(flowgen_nats::jetstream::subscriber::Subscriber),
     /// NATS JetStream publisher task.
-    nats_jetstream_publisher(flowgen_nats::jetstream::config::Publisher),
+    nats_jetstream_publisher(flowgen_nats::jetstream::publisher::Publisher),
     /// Salesforce Pub/Sub API subscriber task.
-    salesforce_pubsubapi_subscriber(flowgen_salesforce::pubsubapi::config::Subscriber),
+    salesforce_pubsubapi_subscriber(flowgen_salesforce::pubsubapi::subscriber::Subscriber),
     /// Salesforce Pub/Sub API publisher task.
-    salesforce_pubsubapi_publisher(flowgen_salesforce::pubsubapi::config::Publisher),
+    salesforce_pubsubapi_publisher(flowgen_salesforce::pubsubapi::publisher::Publisher),
     /// Salesforce Bulk API query job operations (create, get, delete, abort, get_results).
-    salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::config::QueryJob),
+    salesforce_bulkapi_query_job(flowgen_salesforce::bulkapi::query_job::QueryJob),
     /// Salesforce REST API SObject operations (create, get, update, upsert, delete).
-    salesforce_restapi_sobject(flowgen_salesforce::restapi::config::SObject),
+    salesforce_restapi_sobject(flowgen_salesforce::restapi::sobject::SObject),
     /// Salesforce REST API Composite operations for bulk record operations.
-    salesforce_restapi_composite(flowgen_salesforce::restapi::config::Composite),
+    salesforce_restapi_composite(flowgen_salesforce::restapi::composite::Composite),
     /// Salesforce REST API SOSL search operations.
-    salesforce_restapi_search(flowgen_salesforce::restapi::config::Search),
+    salesforce_restapi_search(flowgen_salesforce::restapi::search::Search),
     /// Salesforce REST API SOQL queries, following every page of results.
-    salesforce_restapi_query(flowgen_salesforce::restapi::config::Query),
+    salesforce_restapi_query(flowgen_salesforce::restapi::query::Query),
     /// Salesforce SOAP API merge operation for combining duplicate records.
-    salesforce_soapapi_merge(flowgen_salesforce::soapapi::config::Merge),
+    salesforce_soapapi_merge(flowgen_salesforce::soapapi::merge::Merge),
     /// Salesforce Tooling API operations for metadata management.
-    salesforce_toolingapi(flowgen_salesforce::toolingapi::config::Tooling),
+    salesforce_toolingapi(flowgen_salesforce::toolingapi::Tooling),
     /// GCP BigQuery query task.
-    gcp_bigquery_query(flowgen_gcp::bigquery::config::Query),
+    gcp_bigquery_query(flowgen_gcp::bigquery::query::Query),
     /// GCP BigQuery Storage Read API task.
-    gcp_bigquery_storage_read(flowgen_gcp::bigquery::config::StorageRead),
+    gcp_bigquery_storage_read(flowgen_gcp::bigquery::storage_read::StorageRead),
     /// GCP BigQuery unified job operations (create, get, cancel, delete).
-    gcp_bigquery_job(flowgen_gcp::bigquery::config::Job),
+    gcp_bigquery_job(flowgen_gcp::bigquery::job::Job),
     /// GCP BigQuery Storage Write API task for high-throughput streaming inserts.
-    gcp_bigquery_storage_write(flowgen_gcp::bigquery::config::StorageWrite),
+    gcp_bigquery_storage_write(flowgen_gcp::bigquery::storage_write::StorageWrite),
     /// Microsoft SQL Server query task.
-    mssql_query(flowgen_mssql::config::Query),
+    mssql_query(flowgen_mssql::query::Query),
     /// NATS Key-Value store operations (get, put, list, delete).
-    nats_kv_store(flowgen_nats::jetstream::kv_store::Config),
+    nats_kv_store(flowgen_nats::kv_store::KvStore),
     /// AI completion task for generating responses using LLMs.
-    ai_completion(flowgen_ai_agent::completion::config::Processor),
+    ai_completion(flowgen_ai_agent::completion::Completion),
     /// MCP tool task for exposing flows as MCP tools callable by LLMs.
-    mcp_tool(flowgen_mcp::config::Processor),
+    mcp_tool(flowgen_mcp::tool::Tool),
     /// MCP resource task for exposing read-only content to MCP clients.
-    mcp_resource(flowgen_mcp::resource::config::Processor),
+    mcp_resource(flowgen_mcp::resource::Resource),
     /// MCP prompt task for exposing slash-command templates to MCP clients.
-    mcp_prompt(flowgen_mcp::prompt::config::Processor),
+    mcp_prompt(flowgen_mcp::prompt::Prompt),
     /// LLM proxy task — registers a flow as a backend on the AI gateway server.
-    llm_proxy(flowgen_ai_agent::ai_gateway::config::Processor),
+    llm_proxy(flowgen_ai_agent::llm_proxy::LlmProxy),
     /// Git sync task for syncing flows and resources from a Git repository to the cache.
-    git_sync(flowgen_git::sync::config::Processor),
+    git_sync(flowgen_git::sync::GitSync),
     /// OCI sync task for pulling flow artifacts from an OCI registry into the cache.
-    oci_sync(flowgen_oci::sync::config::Processor),
+    oci_sync(flowgen_oci::sync::OciSync),
     /// Git push task for committing files and pushing them to a Git repository.
-    git_push(flowgen_git::push::config::Processor),
+    git_push(flowgen_git::push::GitPush),
     /// OCI push task for releasing files to an OCI registry as an artifact.
-    oci_push(flowgen_oci::push::config::Processor),
+    oci_push(flowgen_oci::push::OciPush),
     /// Braze user data export task.
     braze_export_user_data(flowgen_braze::export_user_data::ExportUserData),
     /// Braze messaging task.
@@ -314,100 +385,17 @@ task_types! {
     /// Klaviyo profiles task.
     klaviyo_profiles(flowgen_klaviyo::profiles::Profiles),
     /// MongoDB collection read/write task.
-    mongodb_collection(flowgen_mongodb::config::Collection),
+    mongodb_collection(flowgen_mongodb::collection::Collection),
     /// MongoDB change stream reader task.
-    mongodb_change_stream(flowgen_mongodb::config::ChangeStream),
+    mongodb_change_stream(flowgen_mongodb::change_stream::ChangeStream),
     /// Kafka produce task.
-    kafka_produce(flowgen_kafka::config::Produce),
+    kafka_produce(flowgen_kafka::produce::Produce),
     /// Kafka subscribe task.
-    kafka_subscribe(flowgen_kafka::config::Subscribe),
+    kafka_subscribe(flowgen_kafka::subscribe::Subscribe),
     /// Source that makes the flow callable in-process at its identity.
-    inproc_endpoint(flowgen_core::task::inproc::config::Endpoint),
+    inproc_endpoint(flowgen_core::task::inproc::endpoint::Endpoint),
     /// Calls a flow with an `inproc_endpoint` and emits its result.
-    inproc_request(flowgen_core::task::inproc::config::Request),
-}
-
-impl TaskType {
-    /// Whether this task participates in the event pipeline.
-    ///
-    /// Registration-only tasks (`mcp_prompt`, `mcp_resource`) publish their
-    /// entry to the shared MCP server at init and exit — the client-facing
-    /// `prompts/get` and `resources/read` calls are served by the MCP HTTP
-    /// server, never through the flow pipeline. They therefore have no
-    /// inbound channel, no outbound channel, and no implicit dependency on
-    /// the preceding task in the flow list.
-    pub const fn has_pipeline_io(&self) -> bool {
-        !matches!(self, TaskType::mcp_prompt(_) | TaskType::mcp_resource(_))
-    }
-
-    /// Whether this task registers its flow with a shared server, so the flow
-    /// must run on every pod and is never leader elected.
-    pub const fn is_blocking(&self) -> bool {
-        matches!(
-            self,
-            TaskType::http_endpoint(_)
-                | TaskType::inproc_endpoint(_)
-                | TaskType::mcp_tool(_)
-                | TaskType::mcp_resource(_)
-                | TaskType::mcp_prompt(_)
-                | TaskType::llm_proxy(_)
-        )
-    }
-
-    /// Returns the `depends_on` list if configured on the task.
-    pub fn depends_on(&self) -> Option<&Vec<String>> {
-        match self {
-            TaskType::convert(c) => c.depends_on.as_ref(),
-            TaskType::iterate(c) => c.depends_on.as_ref(),
-            TaskType::log(c) => c.depends_on.as_ref(),
-            TaskType::script(c) => c.depends_on.as_ref(),
-            TaskType::buffer(c) => c.depends_on.as_ref(),
-            TaskType::object_store(c) => c.depends_on.as_ref(),
-            TaskType::generate(c) => c.depends_on.as_ref(),
-            TaskType::http_request(c) => c.depends_on.as_ref(),
-            TaskType::http_endpoint(c) => c.depends_on.as_ref(),
-            TaskType::html_scrape(c) => c.depends_on.as_ref(),
-            TaskType::nats_jetstream_subscriber(c) => c.depends_on.as_ref(),
-            TaskType::nats_jetstream_publisher(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_pubsubapi_subscriber(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_pubsubapi_publisher(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_bulkapi_query_job(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_restapi_sobject(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_restapi_composite(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_restapi_search(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_restapi_query(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_soapapi_merge(c) => c.depends_on.as_ref(),
-            TaskType::salesforce_toolingapi(c) => c.depends_on.as_ref(),
-            TaskType::gcp_bigquery_query(c) => c.depends_on.as_ref(),
-            TaskType::gcp_bigquery_storage_read(c) => c.depends_on.as_ref(),
-            TaskType::gcp_bigquery_job(c) => c.depends_on.as_ref(),
-            TaskType::gcp_bigquery_storage_write(c) => c.depends_on.as_ref(),
-            TaskType::mssql_query(c) => c.depends_on.as_ref(),
-            TaskType::nats_kv_store(c) => c.depends_on.as_ref(),
-            TaskType::ai_completion(c) => c.depends_on.as_ref(),
-            TaskType::mcp_tool(c) => c.depends_on.as_ref(),
-            TaskType::mcp_resource(c) => c.depends_on.as_ref(),
-            TaskType::mcp_prompt(c) => c.depends_on.as_ref(),
-            TaskType::llm_proxy(c) => c.depends_on.as_ref(),
-            TaskType::git_sync(c) => c.depends_on.as_ref(),
-            TaskType::oci_sync(c) => c.depends_on.as_ref(),
-            TaskType::git_push(c) => c.depends_on.as_ref(),
-            TaskType::oci_push(c) => c.depends_on.as_ref(),
-            TaskType::braze_export_user_data(c) => c.depends_on.as_ref(),
-            TaskType::braze_messaging(c) => c.depends_on.as_ref(),
-            TaskType::klaviyo_templates(c) => c.depends_on.as_ref(),
-            TaskType::klaviyo_campaigns(c) => c.depends_on.as_ref(),
-            TaskType::klaviyo_lists(c) => c.depends_on.as_ref(),
-            TaskType::klaviyo_events(c) => c.depends_on.as_ref(),
-            TaskType::klaviyo_profiles(c) => c.depends_on.as_ref(),
-            TaskType::mongodb_collection(c) => c.depends_on.as_ref(),
-            TaskType::mongodb_change_stream(c) => c.depends_on.as_ref(),
-            TaskType::kafka_produce(c) => c.depends_on.as_ref(),
-            TaskType::kafka_subscribe(c) => c.depends_on.as_ref(),
-            TaskType::inproc_endpoint(_) => None,
-            TaskType::inproc_request(c) => c.depends_on.as_ref(),
-        }
-    }
+    inproc_request(flowgen_core::task::inproc::request::Request),
 }
 
 impl std::fmt::Display for TaskType {
@@ -1273,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_flow_with_tasks() {
-        let convert_config = flowgen_core::task::convert::config::Processor::default();
+        let convert_config = flowgen_core::task::convert::Convert::default();
         let task = TaskType::convert(convert_config);
 
         let flow = Flow {
@@ -1327,10 +1315,8 @@ mod tests {
 
     #[test]
     fn test_task_variants() {
-        let convert_task =
-            TaskType::convert(flowgen_core::task::convert::config::Processor::default());
-        let generate_task =
-            TaskType::generate(flowgen_core::task::generate::config::Subscriber::default());
+        let convert_task = TaskType::convert(flowgen_core::task::convert::Convert::default());
+        let generate_task = TaskType::generate(flowgen_core::task::generate::Generate::default());
 
         assert!(matches!(convert_task, TaskType::convert(_)));
         assert!(matches!(generate_task, TaskType::generate(_)));
@@ -1663,11 +1649,11 @@ flows:
 
     #[test]
     fn test_complex_flow_config() {
-        let convert_config = flowgen_core::task::convert::config::Processor {
+        let convert_config = flowgen_core::task::convert::Convert {
             name: "convert_task".to_string(),
             ..Default::default()
         };
-        let generate_config = flowgen_core::task::generate::config::Subscriber {
+        let generate_config = flowgen_core::task::generate::Generate {
             name: "generate_task".to_string(),
             ..Default::default()
         };

@@ -10,7 +10,7 @@
 //! `cargo test` skips it; CI runs the ignored set explicitly.
 
 use flowgen_core::event::{EventBuilder, EventData};
-use flowgen_nats::jetstream::kv_store::{Config as KvConfig, Operation, ProcessorBuilder};
+use flowgen_nats::kv_store::{KvStore, Operation, ProcessorBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -56,7 +56,7 @@ fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
 }
 
 async fn spawn_processor(
-    config: KvConfig,
+    config: KvStore,
 ) -> (
     mpsc::Sender<flowgen_core::event::Event>,
     mpsc::Receiver<flowgen_core::event::Event>,
@@ -94,7 +94,7 @@ fn drive_event(subject: &str, data: serde_json::Value) -> flowgen_core::event::E
 }
 
 async fn list_keys(url: String, bucket: &str, prefix: &str) -> Vec<String> {
-    let (tx, mut rx) = spawn_processor(KvConfig {
+    let (tx, mut rx) = spawn_processor(KvStore {
         name: "kv_list".to_string(),
         url,
         bucket: bucket.to_string(),
@@ -126,7 +126,7 @@ async fn list_keys(url: String, bucket: &str, prefix: &str) -> Vec<String> {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn put_operation_writes_value_and_emits_put_result() {
     let (_nats, url) = start_nats().await;
-    let (tx, mut rx) = spawn_processor(KvConfig {
+    let (tx, mut rx) = spawn_processor(KvStore {
         name: "kv_put".to_string(),
         url,
         bucket: "kv_put_bucket".to_string(),
@@ -159,7 +159,7 @@ async fn put_operation_writes_value_and_emits_put_result() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn get_operation_retrieves_previously_put_value() {
     let (_nats, url) = start_nats().await;
-    let (put_tx, mut put_rx) = spawn_processor(KvConfig {
+    let (put_tx, mut put_rx) = spawn_processor(KvStore {
         name: "kv_put".to_string(),
         url: url.clone(),
         bucket: "kv_get_bucket".to_string(),
@@ -180,7 +180,7 @@ async fn get_operation_retrieves_previously_put_value() {
         .expect("put ack")
         .expect("channel open");
 
-    let (get_tx, mut get_rx) = spawn_processor(KvConfig {
+    let (get_tx, mut get_rx) = spawn_processor(KvStore {
         name: "kv_get".to_string(),
         url,
         bucket: "kv_get_bucket".to_string(),
@@ -212,7 +212,7 @@ async fn get_operation_retrieves_previously_put_value() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn get_operation_reports_missing_key_as_not_found() {
     let (_nats, url) = start_nats().await;
-    let (tx, mut rx) = spawn_processor(KvConfig {
+    let (tx, mut rx) = spawn_processor(KvStore {
         name: "kv_get_missing".to_string(),
         url,
         bucket: "kv_missing_bucket".to_string(),
@@ -243,7 +243,7 @@ async fn list_operation_returns_all_keys_under_prefix() {
     // Seed three keys through the put processor so the whole
     // pipeline is exercised through the task, not just the raw
     // cache API.
-    let (put_tx, mut put_rx) = spawn_processor(KvConfig {
+    let (put_tx, mut put_rx) = spawn_processor(KvStore {
         name: "kv_seed".to_string(),
         url: url.clone(),
         bucket: "kv_list_bucket".to_string(),
@@ -266,7 +266,7 @@ async fn list_operation_returns_all_keys_under_prefix() {
             .expect("channel open");
     }
 
-    let (list_tx, mut list_rx) = spawn_processor(KvConfig {
+    let (list_tx, mut list_rx) = spawn_processor(KvStore {
         name: "kv_list".to_string(),
         url,
         bucket: "kv_list_bucket".to_string(),
@@ -303,7 +303,7 @@ async fn list_operation_returns_all_keys_under_prefix() {
 async fn delete_operation_removes_key_from_bucket() {
     let (_nats, url) = start_nats().await;
 
-    let (put_tx, mut put_rx) = spawn_processor(KvConfig {
+    let (put_tx, mut put_rx) = spawn_processor(KvStore {
         name: "kv_put".to_string(),
         url: url.clone(),
         bucket: "kv_delete_bucket".to_string(),
@@ -324,7 +324,7 @@ async fn delete_operation_removes_key_from_bucket() {
         .expect("put ack")
         .expect("channel open");
 
-    let (del_tx, mut del_rx) = spawn_processor(KvConfig {
+    let (del_tx, mut del_rx) = spawn_processor(KvStore {
         name: "kv_delete".to_string(),
         url: url.clone(),
         bucket: "kv_delete_bucket".to_string(),
@@ -349,7 +349,7 @@ async fn delete_operation_removes_key_from_bucket() {
     );
 
     // Confirm via a follow-up get that the key is really gone.
-    let (get_tx, mut get_rx) = spawn_processor(KvConfig {
+    let (get_tx, mut get_rx) = spawn_processor(KvStore {
         name: "kv_get".to_string(),
         url,
         bucket: "kv_delete_bucket".to_string(),
@@ -375,7 +375,7 @@ async fn delete_operation_removes_key_from_bucket() {
 #[ignore = "requires Docker daemon; run in CI via `cargo test -- --ignored`"]
 async fn put_entries_writes_changes_and_prunes_the_rest_under_the_prefix() {
     let (_nats, url) = start_nats().await;
-    let (tx, mut rx) = spawn_processor(KvConfig {
+    let (tx, mut rx) = spawn_processor(KvStore {
         name: "kv_mirror".to_string(),
         url: url.clone(),
         bucket: "kv_prune_bucket".to_string(),

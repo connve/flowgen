@@ -4,6 +4,7 @@
 //! operations on object storage (local files, GCS, S3, Azure).
 
 use flowgen_core::config::ConfigExt;
+use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -77,7 +78,7 @@ pub enum Operation {
 ///     source: gs://my-bucket/incoming/*.csv
 ///     destination: gs://my-bucket/processed/
 /// ```
-#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Default, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Processor {
     /// Unique task identifier.

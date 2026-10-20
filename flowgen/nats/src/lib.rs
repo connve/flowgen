@@ -5,7 +5,11 @@
 //! connection management, and provides both publisher and subscriber implementations
 //! that integrate with the flowgen event system.
 
-use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
+use std::sync::Arc;
 
 /// Credential caching functionality for NATS authentication.
 pub mod cache;
@@ -17,8 +21,6 @@ pub mod client;
 pub mod jetstream {
     /// Configuration structures for JetStream publishers and subscribers.
     pub mod config;
-    /// JetStream Key-Value store operations (get, put, list, delete).
-    pub mod kv_store;
     /// Message conversion utilities for JetStream integration.
     pub mod message;
     /// JetStream publisher implementation for reliable message publishing.
@@ -29,6 +31,9 @@ pub mod jetstream {
     pub mod subscriber;
 }
 
+/// JetStream Key-Value store operations (get, put, list, delete).
+pub mod kv_store;
+
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
     name: "nats",
@@ -37,7 +42,29 @@ pub const CONNECTOR: Connector = Connector {
     describe_credentials: None,
 };
 
-impl TaskMeta for jetstream::config::Config {
+impl jetstream::config::Config {
+    fn connections(&self) -> Vec<Connection> {
+        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.url])]
+    }
+}
+
+impl TaskMeta for jetstream::publisher::Publisher {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        self.0.connections()
+    }
+}
+
+impl TaskMeta for jetstream::subscriber::Subscriber {
+    const CONNECTOR: Connector = CONNECTOR;
+
+    fn connections(&self) -> Vec<Connection> {
+        self.0.connections()
+    }
+}
+
+impl TaskMeta for kv_store::KvStore {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -45,10 +72,53 @@ impl TaskMeta for jetstream::config::Config {
     }
 }
 
-impl TaskMeta for jetstream::kv_store::Config {
-    const CONNECTOR: Connector = CONNECTOR;
+impl Task for jetstream::publisher::Publisher {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = jetstream::publisher::ProcessorBuilder::new()
+            .config(Arc::new(self.0))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
 
-    fn connections(&self) -> Vec<Connection> {
-        vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.url])]
+impl Task for jetstream::subscriber::Subscriber {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = jetstream::subscriber::ProcessorBuilder::new()
+            .config(Arc::new(self.0))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for kv_store::KvStore {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = kv_store::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }

@@ -16,13 +16,10 @@ use flowgen_core::event::Event;
 use flowgen_core::resource::Source;
 use flowgen_core::task::context::{TaskContext, TaskContextBuilder};
 use flowgen_mcp::completion::Completion;
-use flowgen_mcp::config::Processor as ToolConfig;
-use flowgen_mcp::processor::ProcessorBuilder as ToolProcessorBuilder;
-use flowgen_mcp::prompt::config::{Argument, Processor as PromptConfig};
-use flowgen_mcp::prompt::processor::ProcessorBuilder as PromptProcessorBuilder;
-use flowgen_mcp::resource::config::{Parameter, Processor as ResourceConfig};
-use flowgen_mcp::resource::processor::ProcessorBuilder as ResourceProcessorBuilder;
+use flowgen_mcp::prompt::{self, Argument, Prompt};
+use flowgen_mcp::resource::{self, Parameter, Resource};
 use flowgen_mcp::server::{new_mcp_server, McpServer};
+use flowgen_mcp::tool::{self, Tool};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -142,7 +139,7 @@ async fn initialize_advertises_all_capabilities() {
 async fn mcp_prompt_registers_lists_and_renders_via_handlebars() {
     let (server, url, _handle) = boot_server().await;
 
-    let cfg = Arc::new(PromptConfig {
+    let cfg = Arc::new(Prompt {
         name: "greet".to_string(),
         description: "Say hi".to_string(),
         arguments: vec![
@@ -172,7 +169,7 @@ async fn mcp_prompt_registers_lists_and_renders_via_handlebars() {
         retry: None,
     });
 
-    let processor = PromptProcessorBuilder::new()
+    let processor = prompt::ProcessorBuilder::new()
         .config(cfg)
         .task_id(0)
         .task_type("mcp_prompt")
@@ -267,7 +264,7 @@ async fn mcp_prompt_registers_lists_and_renders_via_handlebars() {
 async fn mcp_resource_registers_concrete_and_templated_variants() {
     let (server, url, _handle) = boot_server().await;
 
-    let concrete = Arc::new(ResourceConfig {
+    let concrete = Arc::new(Resource {
         name: "glossary".to_string(),
         uri: None,
         uri_template: None,
@@ -279,7 +276,7 @@ async fn mcp_resource_registers_concrete_and_templated_variants() {
         depends_on: None,
         retry: None,
     });
-    let template = Arc::new(ResourceConfig {
+    let template = Arc::new(Resource {
         name: "account_summary".to_string(),
         uri: None,
         uri_template: Some("flowgen://account/{id}".to_string()),
@@ -298,7 +295,7 @@ async fn mcp_resource_registers_concrete_and_templated_variants() {
     });
 
     for cfg in [concrete, template] {
-        let processor = ResourceProcessorBuilder::new()
+        let processor = resource::ProcessorBuilder::new()
             .config(cfg)
             .task_id(0)
             .task_type("mcp_resource")
@@ -412,7 +409,7 @@ async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
         "marketing_agent".to_string(),
     )]);
 
-    let resource_cfg = Arc::new(ResourceConfig {
+    let resource_cfg = Arc::new(Resource {
         name: "scoped_doc".to_string(),
         uri: None,
         uri_template: None,
@@ -424,7 +421,7 @@ async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
         depends_on: None,
         retry: None,
     });
-    let resource_processor = ResourceProcessorBuilder::new()
+    let resource_processor = resource::ProcessorBuilder::new()
         .config(resource_cfg)
         .task_id(0)
         .task_type("mcp_resource")
@@ -437,7 +434,7 @@ async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
         .await
         .expect("register resource");
 
-    let prompt_cfg = Arc::new(PromptConfig {
+    let prompt_cfg = Arc::new(Prompt {
         name: "scoped_prompt".to_string(),
         description: "Scoped prompt".to_string(),
         arguments: Vec::new(),
@@ -447,7 +444,7 @@ async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
         depends_on: None,
         retry: None,
     });
-    let prompt_processor = PromptProcessorBuilder::new()
+    let prompt_processor = prompt::ProcessorBuilder::new()
         .config(prompt_cfg)
         .task_id(0)
         .task_type("mcp_prompt")
@@ -557,7 +554,7 @@ async fn mcp_resource_and_prompt_headers_scope_listing_and_access() {
 async fn mcp_tool_call_routes_through_downstream_and_returns_result() {
     let (server, url, _handle) = boot_server().await;
 
-    let cfg = Arc::new(ToolConfig {
+    let cfg = Arc::new(Tool {
         name: "echo".to_string(),
         description: "Echo input.".to_string(),
         input_schema: json!({
@@ -576,7 +573,7 @@ async fn mcp_tool_call_routes_through_downstream_and_returns_result() {
     // Downstream mpsc pair the tool processor sends onto.
     let (tool_tx, mut tool_rx) = mpsc::channel::<Event>(4);
 
-    let processor = ToolProcessorBuilder::new()
+    let processor = tool::ProcessorBuilder::new()
         .config(cfg)
         .sender(tool_tx)
         .task_id(0)
@@ -659,7 +656,7 @@ async fn deregister_flow_emits_list_changed_on_open_sse_session() {
     let mut sse_stream = sse_resp.bytes_stream();
 
     // Register a prompt so there's something to deregister.
-    let cfg = Arc::new(PromptConfig {
+    let cfg = Arc::new(Prompt {
         name: "notify_probe".to_string(),
         description: "probe".to_string(),
         arguments: Vec::new(),
@@ -669,7 +666,7 @@ async fn deregister_flow_emits_list_changed_on_open_sse_session() {
         depends_on: None,
         retry: None,
     });
-    let processor = PromptProcessorBuilder::new()
+    let processor = prompt::ProcessorBuilder::new()
         .config(cfg)
         .task_id(0)
         .task_type("mcp_prompt")

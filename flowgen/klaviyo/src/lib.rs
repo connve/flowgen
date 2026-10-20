@@ -3,7 +3,11 @@
 //! A private API key belongs to one Klaviyo account, so each task talks to
 //! the account of its `credentials_path`.
 
-use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
+use std::sync::Arc;
 
 pub mod campaigns;
 pub mod events;
@@ -20,7 +24,7 @@ pub const CONNECTOR: Connector = Connector {
     describe_credentials: None,
 };
 
-macro_rules! klaviyo_task_meta {
+macro_rules! klaviyo_task {
     ($($config:ty),+) => {
         $(
             impl TaskMeta for $config {
@@ -34,11 +38,29 @@ macro_rules! klaviyo_task_meta {
                     }
                 }
             }
+
+            impl Task for $config {
+                async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+                    let mut builder = processor::ProcessorBuilder::new()
+                        .config(Arc::new(self))
+                        .task_id(io.task_id)
+                        .task_type(io.task_type)
+                        .task_context(context);
+                    if let Some(rx) = io.rx {
+                        builder = builder.receiver(rx);
+                    }
+                    if let Some(tx) = io.tx {
+                        builder = builder.sender(tx);
+                    }
+                    builder.build()?.run().await?;
+                    Ok(())
+                }
+            }
         )+
     };
 }
 
-klaviyo_task_meta!(
+klaviyo_task!(
     templates::Templates,
     campaigns::Campaigns,
     lists::Lists,

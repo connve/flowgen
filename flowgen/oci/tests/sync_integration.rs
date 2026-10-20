@@ -20,8 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flowgen_oci::sync::config::Processor as OciSyncConfig;
-use flowgen_oci::sync::processor::ProcessorBuilder;
+use flowgen_oci::sync::{OciSync, ProcessorBuilder};
 use oci_client::client::{ClientConfig, ClientProtocol, Config, ImageLayer};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
@@ -80,7 +79,7 @@ async fn oci_sync_emits_one_event_per_file_layer_with_completion_on_last() {
         .await
         .expect("push test artifact to registry");
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull_repo".to_string(),
         artifact: format!("{registry_host}/flowgen/resources:latest"),
         ..Default::default()
@@ -219,7 +218,7 @@ async fn oci_sync_unpacks_tar_gzip_layer_into_per_file_events() {
         .await
         .expect("push tar+gzip artifact to registry");
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull_docker".to_string(),
         artifact: format!("{registry_host}/flowgen/docker-image:latest"),
         ..Default::default()
@@ -391,7 +390,7 @@ async fn push_layer(host: &str, repo: &str, media_type: &str, bytes: Vec<u8>) ->
 /// Runs `oci_sync` against `artifact` and returns whatever events the
 /// downstream channel receives before the sender drops or the deadline
 /// elapses. Fails the test if `oci_sync.run()` returns an error.
-async fn run_sync_and_collect(sync_config: Arc<OciSyncConfig>) -> Vec<flowgen_core::event::Event> {
+async fn run_sync_and_collect(sync_config: Arc<OciSync>) -> Vec<flowgen_core::event::Event> {
     let (trigger_tx, trigger_rx) = mpsc::channel(8);
     let (downstream_tx, mut downstream_rx) = mpsc::channel(16);
 
@@ -447,7 +446,7 @@ async fn run_sync_and_collect(sync_config: Arc<OciSyncConfig>) -> Vec<flowgen_co
 /// re-surface downstream with `event.error = Some(_)` after retries are
 /// exhausted. Returns the error string on the event. Panics if no error
 /// event lands within the deadline.
-async fn run_sync_expecting_error(sync_config: Arc<OciSyncConfig>) -> String {
+async fn run_sync_expecting_error(sync_config: Arc<OciSync>) -> String {
     // Use a small retry budget so a `permanent`-classified error surfaces
     // fast even when the underlying processor's default retry count is
     // large.
@@ -547,7 +546,7 @@ async fn oci_sync_unpacks_uncompressed_tar_layer() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -609,7 +608,7 @@ async fn oci_sync_skips_directory_symlink_hardlink_and_whiteout_entries() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -657,7 +656,7 @@ async fn oci_sync_rejects_layer_exceeding_max_file_size() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         max_file_size: 1024,
@@ -691,7 +690,7 @@ async fn oci_sync_rejects_artifact_exceeding_max_total_size() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         max_file_size: 4096,
@@ -729,7 +728,7 @@ async fn oci_sync_emits_bytes_event_for_binary_raw_layer() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -793,7 +792,7 @@ async fn oci_sync_emits_bytes_event_for_binary_tar_entry() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -891,7 +890,7 @@ async fn oci_sync_merges_docker_layers_with_whiteout_and_override() {
 
     let reference = push_docker_layers(&host, "flowgen/docker-merge", vec![layer1, layer2]).await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -952,7 +951,7 @@ async fn oci_sync_docker_opaque_whiteout_hides_lower_directory() {
 
     let reference = push_docker_layers(&host, "flowgen/docker-opaque", vec![layer1, layer2]).await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -992,7 +991,7 @@ async fn oci_sync_docker_opaque_whiteout_hides_lower_directory() {
 /// Shares one MemoryCache across two syncs so the second tick can hit
 /// the HEAD-check skip path. Returns downstream events from that run.
 async fn run_sync_with_shared_cache(
-    sync_config: Arc<OciSyncConfig>,
+    sync_config: Arc<OciSync>,
     cache: Arc<dyn flowgen_core::cache::Cache>,
 ) -> Vec<flowgen_core::event::Event> {
     let task_manager = Arc::new(
@@ -1080,7 +1079,7 @@ async fn oci_sync_second_tick_skips_when_manifest_unchanged() {
     )
     .await;
 
-    let sync_config = Arc::new(OciSyncConfig {
+    let sync_config = Arc::new(OciSync {
         name: "pull".to_string(),
         artifact: reference,
         ..Default::default()
@@ -1164,7 +1163,7 @@ async fn a_pushed_workspace_is_read_back_by_oci_sync_under_every_tag() {
     );
 
     for tag in ["abc123", "latest"] {
-        let events = run_sync_and_collect(Arc::new(OciSyncConfig {
+        let events = run_sync_and_collect(Arc::new(OciSync {
             name: "pull".to_string(),
             artifact: format!("{host}/flowgen/workspace:{tag}"),
             ..Default::default()

@@ -1,14 +1,20 @@
+//! The `salesforce_pubsubapi_subscriber` task: subscribes to a Pub/Sub API
+//! topic and emits each event, reconnecting whenever the stream breaks.
+
+use crate::processor::{Error, PubSub};
 use flowgen_core::{
-    client::Client,
     config::ConfigExt,
     event::{new_completion_channel, AvroData, Event, EventBuilder, EventData, EventExt},
+    task::TaskConfig,
 };
 use salesforce_core::pubsubapi::{
     eventbus::v1::{ConsumerEvent, ManagedFetchRequest, SchemaInfo},
     FetchRequest, PubSubError, SchemaRequest, TopicRequest,
 };
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tracing::{error, warn, Instrument};
 
@@ -16,100 +22,105 @@ const DEFAULT_NUM_REQUESTED: i32 = 200;
 const DEFAULT_TOPIC_PREFIX_DATA: &str = "/data/";
 const DEFAULT_TOPIC_PREFIX_EVENT: &str = "/event/";
 
-/// Sanitizes a topic name to create a valid NATS KV cache key.
+/// Configuration for subscribing to a Salesforce Pub/Sub API topic.
+///
+/// # Examples
+///
+/// ```yaml
+/// salesforce_pubsubapi_subscriber:
+///   name: opportunity_changes
+///   credentials_path: /path/to/salesforce_creds.json
+///   topic:
+///     name: /data/OpportunityChangeEvent
+///     num_requested: 25
+///     durable_consumer_options:
+///       enabled: true
+///       managed_subscription: false
+///       name: OpportunityProcessor
+/// ```
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Subscriber {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to credentials file containing Salesforce authentication details.
+    pub credentials_path: PathBuf,
+    /// Topic configuration including name and subscription options.
+    pub topic: Topic,
+    /// Optional Salesforce Pub/Sub endpoint (e.g., "api.pubsub.salesforce.com:7443" or "api.deu.pubsub.salesforce.com:7443").
+    pub endpoint: Option<String>,
+    /// Timeout for waiting on flow completion before considering the event failed.
+    /// If not specified, waits indefinitely for flow completion.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<std::time::Duration>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl ConfigExt for Subscriber {}
+
+/// A Pub/Sub topic and how it is read.
+///
+/// Topic names: `/event/CustomEvent__e` for platform events,
+/// `/data/AccountChangeEvent` for change data capture.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Topic {
+    /// Full topic name including namespace (e.g., "/event/Account_Change__e").
+    pub name: String,
+    /// Optional durable consumer configuration for reliable message processing.
+    pub durable_consumer_options: Option<DurableConsumerOptions>,
+    /// Number of messages to request per batch (server default if not specified).
+    pub num_requested: Option<i32>,
+}
+
+/// Where to start reading events when no replay ID is available.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayPreset {
+    /// Start from the latest events (default).
+    #[default]
+    Latest,
+    /// Start from the earliest available events in the retention window.
+    Earliest,
+}
+
+impl ReplayPreset {
+    /// The preset's value in the gRPC API.
+    pub fn to_i32(&self) -> i32 {
+        match self {
+            ReplayPreset::Latest => 0,
+            ReplayPreset::Earliest => 1,
+        }
+    }
+}
+
+/// Durable consumer options: the position in the topic is kept, by
+/// Salesforce for a managed subscription, or as a cached replay ID.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableConsumerOptions {
+    /// Whether to enable durable consumer functionality for reliable message processing.
+    pub enabled: bool,
+    /// Whether Salesforce should automatically manage the subscription lifecycle.
+    pub managed_subscription: bool,
+    /// Unique name for this durable consumer subscription (must be unique within the org).
+    pub name: String,
+    /// Where to start reading events when no replay ID is cached (defaults to Latest).
+    #[serde(default)]
+    pub replay_preset: ReplayPreset,
+}
+
+/// Sanitizes a topic name to create a valid cache key.
 /// Removes leading/trailing slashes and replaces internal slashes with hyphens.
 fn sanitize_topic_name(topic_name: &str) -> String {
     topic_name.trim_matches('/').replace('/', "-")
-}
-
-/// Errors that can occur during Salesforce Pub/Sub subscription operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    #[error("Pub/Sub error: {source}")]
-    PubSub {
-        #[source]
-        source: PubSubError,
-    },
-    #[error(transparent)]
-    Connect(#[from] crate::client::Error),
-    #[error("Event error: {source}")]
-    Event {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-    #[error("Async task join failed: {source}")]
-    TaskJoin {
-        #[source]
-        source: tokio::task::JoinError,
-    },
-    #[error("Error sending event message: {source}")]
-    SendMessage {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-    #[error("Binary encoding error: {source}")]
-    Bincode {
-        #[source]
-        source: bincode::Error,
-    },
-    #[error("Service error: {source}")]
-    Service {
-        #[source]
-        source: flowgen_core::service::Error,
-    },
-    #[error("Missing required attribute: {}", _0)]
-    MissingBuilderAttribute(String),
-    #[error("JSON error: {source}")]
-    Serde {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
-    #[error("Stream ended unexpectedly, connection may have been lost")]
-    StreamEnded,
-    #[error("Config template rendering error: {source}")]
-    ConfigRender {
-        #[source]
-        source: flowgen_core::config::Error,
-    },
-    #[error("Managed subscription requires durable_consumer_options to be configured")]
-    MissingManagedSubscriptionConfig,
-    #[error(
-        "Client registry type mismatch — same credentials used with incompatible client types"
-    )]
-    ClientRegistryMismatch,
-}
-
-/// Processes events from a single Salesforce Pub/Sub topic.
-///
-/// Subscribes to a topic, deserializes Avro payloads, and forwards events
-/// to the event channel. Supports durable consumers with replay ID caching.
-pub struct EventHandler {
-    /// Salesforce Pub/Sub client context
-    pubsub: Arc<Mutex<salesforce_core::pubsubapi::Client>>,
-    /// Same key `init()` used to cache the Salesforce client, so `run()` can
-    /// evict the exact entry that may be stale rather than recomputing it
-    /// (and risking drift if `credentials_path` is templated).
-    client_key: flowgen_core::client_registry::ClientKey,
-    /// Key for the shared gRPC channel. Evicted alongside `client_key` on
-    /// reconnect: the cached channel is the thing that just died, and
-    /// leaving it in place would hand every retry the same dead connection.
-    channel_key: flowgen_core::client_registry::ClientKey,
-    /// Subscriber configuration
-    config: Arc<super::config::Subscriber>,
-    /// Channel sender for processed events
-    tx: Option<Sender<Event>>,
-    /// Task identifier for event tracking
-    task_id: usize,
-    /// Task type for event categorization and logging.
-    task_type: &'static str,
-    /// Task execution context providing metadata and runtime configuration.
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 /// Checks if a gRPC error is due to an invalid/corrupted replay ID.
@@ -127,14 +138,25 @@ fn is_replay_id_error(error: &PubSubError) -> bool {
     false
 }
 
-/// Checks if a gRPC error is due to invalid authentication.
-fn is_auth_error(error: &PubSubError) -> bool {
-    if let PubSubError::Tonic(status) = error {
-        let message = status.message();
-        return message.contains("does not have valid authentication credentials")
-            || message.contains("authentication exception occurred");
-    }
-    false
+/// Processes events from a single Salesforce Pub/Sub topic.
+///
+/// Subscribes to a topic, deserializes Avro payloads, and forwards events
+/// to the event channel. Supports durable consumers with replay ID caching.
+pub struct EventHandler {
+    /// Pub/Sub client and the registry keys to evict on reconnect: the cached
+    /// channel or client may be what just died, and leaving them in place
+    /// would hand every retry the same dead connection.
+    pubsub: PubSub,
+    /// Subscriber configuration
+    config: Arc<Subscriber>,
+    /// Channel sender for processed events
+    tx: Option<Sender<Event>>,
+    /// Task identifier for event tracking
+    task_id: usize,
+    /// Task type for event categorization and logging.
+    task_type: &'static str,
+    /// Task execution context providing metadata and runtime configuration.
+    task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
 
 impl EventHandler {
@@ -187,7 +209,6 @@ impl EventHandler {
                 // Spawn a task for each event to process them concurrently.
                 let handle = tokio::spawn(
                     async move {
-                        // Check cancellation before processing.
                         if cancellation_token.is_cancelled() {
                             return Ok(());
                         }
@@ -197,21 +218,18 @@ impl EventHandler {
                         // every leaf has signalled completion.
                         let (completion_state, completion_rx) = new_completion_channel(leaf_count);
 
-                        // Setup event data payload.
                         let data = AvroData {
                             schema,
                             raw_bytes: event.payload[..].to_vec(),
                         };
 
-                        // Build and send event.
                         let mut e = EventBuilder::new()
                             .data(EventData::Avro(data))
                             .subject(subject)
                             .id(event.id)
                             .task_id(task_id)
                             .task_type(task_type)
-                            .build()
-                            .map_err(|e| Error::Event { source: e })?;
+                            .build()?;
 
                         e.completion_tx = Some(completion_state);
 
@@ -224,7 +242,6 @@ impl EventHandler {
                             .await
                             .map_err(|source| Error::SendMessage { source })?;
 
-                        // Wait for flow completion.
                         // Failed flows skip replay_id advancement, allowing next fetch to retry from same position.
                         let success = match config.ack_timeout {
                             Some(timeout) => matches!(
@@ -258,7 +275,7 @@ impl EventHandler {
         let mut all_succeeded = true;
         for handle in handles {
             match handle.await {
-                Ok(Ok(())) => {} // Event succeeded.
+                Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     error!("Event processing failed: {}", e);
                     all_succeeded = false;
@@ -300,81 +317,62 @@ impl EventHandler {
     /// Fetches topic and schema info, establishes subscription with optional
     /// replay ID, then processes incoming events in a loop.
     async fn handle(self) -> Result<(), Error> {
-        // Get cache from task context.
         let cache = &self.task_context.cache;
         let flow_name = self.task_context.flow.identity();
         // `flow_key` keys the cache; `flow_name` stays human-readable for logs.
         let flow_key = self.task_context.flow.id();
-        // Get topic metadata.
-        let topic_info = self
-            .pubsub
+        let pubsub = &self.pubsub.client;
+        let topic_info = pubsub
             .lock()
             .await
             .get_topic(TopicRequest {
                 topic_name: self.config.topic.name.clone(),
             })
             .await
-            .map_err(|e| Error::PubSub { source: e })?
+            .map_err(|source| Error::PubSub { source })?
             .into_inner();
 
-        // Get schema for message deserialization.
-        let schema_info = self
-            .pubsub
+        let schema_info = pubsub
             .lock()
             .await
             .get_schema(SchemaRequest {
                 schema_id: topic_info.schema_id,
             })
             .await
-            .map_err(|e| Error::PubSub { source: e })?
+            .map_err(|source| Error::PubSub { source })?
             .into_inner();
 
-        // Set batch size for event fetching.
         let num_requested = match self.config.topic.num_requested {
             Some(num_requested) => num_requested,
             None => DEFAULT_NUM_REQUESTED,
         };
 
-        // Get topic name for later use.
         let topic_name = topic_info.topic_name.as_str();
 
-        // Determine subscription type and create appropriate stream.
-        let use_managed_subscription = self
+        let managed_subscription = self
             .config
             .topic
             .durable_consumer_options
             .as_ref()
-            .map(|opts| opts.enabled && opts.managed_subscription)
-            .unwrap_or(false);
+            .filter(|opts| opts.enabled && opts.managed_subscription);
 
-        if use_managed_subscription {
-            // Use managed subscription.
-            let durable_consumer_opts = self
-                .config
-                .topic
-                .durable_consumer_options
-                .as_ref()
-                .ok_or(Error::MissingManagedSubscriptionConfig)?;
-
+        if let Some(durable_consumer_opts) = managed_subscription {
             let managed_request = ManagedFetchRequest {
                 developer_name: durable_consumer_opts.name.clone(),
                 num_requested,
                 ..Default::default()
             };
 
-            let mut stream = self
-                .pubsub
+            let mut stream = pubsub
                 .lock()
                 .await
                 .managed_subscribe(managed_request)
                 .await
-                .map_err(|e| Error::PubSub { source: e })?
+                .map_err(|source| Error::PubSub { source })?
                 .into_inner();
 
-            // Process managed subscription events.
             while let Some(event) = stream.next().await {
                 if self.task_context.cancellation_token.is_cancelled() {
-                    drop(stream);
                     return Ok(());
                 }
 
@@ -391,7 +389,6 @@ impl EventHandler {
                     .await?;
 
                 if self.task_context.cancellation_token.is_cancelled() {
-                    drop(stream);
                     return Ok(());
                 }
             }
@@ -399,7 +396,6 @@ impl EventHandler {
             return Err(Error::StreamEnded);
         }
 
-        // Build fetch request with optional replay_id.
         let mut fetch_request = FetchRequest {
             topic_name: topic_name.to_string(),
             num_requested,
@@ -414,7 +410,6 @@ impl EventHandler {
             .as_ref()
             .filter(|opts| opts.enabled && !opts.managed_subscription)
         {
-            // Try to load cached replay_id, or use configured preset.
             let sanitized_topic = sanitize_topic_name(topic_name);
             let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
             let cached_replay_id = cache.get(&cache_key).await.ok();
@@ -434,74 +429,43 @@ impl EventHandler {
             }
         }
 
-        let mut stream = match self
-            .pubsub
-            .lock()
-            .await
-            .subscribe(fetch_request.clone())
-            .await
-        {
+        let subscribed = pubsub.lock().await.subscribe(fetch_request.clone()).await;
+        let mut stream = match subscribed {
             Ok(response) => response.into_inner(),
-            Err(e) => {
-                // Check if reconnect is needed (gRPC auth errors).
-                if is_auth_error(&e) {
-                    // Reconnect to get fresh OAuth token.
-                    {
-                        let mut pubsub = self.pubsub.lock().await;
-                        pubsub
-                            .reconnect()
-                            .await
-                            .map_err(|e| Error::PubSub { source: e })?;
-                    }
-
-                    // Retry subscribe with new credentials.
-                    match self
-                        .pubsub
-                        .lock()
-                        .await
-                        .subscribe(fetch_request.clone())
-                        .await
-                    {
-                        Ok(response) => response.into_inner(),
-                        Err(e) => {
-                            // If it still fails, return error to trigger full retry.
-                            return Err(Error::PubSub { source: e });
-                        }
-                    }
-                } else if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) {
-                    // If subscribe fails due to invalid replay_id, clear it from cache and let retry handle it.
-                    warn!("Invalid replay_id detected, clearing from cache and retrying");
-
-                    // Clear the invalid replay_id from cache so next retry starts fresh.
-                    if self
-                        .config
-                        .topic
-                        .durable_consumer_options
-                        .as_ref()
-                        .is_some_and(|opts| opts.enabled && !opts.managed_subscription)
-                    {
-                        let sanitized_topic = sanitize_topic_name(topic_name);
-                        let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
-                        if let Err(e) = cache.delete(&cache_key).await {
-                            error!(
-                                "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
-                                flow_name, topic_name, e
-                            );
-                        }
-                    }
-
-                    // Return error to trigger retry with fresh connection.
-                    return Err(Error::PubSub { source: e });
-                } else {
-                    // Return error to trigger retry with fresh connection.
-                    return Err(Error::PubSub { source: e });
-                }
+            Err(e) if crate::processor::is_pubsub_auth_error(&e) => {
+                // Reconnect to get a fresh OAuth token, then subscribe once more.
+                pubsub
+                    .lock()
+                    .await
+                    .reconnect()
+                    .await
+                    .map_err(|source| Error::PubSub { source })?;
+                pubsub
+                    .lock()
+                    .await
+                    .subscribe(fetch_request.clone())
+                    .await
+                    .map_err(|source| Error::PubSub { source })?
+                    .into_inner()
             }
+            Err(e) if !fetch_request.replay_id.is_empty() && is_replay_id_error(&e) => {
+                // Clear the invalid replay_id so the next attempt starts fresh.
+                warn!("Invalid replay_id detected, clearing from cache and retrying");
+                let sanitized_topic = sanitize_topic_name(topic_name);
+                let cache_key = format!("flow.{flow_key}.replay_id.{sanitized_topic}");
+                if let Err(e) = cache.delete(&cache_key).await {
+                    error!(
+                        "Failed to delete invalid replay_id from cache for flow {} topic {}: {}",
+                        flow_name, topic_name, e
+                    );
+                }
+                return Err(Error::PubSub { source: e });
+            }
+            Err(source) => return Err(Error::PubSub { source }),
         };
 
         while let Some(event) = stream.next().await {
             if self.task_context.cancellation_token.is_cancelled() {
-                drop(stream);
                 return Ok(());
             }
 
@@ -518,7 +482,6 @@ impl EventHandler {
                 .await?;
 
             if self.task_context.cancellation_token.is_cancelled() {
-                drop(stream);
                 return Ok(());
             }
         }
@@ -527,107 +490,40 @@ impl EventHandler {
     }
 }
 
-/// Manages multiple Salesforce Pub/Sub topic subscriptions.
-///
-/// Creates TopicListener instances for each configured topic,
-/// handling authentication and connection setup.
+/// Subscribes to a Salesforce Pub/Sub topic, reconnecting with backoff
+/// whenever the stream fails.
 #[derive(Debug)]
-pub struct Subscriber {
-    /// Configuration for topics, credentials, and consumer options
-    config: Arc<super::config::Subscriber>,
-    /// Event channel sender
+pub struct Processor {
+    config: Arc<Subscriber>,
     tx: Option<Sender<Event>>,
-    /// Task identifier for event tracking
     task_id: usize,
-    /// Task execution context providing metadata and runtime configuration.
     task_context: Arc<flowgen_core::task::context::TaskContext>,
-    /// Task type for event categorization and logging.
     task_type: &'static str,
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Subscriber {
+impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
-    /// Initializes the subscriber by establishing connections and authentication.
-    ///
-    /// This method performs all setup operations that can fail, including:
-    /// - Creating gRPC service connection
-    /// - Authenticating with Salesforce
-    /// - Building Pub/Sub context
     async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
+        let config = self
             .config
-            .render(&serde_json::json!({}))
+            .render(&serde_json::Map::new())
             .map_err(|source| Error::ConfigRender { source })?;
-
-        // Determine Pub/Sub endpoint.
-        let endpoint = match &init_config.endpoint {
-            Some(endpoint) => endpoint.clone(),
-            None => format!(
-                "{}:{}",
-                super::config::DEFAULT_PUBSUB_URL,
-                super::config::DEFAULT_PUBSUB_PORT
-            ),
-        };
-
-        // One gRPC channel per endpoint, shared through the client registry.
-        // `Channel` is a cheap handle over a connection pool, so clones
-        // multiplex onto the same HTTP/2 connection instead of each
-        // subscription opening its own — several subscriptions against one
-        // org otherwise hold several TLS connections open, each running its
-        // own keepalive whether or not events are flowing.
-        let channel_key = flowgen_core::client_registry::ClientKeyBuilder::new("salesforce_pubsub")
-            .field("grpc_endpoint", &endpoint)
-            .build();
-        let channel = self
-            .task_context
-            .client_registry
-            .get_or_init(channel_key.clone(), || async {
-                let service = flowgen_core::service::ServiceBuilder::new()
-                    .endpoint(endpoint)
-                    .build()
-                    .map_err(|e| Error::Service { source: e })?
-                    .connect()
-                    .await
-                    .map_err(|e| Error::Service { source: e })?;
-                service.channel.ok_or_else(|| Error::Service {
-                    source: flowgen_core::service::Error::MissingEndpoint(),
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                flowgen_core::client_registry::Error::Init { source } => source,
-                flowgen_core::client_registry::Error::TypeMismatch => Error::ClientRegistryMismatch,
-            })?;
-        let channel = (*channel).clone();
-
-        // Authenticate with Salesforce (shared via client registry).
-        let client_key = crate::client::key(self.task_type, &init_config.credentials_path);
-        let sfdc_client = crate::client::connect(
+        let pubsub = PubSub::connect(
             &self.task_context,
             self.task_type,
-            &init_config.credentials_path,
+            &config.credentials_path,
+            config.endpoint.as_deref(),
         )
         .await?;
 
-        // Create Pub/Sub context.
-        let pubsub = {
-            let guard = sfdc_client.lock().await;
-            salesforce_core::pubsubapi::Client::new(channel, guard.clone())
-                .map_err(|e| Error::PubSub { source: e })?
-        };
-        let pubsub = Arc::new(Mutex::new(pubsub));
-
-        // Create event handler.
         Ok(EventHandler {
-            client_key,
-            channel_key,
+            pubsub,
             config: Arc::clone(&self.config),
             task_id: self.task_id,
             tx: self.tx.clone(),
-            pubsub,
             task_type: self.task_type,
             task_context: Arc::clone(&self.task_context),
         })
@@ -642,23 +538,19 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
         let mut lost_connectivity = false;
 
-        // Infinite retry loop: subscribers must maintain connectivity indefinitely.
+        // Subscribers must keep connectivity for as long as the task runs.
         loop {
             if cancellation_token.is_cancelled() {
                 return Ok(());
             }
 
-            // Initialize with circuit breaker to detect permanent errors (bad credentials, etc.).
             let init_future = tokio_retry::Retry::spawn(
                 retry_config.init_strategy(self.task_context.startup_delay),
                 || async {
-                    match self.init().await {
-                        Ok(handler) => Ok(handler),
-                        Err(e) => {
-                            error!(error = %e, "Subscriber initialization failed");
-                            Err(tokio_retry::RetryError::transient(e))
-                        }
-                    }
+                    self.init().await.map_err(|e| {
+                        error!(error = %e, "Subscriber initialization failed");
+                        tokio_retry::RetryError::transient(e)
+                    })
                 },
             );
 
@@ -687,13 +579,12 @@ impl flowgen_core::task::runner::Runner for Subscriber {
                 },
             };
 
-            // Run event loop until failure, then reinitialize.
-            let client_key = event_handler.client_key.clone();
-            let channel_key = event_handler.channel_key.clone();
-            let handle_future = event_handler.handle();
+            // Run the event loop until it fails, then reinitialize.
+            let client_key = event_handler.pubsub.client_key.clone();
+            let channel_key = event_handler.pubsub.channel_key.clone();
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
-                result = handle_future => match result {
+                result = event_handler.handle() => match result {
                     Ok(()) => warn!("Subscriber lost connectivity, reinitializing"),
                     Err(e) => error!(error = %e, "Subscriber lost connectivity, reinitializing"),
                 },
@@ -716,48 +607,41 @@ impl flowgen_core::task::runner::Runner for Subscriber {
     }
 }
 
-/// Builder for constructing Subscriber instances.
+/// Builds a [`Processor`].
 #[derive(Default)]
-pub struct SubscriberBuilder {
-    /// Subscriber configuration
-    config: Option<Arc<super::config::Subscriber>>,
-    /// Event channel sender
+pub struct ProcessorBuilder {
+    config: Option<Arc<Subscriber>>,
     tx: Option<Sender<Event>>,
-    /// Task identifier
     task_id: usize,
-    /// Task execution context providing metadata and runtime configuration
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
-    /// Task type for event categorization and logging.
     task_type: Option<&'static str>,
 }
 
-impl SubscriberBuilder {
-    /// Creates a new builder instance.
-    pub fn new() -> SubscriberBuilder {
-        SubscriberBuilder {
-            ..Default::default()
-        }
+impl ProcessorBuilder {
+    /// An empty builder.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Sets the subscriber configuration.
-    pub fn config(mut self, config: Arc<super::config::Subscriber>) -> Self {
+    /// The task's config.
+    pub fn config(mut self, config: Arc<Subscriber>) -> Self {
         self.config = Some(config);
         self
     }
 
-    /// Sets the event channel sender.
+    /// Where the task sends events.
     pub fn sender(mut self, sender: Sender<Event>) -> Self {
         self.tx = Some(sender);
         self
     }
 
-    /// Sets the current task ID.
+    /// The task's position in its flow.
     pub fn task_id(mut self, task_id: usize) -> Self {
         self.task_id = task_id;
         self
     }
 
-    /// Sets the task execution context.
+    /// The flow's shared context: cache, retry defaults, cancellation.
     pub fn task_context(
         mut self,
         task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -766,26 +650,26 @@ impl SubscriberBuilder {
         self
     }
 
-    /// Sets the task type.
+    /// The task type, as written in the flow.
     pub fn task_type(mut self, task_type: &'static str) -> Self {
         self.task_type = Some(task_type);
         self
     }
 
-    /// Builds the Subscriber instance.
-    pub async fn build(self) -> Result<Subscriber, Error> {
-        Ok(Subscriber {
+    /// The processor, or the first missing attribute.
+    pub fn build(self) -> Result<Processor, Error> {
+        Ok(Processor {
             config: self
                 .config
-                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("config"))?,
             tx: self.tx,
             task_id: self.task_id,
             task_context: self
                 .task_context
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("task_context"))?,
             task_type: self
                 .task_type
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
+                .ok_or(Error::MissingBuilderAttribute("task_type"))?,
         })
     }
 }
@@ -793,95 +677,61 @@ impl SubscriberBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pubsubapi::config;
-    use serde_json::{Map, Value};
-    use std::path::PathBuf;
-    use tokio::sync::mpsc;
-
-    /// Creates a mock TaskContext for testing.
-    fn create_mock_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
-        let mut labels = Map::new();
-        labels.insert(
-            "description".to_string(),
-            Value::String("Clone Test".to_string()),
-        );
-        let task_manager = Arc::new(
-            flowgen_core::task::manager::TaskManagerBuilder::new()
-                .build()
-                .unwrap(),
-        );
-        let cache = Arc::new(flowgen_core::cache::memory::MemoryCache::new())
-            as Arc<dyn flowgen_core::cache::Cache>;
-        Arc::new(
-            flowgen_core::task::context::TaskContextBuilder::new()
-                .flow_name("test-flow".to_string())
-                .flow_labels(Some(labels))
-                .task_manager(task_manager)
-                .cache(cache)
-                .build()
-                .unwrap(),
-        )
-    }
 
     #[test]
     fn test_sanitize_topic_name() {
-        // Test with leading slash.
         assert_eq!(sanitize_topic_name("/event/Test__e"), "event-Test__e");
-
-        // Test with leading and trailing slashes.
         assert_eq!(sanitize_topic_name("/data/MyData/"), "data-MyData");
-
-        // Test with multiple slashes.
         assert_eq!(
             sanitize_topic_name("/event/BulkApi2JobEvent"),
             "event-BulkApi2JobEvent"
         );
-
-        // Test without slashes.
         assert_eq!(sanitize_topic_name("simple"), "simple");
-
-        // Test with only slashes.
         assert_eq!(sanitize_topic_name("///"), "");
     }
 
-    #[tokio::test]
-    async fn test_subscriber_builder() {
-        let config = Arc::new(config::Subscriber {
+    #[test]
+    fn a_builder_without_a_config_fails() {
+        let result = ProcessorBuilder::new().task_type("test").build();
+        assert!(matches!(
+            result,
+            Err(Error::MissingBuilderAttribute("config"))
+        ));
+    }
+
+    #[test]
+    fn test_subscriber_config_serialization() {
+        let subscriber = Subscriber {
             name: "test_subscriber".to_string(),
             credentials_path: PathBuf::from("test_creds"),
-            topic: config::Topic {
+            topic: Topic {
                 name: "/event/Test__e".to_string(),
-                durable_consumer_options: None,
-                num_requested: Some(10),
+                durable_consumer_options: Some(DurableConsumerOptions {
+                    enabled: true,
+                    managed_subscription: false,
+                    name: "TestConsumer".to_string(),
+                    replay_preset: ReplayPreset::Latest,
+                }),
+                num_requested: Some(50),
             },
-            endpoint: None,
+            endpoint: Some("api.pubsub.salesforce.com:7443".to_string()),
             ack_timeout: None,
             depends_on: None,
             retry: None,
-        });
-        let (tx, _) = mpsc::channel::<Event>(10);
+        };
 
-        // Success case.
-        let subscriber = SubscriberBuilder::new()
-            .config(config.clone())
-            .sender(tx.clone())
-            .task_id(1)
-            .task_type("test")
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-        assert!(subscriber.is_ok());
+        let json = serde_json::to_string(&subscriber).unwrap();
+        let deserialized: Subscriber = serde_json::from_str(&json).unwrap();
+        assert_eq!(subscriber, deserialized);
+    }
 
-        // Error case - missing config.
-        let (tx2, _rx2) = mpsc::channel::<Event>(10);
-        let result = SubscriberBuilder::new()
-            .sender(tx2)
-            .task_context(create_mock_task_context())
-            .build()
-            .await;
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::MissingBuilderAttribute(_)
-        ));
+    #[test]
+    fn replay_presets_map_to_the_grpc_values() {
+        assert_eq!(ReplayPreset::Latest.to_i32(), 0);
+        assert_eq!(ReplayPreset::Earliest.to_i32(), 1);
+        assert_eq!(
+            serde_json::from_str::<ReplayPreset>("\"earliest\"").unwrap(),
+            ReplayPreset::Earliest
+        );
     }
 }

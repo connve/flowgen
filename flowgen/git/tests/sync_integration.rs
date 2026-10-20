@@ -15,8 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flowgen_core::event::{Event, EventBuilder, EventData};
-use flowgen_git::sync::config::Processor as GitSyncConfig;
-use flowgen_git::sync::processor::ProcessorBuilder;
+use flowgen_git::sync::{GitSync, ProcessorBuilder};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -160,7 +159,7 @@ fn test_task_context() -> Arc<flowgen_core::task::context::TaskContext> {
 /// HEAD-commit cache-skip test observes the second run seeing no
 /// events.
 async fn run_once(
-    config: Arc<GitSyncConfig>,
+    config: Arc<GitSync>,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 ) -> Vec<Event> {
     let (trigger_tx, trigger_rx) = mpsc::channel(8);
@@ -213,8 +212,8 @@ async fn run_once(
     events
 }
 
-fn base_config(url: &str, clone_path: PathBuf) -> GitSyncConfig {
-    GitSyncConfig {
+fn base_config(url: &str, clone_path: PathBuf) -> GitSync {
+    GitSync {
         name: "sync".to_string(),
         repository_url: url.to_string(),
         branch: "main".to_string(),

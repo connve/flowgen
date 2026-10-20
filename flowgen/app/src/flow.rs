@@ -31,7 +31,8 @@
 //! while background tasks receive from a different channel.
 
 use crate::config::{FlowConfig, TaskType};
-use flowgen_core::{event::Event, task::runner::Runner};
+use flowgen_core::event::Event;
+use flowgen_core::task::context::Services;
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, info, warn, Instrument};
@@ -44,69 +45,12 @@ const CHANNEL_CAPACITY: usize = 1;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Error in convert processor task.
-    #[error(transparent)]
-    ConverProcessor(#[from] flowgen_core::task::convert::processor::Error),
-    /// Error in iterate processor task.
-    #[error(transparent)]
-    IterateProcessor(#[from] flowgen_core::task::iterate::processor::Error),
-    /// Error in log processor task.
-    #[error(transparent)]
-    LogProcessor(#[from] flowgen_core::task::log::processor::Error),
-    /// Error in script processor task.
-    #[error(transparent)]
-    ScriptProcessor(#[from] flowgen_core::task::script::processor::Error),
-    /// Error in buffer processor task.
-    #[error(transparent)]
-    BufferProcessor(#[from] flowgen_core::task::buffer::processor::Error),
-    /// Error in Salesforce Pub/Sub API subscriber task.
-    #[error(transparent)]
-    SalesforcePubSubSubscriber(#[from] flowgen_salesforce::pubsubapi::subscriber::Error),
-    /// Error in Salesforce Pub/Sub API publisher task.
-    #[error(transparent)]
-    SalesforcePubsubPublisher(#[from] flowgen_salesforce::pubsubapi::publisher::Error),
-    /// Error in HTTP request processor task.
-    #[error(transparent)]
-    HttpRequestProcessor(#[from] flowgen_http::request::Error),
-    /// Error in HTTP endpoint processor task.
-    #[error(transparent)]
-    HttpEndpointProcessor(#[from] flowgen_http::endpoint::Error),
-    /// Error in HTML scrape processor task.
-    #[error(transparent)]
-    HtmlScrapeProcessor(#[from] flowgen_html::scrape::processor::Error),
-    /// Error in HTTP server task.
-    #[error(transparent)]
-    HttpServer(#[from] flowgen_core::http_server::Error),
-    /// Error in NATS JetStream publisher task.
-    #[error(transparent)]
-    NatsJetStreamPublisher(#[from] flowgen_nats::jetstream::publisher::Error),
-    /// Error in NATS JetStream subscriber task.
-    #[error(transparent)]
-    NatsJetStreamSubscriber(#[from] flowgen_nats::jetstream::subscriber::Error),
-    /// Error in object store read task.
-    #[error(transparent)]
-    ObjectStoreRead(#[from] flowgen_object_store::read::Error),
-    /// Error in object store write task.
-    #[error(transparent)]
-    ObjectStoreWrite(#[from] flowgen_object_store::write::Error),
-    /// Error in object store list task.
-    #[error(transparent)]
-    ObjectStoreList(#[from] flowgen_object_store::list::Error),
-    /// Error in object store move task.
-    #[error(transparent)]
-    ObjectStoreMove(#[from] flowgen_object_store::r#move::Error),
-    /// Error in generate subscriber task.
-    #[error(transparent)]
-    GenerateSubscriber(#[from] flowgen_core::task::generate::subscriber::Error),
-    /// Error in inproc endpoint task.
-    #[error(transparent)]
-    InprocEndpoint(#[from] flowgen_core::task::inproc::endpoint::Error),
-    /// Error in inproc request task.
-    #[error(transparent)]
-    InprocRequest(#[from] flowgen_core::task::inproc::request::Error),
-    /// Error in cache operations.
-    #[error(transparent)]
-    Cache(#[from] flowgen_nats::cache::Error),
+    /// A task failed, with the error of the crate that owns it.
+    #[error("Task {task_type} failed: {source}")]
+    Task {
+        task_type: &'static str,
+        source: flowgen_core::task::TaskError,
+    },
     /// Missing required builder attribute.
     #[error("Missing required builder attribute: {0}")]
     MissingBuilderAttribute(String),
@@ -128,90 +72,6 @@ pub enum Error {
     /// Leadership channel closed unexpectedly.
     #[error("Leadership channel closed unexpectedly")]
     LeadershipChannelClosed,
-    /// Error in Salesforce Bulk API query job operations.
-    #[error(transparent)]
-    SalesforceBulkApiQueryJob(#[from] flowgen_salesforce::bulkapi::query_job::Error),
-    /// Error in Salesforce REST API SObject operations.
-    #[error(transparent)]
-    SalesforceRestApiSObject(#[from] flowgen_salesforce::restapi::sobject::Error),
-    /// Error in Salesforce REST API Composite operations.
-    #[error(transparent)]
-    SalesforceRestApiComposite(#[from] flowgen_salesforce::restapi::composite::Error),
-    /// Error in Salesforce REST API SOSL search operations.
-    #[error(transparent)]
-    SalesforceRestApiSearch(#[from] flowgen_salesforce::restapi::search::Error),
-    /// Error in Salesforce REST API SOQL query operations.
-    #[error(transparent)]
-    SalesforceRestApiQuery(#[from] flowgen_salesforce::restapi::query::Error),
-    /// Error in Salesforce SOAP API merge operations.
-    #[error(transparent)]
-    SalesforceSoapApiMerge(#[from] flowgen_salesforce::soapapi::merge::Error),
-    /// Error in Salesforce Tooling API operations.
-    #[error(transparent)]
-    SalesforceTooling(#[from] flowgen_salesforce::toolingapi::processor::Error),
-    /// Error in GCP BigQuery query task.
-    #[error(transparent)]
-    GcpBigQueryQuery(#[from] flowgen_gcp::bigquery::query::Error),
-    /// Error in GCP BigQuery Storage Read task.
-    #[error(transparent)]
-    GcpBigQueryStorageRead(#[from] flowgen_gcp::bigquery::storage_read::Error),
-    /// Error in GCP BigQuery unified job operations.
-    #[error(transparent)]
-    GcpBigQueryJob(#[from] flowgen_gcp::bigquery::job::Error),
-    /// Error in GCP BigQuery Storage Write task.
-    #[error(transparent)]
-    GcpBigQueryStorageWrite(#[from] flowgen_gcp::bigquery::storage_write::Error),
-    /// Error in Microsoft SQL Server query task.
-    #[error(transparent)]
-    MssqlQuery(#[from] flowgen_mssql::query::Error),
-    /// Error in AI completion task.
-    #[error(transparent)]
-    AiCompletion(#[from] flowgen_ai_agent::completion::processor::Error),
-    /// Error in MCP tool processor task.
-    #[error(transparent)]
-    McpToolProcessor(#[from] flowgen_mcp::processor::Error),
-    /// Error in MCP resource processor task.
-    #[error(transparent)]
-    McpResourceProcessor(#[from] flowgen_mcp::resource::processor::Error),
-    /// Error in MCP prompt processor task.
-    #[error(transparent)]
-    McpPromptProcessor(#[from] flowgen_mcp::prompt::processor::Error),
-    /// Error in NATS KV store task.
-    #[error(transparent)]
-    NatsKvStore(#[from] flowgen_nats::jetstream::kv_store::Error),
-    /// Error in AI gateway task.
-    #[error(transparent)]
-    LlmProxy(#[from] flowgen_ai_agent::ai_gateway::llm_proxy::Error),
-    /// Error in Git sync task.
-    #[error(transparent)]
-    GitSync(#[from] flowgen_git::sync::processor::Error),
-    /// Error in OCI sync task.
-    #[error(transparent)]
-    OciSync(#[from] flowgen_oci::sync::processor::Error),
-    /// Error in Git push task.
-    #[error(transparent)]
-    GitPush(#[from] flowgen_git::push::processor::Error),
-    /// Error in OCI push task.
-    #[error(transparent)]
-    OciPush(#[from] flowgen_oci::push::processor::Error),
-    /// Error in a Braze task.
-    #[error(transparent)]
-    Braze(#[from] flowgen_braze::processor::Error),
-    /// Error in a Klaviyo task.
-    #[error(transparent)]
-    Klaviyo(#[from] flowgen_klaviyo::processor::Error),
-    /// Error in MongoDB collection task.
-    #[error(transparent)]
-    MongoDbCollection(#[from] flowgen_mongodb::collection::Error),
-    /// Error in MongoDB change stream task.
-    #[error(transparent)]
-    MongoDbChangeStream(#[from] flowgen_mongodb::change_stream::Error),
-    /// Error in Kafka produce task.
-    #[error(transparent)]
-    KafkaProduce(#[from] flowgen_kafka::produce::Error),
-    /// Error in Kafka subscribe task.
-    #[error(transparent)]
-    KafkaSubscribe(#[from] flowgen_kafka::subscribe::Error),
     /// Failed to store background task handles for later monitoring.
     #[error("Error storing background task handles")]
     BackgroundHandlesStoreFailed,
@@ -221,15 +81,6 @@ pub enum Error {
     /// Failed to retrieve background task handles for monitoring.
     #[error("Error retrieving background task handles")]
     BackgroundHandlesRetrieveFailed,
-    /// Flow cannot be initialized because HTTP server is not enabled.
-    #[error("Flow cannot be initialized as http_server is not enabled")]
-    HttpServerNotEnabled,
-    /// Flow cannot be initialized because MCP server is not enabled.
-    #[error("Flow cannot be initialized as mcp_server is not configured. Add worker.mcp_server to config or remove mcp_tool/mcp_resource/mcp_prompt tasks.")]
-    McpServerNotEnabled,
-    /// Flow cannot be initialized because AI gateway server is not enabled.
-    #[error("Flow cannot be initialized as ai_gateway is not configured. Add worker.ai_gateway to config or remove llm_proxy tasks.")]
-    AiGatewayServerNotEnabled,
     /// Flow configuration error (duplicate task names, invalid dependencies, etc.).
     #[error("Flow configuration error: {0}")]
     ConfigError(String),
@@ -566,12 +417,8 @@ impl TaskRegistryBuilder {
 pub struct Flow {
     /// The flow's static configuration, loaded from a file.
     pub config: Arc<FlowConfig>,
-    /// An optional shared webhook HTTP server, passed in from the main application.
-    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
-    /// An optional shared MCP server, passed in from the main application.
-    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
-    /// An optional shared AI gateway server, passed in from the main application.
-    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Shared servers tasks register with, passed in from the main application.
+    services: Services,
     /// Shared runtime cache, passed in from the main application. Holds
     /// per-flow state (replay IDs, counters, last-run timestamps, business
     /// data) and is exposed to user scripts via `ctx.cache`.
@@ -674,28 +521,11 @@ impl Flow {
             return Ok(()); // Already initialized
         }
 
-        // Validate: Flow with http_endpoint tasks requires HTTP server to be configured.
-        let has_webhook_tasks = self
-            .config
-            .flow
-            .tasks
-            .iter()
-            .any(|task| matches!(task, TaskType::http_endpoint(_) | TaskType::llm_proxy(_)));
-
-        if has_webhook_tasks && self.http_server.is_none() {
-            return Err(Error::HttpServerNotEnabled);
-        }
-
-        // Validate: any MCP registration task requires the MCP server.
-        let has_mcp_tasks = self.config.flow.tasks.iter().any(|task| {
-            matches!(
-                task,
-                TaskType::mcp_tool(_) | TaskType::mcp_resource(_) | TaskType::mcp_prompt(_)
-            )
-        });
-
-        if has_mcp_tasks && self.mcp_server.is_none() {
-            return Err(Error::McpServerNotEnabled);
+        for task in &self.config.flow.tasks {
+            task.check(&self.services).map_err(|source| Error::Task {
+                task_type: task.as_str(),
+                source,
+            })?;
         }
 
         // Create an Executor backed by the system cache. Lease keys must
@@ -750,7 +580,8 @@ impl Flow {
             .resource_loader(self.resource_loader.clone())
             .cancellation_token(cancellation_token)
             .client_registry(Arc::clone(&self.client_registry))
-            .inproc(Arc::clone(&self.inproc));
+            .inproc(Arc::clone(&self.inproc))
+            .services(self.services.clone());
 
         if let Some(retry_config) = &self.retry {
             task_context_builder = task_context_builder.retry(retry_config.clone());
@@ -802,33 +633,14 @@ impl Flow {
         // Separate blocking (setup) tasks from background tasks.
         let (blocking_tasks, background_tasks) = registry.partition();
 
-        // Spawn all blocking tasks (webhooks).
-        let mut blocking_handles = Vec::new();
-        for task_desc in blocking_tasks {
-            let handle = spawn_task(
-                task_desc,
-                task_context.clone(),
-                self.http_server.clone(),
-                self.mcp_server.clone(),
-                self.ai_gateway_server.clone(),
-            )
-            .await?;
-            blocking_handles.push(handle);
-        }
-
-        // Spawn all background tasks.
-        let mut background_handles = Vec::new();
-        for task_desc in background_tasks {
-            let handle = spawn_task(
-                task_desc,
-                task_context.clone(),
-                self.http_server.clone(),
-                self.mcp_server.clone(),
-                self.ai_gateway_server.clone(),
-            )
-            .await?;
-            background_handles.push(handle);
-        }
+        let blocking_handles = blocking_tasks
+            .into_iter()
+            .map(|task_desc| spawn_task(task_desc, &task_context))
+            .collect();
+        let background_handles = background_tasks
+            .into_iter()
+            .map(|task_desc| spawn_task(task_desc, &task_context))
+            .collect();
 
         Ok(TaskHandles {
             blocking_handles,
@@ -855,33 +667,14 @@ impl Flow {
             all_background_tasks.extend(background_tasks);
         }
 
-        // Spawn all blocking tasks.
-        let mut blocking_handles = Vec::new();
-        for task_desc in all_blocking_tasks {
-            let handle = spawn_task(
-                task_desc,
-                task_context.clone(),
-                self.http_server.clone(),
-                self.mcp_server.clone(),
-                self.ai_gateway_server.clone(),
-            )
-            .await?;
-            blocking_handles.push(handle);
-        }
-
-        // Spawn all background tasks.
-        let mut background_handles = Vec::new();
-        for task_desc in all_background_tasks {
-            let handle = spawn_task(
-                task_desc,
-                task_context.clone(),
-                self.http_server.clone(),
-                self.mcp_server.clone(),
-                self.ai_gateway_server.clone(),
-            )
-            .await?;
-            background_handles.push(handle);
-        }
+        let blocking_handles = all_blocking_tasks
+            .into_iter()
+            .map(|task_desc| spawn_task(task_desc, &task_context))
+            .collect();
+        let background_handles = all_background_tasks
+            .into_iter()
+            .map(|task_desc| spawn_task(task_desc, &task_context))
+            .collect();
 
         Ok(TaskHandles {
             blocking_handles,
@@ -1174,1125 +967,26 @@ async fn fan_out(mut rx: mpsc::Receiver<Event>, mut branches: Vec<mpsc::Sender<E
     }
 }
 
-/// Spawns a single task based on its descriptor with proper channel wiring.
-///
-/// Returns a JoinHandle for the spawned task.
-async fn spawn_task(
+/// Spawns a task with its channels and a context sized for its place in the flow.
+fn spawn_task(
     task_desc: TaskDescriptor,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
-    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
-    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
-) -> Result<JoinHandle<Result<(), Error>>, Error> {
-    let task_id = task_desc.id;
-    let rx = task_desc.input_rx;
-    let tx = task_desc.output_tx;
-    let task_type_str = task_desc.task_type.as_str();
-    let span = tracing::Span::current();
-
-    // Each task receives a context whose `leaf_count` reflects the leaves
-    // reachable from this specific task's output. Source and intermediate
-    // tasks (such as iterate) read this value when constructing per-flow or
-    // per-element completion channels.
-    let task_context = {
-        let mut ctx = (*task_context).clone();
-        ctx.leaf_count = task_desc.downstream_leaves;
-        ctx.max_in_flight =
-            flowgen_core::task::runner::max_in_flight(task_desc.task_type.cpu_intensive());
-        // Stagger init for background tasks to avoid thundering-herd on
-        // external services. Blocking tasks (webhooks) and generate (cron)
-        // must start immediately.
-        if !task_desc.is_blocking && !matches!(task_desc.task_type, TaskType::generate(_)) {
-            let retry_config = flowgen_core::retry::RetryConfig::merge(&ctx.retry, &None);
-            ctx.startup_delay = Some(retry_config.startup_jitter());
-        }
-        Arc::new(ctx)
+    task_context: &Arc<flowgen_core::task::context::TaskContext>,
+) -> TaskHandle {
+    let task_type = task_desc.task_type;
+    let mut context = (**task_context).clone();
+    context.leaf_count = task_desc.downstream_leaves;
+    context.max_in_flight = flowgen_core::task::runner::max_in_flight(task_type.cpu_intensive());
+    if !task_type.starts_at_once() {
+        let retry_config = flowgen_core::retry::RetryConfig::merge(&context.retry, &None);
+        context.startup_delay = Some(retry_config.startup_jitter());
+    }
+    let io = flowgen_core::task::TaskIo {
+        task_id: task_desc.id,
+        task_type: task_type.as_str(),
+        rx: task_desc.input_rx,
+        tx: task_desc.output_tx,
     };
-
-    let handle = match task_desc.task_type {
-        TaskType::convert(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_core::task::convert::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::iterate(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_core::task::iterate::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::log(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_core::task::log::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::buffer(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_core::task::buffer::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::script(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_core::task::script::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::generate(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_core::task::generate::subscriber::SubscriberBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::inproc_endpoint(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_core::task::inproc::endpoint::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::inproc_request(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_core::task::inproc::request::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::http_request(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_http::request::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::http_endpoint(config) => {
-            let config = Arc::new(config);
-            let http_server = http_server.clone().ok_or(Error::HttpServerNotEnabled)?;
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_http::endpoint::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context)
-                        .http_server(http_server);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::html_scrape(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_html::scrape::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::nats_jetstream_subscriber(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_nats::jetstream::subscriber::SubscriberBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::nats_jetstream_publisher(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_nats::jetstream::publisher::PublisherBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_pubsubapi_subscriber(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_salesforce::pubsubapi::subscriber::SubscriberBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_pubsubapi_publisher(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_salesforce::pubsubapi::publisher::PublisherBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_bulkapi_query_job(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_salesforce::bulkapi::query_job::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_restapi_sobject(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_salesforce::restapi::sobject::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_restapi_composite(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_salesforce::restapi::composite::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_restapi_search(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_salesforce::restapi::search::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_restapi_query(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_salesforce::restapi::query::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_soapapi_merge(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_salesforce::soapapi::merge::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::salesforce_toolingapi(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_salesforce::toolingapi::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::object_store(config) => {
-            let operation = config.operation.clone();
-            let config = Arc::new(config);
-            match operation {
-                flowgen_object_store::config::Operation::Read => tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::read::ReadProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                ),
-                flowgen_object_store::config::Operation::Write => tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::write::WriteProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                ),
-                flowgen_object_store::config::Operation::List => tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::list::ListProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                ),
-                flowgen_object_store::config::Operation::Move => tokio::spawn(
-                    async move {
-                        let mut builder = flowgen_object_store::r#move::MoveProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                        if let Some(rx) = rx {
-                            builder = builder.receiver(rx);
-                        }
-                        if let Some(tx) = tx {
-                            builder = builder.sender(tx);
-                        }
-                        builder.build().await?.run().await?;
-                        Ok(())
-                    }
-                    .instrument(span),
-                ),
-            }
-        }
-        TaskType::gcp_bigquery_query(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_gcp::bigquery::query::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::gcp_bigquery_storage_read(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_gcp::bigquery::storage_read::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::gcp_bigquery_job(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_gcp::bigquery::job::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::gcp_bigquery_storage_write(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_gcp::bigquery::storage_write::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::mssql_query(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_mssql::query::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::nats_kv_store(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_nats::jetstream::kv_store::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::ai_completion(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_ai_agent::completion::processor::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::mcp_tool(config) => {
-            let config = Arc::new(config);
-            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_mcp::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context)
-                        .mcp_server(mcp_server);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::mcp_resource(config) => {
-            let config = Arc::new(config);
-            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
-            // mcp_resource emits no events; drop the pipeline sender.
-            drop(tx);
-            tokio::spawn(
-                async move {
-                    let builder = flowgen_mcp::resource::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context)
-                        .mcp_server(mcp_server);
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::mcp_prompt(config) => {
-            let config = Arc::new(config);
-            let mcp_server = mcp_server.clone().ok_or(Error::McpServerNotEnabled)?;
-            // mcp_prompt emits no events; drop the pipeline sender.
-            drop(tx);
-            tokio::spawn(
-                async move {
-                    let builder = flowgen_mcp::prompt::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context)
-                        .mcp_server(mcp_server);
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::llm_proxy(config) => {
-            let config = Arc::new(config);
-            let ai_gateway_server = ai_gateway_server
-                .clone()
-                .ok_or(Error::AiGatewayServerNotEnabled)?;
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_ai_agent::ai_gateway::llm_proxy::ProcessorBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context)
-                            .ai_gateway_server(ai_gateway_server);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::git_sync(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_git::sync::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::oci_sync(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_oci::sync::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::git_push(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_git::push::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::oci_push(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_oci::push::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::klaviyo_templates(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::klaviyo_campaigns(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::klaviyo_lists(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::klaviyo_events(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::klaviyo_profiles(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_klaviyo::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::braze_export_user_data(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_braze::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-        TaskType::braze_messaging(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_braze::processor::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-
-        TaskType::mongodb_collection(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_mongodb::collection::ProcessorBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build()?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-
-        TaskType::mongodb_change_stream(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder =
-                        flowgen_mongodb::change_stream::ChangeStreamReaderBuilder::new()
-                            .config(config)
-                            .task_id(task_id)
-                            .task_type(task_type_str)
-                            .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-
-        TaskType::kafka_produce(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_kafka::produce::ProducerBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(rx) = rx {
-                        builder = builder.receiver(rx);
-                    }
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-
-        TaskType::kafka_subscribe(config) => {
-            let config = Arc::new(config);
-            tokio::spawn(
-                async move {
-                    let mut builder = flowgen_kafka::subscribe::SubscriberBuilder::new()
-                        .config(config)
-                        .task_id(task_id)
-                        .task_type(task_type_str)
-                        .task_context(task_context);
-                    if let Some(tx) = tx {
-                        builder = builder.sender(tx);
-                    }
-                    builder.build().await?.run().await?;
-                    Ok(())
-                }
-                .instrument(span),
-            )
-        }
-    };
-
-    Ok(handle)
+    task_type.spawn(io, Arc::new(context))
 }
 
 /// Builder for creating Flow instances.
@@ -2300,12 +994,8 @@ async fn spawn_task(
 pub struct FlowBuilder {
     /// Optional flow configuration.
     config: Option<Arc<FlowConfig>>,
-    /// Optional shared webhook HTTP server.
-    http_server: Option<Arc<flowgen_http::server::EndpointServer>>,
-    /// Optional shared MCP server.
-    mcp_server: Option<Arc<flowgen_mcp::server::McpServer>>,
-    /// Optional shared AI gateway server.
-    ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>>,
+    /// Shared servers tasks register with.
+    services: Services,
     /// Shared runtime cache instance.
     cache: Option<Arc<dyn flowgen_core::cache::Cache>>,
     /// System cache instance. Backs the executor's lease store and is kept
@@ -2337,24 +1027,9 @@ impl FlowBuilder {
         self
     }
 
-    /// Sets the shared webhook HTTP server.
-    pub fn http_server(mut self, server: Arc<flowgen_http::server::EndpointServer>) -> Self {
-        self.http_server = Some(server);
-        self
-    }
-
-    /// Sets the shared MCP server.
-    pub fn mcp_server(mut self, server: Arc<flowgen_mcp::server::McpServer>) -> Self {
-        self.mcp_server = Some(server);
-        self
-    }
-
-    /// Sets the shared AI gateway server.
-    pub fn ai_gateway_server(
-        mut self,
-        server: Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>,
-    ) -> Self {
-        self.ai_gateway_server = Some(server);
+    /// Adds a shared server tasks register with, such as the HTTP endpoint server.
+    pub fn service<T: Send + Sync + 'static>(mut self, service: Arc<T>) -> Self {
+        self.services.insert(service);
         self
     }
 
@@ -2428,9 +1103,7 @@ impl FlowBuilder {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
-            http_server: self.http_server,
-            mcp_server: self.mcp_server,
-            ai_gateway_server: self.ai_gateway_server,
+            services: self.services,
             cache: self
                 .cache
                 .ok_or_else(|| Error::MissingBuilderAttribute("cache".to_string()))?,
@@ -2510,14 +1183,20 @@ mod tests {
     fn test_flow_builder_new() {
         let builder = FlowBuilder::new();
         assert!(builder.config.is_none());
-        assert!(builder.http_server.is_none());
+        assert!(builder
+            .services
+            .get::<flowgen_http::server::EndpointServer>()
+            .is_none());
     }
 
     #[test]
     fn test_flow_builder_default() {
         let builder = FlowBuilder::default();
         assert!(builder.config.is_none());
-        assert!(builder.http_server.is_none());
+        assert!(builder
+            .services
+            .get::<flowgen_http::server::EndpointServer>()
+            .is_none());
     }
 
     #[test]
@@ -2550,8 +1229,11 @@ mod tests {
         >::new(
             flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
-        let builder = FlowBuilder::new().http_server(server.clone());
-        assert!(builder.http_server.is_some());
+        let builder = FlowBuilder::new().service(server);
+        assert!(builder
+            .services
+            .get::<flowgen_http::server::EndpointServer>()
+            .is_some());
     }
 
     #[test]
@@ -2562,7 +1244,7 @@ mod tests {
             flowgen_http::server::DEFAULT_ENDPOINT_PATH.to_string()
         ));
 
-        let result = FlowBuilder::new().http_server(server).build();
+        let result = FlowBuilder::new().service(server).build();
 
         assert!(matches!(
             result,
@@ -2599,7 +1281,10 @@ mod tests {
 
         assert!(result.is_ok());
         let flow = result.unwrap();
-        assert!(flow.http_server.is_none());
+        assert!(flow
+            .services
+            .get::<flowgen_http::server::EndpointServer>()
+            .is_none());
     }
 
     #[test]
@@ -2630,7 +1315,7 @@ mod tests {
 
         let result = FlowBuilder::new()
             .config(flow_config.clone())
-            .http_server(server)
+            .service(server)
             .cache(cache.clone())
             .system_cache(cache)
             .build();
@@ -2652,15 +1337,15 @@ mod tests {
                         name: Some("test_flow".to_string()),
                         labels: None,
                         tasks: vec![
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
@@ -2708,12 +1393,10 @@ mod tests {
                     flow: Flow {
                         name: Some("test_flow".to_string()),
                         labels: None,
-                        tasks: vec![TaskType::script(
-                            flowgen_core::task::script::config::Processor {
-                                name: "s".to_string(),
-                                ..Default::default()
-                            },
-                        )],
+                        tasks: vec![TaskType::script(flowgen_core::task::script::Script {
+                            name: "s".to_string(),
+                            ..Default::default()
+                        })],
                         require_leader_election: None,
                         parallel_instances: 1,
                     },
@@ -2747,15 +1430,17 @@ mod tests {
                         name: Some("test_flow".to_string()),
                         labels: None,
                         tasks: vec![
-                            TaskType::http_endpoint(flowgen_http::config::Processor {
-                                name: "h".to_string(),
-                                ..Default::default()
-                            }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::http_endpoint(flowgen_http::endpoint::Endpoint(
+                                flowgen_http::config::Processor {
+                                    name: "h".to_string(),
+                                    ..Default::default()
+                                },
+                            )),
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
@@ -2831,15 +1516,15 @@ mod tests {
                         name: Some("test_flow".to_string()),
                         labels: None,
                         tasks: vec![
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
-                            TaskType::script(flowgen_core::task::script::config::Processor {
+                            TaskType::script(flowgen_core::task::script::Script {
                                 name: "s".to_string(),
                                 ..Default::default()
                             }),
@@ -2866,7 +1551,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
                 ..Default::default()
@@ -2929,7 +1614,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
                 ..Default::default()
@@ -2978,7 +1663,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
                 ..Default::default()
@@ -3039,7 +1724,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
                 ..Default::default()
@@ -3100,7 +1785,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script_with_deps = |name: &str, deps: Option<Vec<&str>>| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: deps.map(|v| v.into_iter().map(String::from).collect()),
                 ..Default::default()
@@ -3146,7 +1831,7 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let mcp_prompt = |name: &str| {
-            TaskType::mcp_prompt(flowgen_mcp::prompt::config::Processor {
+            TaskType::mcp_prompt(flowgen_mcp::prompt::Prompt {
                 name: name.to_string(),
                 description: format!("desc for {name}"),
                 arguments: Vec::new(),
@@ -3199,14 +1884,14 @@ mod tests {
         use crate::config::{Flow, FlowConfig, FlowConfigRaw, TaskType};
 
         let script = |name: &str| {
-            TaskType::script(flowgen_core::task::script::config::Processor {
+            TaskType::script(flowgen_core::task::script::Script {
                 name: name.to_string(),
                 depends_on: None,
                 ..Default::default()
             })
         };
         let mcp_prompt = |name: &str| {
-            TaskType::mcp_prompt(flowgen_mcp::prompt::config::Processor {
+            TaskType::mcp_prompt(flowgen_mcp::prompt::Prompt {
                 name: name.to_string(),
                 description: format!("desc for {name}"),
                 arguments: Vec::new(),

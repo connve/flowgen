@@ -9,6 +9,7 @@ use arrow::datatypes::*;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
+    task::TaskConfig,
 };
 
 use google_cloud_bigquery::client::{Client, ClientConfig};
@@ -19,10 +20,296 @@ use google_cloud_bigquery::http::job::query::{QueryRequest, QueryResponse};
 use google_cloud_bigquery::http::table::TableFieldSchema;
 use google_cloud_bigquery::http::tabledata::list::{Tuple, Value};
 use google_cloud_bigquery::http::types::{QueryParameter, QueryParameterType, QueryParameterValue};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
+
+/// BigQuery parameter type constants.
+pub const PARAM_TYPE_STRING: &str = "STRING";
+pub const PARAM_TYPE_INT64: &str = "INT64";
+pub const PARAM_TYPE_FLOAT64: &str = "FLOAT64";
+pub const PARAM_TYPE_NUMERIC: &str = "NUMERIC";
+pub const PARAM_TYPE_BIGNUMERIC: &str = "BIGNUMERIC";
+pub const PARAM_TYPE_BOOL: &str = "BOOL";
+pub const PARAM_TYPE_TIMESTAMP: &str = "TIMESTAMP";
+pub const PARAM_TYPE_DATETIME: &str = "DATETIME";
+pub const PARAM_TYPE_DATE: &str = "DATE";
+pub const PARAM_TYPE_TIME: &str = "TIME";
+pub const PARAM_TYPE_BYTES: &str = "BYTES";
+pub const PARAM_TYPE_GEOGRAPHY: &str = "GEOGRAPHY";
+pub const PARAM_TYPE_JSON: &str = "JSON";
+
+/// Default timeout for BigQuery queries (10 seconds per BigQuery API defaults).
+fn default_timeout() -> Option<Duration> {
+    Some(Duration::from_secs(10))
+}
+
+/// Default value for use_query_cache.
+fn default_use_query_cache() -> bool {
+    true
+}
+
+/// Default value for use_legacy_sql.
+fn default_use_legacy_sql() -> bool {
+    false
+}
+
+/// The file-reference form of a query parameter.
+///
+/// `deny_unknown_fields` holds this to a lone `resource` key. Without it the
+/// untagged enum below also matches an inline object that merely carries a
+/// `resource` field, silently dropping that object's other fields and binding
+/// a file's contents where the flow asked for its own data.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryParameterResource {
+    /// Resource path, loaded and parsed as JSON.
+    pub resource: String,
+}
+
+/// A query parameter value: either given inline, or loaded from a resource
+/// file. `Resource` is tried first so `{ resource: "..." }` is read as a file
+/// reference rather than as a one-key JSON object.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum QueryParameterSource {
+    /// Loads the file and parses it as JSON. A non-JSON file is passed
+    /// through as a string.
+    Resource(QueryParameterResource),
+    /// Used as-is.
+    Literal(JsonValue),
+}
+
+/// Configuration structure for BigQuery query operations.
+///
+/// This structure defines all parameters needed to execute queries against BigQuery,
+/// including authentication credentials, project configuration, and SQL query with
+/// optional parameterization for safe query execution.
+///
+/// # SQL Injection Protection
+///
+/// To prevent SQL injection attacks, use parameterized queries with the `parameters`
+/// field instead of string interpolation. Parameters are type-safe and properly
+/// escaped by the BigQuery client library.
+///
+/// # Fields
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to GCP service account credentials JSON file.
+/// - `project_id`: GCP project ID where BigQuery resources are located (data project).
+/// - `job_project_id`: Optional GCP project ID for running the query job (billing project). If not specified, uses `project_id`.
+/// - `query`: SQL query source (inline string or resource file reference).
+/// - `parameters`: Optional query parameters for safe SQL injection prevention.
+/// - `location`: Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
+/// - `max_results`: Optional maximum number of rows to return per page (default: all rows).
+/// - `timeout`: Optional query timeout (e.g., "30s", "5m", "1h"). Default: 10 seconds.
+/// - `use_query_cache`: Whether to use query cache (default: true).
+/// - `use_legacy_sql`: Whether to use legacy SQL syntax (default: false for Standard SQL).
+/// - `create_session`: Whether to create a new session for this query.
+/// - `labels`: Optional labels for the query job (key-value pairs).
+/// - `default_dataset`: Optional default dataset for unqualified table names.
+///
+/// # Examples
+///
+/// Basic query with inline SQL:
+/// ```yaml
+/// bigquery_query:
+///   name: fetch_recent_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   query:
+///     inline: "SELECT order_id, customer_id, amount FROM `project.dataset.orders` WHERE order_date >= '2024-01-01' LIMIT 100"
+/// ```
+///
+/// Query using external resource file:
+/// ```yaml
+/// bigquery_query:
+///   name: fetch_recent_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   query:
+///     resource: "queries/get_recent_orders.sql"
+/// ```
+///
+/// Parameterized query for SQL injection protection:
+/// ```json
+/// {
+///     "bigquery_query": {
+///         "name": "fetch_orders_by_status",
+///         "credentials_path": "/etc/gcp/credentials.json",
+///         "project_id": "my-project-id",
+///         "query": "SELECT order_id, customer_id, amount FROM `project.dataset.orders` WHERE status = @status AND order_date >= @start_date",
+///         "parameters": {
+///             "status": "completed",
+///             "start_date": "2024-01-01"
+///         }
+///     }
+/// }
+/// ```
+///
+/// Query with location and result limits:
+/// ```json
+/// {
+///     "bigquery_query": {
+///         "name": "analyze_eu_customers",
+///         "credentials_path": "/etc/gcp/credentials.json",
+///         "project_id": "my-project-id",
+///         "location": "EU",
+///         "query": "SELECT customer_id, COUNT(*) as order_count FROM `project.dataset.orders` GROUP BY customer_id ORDER BY order_count DESC",
+///         "max_results": 1000,
+///         "timeout": "5m"
+///     }
+/// }
+/// ```
+///
+/// Query with dynamic parameters from upstream events:
+/// ```json
+/// {
+///     "bigquery_query": {
+///         "name": "fetch_customer_orders",
+///         "credentials_path": "/etc/gcp/credentials.json",
+///         "project_id": "my-project-id",
+///         "query": "SELECT * FROM `project.dataset.orders` WHERE customer_id = @customer_id",
+///         "parameters": {
+///             "customer_id": "{{event.customer_id}}"
+///         }
+///     }
+/// }
+/// ```
+///
+/// Cross-project query (data in one project, billing in another):
+/// ```yaml
+/// gcp_bigquery_query:
+///   name: cross_project_query
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: data-project-id
+///   job_project_id: billing-project-id
+///   query:
+///     inline: "SELECT * FROM `data-project-id.dataset.table` LIMIT 100"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Query {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to GCP service account credentials JSON file.
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// GCP project ID where BigQuery resources are located (data project).
+    pub project_id: String,
+    /// Optional GCP project ID for running the query job (billing project).
+    /// If not specified, uses `project_id`.
+    #[serde(default)]
+    pub job_project_id: Option<String>,
+    /// SQL query source (inline or resource).
+    pub query: flowgen_core::resource::Source,
+    /// Optional query parameters for SQL injection protection.
+    /// Keys are parameter names (without @ prefix), values are parameter values.
+    ///
+    /// A value may also be `{ resource: "path/to/file.json" }`, which loads
+    /// the file and passes its parsed contents as the parameter. Use it to
+    /// drive a query from a schema definition the flow already keeps on disk,
+    /// rather than restating that list inside the SQL:
+    ///
+    /// ```yaml
+    /// parameters:
+    ///   table: "Account"
+    ///   schema: { resource: schemas/account_schema.json }
+    /// ```
+    #[serde(default)]
+    pub parameters: Option<HashMap<String, QueryParameterSource>>,
+    /// Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
+    pub location: Option<String>,
+    /// Optional maximum number of rows to return per page.
+    pub max_results: Option<u64>,
+    /// Optional query timeout (e.g., "30s", "5m", "1h"). Default: 10 seconds.
+    #[serde(default = "default_timeout", with = "humantime_serde")]
+    pub timeout: Option<Duration>,
+    /// Whether to use query cache. Default: true.
+    #[serde(default = "default_use_query_cache")]
+    pub use_query_cache: bool,
+    /// Whether to use legacy SQL syntax. Default: false (uses Standard SQL).
+    #[serde(default = "default_use_legacy_sql")]
+    pub use_legacy_sql: bool,
+    /// Whether to create a new session for this query.
+    #[serde(default)]
+    pub create_session: Option<bool>,
+    /// Optional labels for the query job (key-value pairs for organization).
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
+    /// Optional default dataset for unqualified table names in the query.
+    /// Format: "project_id.dataset_id" or "dataset_id" (uses query's project_id).
+    #[serde(default)]
+    pub default_dataset: Option<String>,
+    /// Route the result through the BigQuery Storage Read API instead
+    /// of paginated REST results. Emits Arrow `RecordBatch` directly
+    /// per wire batch, without the per-row `Tuple` conversion the REST
+    /// path pays. Recommended for large result sets (over one million
+    /// rows or one hundred megabytes); adds temporary-table overhead
+    /// for smaller queries. Not compatible with data-definition or
+    /// data-manipulation statements such as `INSERT` or `CREATE TABLE`,
+    /// because those produce no destination table and will error.
+    /// Default: false.
+    #[serde(default)]
+    pub use_storage_read: bool,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Query {}
+
+impl Query {
+    /// Resolves the query string from inline or resource source.
+    ///
+    /// # Arguments
+    /// * `resource_loader` - ResourceLoader instance for loading external files.
+    ///
+    /// # Returns
+    /// The resolved SQL query string.
+    pub async fn resolve_query(
+        &self,
+        resource_loader: &flowgen_core::resource::ResourceLoader,
+    ) -> Result<String, ResolveError> {
+        match &self.query {
+            flowgen_core::resource::Source::Inline(sql) => Ok(sql.clone()),
+            flowgen_core::resource::Source::Resource { resource } => resource_loader
+                .load(resource)
+                .await
+                .map_err(|source| ResolveError::Resource { source }),
+        }
+    }
+
+    /// Returns the project ID to use for running the query job.
+    /// Uses `job_project_id` if specified, otherwise falls back to `project_id`.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
+    }
+}
+
+/// Errors that can occur when resolving query configuration.
+#[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
+pub enum ResolveError {
+    #[error("Error loading resource: {source}")]
+    Resource {
+        #[source]
+        source: flowgen_core::resource::Error,
+    },
+}
 
 /// Errors that can occur during BigQuery query operations.
 #[derive(thiserror::Error, Debug)]
@@ -149,7 +436,7 @@ pub struct EventHandler {
     client: Arc<Client>,
     task_id: usize,
     tx: Option<Sender<Event>>,
-    config: Arc<super::config::Query>,
+    config: Arc<Query>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
@@ -264,7 +551,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 #[derive(Debug)]
 pub struct Processor {
     /// Query configuration including credentials and SQL query.
-    config: Arc<super::config::Query>,
+    config: Arc<Query>,
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
@@ -371,7 +658,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
 /// Builder for creating BigQuery query processor instances.
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Query>>,
+    config: Option<Arc<Query>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: Option<usize>,
@@ -391,7 +678,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Query>) -> Self {
+    pub fn config(mut self, config: Arc<Query>) -> Self {
         self.config = Some(config);
         self
     }
@@ -484,7 +771,7 @@ struct QueryStream<'a> {
 impl<'a> QueryStream<'a> {
     async fn start(
         client: &'a Client,
-        config: &super::config::Query,
+        config: &Query,
         resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
         event_value: &serde_json::Value,
     ) -> Result<QueryStream<'a>, Error> {
@@ -535,7 +822,7 @@ impl<'a> QueryStream<'a> {
 
     async fn start_rest(
         client: &'a Client,
-        config: &super::config::Query,
+        config: &Query,
         query_request: QueryRequest,
     ) -> Result<QueryStream<'a>, Error> {
         let response: QueryResponse = client
@@ -584,7 +871,7 @@ impl<'a> QueryStream<'a> {
 
     async fn start_storage(
         client: &'a Client,
-        config: &super::config::Query,
+        config: &Query,
         query_request: QueryRequest,
     ) -> Result<QueryStream<'a>, Error> {
         use google_cloud_bigquery::query::QueryOption;
@@ -1009,13 +1296,13 @@ fn parse_time_to_micros(time_str: &str) -> Result<i64, Error> {
 /// parameter names a resource. A resource that does not parse as JSON is
 /// passed through as a string, so a plain text file still works.
 async fn resolve_parameter_value(
-    source: &super::config::QueryParameterSource,
+    source: &QueryParameterSource,
     resource_loader: Option<&flowgen_core::resource::ResourceLoader>,
     event_value: &JsonValue,
 ) -> Result<JsonValue, Error> {
     match source {
-        super::config::QueryParameterSource::Literal(value) => Ok(value.clone()),
-        super::config::QueryParameterSource::Resource(source) => {
+        QueryParameterSource::Literal(value) => Ok(value.clone()),
+        QueryParameterSource::Resource(source) => {
             let content = flowgen_core::resource::Source::Resource {
                 resource: source.resource.clone(),
             }
@@ -1028,10 +1315,6 @@ async fn resolve_parameter_value(
 }
 
 fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter, Error> {
-    use super::config::{
-        PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_JSON, PARAM_TYPE_STRING,
-    };
-
     let (parameter_type, parameter_value) = match value {
         JsonValue::String(s) => (
             QueryParameterType {
@@ -1112,9 +1395,6 @@ fn build_query_parameter(name: &str, value: &JsonValue) -> Result<QueryParameter
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::{
-        PARAM_TYPE_BOOL, PARAM_TYPE_FLOAT64, PARAM_TYPE_INT64, PARAM_TYPE_STRING,
-    };
     use super::*;
     use serde_json::json;
 
@@ -1128,11 +1408,9 @@ mod tests {
         .expect("write schema");
         let loader = flowgen_core::resource::ResourceLoader::new(Some(dir.path().to_path_buf()));
 
-        let source = super::super::config::QueryParameterSource::Resource(
-            super::super::config::QueryParameterResource {
-                resource: "account_schema.json".to_string(),
-            },
-        );
+        let source = QueryParameterSource::Resource(QueryParameterResource {
+            resource: "account_schema.json".to_string(),
+        });
         let value = resolve_parameter_value(&source, Some(&loader), &json!({}))
             .await
             .expect("resource parameter resolves");
@@ -1146,15 +1424,14 @@ mod tests {
 
         let param = build_query_parameter("schema", &value).expect("builds parameter");
         assert_eq!(
-            param.parameter_type.parameter_type,
-            super::super::config::PARAM_TYPE_JSON,
+            param.parameter_type.parameter_type, PARAM_TYPE_JSON,
             "bound as JSON so SQL can walk it with JSON_QUERY_ARRAY"
         );
     }
 
     #[tokio::test]
     async fn literal_parameter_is_passed_through_unchanged() {
-        let source = super::super::config::QueryParameterSource::Literal(json!("CUST-1"));
+        let source = QueryParameterSource::Literal(json!("CUST-1"));
         let value = resolve_parameter_value(&source, None, &json!({}))
             .await
             .expect("literal resolves without a loader");
@@ -1241,7 +1518,6 @@ mod tests {
 
     #[test]
     fn test_build_query_parameter_array() {
-        use super::super::config::PARAM_TYPE_JSON;
         let param = build_query_parameter("items", &json!([1, 2, 3])).unwrap();
         assert_eq!(param.name, Some("items".to_string()));
         assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_JSON);
@@ -1250,7 +1526,6 @@ mod tests {
 
     #[test]
     fn test_build_query_parameter_object() {
-        use super::super::config::PARAM_TYPE_JSON;
         let param = build_query_parameter("data", &json!({"key": "value"})).unwrap();
         assert_eq!(param.name, Some("data".to_string()));
         assert_eq!(param.parameter_type.parameter_type, PARAM_TYPE_JSON);
@@ -1742,5 +2017,294 @@ mod tests {
             source: google_cloud_bigquery::client::QueryError::JobHttp(http_error_response(400)),
         };
         assert!(e.is_permanent());
+    }
+
+    #[test]
+    fn test_query_config_deserialization_with_inline_query() {
+        let json = r#"{
+            "name": "test",
+            "credentials_path": "/test/creds.json",
+            "project_id": "test-project",
+            "query": "SELECT 1"
+        }"#;
+        let query: Query = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            query.query,
+            flowgen_core::resource::Source::Inline("SELECT 1".to_string())
+        );
+        assert_eq!(query.timeout, Some(Duration::from_secs(10)));
+        assert!(query.use_query_cache);
+        assert!(!query.use_legacy_sql);
+    }
+
+    #[test]
+    fn test_query_config_deserialization_with_resource_query() {
+        let json = r#"{
+            "name": "test",
+            "credentials_path": "/test/creds.json",
+            "project_id": "test-project",
+            "query": {
+                "resource": "queries/get_data.sql"
+            }
+        }"#;
+        let query: Query = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            query.query,
+            flowgen_core::resource::Source::Resource {
+                resource: "queries/get_data.sql".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_query_config_creation() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "status".to_string(),
+            QueryParameterSource::Literal(json!("completed")),
+        );
+        parameters.insert(
+            "start_date".to_string(),
+            QueryParameterSource::Literal(json!("2024-01-01")),
+        );
+
+        let query = Query {
+            name: "test_query".to_string(),
+            credentials_path: Some(PathBuf::from("/etc/gcp/credentials.json")),
+            project_id: "my-project-id".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline(
+                "SELECT * FROM `dataset.table` WHERE status = @status AND date >= @start_date"
+                    .to_string(),
+            ),
+            parameters: Some(parameters.clone()),
+            location: Some("US".to_string()),
+            max_results: Some(1000),
+            timeout: Some(Duration::from_secs(300)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        assert_eq!(query.name, "test_query");
+        assert_eq!(query.project_id, "my-project-id");
+        assert_eq!(query.parameters, Some(parameters));
+        assert_eq!(query.location, Some("US".to_string()));
+        assert_eq!(query.max_results, Some(1000));
+        assert_eq!(query.timeout, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_query_config_serialization() {
+        let query = Query {
+            name: "serialize_test".to_string(),
+            credentials_path: Some(PathBuf::from("/test/creds.json")),
+            project_id: "test-project".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        let json = serde_json::to_string(&query).unwrap();
+        let deserialized: Query = serde_json::from_str(&json).unwrap();
+        assert_eq!(query, deserialized);
+    }
+
+    /// The untagged enum decides between a file reference and an inline
+    /// value purely on shape, so both spellings are pinned here: a bare
+    /// scalar must stay a literal, and only `{ resource: ... }` may become a
+    /// resource. An inline object that merely *contains* a `resource` key
+    /// alongside others must stay a literal too.
+    #[test]
+    fn parameters_deserialize_resource_and_literal_forms() {
+        let raw = r#"{
+            "name": "params",
+            "project_id": "proj",
+            "query": "SELECT 1",
+            "parameters": {
+                "table": "Account",
+                "count": 5,
+                "schema": { "resource": "schemas/account_schema.json" },
+                "inline_obj": { "resource": "a", "other": "b" }
+            }
+        }"#;
+        let query: Query = serde_json::from_str(raw).expect("parses");
+        let params = query.parameters.expect("parameters present");
+
+        assert_eq!(
+            params.get("table"),
+            Some(&QueryParameterSource::Literal(json!("Account"))),
+            "a bare string must not be read as a resource"
+        );
+        assert_eq!(
+            params.get("count"),
+            Some(&QueryParameterSource::Literal(json!(5)))
+        );
+        assert_eq!(
+            params.get("schema"),
+            Some(&QueryParameterSource::Resource(QueryParameterResource {
+                resource: "schemas/account_schema.json".to_string()
+            })),
+            "a lone `resource` key is the file-reference form"
+        );
+        assert_eq!(
+            params.get("inline_obj"),
+            Some(&QueryParameterSource::Literal(
+                json!({"resource": "a", "other": "b"})
+            )),
+            "an object with extra keys is data, not a file reference"
+        );
+    }
+
+    #[test]
+    fn test_query_config_with_parameters() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "customer_id".to_string(),
+            QueryParameterSource::Literal(json!("CUST-12345")),
+        );
+        parameters.insert(
+            "min_amount".to_string(),
+            QueryParameterSource::Literal(json!(100.50)),
+        );
+        parameters.insert(
+            "active".to_string(),
+            QueryParameterSource::Literal(json!(true)),
+        );
+
+        let query = Query {
+            name: "parameterized_query".to_string(),
+            credentials_path: Some(PathBuf::from("/etc/gcp/creds.json")),
+            project_id: "analytics-prod".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline("SELECT * FROM orders WHERE customer_id = @customer_id AND amount >= @min_amount AND active = @active".to_string()),
+            parameters: Some(parameters),
+            location: Some("EU".to_string()),
+            max_results: Some(500),
+            timeout: Some(Duration::from_secs(60)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        assert!(query.parameters.is_some());
+        let params = query.parameters.unwrap();
+        assert_eq!(
+            params.get("customer_id"),
+            Some(&QueryParameterSource::Literal(json!("CUST-12345")))
+        );
+        assert_eq!(
+            params.get("min_amount"),
+            Some(&QueryParameterSource::Literal(json!(100.50)))
+        );
+        assert_eq!(
+            params.get("active"),
+            Some(&QueryParameterSource::Literal(json!(true)))
+        );
+    }
+
+    #[test]
+    fn test_query_config_clone() {
+        let query = Query {
+            name: "clone_test".to_string(),
+            credentials_path: Some(PathBuf::from("/creds.json")),
+            project_id: "test-project".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline(
+                "SELECT COUNT(*) FROM dataset.table".to_string(),
+            ),
+            location: Some("us-central1".to_string()),
+            max_results: Some(100),
+            timeout: Some(Duration::from_secs(30)),
+            parameters: None,
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        let cloned = query.clone();
+        assert_eq!(query, cloned);
+    }
+
+    #[test]
+    fn test_get_job_project_id_with_override() {
+        let query = Query {
+            name: "cross_project_query".to_string(),
+            credentials_path: Some(PathBuf::from("/creds.json")),
+            project_id: "data-project".to_string(),
+            job_project_id: Some("billing-project".to_string()),
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        assert_eq!(query.get_job_project_id(), "billing-project");
+    }
+
+    #[test]
+    fn test_get_job_project_id_default() {
+        let query = Query {
+            name: "single_project_query".to_string(),
+            credentials_path: Some(PathBuf::from("/creds.json")),
+            project_id: "my-project".to_string(),
+            job_project_id: None,
+            query: flowgen_core::resource::Source::Inline("SELECT 1".to_string()),
+            parameters: None,
+            location: None,
+            max_results: None,
+            timeout: Some(Duration::from_secs(10)),
+            use_query_cache: true,
+            use_legacy_sql: false,
+            create_session: None,
+            labels: None,
+            default_dataset: None,
+            use_storage_read: false,
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        };
+
+        assert_eq!(query.get_job_project_id(), "my-project");
     }
 }

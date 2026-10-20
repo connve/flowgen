@@ -2,12 +2,19 @@ use super::message::FlowgenMessageExt;
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
+use flowgen_core::task::TaskConfig;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     Mutex,
 };
 use tracing::error;
+
+/// `nats_jetstream_publisher` task config.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(transparent)]
+pub struct Publisher(pub super::config::Config);
 
 /// Serializable representation of a NATS JetStream publish acknowledgment.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -94,7 +101,7 @@ pub struct EventHandler {
     jetstream: Arc<Mutex<async_nats::jetstream::Context>>,
     task_id: usize,
     tx: Option<Sender<Event>>,
-    config: Arc<super::config::Publisher>,
+    config: Arc<super::config::Config>,
     task_type: &'static str,
 }
 
@@ -178,9 +185,9 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
 /// NATS JetStream publisher that receives events and publishes them to configured streams.
 #[derive(Debug)]
-pub struct Publisher {
+pub struct Processor {
     /// Publisher configuration including stream settings.
-    config: Arc<super::config::Publisher>,
+    config: Arc<super::config::Config>,
     /// Receiver for incoming events to publish.
     rx: Receiver<Event>,
     /// Channel sender for response events.
@@ -194,7 +201,7 @@ pub struct Publisher {
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Publisher {
+impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
@@ -318,9 +325,9 @@ impl flowgen_core::task::runner::Runner for Publisher {
 
 /// Builder for configuring and creating NATS JetStream publishers.
 #[derive(Default)]
-pub struct PublisherBuilder {
+pub struct ProcessorBuilder {
     /// Optional publisher configuration.
-    config: Option<Arc<super::config::Publisher>>,
+    config: Option<Arc<super::config::Config>>,
     /// Optional event receiver.
     rx: Option<Receiver<Event>>,
     /// Optional event sender.
@@ -333,14 +340,14 @@ pub struct PublisherBuilder {
     task_type: Option<&'static str>,
 }
 
-impl PublisherBuilder {
-    pub fn new() -> PublisherBuilder {
-        PublisherBuilder {
+impl ProcessorBuilder {
+    pub fn new() -> ProcessorBuilder {
+        ProcessorBuilder {
             ..Default::default()
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Publisher>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Config>) -> Self {
         self.config = Some(config);
         self
     }
@@ -373,8 +380,8 @@ impl PublisherBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Publisher, Error> {
-        Ok(Publisher {
+    pub async fn build(self) -> Result<Processor, Error> {
+        Ok(Processor {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
@@ -427,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_publisher_builder() {
-        let config = Arc::new(super::super::config::Publisher {
+        let config = Arc::new(super::super::config::Config {
             name: "test_publisher".to_string(),
             credentials_path: Some(PathBuf::from("/test/creds.jwt")),
             subject: "test.subject".to_string(),
@@ -450,7 +457,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(100);
 
         // Success case.
-        let publisher = PublisherBuilder::new()
+        let publisher = ProcessorBuilder::new()
             .config(config.clone())
             .receiver(rx)
             .sender(tx.clone())
@@ -463,7 +470,7 @@ mod tests {
 
         // Error case - missing config.
         let (_tx2, rx2) = mpsc::channel(100);
-        let result = PublisherBuilder::new()
+        let result = ProcessorBuilder::new()
             .receiver(rx2)
             .task_context(create_mock_task_context())
             .build()

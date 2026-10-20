@@ -134,6 +134,9 @@ http = { version = "1.4" }
 bb8 = { version = "0.9" }
 bb8-tiberius = { version = "0.16" }
 async-trait = { version = "0.1" }
+proc-macro2 = { version = "1.0" }
+quote = { version = "1.0" }
+syn = { version = "2.0" }
 rhai = { version = "1.20", features = ["sync", "serde"] }
 tokio-retry = { package = "tokio-retry2", version = "0.6", features = [
     "jitter",

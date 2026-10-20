@@ -11,9 +11,10 @@
 //! `cargo test` skips it; CI runs the ignored set explicitly.
 
 use flowgen_core::event::{Event, EventBuilder, EventData};
-use flowgen_mongodb::change_stream::ChangeStreamReaderBuilder;
-use flowgen_mongodb::collection::ProcessorBuilder;
-use flowgen_mongodb::config::{ChangeStream as ChangeStreamConfig, Collection, Operation};
+use flowgen_mongodb::change_stream::{
+    ChangeStream as ChangeStreamConfig, ChangeStreamReaderBuilder,
+};
+use flowgen_mongodb::collection::{Collection, Operation, ProcessorBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::client::ClientError;

@@ -22,10 +22,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flowgen_ai_agent::ai_gateway::config::{Processor as GatewayConfig, Protocol};
+use flowgen_ai_agent::ai_gateway::config::Protocol;
 use flowgen_ai_agent::ai_gateway::server::{
     AiGatewayExtras, AiGatewayServer, LlmProxyRegistration,
 };
+use flowgen_ai_agent::llm_proxy::LlmProxy;
 use flowgen_core::credentials::HttpCredentials;
 use flowgen_core::event::Event;
 use flowgen_core::http_server::HttpServer;
@@ -94,7 +95,7 @@ fn register_fake_proxy_with_protocol<F>(
 {
     let (tx, mut rx) = mpsc::channel::<Event>(4);
 
-    let config = Arc::new(GatewayConfig {
+    let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
         headers: HashMap::new(),
@@ -145,7 +146,7 @@ fn register_fake_proxy_with_models<F>(
 {
     let (tx, mut rx) = mpsc::channel::<Event>(4);
 
-    let config = Arc::new(GatewayConfig {
+    let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models,
         headers: HashMap::new(),
@@ -193,7 +194,7 @@ fn register_fake_proxy_with_headers(
 ) {
     let (tx, mut rx) = mpsc::channel::<Event>(4);
 
-    let config = Arc::new(GatewayConfig {
+    let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
         headers,
@@ -961,7 +962,7 @@ fn register_proxy_with_bearer_token(
 ) {
     let (tx, mut rx) = mpsc::channel::<Event>(4);
 
-    let config = Arc::new(GatewayConfig {
+    let config = Arc::new(LlmProxy {
         name: name.to_string(),
         models: Vec::new(),
         headers: HashMap::new(),
@@ -1216,7 +1217,7 @@ async fn session_of_bearer_request(
             display_name: None,
             description: None,
             protocol: Protocol::Openai,
-            config: Arc::new(GatewayConfig {
+            config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
                 headers: HashMap::new(),
@@ -1312,7 +1313,7 @@ async fn a_request_not_taken_within_ack_timeout_gets_503() {
             display_name: None,
             description: None,
             protocol: Protocol::Openai,
-            config: Arc::new(GatewayConfig {
+            config: Arc::new(LlmProxy {
                 name: "gw".to_string(),
                 models: Vec::new(),
                 headers: HashMap::new(),

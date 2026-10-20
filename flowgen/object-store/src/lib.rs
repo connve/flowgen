@@ -1,6 +1,10 @@
-use flowgen_core::task::meta::{is_per_event, Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{is_per_event, Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 pub mod client;
 pub mod config;
@@ -50,6 +54,72 @@ impl TaskMeta for config::Processor {
             false => Some(buckets.into_iter().collect::<Vec<_>>().join(" · ")),
         };
         vec![connection]
+    }
+}
+
+impl Task for config::Processor {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let operation = self.operation.clone();
+        let config = Arc::new(self);
+        match operation {
+            config::Operation::Read => {
+                let mut builder = read::ReadProcessorBuilder::new()
+                    .config(config)
+                    .task_id(io.task_id)
+                    .task_type(io.task_type)
+                    .task_context(context);
+                if let Some(rx) = io.rx {
+                    builder = builder.receiver(rx);
+                }
+                if let Some(tx) = io.tx {
+                    builder = builder.sender(tx);
+                }
+                builder.build().await?.run().await?;
+            }
+            config::Operation::Write => {
+                let mut builder = write::WriteProcessorBuilder::new()
+                    .config(config)
+                    .task_id(io.task_id)
+                    .task_type(io.task_type)
+                    .task_context(context);
+                if let Some(rx) = io.rx {
+                    builder = builder.receiver(rx);
+                }
+                if let Some(tx) = io.tx {
+                    builder = builder.sender(tx);
+                }
+                builder.build().await?.run().await?;
+            }
+            config::Operation::List => {
+                let mut builder = list::ListProcessorBuilder::new()
+                    .config(config)
+                    .task_id(io.task_id)
+                    .task_type(io.task_type)
+                    .task_context(context);
+                if let Some(rx) = io.rx {
+                    builder = builder.receiver(rx);
+                }
+                if let Some(tx) = io.tx {
+                    builder = builder.sender(tx);
+                }
+                builder.build().await?.run().await?;
+            }
+            config::Operation::Move => {
+                let mut builder = r#move::MoveProcessorBuilder::new()
+                    .config(config)
+                    .task_id(io.task_id)
+                    .task_type(io.task_type)
+                    .task_context(context);
+                if let Some(rx) = io.rx {
+                    builder = builder.receiver(rx);
+                }
+                if let Some(tx) = io.tx {
+                    builder = builder.sender(tx);
+                }
+                builder.build().await?.run().await?;
+            }
+        }
+        Ok(())
     }
 }
 

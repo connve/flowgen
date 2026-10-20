@@ -14,6 +14,7 @@ path = "src/lib.rs"
 test-util = []
 
 [dependencies]
+flowgen_macros = { path = "../macros" }
 arrow = { workspace = true }
 arrow-schema = { workspace = true }
 apache-avro = { workspace = true }

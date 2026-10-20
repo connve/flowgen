@@ -5,22 +5,163 @@
 //! advances once the flow has completed the record. A record the flow fails
 //! to complete is delivered again, until it succeeds or `max_deliver` runs out.
 
+use crate::config::{default_brokers, ConfigError};
 use flowgen_core::client::Client;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{
     new_completion_channel, CompletionRx, Event, EventBuilder, EventData, EventExt,
 };
 use flowgen_core::retry::RetryConfig;
+use flowgen_core::task::TaskConfig;
 use futures_util::{future, StreamExt};
-use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
+use rskafka::client::consumer::{StartOffset as ConsumerStart, StreamConsumerBuilder};
 use rskafka::client::error::{Error as KafkaError, ProtocolError};
 use rskafka::client::partition::{OffsetAt, PartitionClient, UnknownTopicHandling};
 use rskafka::record::RecordAndOffset;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tracing::{error, warn};
+
+/// Where a partition starts when no offset is stored for it.
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum StartOffset {
+    /// The oldest record the topic still retains.
+    Earliest,
+    /// The next record written after the subscriber starts.
+    #[default]
+    Latest,
+    /// The first record written at or after this time.
+    Timestamp(chrono::DateTime<chrono::Utc>),
+}
+
+const START_OFFSET_EARLIEST: &str = "earliest";
+const START_OFFSET_LATEST: &str = "latest";
+
+impl TryFrom<String> for StartOffset {
+    type Error = ConfigError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            START_OFFSET_EARLIEST => Ok(StartOffset::Earliest),
+            START_OFFSET_LATEST => Ok(StartOffset::Latest),
+            other => match chrono::DateTime::parse_from_rfc3339(other) {
+                Ok(timestamp) if timestamp.timestamp_millis() >= 0 => {
+                    Ok(StartOffset::Timestamp(timestamp.to_utc()))
+                }
+                _ => Err(ConfigError::InvalidStartOffset { value }),
+            },
+        }
+    }
+}
+
+impl From<StartOffset> for String {
+    fn from(start_offset: StartOffset) -> Self {
+        match start_offset {
+            StartOffset::Earliest => START_OFFSET_EARLIEST.to_string(),
+            StartOffset::Latest => START_OFFSET_LATEST.to_string(),
+            StartOffset::Timestamp(timestamp) => timestamp.to_rfc3339(),
+        }
+    }
+}
+
+/// Kafka subscribe task configuration.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Subscribe {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to credentials file containing SASL/SSL authentication details.
+    /// Omit to connect without authentication.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// Comma-separated bootstrap broker addresses.
+    #[serde(default = "default_brokers")]
+    pub brokers: String,
+    /// Topic to consume.
+    pub topic: String,
+    /// Where a partition starts when no offset is stored for it, or when the
+    /// stored offset is no longer retained by the topic.
+    #[serde(default)]
+    pub start_offset: StartOffset,
+    /// How long to wait for the flow to complete a record. Waits
+    /// indefinitely when omitted.
+    #[serde(default, with = "humantime_serde")]
+    pub ack_timeout: Option<Duration>,
+    /// How many times a record is sent through the flow before it is skipped.
+    /// Delivered until the flow completes it when omitted.
+    #[serde(default)]
+    pub max_deliver: Option<u32>,
+    /// Delays between deliveries of a record the flow failed to complete
+    /// (e.g. ["1s", "5s", "1m"]); the last entry repeats.
+    #[serde(default, with = "duration_list", skip_serializing_if = "Vec::is_empty")]
+    pub backoff: Vec<Duration>,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration for connecting (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+}
+
+impl Default for Subscribe {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            credentials_path: None,
+            brokers: default_brokers(),
+            topic: String::new(),
+            start_offset: StartOffset::default(),
+            ack_timeout: None,
+            max_deliver: None,
+            backoff: Vec::new(),
+            depends_on: None,
+            retry: None,
+        }
+    }
+}
+
+/// Serde for a list of human-readable durations.
+mod duration_list {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(
+        durations: &[Duration],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(durations.iter().map(|d| humantime_serde::Serde::from(*d)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Duration>, D::Error> {
+        let durations = Vec::<humantime_serde::Serde<Duration>>::deserialize(deserializer)?;
+        Ok(durations.into_iter().map(|d| d.into_inner()).collect())
+    }
+}
+
+impl ConfigExt for Subscribe {}
+
+impl Subscribe {
+    /// Validates the config after any templating has been applied.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.topic.trim().is_empty() {
+            return Err(ConfigError::EmptyTopic);
+        }
+        if self.brokers.trim().is_empty() {
+            return Err(ConfigError::EmptyBrokers);
+        }
+        if self.max_deliver == Some(0) {
+            return Err(ConfigError::ZeroMaxDeliver);
+        }
+        Ok(())
+    }
+}
 
 /// Bounds each request to the brokers and the retries around it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -67,7 +208,7 @@ pub enum Error {
         source: flowgen_core::config::Error,
     },
     #[error(transparent)]
-    Config(#[from] crate::config::ConfigError),
+    Config(#[from] ConfigError),
     #[error("Metadata fetch error: {source}")]
     MetadataFetch {
         #[source]
@@ -136,12 +277,12 @@ impl Error {
 /// timestamp with no record at or after it starts at the latest offset.
 async fn resolve_start_offset(
     client: &PartitionClient,
-    start_offset: super::config::StartOffset,
+    start_offset: StartOffset,
 ) -> Result<i64, Error> {
     match start_offset {
-        super::config::StartOffset::Earliest => partition_offset(client, OffsetAt::Earliest).await,
-        super::config::StartOffset::Latest => partition_offset(client, OffsetAt::Latest).await,
-        super::config::StartOffset::Timestamp(timestamp) => {
+        StartOffset::Earliest => partition_offset(client, OffsetAt::Earliest).await,
+        StartOffset::Latest => partition_offset(client, OffsetAt::Latest).await,
+        StartOffset::Timestamp(timestamp) => {
             match partition_offset(client, OffsetAt::Timestamp(timestamp)).await? {
                 offset if offset < 0 => partition_offset(client, OffsetAt::Latest).await,
                 offset => Ok(offset),
@@ -292,7 +433,7 @@ pub struct EventHandler {
     partitions: Vec<Partition>,
     tx: Option<Sender<Event>>,
     task_id: usize,
-    config: Arc<super::config::Subscribe>,
+    config: Arc<Subscribe>,
     retry_config: RetryConfig,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -410,7 +551,7 @@ impl EventHandler {
         let mut backoff = self.retry_config.reconnect_strategy();
         loop {
             let mut stream =
-                StreamConsumerBuilder::new(Arc::clone(client), StartOffset::At(next_offset))
+                StreamConsumerBuilder::new(Arc::clone(client), ConsumerStart::At(next_offset))
                     .build();
             let failure = loop {
                 match stream.next().await {
@@ -521,7 +662,7 @@ impl EventHandler {
 
 #[derive(Debug)]
 pub struct Subscriber {
-    config: Arc<super::config::Subscribe>,
+    config: Arc<Subscribe>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
@@ -704,7 +845,7 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
 #[derive(Default)]
 pub struct SubscriberBuilder {
-    config: Option<Arc<super::config::Subscribe>>,
+    config: Option<Arc<Subscribe>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
@@ -718,7 +859,7 @@ impl SubscriberBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Subscribe>) -> Self {
+    pub fn config(mut self, config: Arc<Subscribe>) -> Self {
         self.config = Some(config);
         self
     }
@@ -960,7 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriber_builder_missing_each_field() {
-        let config = Arc::new(super::super::config::Subscribe {
+        let config = Arc::new(Subscribe {
             name: "n".into(),
             topic: "t".into(),
             ..Default::default()
@@ -989,5 +1130,125 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, Error::MissingBuilderAttribute(attr) if attr == "task_type"));
+    }
+
+    #[test]
+    fn test_subscribe_defaults() {
+        let json = r#"{ "name": "n", "topic": "t" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config,
+            Subscribe {
+                name: "n".into(),
+                topic: "t".into(),
+                ..Default::default()
+            }
+        );
+        assert_eq!(config.start_offset, StartOffset::Latest);
+        assert_eq!(config.ack_timeout, None);
+    }
+
+    #[test]
+    fn test_subscribe_parses_start_offset_and_ack_timeout() {
+        let json =
+            r#"{ "name": "n", "topic": "t", "start_offset": "earliest", "ack_timeout": "2m" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.start_offset, StartOffset::Earliest);
+        assert_eq!(config.ack_timeout, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn test_subscribe_parses_a_timestamp_start_offset() {
+        let json = r#"{ "name": "n", "topic": "t", "start_offset": "2026-09-01T02:00:00+02:00" }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            config.start_offset,
+            StartOffset::Timestamp("2026-09-01T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_start_offset_round_trips() {
+        for start_offset in [
+            StartOffset::Earliest,
+            StartOffset::Latest,
+            StartOffset::Timestamp("2026-09-01T00:00:00Z".parse().unwrap()),
+        ] {
+            let json = serde_json::to_string(&start_offset).unwrap();
+            assert_eq!(
+                serde_json::from_str::<StartOffset>(&json).unwrap(),
+                start_offset
+            );
+        }
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_start_offset() {
+        assert_eq!(
+            StartOffset::try_from("middle".to_string()),
+            Err(ConfigError::InvalidStartOffset {
+                value: "middle".to_string()
+            })
+        );
+        let json = r#"{ "name": "n", "topic": "t", "start_offset": "middle" }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    #[test]
+    fn test_start_offset_rejects_a_timestamp_before_1970() {
+        assert!(matches!(
+            StartOffset::try_from("1969-12-31T23:59:59Z".to_string()),
+            Err(ConfigError::InvalidStartOffset { .. })
+        ));
+    }
+
+    #[test]
+    fn test_subscribe_parses_max_deliver_and_backoff() {
+        let json = r#"{ "name": "n", "topic": "t", "max_deliver": 3, "backoff": ["1s", "1m"] }"#;
+        let config: Subscribe = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.max_deliver, Some(3));
+        assert_eq!(
+            config.backoff,
+            vec![Duration::from_secs(1), Duration::from_secs(60)]
+        );
+        assert_eq!(config.render(&serde_json::json!({})).unwrap(), config);
+    }
+
+    #[test]
+    fn test_subscribe_validate_rejects_zero_max_deliver() {
+        let config = Subscribe {
+            name: "n".into(),
+            topic: "t".into(),
+            max_deliver: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(config.validate(), Err(ConfigError::ZeroMaxDeliver));
+    }
+
+    #[test]
+    fn test_subscribe_rejects_unknown_fields() {
+        let json = r#"{ "name": "n", "topic": "t", "group_id": "g" }"#;
+        assert!(serde_json::from_str::<Subscribe>(json).is_err());
+    }
+
+    #[test]
+    fn test_subscribe_validate_rejects_empty_topic_and_brokers() {
+        let empty_topic = Subscribe {
+            name: "n".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty_topic.validate(), Err(ConfigError::EmptyTopic));
+
+        let empty_brokers = Subscribe {
+            name: "n".into(),
+            topic: "t".into(),
+            brokers: " ".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty_brokers.validate(), Err(ConfigError::EmptyBrokers));
     }
 }

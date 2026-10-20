@@ -3,17 +3,19 @@
 //! This module provides MongoDB integration components for the Flowgen data processing framework.
 //! It includes support for change data capture (CDC), collection read/write/upsert, and message conversion
 //! utilities for working with MongoDB collections and change streams.
-use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Configuration for MongoDB change data capture.
+/// MongoDB change data capture task.
 pub mod change_stream;
 /// Configuration for MongoDB client creator.
 pub mod client;
-/// MongoDB collection read/write/upsert processor.
+/// MongoDB collection read/write/upsert task.
 pub mod collection;
-/// Configuration structures for MongoDB processors.
-pub mod config;
 /// Message conversion utilities for MongoDB integration.
 pub mod message;
 
@@ -41,7 +43,7 @@ fn connections(credentials_path: &Option<PathBuf>) -> Vec<Connection> {
     }
 }
 
-impl TaskMeta for config::Collection {
+impl TaskMeta for collection::Collection {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
@@ -49,11 +51,44 @@ impl TaskMeta for config::Collection {
     }
 }
 
-impl TaskMeta for config::ChangeStream {
+impl TaskMeta for change_stream::ChangeStream {
     const CONNECTOR: Connector = CONNECTOR;
 
     fn connections(&self) -> Vec<Connection> {
         connections(&self.credentials_path)
+    }
+}
+
+impl Task for collection::Collection {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = collection::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build()?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for change_stream::ChangeStream {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = change_stream::ChangeStreamReaderBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }
 

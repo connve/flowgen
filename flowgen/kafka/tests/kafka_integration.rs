@@ -11,9 +11,8 @@
 //! `cargo test` skips it; CI runs the ignored set explicitly.
 
 use flowgen_core::event::{Event, EventBuilder, EventData};
-use flowgen_kafka::config::{Produce, StartOffset, Subscribe};
-use flowgen_kafka::produce::ProducerBuilder;
-use flowgen_kafka::subscribe::SubscriberBuilder;
+use flowgen_kafka::produce::{Produce, ProducerBuilder};
+use flowgen_kafka::subscribe::{StartOffset, Subscribe, SubscriberBuilder};
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::record::{Record, RecordAndOffset};
 use std::sync::Arc;
@@ -324,7 +323,7 @@ async fn created_topic_uses_configured_partitions() {
         brokers: brokers.clone(),
         topic: "partitioned".to_string(),
         create_or_update: true,
-        topic_options: flowgen_kafka::config::TopicOptions {
+        topic_options: flowgen_kafka::produce::TopicOptions {
             partitions: 3,
             replication_factor: 1,
             retention: Some(Duration::from_secs(7 * 24 * 60 * 60)),
@@ -456,7 +455,7 @@ async fn produced_partitions(brokers: &str, config: Produce, keys: &[&str]) -> V
     let (produce_tx, mut produce_rx) = spawn_producer(Produce {
         brokers: brokers.to_string(),
         create_or_update: true,
-        topic_options: flowgen_kafka::config::TopicOptions {
+        topic_options: flowgen_kafka::produce::TopicOptions {
             partitions: 3,
             ..Default::default()
         },

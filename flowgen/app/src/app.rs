@@ -821,21 +821,6 @@ impl App {
             .map(|mcp| mcp.enabled)
             .unwrap_or(false);
 
-        let has_mcp_tasks = flow_configs.iter().any(|fc| {
-            fc.flow.tasks.iter().any(|t| {
-                matches!(
-                    t,
-                    crate::config::TaskType::mcp_tool(_)
-                        | crate::config::TaskType::mcp_resource(_)
-                        | crate::config::TaskType::mcp_prompt(_)
-                )
-            })
-        });
-
-        if has_mcp_tasks && !mcp_enabled {
-            warn!("Flows contain MCP registration tasks but mcp_server is not enabled in config; registrations will be skipped");
-        }
-
         let mcp_server: Option<Arc<flowgen_mcp::server::McpServer>> = if mcp_enabled {
             let mcp_config = app_config.mcp_server.as_ref();
             // Load MCP credentials if configured.
@@ -889,22 +874,11 @@ impl App {
             None
         };
 
-        // Create AI gateway server if enabled and any flow contains llm_proxy tasks.
-        let has_ai_gateway_tasks = flow_configs.iter().any(|fc| {
-            fc.flow
-                .tasks
-                .iter()
-                .any(|t| matches!(t, crate::config::TaskType::llm_proxy(_)))
-        });
         let ai_gateway_enabled = app_config
             .ai_gateway
             .as_ref()
             .map(|g| g.enabled)
             .unwrap_or(false);
-
-        if has_ai_gateway_tasks && !ai_gateway_enabled {
-            warn!("Flows contain llm_proxy tasks but ai_gateway is not enabled, LLM proxy endpoints will not be registered");
-        }
 
         let ai_gateway_server: Option<Arc<flowgen_ai_agent::ai_gateway::server::AiGatewayServer>> =
             if ai_gateway_enabled {
@@ -1085,15 +1059,15 @@ impl App {
                 .peer_registry(Arc::clone(&peer_registry));
 
             if let Some(server) = http_server {
-                flow_builder = flow_builder.http_server(server);
+                flow_builder = flow_builder.service(server);
             }
 
             if let Some(ref server) = mcp_server {
-                flow_builder = flow_builder.mcp_server(Arc::clone(server));
+                flow_builder = flow_builder.service(Arc::clone(server));
             }
 
             if let Some(ref server) = ai_gateway_server {
-                flow_builder = flow_builder.ai_gateway_server(Arc::clone(server));
+                flow_builder = flow_builder.service(Arc::clone(server));
             }
 
             if let Some(retry_config) = app_config.retry.as_ref() {

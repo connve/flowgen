@@ -11,8 +11,7 @@ use flowgen_core::event::{EventBuilder, EventData};
 use flowgen_nats::jetstream::config::{
     Config as JsConfig, DiscardPolicy, RetentionPolicy, StreamOptions,
 };
-use flowgen_nats::jetstream::publisher::PublisherBuilder;
-use flowgen_nats::jetstream::subscriber::SubscriberBuilder;
+use flowgen_nats::jetstream::{publisher, subscriber};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -118,11 +117,11 @@ async fn spawn_publisher(
 ) -> (
     mpsc::Sender<flowgen_core::event::Event>,
     mpsc::Receiver<flowgen_core::event::Event>,
-    tokio::task::JoinHandle<Result<(), flowgen_nats::jetstream::publisher::Error>>,
+    tokio::task::JoinHandle<Result<(), publisher::Error>>,
 ) {
     let (in_tx, in_rx) = mpsc::channel(4);
     let (out_tx, out_rx) = mpsc::channel(4);
-    let publisher = PublisherBuilder::new()
+    let publisher = publisher::ProcessorBuilder::new()
         .config(config)
         .receiver(in_rx)
         .sender(out_tx)
@@ -222,7 +221,7 @@ async fn publisher_and_subscriber_round_trip_delivers_the_message() {
         ..Default::default()
     });
     let (sub_out_tx, mut sub_out_rx) = mpsc::channel(4);
-    let subscriber = SubscriberBuilder::new()
+    let subscriber = subscriber::ProcessorBuilder::new()
         .config(sub_config)
         .sender(sub_out_tx)
         .task_id(1)
@@ -538,7 +537,7 @@ async fn idle_subscriber_does_not_poll_the_server() {
         ..Default::default()
     });
     let (sub_out_tx, mut sub_out_rx) = mpsc::channel(4);
-    let subscriber = SubscriberBuilder::new()
+    let subscriber = subscriber::ProcessorBuilder::new()
         .config(sub_config)
         .sender(sub_out_tx)
         .task_id(1)
@@ -600,7 +599,7 @@ async fn idle_subscriber_still_delivers_a_message_published_later() {
         ..Default::default()
     });
     let (sub_out_tx, mut sub_out_rx) = mpsc::channel(4);
-    let subscriber = SubscriberBuilder::new()
+    let subscriber = subscriber::ProcessorBuilder::new()
         .config(sub_config)
         .sender(sub_out_tx)
         .task_id(1)
@@ -692,7 +691,7 @@ async fn subscriber_delivers_every_message_when_the_flow_is_slow() {
         ..Default::default()
     });
     let (sub_out_tx, mut sub_out_rx) = mpsc::channel(16);
-    let subscriber = SubscriberBuilder::new()
+    let subscriber = subscriber::ProcessorBuilder::new()
         .config(sub_config)
         .sender(sub_out_tx)
         .task_id(1)

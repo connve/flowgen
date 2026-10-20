@@ -9,6 +9,7 @@ use arrow::array::RecordBatch;
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
+    task::TaskConfig,
 };
 
 use gcloud_googleapis::cloud::bigquery::storage::v1::read_session::{
@@ -16,9 +17,197 @@ use gcloud_googleapis::cloud::bigquery::storage::v1::read_session::{
 };
 use google_cloud_bigquery::client::{Client, ClientConfig, ReadTableOption};
 use google_cloud_bigquery::http::table::TableReference;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
+
+/// Data format for BigQuery Storage Read API.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum DataFormat {
+    /// Arrow format (default, preferred for columnar processing).
+    #[default]
+    Arrow,
+    /// Avro format (row-based).
+    Avro,
+}
+
+/// Response compression codec for BigQuery Storage Read API.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum CompressionCodec {
+    /// No compression (default).
+    #[default]
+    Unspecified,
+    /// LZ4 compression.
+    Lz4,
+}
+
+/// Configuration structure for BigQuery Storage Read API operations.
+///
+/// The Storage Read API provides high-throughput, parallel access to BigQuery tables
+/// without running SQL queries. It is optimized for reading large tables with optional
+/// column selection and row filtering.
+///
+/// # Key Benefits
+/// - High-throughput parallel reads using multiple streams
+/// - Column selection to reduce data transfer
+/// - Server-side filtering with row_restriction
+/// - Arrow format for efficient columnar processing
+/// - Time-travel queries with snapshot_time
+///
+/// # Fields
+/// - `name`: Unique name / identifier of the task.
+/// - `credentials_path`: Path to GCP service account credentials JSON file.
+/// - `project_id`: GCP project ID where BigQuery resources are located (data project).
+/// - `job_project_id`: Optional GCP project ID for creating the read session (billing project). If not specified, uses `project_id`.
+/// - `dataset_id`: BigQuery dataset ID containing the table.
+/// - `table_id`: BigQuery table ID to read from.
+/// - `selected_fields`: Optional list of column names to read (reads all if not specified).
+/// - `row_restriction`: Optional SQL WHERE clause (without WHERE keyword) for server-side filtering.
+/// - `sample_percentage`: Optional random sampling percentage (0.0 to 100.0).
+/// - `compression_codec`: Optional response compression. Default: unspecified.
+/// - `snapshot_time`: Optional timestamp for time-travel queries (RFC3339 format).
+/// - `max_stream_count`: Optional maximum number of parallel read streams.
+/// - `preferred_min_stream_count`: Optional minimum streams hint for optimization.
+/// - `data_format`: Data format for results. Default: arrow.
+/// - `retry`: Optional retry configuration (overrides app-level retry config).
+///
+/// # Examples
+///
+/// Basic table read with all columns:
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: read_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: analytics
+///   table_id: orders
+/// ```
+///
+/// Read with column selection and filtering:
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: read_recent_orders
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: analytics
+///   table_id: orders
+///   selected_fields:
+///     - order_id
+///     - customer_id
+///     - amount
+///   row_restriction: "order_date >= '2024-01-01' AND status = 'completed'"
+/// ```
+///
+/// Parallel read with compression:
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: fast_table_scan
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: warehouse
+///   table_id: large_table
+///   max_stream_count: 10
+///   compression_codec: lz4
+/// ```
+///
+/// Time-travel query with sampling:
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: historical_sample
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project
+///   dataset_id: analytics
+///   table_id: events
+///   snapshot_time: "2024-01-15T00:00:00Z"
+///   sample_percentage: 10.0
+/// ```
+///
+/// Cross-project read (data in one project, billing in another):
+/// ```yaml
+/// gcp_bigquery_storage_read:
+///   name: cross_project_read
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: data-project-id
+///   job_project_id: billing-project-id
+///   dataset_id: warehouse
+///   table_id: large_table
+/// ```
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct StorageRead {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Path to GCP service account credentials JSON file.
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// GCP project ID where BigQuery resources are located (data project).
+    pub project_id: String,
+    /// Optional GCP project ID for creating the read session (billing project).
+    /// If not specified, uses `project_id`.
+    #[serde(default)]
+    pub job_project_id: Option<String>,
+    /// BigQuery dataset ID containing the table.
+    pub dataset_id: String,
+    /// BigQuery table ID to read from.
+    pub table_id: String,
+    /// Optional list of column names to read. If not specified, reads all columns.
+    /// Supports nested field selection using dot notation (e.g., "struct_field.nested_field").
+    #[serde(default)]
+    pub selected_fields: Option<Vec<String>>,
+    /// Optional SQL WHERE clause for server-side row filtering (without WHERE keyword).
+    /// Example: "order_date >= '2024-01-01' AND status = 'completed'".
+    #[serde(default)]
+    pub row_restriction: Option<String>,
+    /// Optional random sampling percentage (0.0 to 100.0).
+    /// Samples rows randomly from the table before applying filters.
+    #[serde(default)]
+    pub sample_percentage: Option<f64>,
+    /// Optional response compression codec. Default: unspecified (no compression).
+    #[serde(default)]
+    pub compression_codec: CompressionCodec,
+    /// Optional timestamp for time-travel queries (RFC3339 format).
+    /// Example: "2024-01-15T00:00:00Z".
+    #[serde(default)]
+    pub snapshot_time: Option<String>,
+    /// Optional maximum number of parallel read streams.
+    /// Higher values can improve throughput for large tables.
+    #[serde(default)]
+    pub max_stream_count: Option<i32>,
+    /// Optional preferred minimum number of streams (optimization hint).
+    #[serde(default)]
+    pub preferred_min_stream_count: Option<i32>,
+    /// Data format for results. Default: arrow (preferred for columnar processing).
+    #[serde(default)]
+    pub data_format: DataFormat,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for StorageRead {}
+
+impl StorageRead {
+    /// Returns the project ID to use for creating the read session.
+    /// Uses `job_project_id` if specified, otherwise falls back to `project_id`.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
+    }
+}
 
 /// Errors that can occur during BigQuery Storage Read operations.
 #[derive(thiserror::Error, Debug)]
@@ -84,7 +273,7 @@ pub struct EventHandler {
     client: Arc<Client>,
     task_id: usize,
     tx: Option<Sender<Event>>,
-    config: Arc<super::config::StorageRead>,
+    config: Arc<StorageRead>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
@@ -181,7 +370,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 #[derive(Debug)]
 pub struct Processor {
     /// Storage read configuration including credentials and table identifiers.
-    config: Arc<super::config::StorageRead>,
+    config: Arc<StorageRead>,
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
@@ -288,7 +477,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
 /// Builder for creating BigQuery Storage Read processor instances.
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::StorageRead>>,
+    config: Option<Arc<StorageRead>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: Option<usize>,
@@ -308,7 +497,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::StorageRead>) -> Self {
+    pub fn config(mut self, config: Arc<StorageRead>) -> Self {
         self.config = Some(config);
         self
     }
@@ -374,7 +563,7 @@ impl Default for ProcessorBuilder {
 /// so callers can emit downstream events without buffering the whole result set.
 async fn open_read_iterator(
     client: &Client,
-    config: &super::config::StorageRead,
+    config: &StorageRead,
 ) -> Result<google_cloud_bigquery::storage::RecordBatchIterator, Error> {
     let table_ref = TableReference {
         project_id: config.project_id.clone(),
@@ -397,8 +586,8 @@ async fn open_read_iterator(
     }
 
     read_options.response_compression_codec = Some(match config.compression_codec {
-        super::config::CompressionCodec::Unspecified => 0,
-        super::config::CompressionCodec::Lz4 => 2,
+        CompressionCodec::Unspecified => 0,
+        CompressionCodec::Lz4 => 2,
     });
 
     let table_modifiers = if let Some(ref snapshot_time) = config.snapshot_time {
@@ -436,6 +625,8 @@ async fn open_read_iterator(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_invalid_timestamp() {
         let result = chrono::DateTime::parse_from_rfc3339("invalid");
@@ -452,8 +643,6 @@ mod tests {
 
     #[test]
     fn test_compression_codec_values() {
-        use super::super::config::CompressionCodec;
-
         let unspecified = CompressionCodec::Unspecified;
         let lz4 = CompressionCodec::Lz4;
 
@@ -484,5 +673,35 @@ mod tests {
         assert_eq!(table_ref.project_id, "my-project");
         assert_eq!(table_ref.dataset_id, "my-dataset");
         assert_eq!(table_ref.table_id, "my-table");
+    }
+
+    #[test]
+    fn test_storage_read_get_job_project_id_with_override() {
+        let storage_read = StorageRead {
+            name: "cross_project_read".to_string(),
+            credentials_path: Some(PathBuf::from("/creds.json")),
+            project_id: "data-project".to_string(),
+            job_project_id: Some("billing-project".to_string()),
+            dataset_id: "warehouse".to_string(),
+            table_id: "large_table".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(storage_read.get_job_project_id(), "billing-project");
+    }
+
+    #[test]
+    fn test_storage_read_get_job_project_id_default() {
+        let storage_read = StorageRead {
+            name: "single_project_read".to_string(),
+            credentials_path: Some(PathBuf::from("/creds.json")),
+            project_id: "my-project".to_string(),
+            job_project_id: None,
+            dataset_id: "analytics".to_string(),
+            table_id: "events".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(storage_read.get_job_project_id(), "my-project");
     }
 }

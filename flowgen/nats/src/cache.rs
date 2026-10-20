@@ -1,6 +1,6 @@
 //! NATS JetStream Key-Value store cache implementation.
 
-use flowgen_core::client::Client as FlowgenClientTrait;
+use flowgen_core::client::Client as _;
 use std::path::PathBuf;
 use std::time::Duration;
 

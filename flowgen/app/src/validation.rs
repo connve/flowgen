@@ -1,7 +1,7 @@
 //! Validation of workspace files (flows and resources) without running them.
 
-use crate::config::{FlowConfig, FlowConfigRaw, TaskType};
-use flowgen_core::task::script::config::RhaiLimits;
+use crate::config::{FlowConfig, FlowConfigRaw};
+use flowgen_core::task::script::RhaiLimits;
 
 /// One problem found in a file.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,11 +24,7 @@ pub enum Error {
     #[error(transparent)]
     Dag(#[from] crate::flow::DagError),
     #[error(transparent)]
-    Generate(#[from] flowgen_core::task::generate::config::ConfigError),
-    #[error(transparent)]
-    Kafka(#[from] flowgen_kafka::config::ConfigError),
-    #[error("Script does not compile: {0}")]
-    Script(#[source] Box<rhai::ParseError>),
+    Script(#[from] flowgen_core::task::script::CompileError),
     #[error("Invalid JSON: {0}")]
     Json(#[source] serde_json::Error),
 }
@@ -65,7 +61,7 @@ pub fn validate_flow(path: &str, content: &str) -> Vec<Issue> {
         issues.push(Error::from(source).into());
     }
     for (index, task) in config.flow.tasks.iter().enumerate() {
-        if let Err(error) = validate_task(task) {
+        if let Err(error) = task.validate() {
             issues.push(Issue {
                 location: Some(format!("flow.tasks.{index}.{}", task.as_str())),
                 message: error.to_string(),
@@ -93,7 +89,7 @@ fn parse_issue(source: config::ConfigError) -> Issue {
 /// JSON must parse. Other files are accepted as they are.
 pub fn validate_resource(path: &str, content: &str) -> Vec<Issue> {
     let result = match path.rsplit_once('.').map(|(_, extension)| extension) {
-        Some("rhai") => compile_script(content, &RhaiLimits::default()),
+        Some("rhai") => RhaiLimits::default().compile(content).map_err(Error::from),
         Some("json") => match serde_json::from_str::<serde_json::Value>(content) {
             Ok(_) => Ok(()),
             Err(source) => Err(Error::Json(source)),
@@ -113,30 +109,6 @@ pub(crate) fn flow_identity(path: &str) -> &str {
             stem
         }
         _ => path,
-    }
-}
-
-/// Checks a task's own settings and compiles inline scripts.
-fn validate_task(task: &TaskType) -> Result<(), Error> {
-    match task {
-        TaskType::generate(config) => Ok(config.validate()?),
-        TaskType::kafka_produce(config) => Ok(config.validate()?),
-        TaskType::kafka_subscribe(config) => Ok(config.validate()?),
-        TaskType::script(config) => match &config.code {
-            flowgen_core::resource::Source::Inline(code) => compile_script(code, &config.limits),
-            flowgen_core::resource::Source::Resource { .. } => Ok(()),
-        },
-        _ => Ok(()),
-    }
-}
-
-/// Compiles a script with the parse limits the script task applies.
-fn compile_script(code: &str, limits: &RhaiLimits) -> Result<(), Error> {
-    let mut engine = rhai::Engine::new();
-    limits.apply(&mut engine);
-    match engine.compile(code) {
-        Ok(_) => Ok(()),
-        Err(source) => Err(Error::Script(Box::new(source))),
     }
 }
 
@@ -305,7 +277,7 @@ flow:
 
     /// Every task type name, read from serde's unknown-variant error.
     fn task_types() -> std::collections::BTreeSet<String> {
-        let error = serde_json::from_str::<TaskType>(r#"{"": {}}"#)
+        let error = serde_json::from_str::<crate::config::TaskType>(r#"{"": {}}"#)
             .unwrap_err()
             .to_string();
         let expected = match error.split_once("expected one of ") {

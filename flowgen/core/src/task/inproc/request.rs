@@ -3,8 +3,31 @@
 use super::registry::CallError;
 use crate::config::ConfigExt;
 use crate::event::{Event, EventBuilder, EventData, EventExt};
+use crate::task::TaskConfig;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
+
+/// Processor that calls a flow with an `inproc_endpoint` and emits its result.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    /// The unique name of the task.
+    pub name: String,
+    /// Identity of the flow to call, e.g. `system/publish_workspace`.
+    pub flow: String,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration.
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Request {}
 
 /// Errors from the in-process request processor.
 #[derive(thiserror::Error, Debug)]
@@ -49,7 +72,7 @@ impl Error {
 
 /// Calls the configured flow for each event.
 pub struct EventHandler {
-    config: Arc<super::config::Request>,
+    config: Arc<Request>,
     tx: Option<Sender<Event>>,
     task_id: usize,
     task_type: &'static str,
@@ -133,7 +156,7 @@ impl crate::task::runner::Handler for EventHandler {
 /// In-process request processor.
 #[derive(Debug)]
 pub struct Processor {
-    config: Arc<super::config::Request>,
+    config: Arc<Request>,
     rx: Receiver<Event>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -177,7 +200,7 @@ impl crate::task::runner::Runner for Processor {
 /// Builder for the in-process request processor.
 #[derive(Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Request>>,
+    config: Option<Arc<Request>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -190,7 +213,7 @@ impl ProcessorBuilder {
         Self::default()
     }
 
-    pub fn config(mut self, config: Arc<super::config::Request>) -> Self {
+    pub fn config(mut self, config: Arc<Request>) -> Self {
         self.config = Some(config);
         self
     }

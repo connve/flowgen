@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn script_task(name: &str, code: &str, depends_on: Option<Vec<&str>>) -> TaskType {
-    TaskType::script(flowgen_core::task::script::config::Processor {
+    TaskType::script(flowgen_core::task::script::Script {
         name: name.to_string(),
         code: flowgen_core::resource::Source::Inline(code.to_string()),
         depends_on: depends_on.map(|v| v.into_iter().map(String::from).collect()),
@@ -30,7 +30,7 @@ fn script_task(name: &str, code: &str, depends_on: Option<Vec<&str>>) -> TaskTyp
 }
 
 fn iterate_task(name: &str) -> TaskType {
-    TaskType::iterate(flowgen_core::task::iterate::config::Processor {
+    TaskType::iterate(flowgen_core::task::iterate::Iterate {
         name: name.to_string(),
         iterate_key: None,
         depends_on: None,
@@ -101,7 +101,7 @@ async fn both_branches_of_a_reentrant_fan_out_observe_the_same_tick_data() {
                 name: Some("reentrant_fan_out_repro".to_string()),
                 labels: None,
                 tasks: vec![
-                    TaskType::generate(flowgen_core::task::generate::config::Subscriber {
+                    TaskType::generate(flowgen_core::task::generate::Generate {
                         name: "trigger".to_string(),
                         interval: Some(Duration::from_millis(200)),
                         count: Some(3),

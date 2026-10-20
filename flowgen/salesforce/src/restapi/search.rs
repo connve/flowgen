@@ -1,12 +1,10 @@
-//! Salesforce SOSL search processor.
-//!
-//! Executes SOSL queries via the REST API and emits matching records as events.
+//! The `salesforce_restapi_search` task: SOSL searches through the REST API.
 
+use crate::processor::{to_json, Call, Emitter, Error, Operation, Output};
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::error;
+use flowgen_core::task::TaskConfig;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// SOSL reserved characters that must be backslash-escaped inside a phrase
 /// search (`FIND {"..."}`). Hyphens, ampersands, and the like otherwise abort
@@ -14,6 +12,66 @@ use tracing::error;
 const SOSL_RESERVED: &[char] = &[
     '\\', '+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\'',
 ];
+
+/// Configuration for Salesforce REST API SOSL search operations.
+///
+/// # Examples
+///
+/// ```yaml
+/// salesforce_restapi_search:
+///   name: find_accounts
+///   credentials_path: /path/to/salesforce_creds.json
+///   query: "FIND {{{event.data.search_term}}} IN ALL FIELDS RETURNING Account(Id, Name)"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Search {
+    /// Unique task identifier.
+    pub name: String,
+    /// Path to Salesforce authentication credentials.
+    pub credentials_path: PathBuf,
+    /// SOSL query string (supports Handlebars templating).
+    pub query: String,
+    /// Optional list of upstream task names this task depends on.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Search {}
+
+#[async_trait::async_trait]
+impl Operation for Search {
+    type Client = salesforce_core::restapi::Client;
+
+    fn client(auth: &salesforce_core::client::Client) -> Result<Self::Client, Error> {
+        crate::processor::rest_client(auth)
+    }
+
+    fn credentials_path(&self) -> &Path {
+        &self.credentials_path
+    }
+
+    async fn call(
+        &self,
+        client: &Self::Client,
+        _call: &Call<'_>,
+        emitter: &mut Emitter<'_>,
+    ) -> Result<(), Error> {
+        let response = client
+            .search(&escape_sosl_phrases(&self.query))
+            .await
+            .map_err(|source| Error::Search {
+                source: Box::new(source),
+            })?;
+        emitter.emit(Output::json(to_json(&response)?)).await
+    }
+}
 
 /// Auto-escapes phrase-search content in a rendered SOSL query so user input
 /// containing reserved characters doesn't crash the Salesforce parser.
@@ -59,343 +117,9 @@ fn escape_sosl_phrases(query: &str) -> String {
     out
 }
 
-/// Errors for Salesforce SOSL search operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    #[error("Failed to send event message to next task: {source}")]
-    SendMessage {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-    #[error("Missing required builder attribute: {}", _0)]
-    MissingBuilderAttribute(String),
-    #[error("Salesforce authentication error: {source}")]
-    SalesforceAuth {
-        #[source]
-        source: salesforce_core::client::Error,
-    },
-    #[error(transparent)]
-    Connect(#[from] crate::client::Error),
-    #[error("Salesforce SOSL search failed: {source}")]
-    SearchOperation {
-        #[source]
-        source: Box<salesforce_core::restapi::search::Error>,
-    },
-    #[error("Failed to serialize or deserialize data: {source}")]
-    SerdeExt {
-        #[source]
-        source: flowgen_core::serde::Error,
-    },
-    #[error(transparent)]
-    EventError(#[from] flowgen_core::event::Error),
-    #[error("Failed to render configuration template: {source}")]
-    ConfigRender {
-        #[source]
-        source: flowgen_core::config::Error,
-    },
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
-    #[error("Failed to build REST API client: {source}")]
-    RestClientBuild {
-        #[source]
-        source: salesforce_core::restapi::ClientError,
-    },
-}
-
-/// Event handler for processing individual SOSL search requests.
-pub struct EventHandler {
-    client: Arc<salesforce_core::restapi::Client>,
-    config: Arc<super::config::Search>,
-    tx: Option<Sender<Event>>,
-    current_task_id: usize,
-    sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
-    task_type: &'static str,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-}
-
-impl EventHandler {
-    async fn process(&self, event: Event) -> Result<(), Error> {
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        let event = Arc::new(event);
-        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
-
-        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let config = self
-                .config
-                .render_for_event(&event)
-                .map_err(|e| Error::ConfigRender { source: e })?;
-
-            let query = escape_sosl_phrases(&config.query);
-            let response =
-                self.client
-                    .search(&query)
-                    .await
-                    .map_err(|e| Error::SearchOperation {
-                        source: Box::new(e),
-                    })?;
-
-            let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
-                source: flowgen_core::serde::Error::Serde { source: e },
-            })?;
-
-            let mut e = EventBuilder::new()
-                .data(EventData::Json(resp))
-                .subject(config.name.to_owned())
-                .task_id(self.current_task_id)
-                .task_type(self.task_type)
-                .build()?;
-
-            match self.tx {
-                None => {
-                    if let Some(arc) = completion_tx_arc.as_ref() {
-                        arc.signal_completion(e.data_as_json().ok());
-                    }
-                }
-                Some(_) => {
-                    e.completion_tx = completion_tx_arc.clone();
-                }
-            }
-
-            e.send_with_logging(self.tx.as_ref())
-                .await
-                .map_err(|e| Error::SendMessage { source: e })?;
-
-            Ok(())
-        })
-        .await
-    }
-
-    async fn reconnect_on_auth_error(&self, error: Error) -> Error {
-        let needs_reconnect = match &error {
-            Error::SalesforceAuth { .. } => true,
-            Error::SearchOperation { source } => matches!(
-                source.as_ref(),
-                salesforce_core::restapi::search::Error::Auth { .. }
-            ),
-            _ => false,
-        };
-        match needs_reconnect {
-            true => match self.sfdc_client.lock().await.reconnect().await {
-                Ok(()) => error,
-                Err(source) => {
-                    error!(error = %error, "Reconnecting after an authentication error failed");
-                    Error::SalesforceAuth { source }
-                }
-            },
-            false => error,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl flowgen_core::task::runner::Handler for EventHandler {
-    type Error = Error;
-
-    fn sender(&self) -> Option<&Sender<Event>> {
-        self.tx.as_ref()
-    }
-
-    fn is_retryable(&self, error: &Error) -> bool {
-        match error {
-            Error::SearchOperation { source } => source.is_retryable(),
-            _ => true,
-        }
-    }
-
-    /// Ignores events addressed to another task.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
-    async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.current_task_id.checked_sub(1) {
-            return Ok(());
-        }
-        match self.process(event).await {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.reconnect_on_auth_error(error).await),
-        }
-    }
-}
-
-/// Salesforce SOSL search processor.
-#[derive(Debug)]
-pub struct Processor {
-    config: Arc<super::config::Search>,
-    rx: Receiver<Event>,
-    tx: Option<Sender<Event>>,
-    task_id: usize,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-    task_type: &'static str,
-}
-
-#[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Processor {
-    type Error = Error;
-    type EventHandler = EventHandler;
-
-    async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
-            .config
-            .render(&serde_json::json!({}))
-            .map_err(|e| Error::ConfigRender { source: e })?;
-
-        let sfdc_client = crate::client::connect(
-            &self.task_context,
-            self.task_type,
-            &init_config.credentials_path,
-        )
-        .await?;
-
-        let rest_client = {
-            let guard = sfdc_client.lock().await;
-            salesforce_core::restapi::ClientBuilder::new(guard.clone())
-                .build()
-                .map_err(|e| Error::RestClientBuild { source: e })?
-        };
-
-        let event_handler = EventHandler {
-            config: Arc::clone(&self.config),
-            current_task_id: self.task_id,
-            tx: self.tx.clone(),
-            client: Arc::new(rest_client),
-            sfdc_client,
-            task_type: self.task_type,
-            task_context: Arc::clone(&self.task_context),
-        };
-        Ok(event_handler)
-    }
-
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(self) -> Result<(), Self::Error> {
-        let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
-                match self.init().await {
-                    Ok(handler) => Ok(handler),
-                    Err(e) => {
-                        error!(error = %e, "Failed to initialize SOSL search processor");
-                        Err(tokio_retry::RetryError::transient(e))
-                    }
-                }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        flowgen_core::task::runner::process_events(
-            self.rx,
-            event_handler,
-            &retry_config,
-            self.config.max_in_flight,
-            &self.task_context,
-        )
-        .await;
-        Ok(())
-    }
-}
-
-/// Builder for creating search Processor instances.
-pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Search>>,
-    rx: Option<Receiver<Event>>,
-    tx: Option<Sender<Event>>,
-    task_id: Option<usize>,
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
-    task_type: Option<&'static str>,
-}
-
-impl Default for ProcessorBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ProcessorBuilder {
-    pub fn new() -> Self {
-        Self {
-            config: None,
-            rx: None,
-            tx: None,
-            task_id: None,
-            task_context: None,
-            task_type: None,
-        }
-    }
-
-    pub fn config(mut self, config: Arc<super::config::Search>) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
-        self.rx = Some(receiver);
-        self
-    }
-
-    pub fn sender(mut self, sender: Sender<Event>) -> Self {
-        self.tx = Some(sender);
-        self
-    }
-
-    pub fn task_id(mut self, task_id: usize) -> Self {
-        self.task_id = Some(task_id);
-        self
-    }
-
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
-    pub fn task_type(mut self, task_type: &'static str) -> Self {
-        self.task_type = Some(task_type);
-        self
-    }
-
-    pub fn build(self) -> Result<Processor, Error> {
-        Ok(Processor {
-            config: self
-                .config
-                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
-            tx: self.tx,
-            task_id: self
-                .task_id
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
-            task_type: self
-                .task_type
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::config::Search;
-    use super::escape_sosl_phrases;
-
-    // ── SOSL phrase escaping ─────────────────────────────────────────
+    use super::*;
 
     #[test]
     fn escape_phrase_with_hyphen() {
@@ -454,8 +178,6 @@ mod tests {
         let q = r#"FIND {Acme} RETURNING Account"#;
         assert_eq!(escape_sosl_phrases(q), q);
     }
-
-    // ── Config Deserialization ───────────────────────────────────────
 
     #[test]
     fn config_deser_minimal() {

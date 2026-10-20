@@ -4,12 +4,19 @@ use flowgen_core::{
     client::Client,
     config::ConfigExt,
     event::{new_completion_channel, Event, EventExt},
+    task::TaskConfig,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::pin;
 use tokio::sync::mpsc::Sender;
 use tokio_stream::StreamExt;
 use tracing::{error, warn};
+
+/// `nats_jetstream_subscriber` task config.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize, TaskConfig)]
+#[serde(transparent)]
+pub struct Subscriber(pub super::config::Config);
 
 /// Errors that can occur during NATS JetStream subscription operations.
 #[derive(thiserror::Error, Debug)]
@@ -101,7 +108,7 @@ pub struct EventHandler {
     client_key: flowgen_core::client_registry::ClientKey,
     tx: Option<Sender<Event>>,
     task_id: usize,
-    config: Arc<super::config::Subscriber>,
+    config: Arc<super::config::Config>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
@@ -220,9 +227,9 @@ impl EventHandler {
 
 /// NATS JetStream subscriber that consumes messages and converts them to flowgen events.
 #[derive(Debug)]
-pub struct Subscriber {
+pub struct Processor {
     /// Subscriber configuration including stream and consumer settings.
-    config: Arc<super::config::Subscriber>,
+    config: Arc<super::config::Config>,
     /// Sender for forwarding converted events.
     tx: Option<Sender<Event>>,
     /// Task identifier for event tagging.
@@ -234,7 +241,7 @@ pub struct Subscriber {
 }
 
 #[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Subscriber {
+impl flowgen_core::task::runner::Runner for Processor {
     type Error = Error;
     type EventHandler = EventHandler;
 
@@ -468,9 +475,9 @@ impl flowgen_core::task::runner::Runner for Subscriber {
 
 /// Builder for configuring and creating NATS JetStream subscribers.
 #[derive(Default)]
-pub struct SubscriberBuilder {
+pub struct ProcessorBuilder {
     /// Optional subscriber configuration.
-    config: Option<Arc<super::config::Subscriber>>,
+    config: Option<Arc<super::config::Config>>,
     /// Optional event sender.
     tx: Option<Sender<Event>>,
     /// Task identifier for event processing.
@@ -481,14 +488,14 @@ pub struct SubscriberBuilder {
     task_type: Option<&'static str>,
 }
 
-impl SubscriberBuilder {
-    pub fn new() -> SubscriberBuilder {
-        SubscriberBuilder {
+impl ProcessorBuilder {
+    pub fn new() -> ProcessorBuilder {
+        ProcessorBuilder {
             ..Default::default()
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Subscriber>) -> Self {
+    pub fn config(mut self, config: Arc<super::config::Config>) -> Self {
         self.config = Some(config);
         self
     }
@@ -516,8 +523,8 @@ impl SubscriberBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Subscriber, Error> {
-        Ok(Subscriber {
+    pub async fn build(self) -> Result<Processor, Error> {
+        Ok(Processor {
             config: self
                 .config
                 .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
@@ -567,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriber_builder() {
-        let config = Arc::new(super::super::config::Subscriber {
+        let config = Arc::new(super::super::config::Config {
             name: "test_subscriber".to_string(),
             credentials_path: Some(PathBuf::from("/test/creds.jwt")),
             subject: "test.subject".to_string(),
@@ -588,7 +595,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(100);
 
         // Success case.
-        let subscriber = SubscriberBuilder::new()
+        let subscriber = ProcessorBuilder::new()
             .config(config.clone())
             .sender(tx.clone())
             .task_id(1)
@@ -600,7 +607,7 @@ mod tests {
 
         // Error case - missing config.
         let (tx2, _rx2) = mpsc::channel(100);
-        let result = SubscriberBuilder::new()
+        let result = ProcessorBuilder::new()
             .sender(tx2)
             .task_context(create_mock_task_context())
             .build()
@@ -613,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscriber_builder_build_missing_task_context() {
-        let config = Arc::new(super::super::config::Subscriber {
+        let config = Arc::new(super::super::config::Config {
             name: "test_subscriber".to_string(),
             credentials_path: Some(PathBuf::from("/test/creds.jwt")),
             subject: "test.subject".to_string(),
@@ -633,7 +640,7 @@ mod tests {
         });
         let (tx, _rx) = mpsc::channel(100);
 
-        let result = SubscriberBuilder::new()
+        let result = ProcessorBuilder::new()
             .config(config)
             .sender(tx)
             .task_id(1)

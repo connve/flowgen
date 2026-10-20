@@ -50,6 +50,25 @@ impl FlowOptions {
     }
 }
 
+/// Shared servers the app started, such as the HTTP endpoint server, looked up by type.
+#[derive(Clone, Default)]
+pub struct Services(
+    std::collections::HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+);
+
+impl Services {
+    /// Adds `service`, replacing one of the same type.
+    pub fn insert<T: Send + Sync + 'static>(&mut self, service: std::sync::Arc<T>) {
+        self.0.insert(std::any::TypeId::of::<T>(), service);
+    }
+
+    /// The service of type `T`; `None` when the app did not start it.
+    pub fn get<T: Send + Sync + 'static>(&self) -> Option<std::sync::Arc<T>> {
+        let service = self.0.get(&std::any::TypeId::of::<T>())?;
+        std::sync::Arc::clone(service).downcast::<T>().ok()
+    }
+}
+
 /// Context information for task execution shared across all tasks.
 #[derive(Clone)]
 pub struct TaskContext {
@@ -85,6 +104,15 @@ pub struct TaskContext {
     pub client_registry: std::sync::Arc<crate::client_registry::ClientRegistry>,
     /// Flows callable in-process, shared by every flow in the process.
     pub inproc: std::sync::Arc<crate::task::inproc::registry::InprocRegistry>,
+    /// Shared servers tasks register with.
+    pub services: Services,
+}
+
+impl TaskContext {
+    /// The shared server of type `T`; `None` when it is not enabled.
+    pub fn service<T: Send + Sync + 'static>(&self) -> Option<std::sync::Arc<T>> {
+        self.services.get::<T>()
+    }
 }
 
 impl std::fmt::Debug for TaskContext {
@@ -137,6 +165,8 @@ pub struct TaskContextBuilder {
     client_registry: Option<std::sync::Arc<crate::client_registry::ClientRegistry>>,
     /// Flows callable in-process.
     inproc: Option<std::sync::Arc<crate::task::inproc::registry::InprocRegistry>>,
+    /// Shared servers tasks register with.
+    services: Services,
 }
 
 impl TaskContextBuilder {
@@ -262,6 +292,12 @@ impl TaskContextBuilder {
         self
     }
 
+    /// Sets the shared servers tasks register with.
+    pub fn services(mut self, services: Services) -> Self {
+        self.services = services;
+        self
+    }
+
     /// Builds the TaskContext instance.
     ///
     /// # Errors
@@ -299,6 +335,7 @@ impl TaskContextBuilder {
                 Some(inproc) => inproc,
                 None => std::sync::Arc::new(crate::task::inproc::registry::InprocRegistry::new()),
             },
+            services: self.services,
         })
     }
 }

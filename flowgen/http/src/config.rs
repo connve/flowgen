@@ -4,6 +4,7 @@
 //! method types, payload formats, and authentication settings.
 
 use flowgen_core::config::ConfigExt;
+use flowgen_core::task::TaskConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
@@ -19,7 +20,7 @@ pub(crate) fn default_connect_timeout() -> Option<Duration> {
 }
 
 /// HTTP processor configuration.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Processor {
     /// The unique name / identifier of the task.

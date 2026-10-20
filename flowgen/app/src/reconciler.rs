@@ -608,13 +608,13 @@ fn build_flow(
         .peer_registry(Arc::clone(&ctx.peer_registry));
 
     if let Some(server) = &ctx.servers.http_server {
-        builder = builder.http_server(Arc::clone(server));
+        builder = builder.service(Arc::clone(server));
     }
     if let Some(server) = &ctx.servers.mcp_server {
-        builder = builder.mcp_server(Arc::clone(server));
+        builder = builder.service(Arc::clone(server));
     }
     if let Some(server) = &ctx.servers.ai_gateway_server {
-        builder = builder.ai_gateway_server(Arc::clone(server));
+        builder = builder.service(Arc::clone(server));
     }
     if let Some(retry) = ctx.app_config.retry.as_ref() {
         builder = builder.retry(retry.clone());

@@ -11,9 +11,7 @@
 //! `flowgen_core::http_server`; this module owns only the AI-gateway-specific
 //! URL layout and OpenAI translation logic.
 
-use crate::ai_gateway::config::{
-    self, ChatCompletionRequest, EventPayload, Message, Protocol, SSE_DONE,
-};
+use crate::ai_gateway::config::{ChatCompletionRequest, EventPayload, Message, Protocol, SSE_DONE};
 use crate::ai_gateway::protocol::completions::OpenAiAdapter;
 use crate::ai_gateway::protocol::messages::{
     self as anthropic_msg, MessagesAdapter, MessagesRequest,
@@ -83,7 +81,7 @@ pub struct LlmProxyRegistration {
     pub protocol: Protocol,
     /// Full processor configuration. The dispatcher reads `auth`, `ack_timeout`,
     /// and `name` from here.
-    pub config: Arc<config::Processor>,
+    pub config: Arc<crate::llm_proxy::LlmProxy>,
     /// Optional bearer-token credentials loaded from `config.credentials_path`.
     pub credentials: Option<HttpCredentials>,
     /// Optional auth provider for user identity resolution (JWT, OIDC, session).

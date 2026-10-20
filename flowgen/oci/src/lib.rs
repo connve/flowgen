@@ -8,26 +8,16 @@
 //! artifact and pushes it to a registry under one or more tags, in the
 //! layout `oci_sync` reads back.
 
-use flowgen_core::task::meta::{Connection, Connector, Icon, TaskMeta};
+use flowgen_core::task::context::TaskContext;
+use flowgen_core::task::meta::{Connection, Connector, Icon};
+use flowgen_core::task::runner::Runner;
+use flowgen_core::task::{Task, TaskError, TaskIo, TaskMeta};
+use std::sync::Arc;
 
-/// OCI push: push files to a registry as an artifact.
-pub mod push {
-    /// Artifact packing and the registry push.
-    pub mod client;
-    /// Configuration for the OCI push task.
-    pub mod config;
-    /// OCI push processor implementation.
-    pub mod processor;
-}
+pub mod push;
 /// Registry credentials and client setup shared by both tasks.
 pub mod registry;
-/// OCI sync: pull an artifact from a registry and emit its files.
-pub mod sync {
-    /// Configuration for the OCI sync task.
-    pub mod config;
-    /// OCI sync processor implementation.
-    pub mod processor;
-}
+pub mod sync;
 
 /// The connector of this crate's task types.
 pub const CONNECTOR: Connector = Connector {
@@ -37,7 +27,7 @@ pub const CONNECTOR: Connector = Connector {
     describe_credentials: None,
 };
 
-impl TaskMeta for push::config::Processor {
+impl TaskMeta for push::OciPush {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
@@ -47,11 +37,47 @@ impl TaskMeta for push::config::Processor {
     }
 }
 
-impl TaskMeta for sync::config::Processor {
+impl TaskMeta for sync::OciSync {
     const CONNECTOR: Connector = CONNECTOR;
     const CPU_INTENSIVE: bool = true;
 
     fn connections(&self) -> Vec<Connection> {
         vec![Connection::new(CONNECTOR, self.credentials_path.as_deref()).target(&[&self.artifact])]
+    }
+}
+
+impl Task for push::OciPush {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = push::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
+    }
+}
+
+impl Task for sync::OciSync {
+    async fn run(self, io: TaskIo, context: Arc<TaskContext>) -> Result<(), TaskError> {
+        let mut builder = sync::ProcessorBuilder::new()
+            .config(Arc::new(self))
+            .task_id(io.task_id)
+            .task_type(io.task_type)
+            .task_context(context);
+        if let Some(rx) = io.rx {
+            builder = builder.receiver(rx);
+        }
+        if let Some(tx) = io.tx {
+            builder = builder.sender(tx);
+        }
+        builder.build().await?.run().await?;
+        Ok(())
     }
 }

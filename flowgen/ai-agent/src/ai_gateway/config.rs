@@ -1,20 +1,7 @@
-//! AI gateway task configuration and the internal event payload.
-//!
-//! The OpenAI wire types live in `super::protocol::completions`; the
-//! Anthropic wire types live in `super::protocol::messages`. This
-//! module keeps only what is shared across protocols: the `Processor`
-//! task config, the `Protocol` selector, and the `EventPayload` the
-//! dispatcher writes into `event.data` before dispatching a request
-//! into the flow pipeline.
-//!
-//! Re-exports of the OpenAI wire types are kept here so downstream
-//! crates (`app`, `completion::passthrough`, `completion::processor`,
-//! integration tests) continue to reach them through
-//! `ai_gateway::config::*` without touching their imports.
+//! What the AI gateway's protocols share: the `Protocol` selector and the
+//! `EventPayload` the gateway writes into `event.data` for a flow.
 
-use flowgen_core::config::ConfigExt;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 // Re-exports so downstream crates keep resolving OpenAI wire types
 // through the well-known `ai_gateway::config::*` path. New code
@@ -62,75 +49,6 @@ impl Protocol {
     }
 }
 
-/// LLM proxy task configuration.
-///
-/// Registers a flow as a backend on the shared AI gateway server (configured
-/// under `worker.ai_gateway`). The `protocol` selects which URL layout the
-/// server exposes; the task's `name` is the routing key clients use to pick
-/// this backend within that protocol.
-///
-/// # Example
-///
-/// ```yaml
-/// tasks:
-///   - llm_proxy:
-///       name: proxy
-///       # protocol: openai  # default; mounts /v1/chat/completions
-///       credentials_path: /etc/proxy/credentials.json
-///
-///   - ai_completion:
-///       name: complete
-///       provider: google_vertex
-///       model: gemini-2.0-flash
-///       stream: true
-///       prompt: "{{event.data.prompt}}"
-/// ```
-///
-/// Clients then send `model: "proxy/<downstream-model>"` to reach this proxy.
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Processor {
-    /// The unique name / identifier of the task. Used as the routing key
-    /// inside the chosen protocol (e.g. the prefix of OpenAI's `model` field).
-    pub name: String,
-    /// Models advertised on `GET <path>/models`, each exposed as `<name>/<model>`.
-    /// This is a discovery menu, not a whitelist: an unlisted `<model>` is still
-    /// forwarded (the routing script / provider decides what to do with it).
-    /// When non-empty, clients must pick a model — a bare proxy id is rejected.
-    /// When empty, the proxy is advertised by its bare `<name>` and accepts a
-    /// bare id, leaving the model choice to the routing script.
-    #[serde(default)]
-    pub models: Vec<String>,
-    /// HTTP headers a request must carry, with matching values, for this
-    /// proxy to be visible on `GET <path>/models` and reachable at all.
-    /// All declared headers must match (AND). An empty map (the default)
-    /// means every caller can reach it. A caller missing a required header
-    /// gets the same 404 as an unknown proxy name.
-    #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
-    /// Wire protocol exposed for this task. Defaults to OpenAI-compatible.
-    #[serde(default)]
-    pub protocol: Protocol,
-    /// Optional path to credentials file for authenticating incoming requests.
-    pub credentials_path: Option<PathBuf>,
-    /// Optional user authentication configuration.
-    /// When `auth.required` is true, requests must include a valid bearer token
-    /// validated by the worker-level auth provider (JWT, OIDC, or session).
-    #[serde(default)]
-    pub auth: Option<flowgen_core::auth::TaskAuthConfig>,
-    /// Timeout for waiting on pipeline completion before responding.
-    #[serde(default, with = "humantime_serde")]
-    pub ack_timeout: Option<std::time::Duration>,
-    /// Optional list of upstream task names this task depends on.
-    #[serde(default)]
-    pub depends_on: Option<Vec<String>>,
-    /// Optional retry configuration.
-    #[serde(default)]
-    pub retry: Option<flowgen_core::retry::RetryConfig>,
-}
-
-impl ConfigExt for Processor {}
-
 /// Payload the AI gateway server writes into `event.data` before
 /// dispatching an incoming request into the flow pipeline.
 ///
@@ -167,81 +85,4 @@ pub struct EventPayload<'a> {
     pub tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<&'a serde_json::Value>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn processor_deser_minimal() {
-        let json = r#"{
-            "name": "proxy"
-        }"#;
-        let cfg: Processor = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.name, "proxy");
-        assert_eq!(cfg.protocol, Protocol::Openai);
-        assert_eq!(cfg.credentials_path, None);
-        assert_eq!(cfg.auth, None);
-        assert_eq!(cfg.ack_timeout, None);
-        assert_eq!(cfg.depends_on, None);
-        assert_eq!(cfg.retry, None);
-    }
-
-    #[test]
-    fn processor_deser_with_credentials_and_auth() {
-        let json = r#"{
-            "name": "secure_proxy",
-            "credentials_path": "/etc/proxy/creds.json",
-            "auth": { "required": true }
-        }"#;
-        let cfg: Processor = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cfg.credentials_path,
-            Some(PathBuf::from("/etc/proxy/creds.json"))
-        );
-        let auth = cfg.auth.unwrap();
-        assert!(auth.required);
-    }
-
-    #[test]
-    fn processor_deser_with_ack_timeout() {
-        let json = r#"{
-            "name": "proxy",
-            "ack_timeout": "30s"
-        }"#;
-        let cfg: Processor = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.ack_timeout, Some(std::time::Duration::from_secs(30)));
-    }
-
-    #[test]
-    fn processor_deser_with_depends_on() {
-        let json = r#"{
-            "name": "proxy",
-            "depends_on": ["auth_check", "rate_limit"]
-        }"#;
-        let cfg: Processor = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cfg.depends_on,
-            Some(vec!["auth_check".to_string(), "rate_limit".to_string()])
-        );
-    }
-
-    #[test]
-    fn processor_roundtrip() {
-        let cfg = Processor {
-            name: "gw".to_string(),
-            models: vec!["glm-4.6".to_string(), "kimi-k2.7-code".to_string()],
-            headers: std::collections::HashMap::new(),
-            protocol: Protocol::Openai,
-            credentials_path: Some(PathBuf::from("/c.json")),
-            auth: None,
-            ack_timeout: Some(std::time::Duration::from_secs(60)),
-            depends_on: None,
-            retry: None,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: Processor = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg, back);
-    }
 }

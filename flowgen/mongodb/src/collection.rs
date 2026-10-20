@@ -1,17 +1,67 @@
+//! The `mongodb_collection` task: read, write, or upsert documents.
+
 use super::message::MongoEventsExt;
 use crate::client::MongoClientBuilder;
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::{Event, EventData, EventExt};
+use flowgen_core::task::TaskConfig;
 use futures::TryStreamExt;
 use mongodb::bson::{oid::ObjectId, Bson, Document as BsonDocument};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
-use mongodb::Collection;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
-use super::config::Operation;
+/// Operation performed against a MongoDB collection.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    /// Find documents matching `filter` and emit each as an event.
+    Read,
+    /// Insert the incoming event's JSON payload as a document.
+    Write,
+    /// Update the first document matching `filter` with the incoming event's
+    /// JSON payload, inserting a document if nothing matches.
+    Upsert,
+}
+
+/// MongoDB collection task configuration: read, write, or upsert documents.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Collection {
+    /// The unique name / identifier of the task.
+    pub name: String,
+    /// Operation to perform against the collection.
+    pub operation: Operation,
+    /// Path to credentials file containing MongoDB authentication details.
+    /// Omit to connect to `localhost:27017` without authentication.
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// The Database Name from MongoDB.
+    pub db_name: String,
+    /// The Collection Name from MongoDB.
+    pub collection_name: String,
+    /// MongoDB query document selecting which documents the operation acts
+    /// on. Used by `operation: read`, and required by `operation: upsert`.
+    #[serde(default)]
+    pub filter: serde_json::Map<String, serde_json::Value>,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Collection {}
 
 /// Errors that can occur during MongoDB collection read/write operations.
 #[derive(thiserror::Error, Debug)]
@@ -115,7 +165,7 @@ impl Error {
 /// Event handler for processing individual events against a MongoDB collection.
 pub struct EventHandler {
     client: Arc<mongodb::Client>,
-    config: Arc<super::config::Collection>,
+    config: Arc<Collection>,
     task_id: usize,
     tx: Option<Sender<Event>>,
     task_type: &'static str,
@@ -156,7 +206,7 @@ impl EventHandler {
         &self,
         completion_tx_arc: &Option<flowgen_core::event::SharedCompletionTx>,
     ) -> Result<(), Error> {
-        let collection: Collection<BsonDocument> = self
+        let collection: mongodb::Collection<BsonDocument> = self
             .client
             .database(&self.config.db_name)
             .collection(&self.config.collection_name);
@@ -269,7 +319,7 @@ impl EventHandler {
 
         let subject = format!("{}.{}", self.config.db_name, self.config.collection_name);
 
-        let collection: Collection<BsonDocument> = self
+        let collection: mongodb::Collection<BsonDocument> = self
             .client
             .database(&self.config.db_name)
             .collection(&self.config.collection_name);
@@ -332,7 +382,7 @@ impl EventHandler {
         };
         let update_doc = build_update_doc(payload_doc)?;
 
-        let collection: Collection<BsonDocument> = self
+        let collection: mongodb::Collection<BsonDocument> = self
             .client
             .database(&self.config.db_name)
             .collection(&self.config.collection_name);
@@ -378,7 +428,7 @@ impl EventHandler {
 /// on `config.operation`.
 #[derive(Debug)]
 pub struct Processor {
-    config: Arc<super::config::Collection>,
+    config: Arc<Collection>,
     rx: Receiver<Event>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -520,7 +570,7 @@ fn build_update_doc(payload: BsonDocument) -> Result<BsonDocument, Error> {
 /// Builder for constructing `Processor` instances.
 #[derive(Default)]
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Collection>>,
+    config: Option<Arc<Collection>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: usize,
@@ -535,7 +585,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Collection>) -> Self {
+    pub fn config(mut self, config: Arc<Collection>) -> Self {
         self.config = Some(config);
         self
     }
@@ -597,8 +647,8 @@ mod tests {
     use std::path::PathBuf;
     use tokio::sync::mpsc::channel;
 
-    fn mock_config(operation: Operation) -> super::super::config::Collection {
-        super::super::config::Collection {
+    fn mock_config(operation: Operation) -> Collection {
+        Collection {
             name: "test_mongodb_collection".to_string(),
             operation,
             db_name: "test_database".to_string(),
@@ -1145,5 +1195,80 @@ mod tests {
         ));
         let err = Error::MongoDB { source };
         assert!(err.to_string().contains("MongoDB error:"));
+    }
+
+    fn fixture(operation: Operation) -> Collection {
+        Collection {
+            name: "task1".to_string(),
+            operation,
+            credentials_path: Some(PathBuf::from("/tmp/creds.json")),
+            db_name: "db".to_string(),
+            collection_name: "col".to_string(),
+            filter: serde_json::Map::new(),
+            depends_on: None,
+            retry: None,
+            max_in_flight: None,
+        }
+    }
+
+    #[test]
+    fn test_collection_read_serde_roundtrip() {
+        let mut c = fixture(Operation::Read);
+        c.filter.insert("status".to_string(), "active".into());
+
+        let s = serde_json::to_string(&c).unwrap();
+        let de: Collection = serde_json::from_str(&s).unwrap();
+        assert_eq!(c, de);
+    }
+
+    #[test]
+    fn test_collection_write_serde_roundtrip() {
+        let c = fixture(Operation::Write);
+        let s = serde_json::to_string(&c).unwrap();
+        let de: Collection = serde_json::from_str(&s).unwrap();
+        assert_eq!(c, de);
+    }
+
+    #[test]
+    fn test_collection_upsert_serde_roundtrip() {
+        let mut c = fixture(Operation::Upsert);
+        c.filter.insert("status".to_string(), "active".into());
+
+        let s = serde_json::to_string(&c).unwrap();
+        let de: Collection = serde_json::from_str(&s).unwrap();
+        assert_eq!(c, de);
+    }
+
+    #[test]
+    fn test_filter_keeps_operators_and_value_types() {
+        let json = r#"{
+            "name": "n", "operation": "read", "credentials_path": "/c.json",
+            "db_name": "d", "collection_name": "c",
+            "filter": { "age": { "$gt": 30 }, "count": 5 }
+        }"#;
+        let c: Collection = serde_json::from_str(json).unwrap();
+
+        assert_eq!(c.filter["age"], serde_json::json!({ "$gt": 30 }));
+        assert_eq!(c.filter["count"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn test_operation_uses_snake_case() {
+        let json = r#"{
+            "name": "n", "operation": "read", "credentials_path": "/c.json",
+            "db_name": "d", "collection_name": "c"
+        }"#;
+        let c: Collection = serde_json::from_str(json).unwrap();
+        assert_eq!(c.operation, Operation::Read);
+    }
+
+    #[test]
+    fn test_rejects_unknown_fields() {
+        let json = r#"{
+            "name": "n", "operation": "read", "credentials_path": "/c.json",
+            "db_name": "d", "collection_name": "c", "bogus": 1
+        }"#;
+        let err = serde_json::from_str::<Collection>(json).unwrap_err();
+        assert!(err.to_string().contains("bogus"));
     }
 }

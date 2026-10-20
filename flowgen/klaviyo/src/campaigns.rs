@@ -5,6 +5,7 @@ use crate::processor::{
 };
 use flowgen_core::config::ConfigExt;
 use flowgen_core::event::Event;
+use flowgen_core::task::TaskConfig;
 use klaviyo::types;
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -48,7 +49,7 @@ pub enum CampaignOperation {
 ///     campaign_id: "{{event.data.data.id}}"
 ///     template_id: "{{event.meta.template_id}}"
 /// ```
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
 pub struct Campaigns {
     /// Task name.
@@ -90,24 +91,12 @@ impl ConfigExt for Campaigns {}
 
 #[async_trait::async_trait]
 impl Operation for Campaigns {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn credentials_path(&self) -> &Path {
         &self.credentials_path
     }
 
     fn base_url(&self) -> Option<&str> {
         self.base_url.as_deref()
-    }
-
-    fn retry(&self) -> Option<&flowgen_core::retry::RetryConfig> {
-        self.retry.as_ref()
-    }
-
-    fn max_in_flight(&self) -> Option<std::num::NonZeroUsize> {
-        self.max_in_flight
     }
 
     fn validate(&self) -> Result<(), Error> {

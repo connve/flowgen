@@ -6,6 +6,7 @@
 use flowgen_core::{
     config::ConfigExt,
     event::{Event, EventBuilder, EventData, EventExt},
+    task::TaskConfig,
 };
 
 use google_cloud_bigquery::client::{Client, ClientConfig};
@@ -20,10 +21,367 @@ use google_cloud_bigquery::http::table::{
 };
 use google_cloud_bigquery::http::types::ErrorProto;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
+
+/// Job operation type for unified job processor.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOperation {
+    /// Create a new job (load, query, extract, copy).
+    Create,
+    /// Get job status and poll until completion.
+    Get,
+    /// Cancel a running job.
+    Cancel,
+    /// Delete job metadata.
+    Delete,
+}
+
+/// Unified configuration for BigQuery job operations.
+///
+/// This single config handles all job operations: create, get, cancel, and delete.
+/// The operation type determines which fields are required and what action is performed.
+///
+/// # Examples
+///
+/// Create a load job:
+/// ```yaml
+/// bigquery_job:
+///   name: import_events
+///   operation: create
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   source_uris:
+///     - "gs://my-bucket/data/*.parquet"
+///   destination_table:
+///     project_id: my-project-id
+///     dataset_id: analytics
+///     table_id: events
+///   source_format: parquet
+///   write_disposition: write_append
+///   autodetect: true
+/// ```
+///
+/// Poll job status:
+/// ```yaml
+/// bigquery_job:
+///   name: check_load_status
+///   operation: get
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+///   poll_interval: 5s
+///   max_poll_duration: 30m
+/// ```
+///
+/// Cancel a job:
+/// ```yaml
+/// bigquery_job:
+///   name: stop_job
+///   operation: cancel
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+/// ```
+///
+/// Delete job metadata:
+/// ```yaml
+/// bigquery_job:
+///   name: cleanup_job
+///   operation: delete
+///   credentials_path: /etc/gcp/credentials.json
+///   project_id: my-project-id
+///   job_id: "{{event.data.job_id}}"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct Job {
+    /// Unique task identifier.
+    pub name: String,
+    /// Job operation type (create, get, cancel, delete).
+    pub operation: JobOperation,
+    /// Path to GCP service account credentials JSON file.
+    /// When omitted, falls back to Application Default Credentials (ADC).
+    #[serde(default)]
+    pub credentials_path: Option<PathBuf>,
+    /// GCP project ID where BigQuery resources are located.
+    pub project_id: String,
+    /// Optional GCP project ID for running the job (billing project).
+    #[serde(default)]
+    pub job_project_id: Option<String>,
+    /// Optional BigQuery dataset location (e.g., "US", "EU", "us-central1").
+    #[serde(default)]
+    pub location: Option<String>,
+    // Fields for create operation.
+    /// Job type for create operation (load, query, extract, copy). Default: load.
+    #[serde(default = "default_job_type")]
+    pub job_type: String,
+    /// GCS URIs of source files to load (create operation only).
+    /// Supports both literal arrays and template expressions that resolve to arrays at runtime.
+    #[serde(default)]
+    pub source_uris: Option<serde_json::Value>,
+    /// Destination BigQuery table (create operation only).
+    #[serde(default)]
+    pub destination_table: Option<TableReference>,
+    /// Source file format (create operation only).
+    #[serde(default)]
+    pub source_format: Option<SourceFormat>,
+    /// How to handle existing data (create operation only).
+    #[serde(default)]
+    pub write_disposition: Option<WriteDisposition>,
+    /// Whether to create table if it doesn't exist (create operation only).
+    #[serde(default)]
+    pub create_disposition: Option<CreateDisposition>,
+    /// Whether to automatically infer schema (create operation only).
+    #[serde(default)]
+    pub autodetect: Option<bool>,
+    /// Explicit table schema (create operation only).
+    /// When provided, overrides autodetect for precise schema control.
+    #[serde(default)]
+    pub schema: Option<Vec<TableField>>,
+    /// Optional maximum number of bad records (create operation only).
+    #[serde(default)]
+    pub max_bad_records: Option<i32>,
+    /// Optional labels for the job.
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
+
+    // Fields for get/cancel/delete operations.
+    /// Job ID (get, cancel, delete operations).
+    #[serde(default)]
+    pub job_id: Option<String>,
+
+    // Fields for get operation.
+    /// Polling interval between status checks (get operation only).
+    #[serde(default = "default_poll_interval", with = "humantime_serde")]
+    pub poll_interval: Duration,
+    /// Maximum duration to poll before giving up (get operation only).
+    #[serde(default = "default_max_poll_duration", with = "humantime_serde")]
+    pub max_poll_duration: Duration,
+
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration.
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
+}
+
+impl ConfigExt for Job {}
+
+impl Job {
+    /// Returns the project ID to use for running the job.
+    pub fn get_job_project_id(&self) -> &str {
+        self.job_project_id.as_deref().unwrap_or(&self.project_id)
+    }
+}
+
+/// BigQuery table reference.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableReference {
+    /// GCP project ID containing the table.
+    pub project_id: String,
+    /// BigQuery dataset ID.
+    pub dataset_id: String,
+    /// BigQuery table ID.
+    pub table_id: String,
+}
+
+/// Source file formats for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceFormat {
+    Parquet,
+    Csv,
+    #[serde(rename = "newline_delimited_json")]
+    #[default]
+    NewlineDelimitedJson,
+    Avro,
+}
+
+impl SourceFormat {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SourceFormat::Parquet => "PARQUET",
+            SourceFormat::Csv => "CSV",
+            SourceFormat::NewlineDelimitedJson => "NEWLINE_DELIMITED_JSON",
+            SourceFormat::Avro => "AVRO",
+        }
+    }
+}
+
+/// BigQuery field type for schema definitions.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    String,
+    Bytes,
+    Integer,
+    Int64,
+    Float,
+    Float64,
+    Numeric,
+    Bignumeric,
+    Boolean,
+    Bool,
+    Timestamp,
+    Date,
+    Time,
+    Datetime,
+    Geography,
+    Json,
+    Record,
+}
+
+impl From<FieldType> for google_cloud_bigquery::http::table::TableFieldType {
+    fn from(ft: FieldType) -> Self {
+        match ft {
+            FieldType::String => Self::String,
+            FieldType::Bytes => Self::Bytes,
+            FieldType::Integer | FieldType::Int64 => Self::Integer,
+            FieldType::Float | FieldType::Float64 => Self::Float,
+            FieldType::Numeric | FieldType::Bignumeric => Self::Numeric,
+            FieldType::Boolean | FieldType::Bool => Self::Boolean,
+            FieldType::Timestamp => Self::Timestamp,
+            FieldType::Date => Self::Date,
+            FieldType::Time => Self::Time,
+            FieldType::Datetime => Self::Datetime,
+            FieldType::Geography => Self::Json,
+            FieldType::Json => Self::Json,
+            FieldType::Record => Self::Record,
+        }
+    }
+}
+
+/// BigQuery field mode for schema definitions.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldMode {
+    #[default]
+    Nullable,
+    Required,
+    Repeated,
+}
+
+impl From<FieldMode> for google_cloud_bigquery::http::table::TableFieldMode {
+    fn from(fm: FieldMode) -> Self {
+        match fm {
+            FieldMode::Nullable => Self::Nullable,
+            FieldMode::Required => Self::Required,
+            FieldMode::Repeated => Self::Repeated,
+        }
+    }
+}
+
+/// Table field schema definition.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableField {
+    /// Field name.
+    pub name: String,
+    /// Field data type.
+    #[serde(rename = "type")]
+    pub field_type: FieldType,
+    /// Field mode (nullable, required, repeated).
+    #[serde(default)]
+    pub mode: FieldMode,
+    /// Optional field description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl From<TableField> for google_cloud_bigquery::http::table::TableFieldSchema {
+    fn from(tf: TableField) -> Self {
+        Self {
+            name: tf.name,
+            data_type: tf.field_type.into(),
+            mode: Some(tf.mode.into()),
+            description: tf.description,
+            fields: None,
+            policy_tags: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            collation: None,
+            default_value_expression: None,
+            rounding_mode: None,
+        }
+    }
+}
+
+/// Write disposition for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteDisposition {
+    /// Append data to existing table. Create table if it doesn't exist.
+    #[serde(rename = "write_append")]
+    #[default]
+    WriteAppend,
+    /// Truncate table before loading data. Create table if it doesn't exist.
+    #[serde(rename = "write_truncate")]
+    WriteTruncate,
+    /// Only load if table is empty. Fail if table exists and has data.
+    #[serde(rename = "write_empty")]
+    WriteEmpty,
+}
+
+impl WriteDisposition {
+    pub fn as_str(&self) -> &str {
+        match self {
+            WriteDisposition::WriteAppend => "WRITE_APPEND",
+            WriteDisposition::WriteTruncate => "WRITE_TRUNCATE",
+            WriteDisposition::WriteEmpty => "WRITE_EMPTY",
+        }
+    }
+}
+
+/// Create disposition for BigQuery load jobs.
+#[derive(PartialEq, Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CreateDisposition {
+    /// Create table if it doesn't exist (default).
+    #[serde(rename = "create_if_needed")]
+    #[default]
+    CreateIfNeeded,
+    /// Never create table. Fail if table doesn't exist.
+    #[serde(rename = "create_never")]
+    CreateNever,
+}
+
+impl CreateDisposition {
+    pub fn as_str(&self) -> &str {
+        match self {
+            CreateDisposition::CreateIfNeeded => "CREATE_IF_NEEDED",
+            CreateDisposition::CreateNever => "CREATE_NEVER",
+        }
+    }
+}
+
+/// Default poll interval for job status checks (5 seconds).
+fn default_poll_interval() -> Duration {
+    Duration::from_secs(5)
+}
+
+/// Default maximum poll duration (30 minutes).
+fn default_max_poll_duration() -> Duration {
+    Duration::from_secs(1800)
+}
+
+/// Default job type for create operation.
+fn default_job_type() -> String {
+    "load".to_string()
+}
 
 /// Response for delete operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,7 +500,7 @@ pub struct EventHandler {
     client: Arc<Client>,
     task_id: usize,
     tx: Option<Sender<Event>>,
-    config: Arc<super::config::Job>,
+    config: Arc<Job>,
     task_type: &'static str,
     task_context: Arc<flowgen_core::task::context::TaskContext>,
 }
@@ -173,7 +531,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
             // Execute operation based on type.
             let (result_data, job_id) = match config.operation {
-                super::config::JobOperation::Create => {
+                JobOperation::Create => {
                     let mut job = self.create_job(&config).await?;
                     let data = serde_json::to_value(&job)
                         .map_err(|source| Error::JobSerialization { source })?;
@@ -184,7 +542,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     };
                     (data, job_id)
                 }
-                super::config::JobOperation::Get => {
+                JobOperation::Get => {
                     let mut job = self.get_job(&config).await?;
                     let data = serde_json::to_value(&job)
                         .map_err(|source| Error::JobSerialization { source })?;
@@ -195,7 +553,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     };
                     (data, job_id)
                 }
-                super::config::JobOperation::Cancel => {
+                JobOperation::Cancel => {
                     let mut job = self.cancel_job(&config).await?;
                     let data = serde_json::to_value(&job)
                         .map_err(|source| Error::JobSerialization { source })?;
@@ -206,7 +564,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
                     };
                     (data, job_id)
                 }
-                super::config::JobOperation::Delete => {
+                JobOperation::Delete => {
                     let response = self.delete_job(&config).await?;
                     let data = serde_json::to_value(&response)
                         .map_err(|source| Error::JobSerialization { source })?;
@@ -255,7 +613,7 @@ impl flowgen_core::task::runner::Handler for EventHandler {
 
 impl EventHandler {
     /// Creates a BigQuery job and returns the complete job response.
-    async fn create_job(&self, config: &super::config::Job) -> Result<BqJob, Error> {
+    async fn create_job(&self, config: &Job) -> Result<BqJob, Error> {
         let source_uris_value = config
             .source_uris
             .as_ref()
@@ -294,29 +652,21 @@ impl EventHandler {
 
         // Map config enums to BigQuery library enums.
         let source_fmt = match source_format {
-            super::config::SourceFormat::Parquet => BqSourceFormat::Parquet,
-            super::config::SourceFormat::Csv => BqSourceFormat::Csv,
-            super::config::SourceFormat::NewlineDelimitedJson => {
-                BqSourceFormat::NewlineDelimitedJson
-            }
-            super::config::SourceFormat::Avro => BqSourceFormat::Avro,
+            SourceFormat::Parquet => BqSourceFormat::Parquet,
+            SourceFormat::Csv => BqSourceFormat::Csv,
+            SourceFormat::NewlineDelimitedJson => BqSourceFormat::NewlineDelimitedJson,
+            SourceFormat::Avro => BqSourceFormat::Avro,
         };
 
         let write_disp = match config.write_disposition.as_ref() {
-            Some(super::config::WriteDisposition::WriteAppend) | None => {
-                BqWriteDisposition::WriteAppend
-            }
-            Some(super::config::WriteDisposition::WriteTruncate) => {
-                BqWriteDisposition::WriteTruncate
-            }
-            Some(super::config::WriteDisposition::WriteEmpty) => BqWriteDisposition::WriteEmpty,
+            Some(WriteDisposition::WriteAppend) | None => BqWriteDisposition::WriteAppend,
+            Some(WriteDisposition::WriteTruncate) => BqWriteDisposition::WriteTruncate,
+            Some(WriteDisposition::WriteEmpty) => BqWriteDisposition::WriteEmpty,
         };
 
         let create_disp = match config.create_disposition.as_ref() {
-            Some(super::config::CreateDisposition::CreateIfNeeded) | None => {
-                BqCreateDisposition::CreateIfNeeded
-            }
-            Some(super::config::CreateDisposition::CreateNever) => BqCreateDisposition::CreateNever,
+            Some(CreateDisposition::CreateIfNeeded) | None => BqCreateDisposition::CreateIfNeeded,
+            Some(CreateDisposition::CreateNever) => BqCreateDisposition::CreateNever,
         };
 
         // Convert schema configuration to TableSchema if provided.
@@ -361,7 +711,7 @@ impl EventHandler {
     }
 
     /// Gets job status and polls until completion or timeout.
-    async fn get_job(&self, config: &super::config::Job) -> Result<BqJob, Error> {
+    async fn get_job(&self, config: &Job) -> Result<BqJob, Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobIdForGet)?;
 
         let start_time = Instant::now();
@@ -403,7 +753,7 @@ impl EventHandler {
     }
 
     /// Cancels a BigQuery job and returns the job response.
-    async fn cancel_job(&self, config: &super::config::Job) -> Result<BqJob, Error> {
+    async fn cancel_job(&self, config: &Job) -> Result<BqJob, Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobIdForCancel)?;
 
         let request = CancelJobRequest {
@@ -421,7 +771,7 @@ impl EventHandler {
     }
 
     /// Deletes a BigQuery job's metadata.
-    async fn delete_job(&self, config: &super::config::Job) -> Result<DeleteJobResponse, Error> {
+    async fn delete_job(&self, config: &Job) -> Result<DeleteJobResponse, Error> {
         let job_id = config.job_id.as_ref().ok_or(Error::MissingJobIdForDelete)?;
 
         self.client
@@ -442,7 +792,7 @@ impl EventHandler {
 #[derive(Debug)]
 pub struct Processor {
     /// Job configuration including credentials and operation parameters.
-    config: Arc<super::config::Job>,
+    config: Arc<Job>,
     /// Receiver for incoming events to process.
     rx: Receiver<Event>,
     /// Channel sender for result events.
@@ -545,7 +895,7 @@ impl flowgen_core::task::runner::Runner for Processor {
 
 /// Builder for creating unified Job processor instances.
 pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::Job>>,
+    config: Option<Arc<Job>>,
     rx: Option<Receiver<Event>>,
     tx: Option<Sender<Event>>,
     task_id: Option<usize>,
@@ -565,7 +915,7 @@ impl ProcessorBuilder {
         }
     }
 
-    pub fn config(mut self, config: Arc<super::config::Job>) -> Self {
+    pub fn config(mut self, config: Arc<Job>) -> Self {
         self.config = Some(config);
         self
     }

@@ -1,853 +1,340 @@
-//! Salesforce REST API processor.
-//!
-//! Handles SObject CRUD operations: create, get, get_by_external_id, update, upsert, delete, and get_deleted.
+//! The `salesforce_restapi_sobject` task: SObject create, get,
+//! get_by_external_id, update, upsert, delete and get_deleted.
 
-use super::config::{ALLOW_SAVE_VALUE, DUPLICATE_RULE_HEADER};
+use crate::processor::{
+    required, to_json, Call, Emitter, Error, Operation, Output, Payload, ALLOW_SAVE_VALUE,
+    DUPLICATE_RULE_HEADER,
+};
 use flowgen_core::config::ConfigExt;
-use flowgen_core::event::{Event, EventBuilder, EventData, EventExt};
-use std::sync::Arc;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, warn};
+use flowgen_core::task::TaskConfig;
+use salesforce_core::chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
+use tracing::warn;
 
-/// Errors for Salesforce REST API CRUD operations.
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum Error {
-    #[error("Failed to send event message to next task: {source}")]
-    SendMessage {
-        #[source]
-        source: flowgen_core::event::Error,
-    },
-    #[error("Missing required builder attribute: {}", _0)]
-    MissingBuilderAttribute(String),
-    #[error("Salesforce authentication error: {source}")]
-    SalesforceAuth {
-        #[source]
-        source: salesforce_core::client::Error,
-    },
-    #[error(transparent)]
-    Connect(#[from] crate::client::Error),
-    #[error("Salesforce REST API operation failed: {source}")]
-    RestApiOperation {
-        #[source]
-        source: Box<salesforce_core::restapi::sobject::Error>,
-    },
-    #[error("Failed to serialize or deserialize data: {source}")]
-    SerdeExt {
-        #[source]
-        source: flowgen_core::serde::Error,
-    },
-    #[error(transparent)]
-    EventError(#[from] flowgen_core::event::Error),
-    #[error("Failed to render configuration template: {source}")]
-    ConfigRender {
-        #[source]
-        source: flowgen_core::config::Error,
-    },
-    #[error("Task failed after all retry attempts: {source}")]
-    RetryExhausted {
-        #[source]
-        source: Box<Error>,
-    },
-    #[error("Operation requires record_id field to be specified")]
-    MissingRecordId,
-    #[error("Operation requires both start and end datetimes to be specified")]
-    MissingTimeWindow,
-    #[error("Invalid '{field}' datetime: {source}")]
-    InvalidDateTime {
-        field: String,
-        #[source]
-        source: chrono::ParseError,
-    },
-    #[error("Operation requires payload data (explicit fields or from_event: true)")]
-    MissingPayload,
-    #[error("Operation requires both external_id_field and external_id_value to be specified")]
-    MissingExternalId,
-    #[error("Failed to build REST API client: {source}")]
-    RestClientBuild {
-        #[source]
-        source: salesforce_core::restapi::ClientError,
-    },
+/// SObject CRUD operations.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SObjectOperation {
+    /// Create a new record.
+    Create,
+    /// Get a record by ID.
+    Get,
+    /// Get a record by external ID field.
+    GetByExternalId,
+    /// Update an existing record by ID.
+    Update,
+    /// Upsert a record by external ID (update if exists, create if not).
+    Upsert,
+    /// Delete a record by ID.
+    Delete,
+    /// Retrieve IDs and deletion datetimes of records deleted within a time window.
+    GetDeleted,
 }
 
-/// Event handler for processing individual SObject CRUD requests.
-pub struct EventHandler {
-    client: Arc<salesforce_core::restapi::Client>,
-    config: Arc<super::config::SObject>,
-    tx: Option<Sender<Event>>,
-    current_task_id: usize,
-    sfdc_client: Arc<tokio::sync::Mutex<salesforce_core::client::Client>>,
-    task_type: &'static str,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
+/// Configuration for Salesforce REST API CRUD operations.
+///
+/// # Examples
+///
+/// Create a new record with explicit payload:
+/// ```yaml
+/// salesforce_restapi_sobject:
+///   name: create_account
+///   operation: create
+///   credentials_path: /path/to/salesforce_creds.json
+///   sobject_type: Account
+///   payload:
+///     Name: "{{event.data.company_name}}"
+///     Industry: "Technology"
+///     BillingCity: "San Francisco"
+/// ```
+///
+/// Create using event data as payload:
+/// ```yaml
+/// salesforce_restapi_sobject:
+///   name: create_account
+///   operation: create
+///   credentials_path: /path/to/salesforce_creds.json
+///   sobject_type: Account
+///   payload:
+///     from_event: true
+/// ```
+///
+/// Update a record:
+/// ```yaml
+/// salesforce_restapi_sobject:
+///   name: update_account
+///   operation: update
+///   credentials_path: /path/to/salesforce_creds.json
+///   sobject_type: Account
+///   record_id: "{{event.data.salesforce_id}}"
+///   payload:
+///     Name: "{{event.data.new_name}}"
+///     Industry: "Manufacturing"
+/// ```
+///
+/// Upsert by external ID:
+/// ```yaml
+/// salesforce_restapi_sobject:
+///   name: upsert_contact
+///   operation: upsert
+///   credentials_path: /path/to/salesforce_creds.json
+///   sobject_type: Contact
+///   external_id_field: ExternalId__c
+///   external_id_value: "{{event.data.external_id}}"
+///   payload:
+///     FirstName: "{{event.data.first_name}}"
+///     LastName: "{{event.data.last_name}}"
+///     Email: "{{event.data.email}}"
+/// ```
+///
+/// Get records deleted within a time window:
+/// ```yaml
+/// salesforce_restapi_sobject:
+///   name: get_deleted_accounts
+///   operation: get_deleted
+///   credentials_path: /path/to/salesforce_creds.json
+///   sobject_type: Account
+///   start: "{{event.data.start_iso}}"
+///   end: "{{event.data.end_iso}}"
+/// ```
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
+#[serde(deny_unknown_fields)]
+pub struct SObject {
+    /// Unique task identifier.
+    pub name: String,
+    /// SObject operation type.
+    pub operation: SObjectOperation,
+    /// Path to Salesforce authentication credentials.
+    pub credentials_path: PathBuf,
+    /// SObject type (e.g., "Account", "Contact", "CustomObject__c").
+    pub sobject_type: String,
+    /// Payload configuration for record data (create, update, upsert).
+    #[serde(default)]
+    pub payload: Option<Payload>,
+    /// Salesforce record ID (get, update, delete).
+    #[serde(default)]
+    pub record_id: Option<String>,
+    /// Comma-separated list of fields to retrieve (get, get_by_external_id).
+    #[serde(default)]
+    pub fields: Option<String>,
+    /// External ID field name (get_by_external_id, upsert).
+    #[serde(default)]
+    pub external_id_field: Option<String>,
+    /// External ID value (get_by_external_id, upsert).
+    #[serde(default)]
+    pub external_id_value: Option<String>,
+    /// Start datetime of the deletion window (ISO 8601) for get_deleted.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// End datetime of the deletion window (ISO 8601) for get_deleted.
+    #[serde(default)]
+    pub end: Option<String>,
+    /// Send `Sforce-Duplicate-Rule-Header: allowSave=true` so Salesforce
+    /// accepts a record even when a duplicate detection rule would
+    /// normally block it. Default duplicate rules ship as "Block" on
+    /// Account/Lead/Contact, so without this flag create calls silently
+    /// no-op on duplicates. Applies to create, update, and upsert.
+    #[serde(default)]
+    pub allow_duplicate_save: bool,
+    /// Optional list of upstream task names this task depends on.
+    /// When set, this task only receives events from the named tasks.
+    /// When not set, the task receives from the previous task in the list (linear chain).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+    /// Optional retry configuration (overrides app-level retry config).
+    #[serde(default)]
+    pub retry: Option<flowgen_core::retry::RetryConfig>,
+    /// Events handled at once; defaults to 64.
+    #[serde(default)]
+    pub max_in_flight: Option<std::num::NonZeroUsize>,
 }
 
-impl EventHandler {
-    /// Log SObject operation failure as a warning if the response indicates failure.
-    /// The event is still forwarded to downstream tasks with the full Salesforce response.
-    fn log_failure(response: &serde_json::Value) {
-        let success = response
-            .get("success")
-            .and_then(|s| s.as_bool())
-            .unwrap_or(true);
-        if !success {
-            let errors = response
-                .get("errors")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            warn!(
-                errors = %errors,
-                "SObject operation completed with failure"
-            );
-        }
+impl ConfigExt for SObject {}
+
+/// A record deleted within the requested window.
+#[derive(Serialize)]
+struct Deleted<'a> {
+    id: &'a str,
+    deleted_date: &'a DateTime<Utc>,
+}
+
+#[async_trait::async_trait]
+impl Operation for SObject {
+    type Client = salesforce_core::restapi::Client;
+
+    fn client(auth: &salesforce_core::client::Client) -> Result<Self::Client, Error> {
+        crate::processor::rest_client(auth)
     }
 
-    async fn process(&self, event: Event) -> Result<(), Error> {
-        if self.task_context.cancellation_token.is_cancelled() {
-            return Ok(());
-        }
-
-        // Run handler with event context for automatic meta preservation.
-        let event = Arc::new(event);
-        let completion_tx_arc = Arc::clone(&event).completion_tx.clone();
-
-        flowgen_core::event::with_event_context(&Arc::clone(&event), async move {
-            let config = self
-                .config
-                .render_for_event(&event)
-                .map_err(|e| Error::ConfigRender { source: e })?;
-
-            // Extract event.data for payload operations
-            let event_data = event.data_as_json()?;
-
-            // Execute operation based on type.
-            match config.operation {
-                super::config::SObjectOperation::Create => {
-                    self.create(&config, &event_data, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::Get => {
-                    self.get(&config, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::GetByExternalId => {
-                    self.get_by_external_id(&config, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::Update => {
-                    self.update(&config, &event_data, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::Upsert => {
-                    self.upsert(&config, &event_data, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::Delete => {
-                    self.delete(&config, completion_tx_arc).await?
-                }
-                super::config::SObjectOperation::GetDeleted => {
-                    self.get_deleted(&config, completion_tx_arc).await?
-                }
-            }
-
-            Ok(())
-        })
-        .await
+    fn credentials_path(&self) -> &Path {
+        &self.credentials_path
     }
 
-    async fn reconnect_on_auth_error(&self, error: Error) -> Error {
-        let needs_reconnect = match &error {
-            Error::SalesforceAuth { .. } => true,
-            Error::RestApiOperation { source } => matches!(
-                source.as_ref(),
-                salesforce_core::restapi::sobject::Error::Auth { .. }
-            ),
-            _ => false,
-        };
-        match needs_reconnect {
-            true => match self.sfdc_client.lock().await.reconnect().await {
-                Ok(()) => error,
-                Err(source) => {
-                    error!(error = %error, "Reconnecting after an authentication error failed");
-                    Error::SalesforceAuth { source }
-                }
-            },
-            false => error,
-        }
+    fn retries_safely(&self) -> bool {
+        !matches!(
+            self.operation,
+            SObjectOperation::Create | SObjectOperation::Upsert
+        )
     }
 
-    /// Extracts payload data from config, handling both from_event and explicit fields.
-    fn get_payload_data(
+    async fn call(
         &self,
-        config: &super::config::SObject,
-        event_data: &serde_json::Value,
-    ) -> Result<serde_json::Value, Error> {
-        let payload = config.payload.as_ref().ok_or(Error::MissingPayload)?;
-
-        match payload {
-            super::config::Payload::FromEvent { from_event } if *from_event => {
-                // Use event.data as the payload
-                Ok(event_data.clone())
+        client: &Self::Client,
+        call: &Call<'_>,
+        emitter: &mut Emitter<'_>,
+    ) -> Result<(), Error> {
+        match self.operation {
+            SObjectOperation::Create => {
+                let fields = self.fields(call)?;
+                emitter.emit(self.create(client, fields).await?).await
             }
-            super::config::Payload::Fields(fields) => {
-                // Use explicit fields
-                Ok(serde_json::Value::Object(fields.clone()))
+            SObjectOperation::Get => {
+                let record_id = required(self.record_id.as_deref(), "record_id")?;
+                let mut builder = client.get(&self.sobject_type, record_id);
+                if let Some(fields) = self.fields.as_deref() {
+                    builder = builder.fields(fields);
+                }
+                let record = builder.send().await.map_err(sobject_error)?;
+                emitter.emit(Output::json(record).id(record_id)).await
             }
-            _ => Err(Error::MissingPayload),
+            SObjectOperation::GetByExternalId => {
+                let field = required(self.external_id_field.as_deref(), "external_id_field")?;
+                let value = required(self.external_id_value.as_deref(), "external_id_value")?;
+                let mut builder = client.get_by_external_id(&self.sobject_type, field, value);
+                if let Some(fields) = self.fields.as_deref() {
+                    builder = builder.fields(fields);
+                }
+                let record = builder.send().await.map_err(sobject_error)?;
+                let record_id = match record.get("Id").and_then(Value::as_str) {
+                    Some(id) => id.to_string(),
+                    None => value.to_string(),
+                };
+                emitter.emit(Output::json(record).id(record_id)).await
+            }
+            SObjectOperation::Update => {
+                let record_id = required(self.record_id.as_deref(), "record_id")?;
+                let fields = self.fields(call)?;
+                emitter
+                    .emit(self.update(client, record_id, fields).await?)
+                    .await
+            }
+            SObjectOperation::Upsert => {
+                let field = required(self.external_id_field.as_deref(), "external_id_field")?;
+                let value = required(self.external_id_value.as_deref(), "external_id_value")?;
+                let fields = self.fields(call)?;
+                let existing = client
+                    .get_by_external_id(&self.sobject_type, field, value)
+                    .fields("Id")
+                    .send()
+                    .await;
+                let output = match existing {
+                    Ok(record) => {
+                        let record_id = record
+                            .get("Id")
+                            .and_then(Value::as_str)
+                            .ok_or(Error::MissingRecordId)?;
+                        self.update(client, record_id, fields).await?
+                    }
+                    Err(_) => self.create(client, fields).await?,
+                };
+                emitter.emit(output).await
+            }
+            SObjectOperation::Delete => {
+                let record_id = required(self.record_id.as_deref(), "record_id")?;
+                client
+                    .delete(&self.sobject_type, record_id)
+                    .send()
+                    .await
+                    .map_err(sobject_error)?;
+                emitter
+                    .emit(Output::json(Value::Object(Map::new())).id(record_id))
+                    .await
+            }
+            SObjectOperation::GetDeleted => {
+                let start = datetime(self.start.as_deref(), "start")?;
+                let end = datetime(self.end.as_deref(), "end")?;
+                let deleted = client
+                    .get_deleted(&self.sobject_type, start..end)
+                    .send()
+                    .await
+                    .map_err(sobject_error)?;
+                let records: Vec<Deleted<'_>> = deleted
+                    .deleted_records
+                    .iter()
+                    .map(|record| Deleted {
+                        id: &record.id,
+                        deleted_date: &record.deleted_date,
+                    })
+                    .collect();
+                emitter.emit(Output::json(to_json(&records)?)).await
+            }
         }
     }
+}
 
-    /// Creates a new SObject record.
+impl SObject {
+    /// The record fields of `payload` for this event.
+    fn fields(&self, call: &Call<'_>) -> Result<Value, Error> {
+        let payload = self
+            .payload
+            .as_ref()
+            .ok_or(Error::MissingField("payload"))?;
+        Ok(Value::Object(payload.fields(call.event)?))
+    }
+
+    /// Creates a record and returns the response to emit.
     async fn create(
         &self,
-        config: &super::config::SObject,
-        event_data: &serde_json::Value,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let data = self.get_payload_data(config, event_data)?;
-
-        let mut builder = self.client.create(&config.sobject_type, data.clone());
-        if config.allow_duplicate_save {
+        client: &salesforce_core::restapi::Client,
+        fields: Value,
+    ) -> Result<Output, Error> {
+        let mut builder = client.create(&self.sobject_type, fields);
+        if self.allow_duplicate_save {
             builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
         }
-        let response = builder.send().await.map_err(|e| Error::RestApiOperation {
-            source: Box::new(e),
-        })?;
-
-        let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
-            source: flowgen_core::serde::Error::Serde { source: e },
-        })?;
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(resp.clone()))
-            .subject(config.name.to_owned())
-            .id(response.id)
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        Self::log_failure(&resp);
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        let response = builder.send().await.map_err(sobject_error)?;
+        let data = to_json(&response)?;
+        log_failure(&data);
+        Ok(Output::json(data).id(response.id))
     }
 
-    /// Gets a record by its Salesforce ID.
-    async fn get(
-        &self,
-        config: &super::config::SObject,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let record_id = config.record_id.as_ref().ok_or(Error::MissingRecordId)?;
-
-        let mut builder = self.client.get(&config.sobject_type, record_id);
-        if let Some(fields) = config.fields.as_deref() {
-            builder = builder.fields(fields);
-        }
-        let record = builder.send().await.map_err(|e| Error::RestApiOperation {
-            source: Box::new(e),
-        })?;
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(record))
-            .subject(config.name.to_owned())
-            .id(record_id.clone())
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Signal completion or pass through to next task.
-        match self.tx {
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-            Some(_) => {
-                // Pass through completion_tx to next task.
-                e.completion_tx = completion_tx_arc.clone();
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
-    }
-
-    /// Gets a record by an external ID field.
-    async fn get_by_external_id(
-        &self,
-        config: &super::config::SObject,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let external_id_field = config
-            .external_id_field
-            .as_ref()
-            .ok_or(Error::MissingExternalId)?;
-        let external_id_value = config
-            .external_id_value
-            .as_ref()
-            .ok_or(Error::MissingExternalId)?;
-
-        let mut builder = self.client.get_by_external_id(
-            &config.sobject_type,
-            external_id_field,
-            external_id_value,
-        );
-        if let Some(fields) = config.fields.as_deref() {
-            builder = builder.fields(fields);
-        }
-        let record = builder.send().await.map_err(|e| Error::RestApiOperation {
-            source: Box::new(e),
-        })?;
-
-        // Extract ID from record if available.
-        let record_id = record
-            .get("Id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(external_id_value)
-            .to_string();
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(record))
-            .subject(config.name.to_owned())
-            .id(record_id)
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Signal completion or pass through to next task.
-        match self.tx {
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-            Some(_) => {
-                // Pass through completion_tx to next task.
-                e.completion_tx = completion_tx_arc.clone();
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
-    }
-
-    /// Updates an existing record.
+    /// Updates a record; Salesforce answers with no body, so the event is empty.
     async fn update(
         &self,
-        config: &super::config::SObject,
-        event_data: &serde_json::Value,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let record_id = config.record_id.as_ref().ok_or(Error::MissingRecordId)?;
-        let data = self.get_payload_data(config, event_data)?;
-
-        let mut builder = self
-            .client
-            .update(&config.sobject_type, record_id, data.clone());
-        if config.allow_duplicate_save {
+        client: &salesforce_core::restapi::Client,
+        record_id: &str,
+        fields: Value,
+    ) -> Result<Output, Error> {
+        let mut builder = client.update(&self.sobject_type, record_id, fields);
+        if self.allow_duplicate_save {
             builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
         }
-        builder.send().await.map_err(|e| Error::RestApiOperation {
-            source: Box::new(e),
-        })?;
-
-        // Salesforce update API returns nothing on success.
-        // Send empty event to maintain event chain.
-        let resp = serde_json::json!({});
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
-            .subject(config.name.to_owned())
-            .id(record_id.clone())
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
-    }
-
-    /// Upserts a record using external ID (update if exists, create if not).
-    async fn upsert(
-        &self,
-        config: &super::config::SObject,
-        event_data: &serde_json::Value,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let external_id_field = config
-            .external_id_field
-            .as_ref()
-            .ok_or(Error::MissingExternalId)?;
-        let external_id_value = config
-            .external_id_value
-            .as_ref()
-            .ok_or(Error::MissingExternalId)?;
-        let data = self.get_payload_data(config, event_data)?;
-
-        // Try to get existing record by external ID.
-        let existing_record = self
-            .client
-            .get_by_external_id(&config.sobject_type, external_id_field, external_id_value)
-            .fields("Id")
-            .send()
-            .await;
-
-        match existing_record {
-            Ok(record) => {
-                // Record exists, update it.
-                let record_id = record
-                    .get("Id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| Error::RestApiOperation {
-                        source: Box::new(
-                            salesforce_core::restapi::sobject::Error::InvalidDataType {
-                                actual_type: "Missing Id field in response".to_string(),
-                            },
-                        ),
-                    })?
-                    .to_string();
-
-                let mut builder =
-                    self.client
-                        .update(&config.sobject_type, &record_id, data.clone());
-                if config.allow_duplicate_save {
-                    builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
-                }
-                builder.send().await.map_err(|e| Error::RestApiOperation {
-                    source: Box::new(e),
-                })?;
-
-                // Salesforce update API returns nothing on success.
-                // Send empty event to maintain event chain.
-                let resp = serde_json::json!({});
-
-                let mut e = EventBuilder::new()
-                    .data(EventData::Json(resp))
-                    .subject(config.name.to_owned())
-                    .id(record_id)
-                    .task_id(self.current_task_id)
-                    .task_type(self.task_type)
-                    .build()?;
-
-                match self.tx {
-                    Some(_) => {
-                        e.completion_tx = completion_tx_arc.clone();
-                    }
-                    None => {
-                        // Leaf task: signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            arc.signal_completion(e.data_as_json().ok());
-                        }
-                    }
-                }
-
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|e| Error::SendMessage { source: e })?;
-
-                Ok(())
-            }
-            Err(_) => {
-                // Record doesn't exist, create it.
-                let mut builder = self.client.create(&config.sobject_type, data.clone());
-                if config.allow_duplicate_save {
-                    builder = builder.header(DUPLICATE_RULE_HEADER, ALLOW_SAVE_VALUE);
-                }
-                let response = builder.send().await.map_err(|e| Error::RestApiOperation {
-                    source: Box::new(e),
-                })?;
-
-                let resp = serde_json::to_value(&response).map_err(|e| Error::SerdeExt {
-                    source: flowgen_core::serde::Error::Serde { source: e },
-                })?;
-
-                let mut e = EventBuilder::new()
-                    .data(EventData::Json(resp.clone()))
-                    .subject(config.name.to_owned())
-                    .id(response.id)
-                    .task_id(self.current_task_id)
-                    .task_type(self.task_type)
-                    .build()?;
-
-                match self.tx {
-                    Some(_) => {
-                        e.completion_tx = completion_tx_arc.clone();
-                    }
-                    None => {
-                        // Leaf task: signal completion.
-                        if let Some(arc) = completion_tx_arc.as_ref() {
-                            arc.signal_completion(e.data_as_json().ok());
-                        }
-                    }
-                }
-
-                Self::log_failure(&resp);
-
-                e.send_with_logging(self.tx.as_ref())
-                    .await
-                    .map_err(|e| Error::SendMessage { source: e })?;
-
-                Ok(())
-            }
-        }
-    }
-
-    /// Deletes a record.
-    async fn delete(
-        &self,
-        config: &super::config::SObject,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let record_id = config.record_id.as_ref().ok_or(Error::MissingRecordId)?;
-
-        self.client
-            .delete(&config.sobject_type, record_id)
-            .send()
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
-
-        // Salesforce delete API returns nothing on success.
-        // Send empty event to maintain event chain.
-        let resp = serde_json::json!({});
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(resp))
-            .subject(config.name.to_owned())
-            .id(record_id.to_string())
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        // Handle completion signal for the operation.
-        match self.tx {
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-            None => {
-                // Leaf task: signal completion.
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
-    }
-
-    /// Retrieves the IDs and deletion datetimes of records of the specified
-    /// SObject type that were deleted within `[start, end)`.
-    ///
-    /// `start` and `end` are parsed as RFC 3339 datetimes. An end that is not
-    /// after the start is rejected before the request is sent; any further
-    /// limits on the window are enforced by Salesforce.
-    ///
-    /// Matching records are emitted as a JSON array of `{id, deleted_date}`
-    /// objects.
-    async fn get_deleted(
-        &self,
-        config: &super::config::SObject,
-        completion_tx_arc: Option<flowgen_core::event::SharedCompletionTx>,
-    ) -> Result<(), Error> {
-        let start = config.start.as_ref().ok_or(Error::MissingTimeWindow)?;
-        let end = config.end.as_ref().ok_or(Error::MissingTimeWindow)?;
-
-        let start = chrono::DateTime::parse_from_rfc3339(start).map_err(|source| {
-            Error::InvalidDateTime {
-                field: "start".to_string(),
-                source,
-            }
-        })?;
-        let end =
-            chrono::DateTime::parse_from_rfc3339(end).map_err(|source| Error::InvalidDateTime {
-                field: "end".to_string(),
-                source,
-            })?;
-
-        let deleted = self
-            .client
-            .get_deleted(
-                &config.sobject_type,
-                start.with_timezone(&chrono::Utc)..end.with_timezone(&chrono::Utc),
-            )
-            .send()
-            .await
-            .map_err(|e| Error::RestApiOperation {
-                source: Box::new(e),
-            })?;
-
-        // Emit the deleted record list (a JSON array) so a downstream
-        // BigQuery Storage Write task can upsert each as a row.
-        let records: Vec<serde_json::Value> = deleted
-            .deleted_records
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "id": r.id,
-                    "deleted_date": r.deleted_date,
-                })
-            })
-            .collect();
-
-        let mut e = EventBuilder::new()
-            .data(EventData::Json(serde_json::Value::Array(records)))
-            .subject(config.name.to_owned())
-            .task_id(self.current_task_id)
-            .task_type(self.task_type)
-            .build()?;
-
-        match self.tx {
-            None => {
-                if let Some(arc) = completion_tx_arc.as_ref() {
-                    arc.signal_completion(e.data_as_json().ok());
-                }
-            }
-            Some(_) => {
-                e.completion_tx = completion_tx_arc.clone();
-            }
-        }
-
-        e.send_with_logging(self.tx.as_ref())
-            .await
-            .map_err(|e| Error::SendMessage { source: e })?;
-
-        Ok(())
+        builder.send().await.map_err(sobject_error)?;
+        Ok(Output::json(Value::Object(Map::new())).id(record_id))
     }
 }
 
-#[async_trait::async_trait]
-impl flowgen_core::task::runner::Handler for EventHandler {
-    type Error = Error;
-
-    fn sender(&self) -> Option<&Sender<Event>> {
-        self.tx.as_ref()
-    }
-
-    fn is_retryable(&self, error: &Error) -> bool {
-        match error {
-            Error::RestApiOperation { source } => source.is_retryable(),
-            _ => true,
-        }
-    }
-
-    /// Ignores events addressed to another task.
-    #[tracing::instrument(skip(self, event), name = "task.handle", fields(duration_ms = tracing::field::Empty))]
-    async fn handle(&self, event: Event) -> Result<(), Error> {
-        if Some(event.task_id) != self.current_task_id.checked_sub(1) {
-            return Ok(());
-        }
-        match self.process(event).await {
-            Ok(()) => Ok(()),
-            Err(error) => Err(self.reconnect_on_auth_error(error).await),
-        }
+fn sobject_error(source: salesforce_core::restapi::SObjectError) -> Error {
+    Error::SObject {
+        source: Box::new(source),
     }
 }
 
-/// Salesforce REST API processor.
-#[derive(Debug)]
-pub struct Processor {
-    config: Arc<super::config::SObject>,
-    rx: Receiver<Event>,
-    tx: Option<Sender<Event>>,
-    task_id: usize,
-    task_context: Arc<flowgen_core::task::context::TaskContext>,
-    task_type: &'static str,
+/// `value` of `field` as a UTC datetime.
+fn datetime(value: Option<&str>, field: &'static str) -> Result<DateTime<Utc>, Error> {
+    let value = required(value, field)?;
+    DateTime::parse_from_rfc3339(value)
+        .map(|datetime| datetime.with_timezone(&Utc))
+        .map_err(|source| Error::InvalidDateTime { field, source })
 }
 
-#[async_trait::async_trait]
-impl flowgen_core::task::runner::Runner for Processor {
-    type Error = Error;
-    type EventHandler = EventHandler;
-
-    async fn init(&self) -> Result<EventHandler, Error> {
-        let init_config = self
-            .config
-            .render(&serde_json::json!({}))
-            .map_err(|e| Error::ConfigRender { source: e })?;
-
-        let sfdc_client = crate::client::connect(
-            &self.task_context,
-            self.task_type,
-            &init_config.credentials_path,
-        )
-        .await?;
-
-        let sobject_client = {
-            let guard = sfdc_client.lock().await;
-            salesforce_core::restapi::ClientBuilder::new(guard.clone())
-                .build()
-                .map_err(|e| Error::RestClientBuild { source: e })?
-        };
-
-        let event_handler = EventHandler {
-            config: Arc::clone(&self.config),
-            current_task_id: self.task_id,
-            tx: self.tx.clone(),
-            client: Arc::new(sobject_client),
-            sfdc_client,
-            task_type: self.task_type,
-            task_context: Arc::clone(&self.task_context),
-        };
-        Ok(event_handler)
-    }
-
-    #[tracing::instrument(skip(self), name = "task.run", fields(task = %self.config.name, task_id = self.task_id, task_type = %self.task_type))]
-    async fn run(self) -> Result<(), Self::Error> {
-        let retry_config =
-            flowgen_core::retry::RetryConfig::merge(&self.task_context.retry, &self.config.retry);
-
-        let event_handler = match tokio_retry::Retry::spawn(
-            retry_config.init_strategy(self.task_context.startup_delay),
-            || async {
-                match self.init().await {
-                    Ok(handler) => Ok(handler),
-                    Err(e) => {
-                        error!(error = %e, "Failed to initialize REST API processor");
-                        Err(tokio_retry::RetryError::transient(e))
-                    }
-                }
-            },
-        )
-        .await
-        {
-            Ok(handler) => Arc::new(handler),
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        flowgen_core::task::runner::process_events(
-            self.rx,
-            event_handler,
-            &retry_config,
-            self.config.max_in_flight,
-            &self.task_context,
-        )
-        .await;
-        Ok(())
-    }
-}
-
-/// Builder for creating Processor instances.
-pub struct ProcessorBuilder {
-    config: Option<Arc<super::config::SObject>>,
-    rx: Option<Receiver<Event>>,
-    tx: Option<Sender<Event>>,
-    task_id: Option<usize>,
-    task_context: Option<Arc<flowgen_core::task::context::TaskContext>>,
-    task_type: Option<&'static str>,
-}
-
-impl Default for ProcessorBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ProcessorBuilder {
-    pub fn new() -> Self {
-        Self {
-            config: None,
-            rx: None,
-            tx: None,
-            task_id: None,
-            task_context: None,
-            task_type: None,
-        }
-    }
-
-    pub fn config(mut self, config: Arc<super::config::SObject>) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub fn receiver(mut self, receiver: Receiver<Event>) -> Self {
-        self.rx = Some(receiver);
-        self
-    }
-
-    pub fn sender(mut self, sender: Sender<Event>) -> Self {
-        self.tx = Some(sender);
-        self
-    }
-
-    pub fn task_id(mut self, task_id: usize) -> Self {
-        self.task_id = Some(task_id);
-        self
-    }
-
-    pub fn task_context(
-        mut self,
-        task_context: Arc<flowgen_core::task::context::TaskContext>,
-    ) -> Self {
-        self.task_context = Some(task_context);
-        self
-    }
-
-    pub fn task_type(mut self, task_type: &'static str) -> Self {
-        self.task_type = Some(task_type);
-        self
-    }
-
-    pub fn build(self) -> Result<Processor, Error> {
-        Ok(Processor {
-            config: self
-                .config
-                .ok_or_else(|| Error::MissingBuilderAttribute("config".to_string()))?,
-            rx: self
-                .rx
-                .ok_or_else(|| Error::MissingBuilderAttribute("receiver".to_string()))?,
-            tx: self.tx,
-            task_id: self
-                .task_id
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_id".to_string()))?,
-            task_context: self
-                .task_context
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_context".to_string()))?,
-            task_type: self
-                .task_type
-                .ok_or_else(|| Error::MissingBuilderAttribute("task_type".to_string()))?,
-        })
+/// Logs a failed save; the full response still goes downstream.
+fn log_failure(response: &Value) {
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
+        let errors = response.get("errors").cloned().unwrap_or(Value::Null);
+        warn!(errors = %errors, "SObject operation completed with failure");
     }
 }
 
@@ -856,31 +343,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_log_failure_success_true() {
-        let resp = serde_json::json!({"success": true, "id": "001abc"});
-        EventHandler::log_failure(&resp);
+    fn get_and_delete_retry_safely_but_create_and_upsert_do_not() {
+        let config = |operation| {
+            SObject {
+            operation,
+            ..serde_json::from_str(
+                r#"{"name": "a", "operation": "get", "credentials_path": "/a", "sobject_type": "Account"}"#,
+            )
+            .unwrap()
+        }
+        };
+
+        assert!(config(SObjectOperation::Get).retries_safely());
+        assert!(config(SObjectOperation::Delete).retries_safely());
+        assert!(!config(SObjectOperation::Create).retries_safely());
+        assert!(!config(SObjectOperation::Upsert).retries_safely());
     }
 
     #[test]
-    fn test_log_failure_success_false() {
-        let resp = serde_json::json!({
-            "success": false,
-            "errors": [{"message": "DUPLICATE_VALUE", "statusCode": "DUPLICATE_VALUE"}]
-        });
-        EventHandler::log_failure(&resp);
-    }
-
-    #[test]
-    fn test_log_failure_no_success_field() {
-        let resp = serde_json::json!({"id": "001abc"});
-        EventHandler::log_failure(&resp);
-    }
-
-    #[test]
-    fn test_log_failure_non_object() {
-        EventHandler::log_failure(&serde_json::json!("just a string"));
-        EventHandler::log_failure(&serde_json::json!(42));
-        EventHandler::log_failure(&serde_json::json!(null));
+    fn deletion_window_must_be_rfc3339() {
+        assert!(datetime(Some("2024-01-01T00:00:00+02:00"), "start").is_ok());
+        assert!(matches!(
+            datetime(Some("yesterday"), "start"),
+            Err(Error::InvalidDateTime { field: "start", .. })
+        ));
+        assert!(matches!(
+            datetime(None, "end"),
+            Err(Error::MissingField("end"))
+        ));
     }
 
     #[test]
@@ -895,13 +385,10 @@ mod tests {
                 "Industry": "Technology"
             }
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::Create
-        );
+        let config: SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(config.operation, SObjectOperation::Create);
         match config.payload {
-            Some(super::super::config::Payload::Fields(ref fields)) => {
+            Some(Payload::Fields(ref fields)) => {
                 assert_eq!(fields.get("Name").unwrap(), "Acme Corp");
                 assert_eq!(fields.get("Industry").unwrap(), "Technology");
             }
@@ -918,11 +405,9 @@ mod tests {
             "sobject_type": "Account",
             "payload": { "from_event": true }
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        let config: SObject = serde_json::from_str(json).unwrap();
         match config.payload {
-            Some(super::super::config::Payload::FromEvent { from_event }) => {
-                assert!(from_event);
-            }
+            Some(Payload::FromEvent { from_event }) => assert!(from_event),
             _ => panic!("expected FromEvent payload"),
         }
     }
@@ -937,11 +422,8 @@ mod tests {
             "record_id": "001000000000001",
             "fields": "Id,Name,Industry"
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::Get
-        );
+        let config: SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(config.operation, SObjectOperation::Get);
         assert_eq!(config.record_id.as_deref(), Some("001000000000001"));
         assert_eq!(config.fields.as_deref(), Some("Id,Name,Industry"));
     }
@@ -956,54 +438,10 @@ mod tests {
             "external_id_field": "ExternalId__c",
             "external_id_value": "EXT-001"
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::GetByExternalId
-        );
+        let config: SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(config.operation, SObjectOperation::GetByExternalId);
         assert_eq!(config.external_id_field.as_deref(), Some("ExternalId__c"));
         assert_eq!(config.external_id_value.as_deref(), Some("EXT-001"));
-    }
-
-    #[test]
-    fn test_config_upsert() {
-        let json = r#"{
-            "name": "upsert_contact",
-            "operation": "upsert",
-            "credentials_path": "/etc/sfdc/credentials.json",
-            "sobject_type": "Contact",
-            "external_id_field": "ExternalId__c",
-            "external_id_value": "EXT-001",
-            "payload": {
-                "FirstName": "Alice",
-                "LastName": "Smith"
-            }
-        }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::Upsert
-        );
-        assert!(config.payload.is_some());
-        assert!(config.external_id_field.is_some());
-        assert!(config.external_id_value.is_some());
-    }
-
-    #[test]
-    fn test_config_delete() {
-        let json = r#"{
-            "name": "delete_account",
-            "operation": "delete",
-            "credentials_path": "/etc/sfdc/credentials.json",
-            "sobject_type": "Account",
-            "record_id": "001000000000001"
-        }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::Delete
-        );
-        assert_eq!(config.record_id.as_deref(), Some("001000000000001"));
     }
 
     #[test]
@@ -1016,32 +454,10 @@ mod tests {
             "start": "2024-01-01T00:00:00+00:00",
             "end": "2024-01-02T00:00:00+00:00"
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::GetDeleted
-        );
+        let config: SObject = serde_json::from_str(json).unwrap();
+        assert_eq!(config.operation, SObjectOperation::GetDeleted);
         assert_eq!(config.start.as_deref(), Some("2024-01-01T00:00:00+00:00"));
         assert_eq!(config.end.as_deref(), Some("2024-01-02T00:00:00+00:00"));
-    }
-
-    #[test]
-    fn test_config_update() {
-        let json = r#"{
-            "name": "update_account",
-            "operation": "update",
-            "credentials_path": "/etc/sfdc/credentials.json",
-            "sobject_type": "Account",
-            "record_id": "001000000000001",
-            "payload": { "Name": "New Name" }
-        }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.operation,
-            super::super::config::SObjectOperation::Update
-        );
-        assert!(config.record_id.is_some());
-        assert!(config.payload.is_some());
     }
 
     #[test]
@@ -1052,7 +468,7 @@ mod tests {
             "credentials_path": "/etc/sfdc/credentials.json",
             "sobject_type": "Account"
         }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
+        let config: SObject = serde_json::from_str(json).unwrap();
         assert!(config.payload.is_none());
         assert!(config.record_id.is_none());
         assert!(config.fields.is_none());
@@ -1063,16 +479,21 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_depends_on() {
-        let json = r#"{
-            "name": "get_account",
-            "operation": "get",
-            "credentials_path": "/etc/sfdc/credentials.json",
-            "sobject_type": "Account",
-            "record_id": "001abc",
-            "depends_on": ["upstream_task"]
-        }"#;
-        let config: super::super::config::SObject = serde_json::from_str(json).unwrap();
-        assert_eq!(config.depends_on, Some(vec!["upstream_task".to_string()]));
+    fn test_sobject_operation_serialization() {
+        for (operation, name) in [
+            (SObjectOperation::Create, "\"create\""),
+            (SObjectOperation::Get, "\"get\""),
+            (SObjectOperation::GetByExternalId, "\"get_by_external_id\""),
+            (SObjectOperation::Update, "\"update\""),
+            (SObjectOperation::Upsert, "\"upsert\""),
+            (SObjectOperation::Delete, "\"delete\""),
+            (SObjectOperation::GetDeleted, "\"get_deleted\""),
+        ] {
+            assert_eq!(serde_json::to_string(&operation).unwrap(), name);
+            assert_eq!(
+                serde_json::from_str::<SObjectOperation>(name).unwrap(),
+                operation
+            );
+        }
     }
 }
