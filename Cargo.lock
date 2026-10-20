@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2279,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2287,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kafka"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_klaviyo"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_macros"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2636,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.148.0"
+version = "0.149.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -4691,7 +4691,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -5723,7 +5723,7 @@ dependencies = [
  "tokio-util",
  "typed-builder",
  "uuid",
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -7299,7 +7299,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -7762,9 +7762,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -9257,7 +9257,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -10009,9 +10009,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.6"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "804f18a4ac2676ffb4e8b5b5fa9ae38af06df08162314f96a68d2a363e21a8ca"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -10022,14 +10022,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.6",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.6"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

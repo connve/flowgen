@@ -5,4 +5,9 @@
 # it is in Cargo.lock but never compiled
 # (`cargo tree -i rsa --all-features --target all` prints nothing).
 # Remove the entry if `cargo tree` ever shows `rsa`.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0381 (distrusted emSign roots in `webpki-roots`): flagged only
+# for `webpki-roots` 0.26.11 from `async-nats` via `tokio-websockets`. That
+# version re-exports `webpki-roots` v1, which Cargo.lock pins at the patched
+# 1.0.10. Remove the entry once `async-nats` depends on `webpki-roots` v1.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0381"]

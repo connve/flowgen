@@ -34,4 +34,16 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_newest_changelog_entry_is_the_workspace_version() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+        let newest = changelog.lines().find_map(|line| line.strip_prefix("## "));
+        assert_eq!(
+            newest,
+            Some(env!("CARGO_PKG_VERSION")),
+            "set the workspace version in Cargo.toml to the newest CHANGELOG.md entry"
+        );
+    }
 }
