@@ -234,6 +234,7 @@ impl Delivery {
         event.completion_tx = Some(completion_state);
         if let Err(source) = event.send_with_logging(self.tx.as_ref()).await {
             error!(error = %Error::SendMessage { source }, "Failed to send the event to the next task");
+            self.nak(&message).await;
             return;
         }
 
@@ -262,17 +263,19 @@ impl Delivery {
             every => every,
         };
         let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-        let deadline = tokio::time::sleep(match self.ack_timeout {
-            Some(ack_timeout) => ack_timeout,
-            None => Duration::ZERO,
-        });
+        let deadline = async {
+            match self.ack_timeout {
+                Some(ack_timeout) => tokio::time::sleep(ack_timeout).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::pin!(deadline);
         loop {
             tokio::select! {
                 biased;
                 _ = self.task_context.cancellation_token.cancelled() => return None,
                 result = &mut completion_rx => return Some(matches!(result, Ok(Ok(_)))),
-                _ = &mut deadline, if self.ack_timeout.is_some() => return Some(false),
+                _ = &mut deadline => return Some(false),
                 _ = progress.tick() => {
                     if let Err(source) = message.ack_with(AckKind::Progress).await {
                         warn!(error = %source, "Failed to tell NATS the message is still in progress");

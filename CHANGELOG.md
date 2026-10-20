@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.150.0
+
+### Breaking
+
+- **NATS subscriber concurrency.** `nats_jetstream_subscriber` runs up to
+  `max_in_flight` messages through the flow at once (default 64). Set
+  `max_in_flight: 1` to keep messages in order.
+
+### Fixed
+
+- `nats_jetstream_subscriber` sends progress acks while a message is in the
+  flow, so NATS doesn't redeliver a message that takes longer than `ack_wait`.
+  It pulls only as many messages as it has free `max_in_flight` slots.
+- A failed or timed-out message is redelivered after its `backoff` delay, or
+  after `ack_wait` without `backoff`.
+
 ## 0.149.0
 
 ### Changed
