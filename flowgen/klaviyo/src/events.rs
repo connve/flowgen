@@ -8,9 +8,6 @@ use klaviyo::types;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// JSON:API type of an event.
-const RESOURCE: &str = "event";
-
 /// What the task does with an event.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,7 +83,7 @@ impl Operation for Events {
         match self.operation {
             EventOperation::Create => {
                 let request: types::EventCreateQueryV2 =
-                    request(RESOURCE, None, attributes(self.payload.as_ref(), event)?)?;
+                    request(None, attributes(self.payload.as_ref(), event)?)?;
                 client.events().create(&request).send().await?;
                 emitter.emit(&Accepted { accepted: true }).await
             }

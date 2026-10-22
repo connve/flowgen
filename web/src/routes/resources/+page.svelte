@@ -311,46 +311,52 @@
 
 	<div class="flex min-w-0 flex-1 flex-col">
 		<div class="shrink-0 space-y-3 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
-			{#if selectedFolder}
-				{@const segments = selectedFolder.split('/')}
+			<div class="flex min-h-8 items-center justify-between gap-2">
 				<div class="flex items-center gap-1.5 text-sm">
-					<button
-						type="button"
-						class="text-primary hover:underline"
-						onclick={() => selectFolder(null)}
-					>{m.resources_all()}</button>
-					{#each segments as segment, i}
-						<span class="opacity-40">/</span>
-						{#if i < segments.length - 1}
-							<button
-								type="button"
-								class="font-mono text-primary hover:underline"
-								onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
-							>{segment}</button>
-						{:else}
-							<span class="font-mono">{segment}</span>
-						{/if}
-					{/each}
+					{#if selectedFolder}
+						{@const segments = selectedFolder.split('/')}
+						<button
+							type="button"
+							class="text-primary hover:underline"
+							onclick={() => selectFolder(null)}
+						>{m.resources_all()}</button>
+						{#each segments as segment, i}
+							<span class="opacity-40">/</span>
+							{#if i < segments.length - 1}
+								<button
+									type="button"
+									class="font-mono text-primary hover:underline"
+									onclick={() => selectFolder(segments.slice(0, i + 1).join('/'))}
+								>{segment}</button>
+							{:else}
+								<span class="font-mono">{segment}</span>
+							{/if}
+						{/each}
+					{:else}
+						<span>{m.resources_all()}</span>
+					{/if}
 					<span class="text-xs opacity-50">· {m.resources_item_count({ count: visibleResources.length })}</span>
 				</div>
-			{/if}
-			<div class="flex items-center justify-end gap-2">
 				{#if authoring}
-					<a
-						href="{base}/changes"
-						class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
-					>
-						<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
-						{m.resources_pending_changes({ count: pending.length })}
-					</a>
-					<a
-						href="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
-						class="btn btn-primary btn-sm gap-1.5"
-					>
-						<Icon icon="tabler:plus" class="h-4 w-4" />
-						{m.common_new()}
-					</a>
+					<div class="flex items-center gap-2">
+						<a
+							href="{base}/changes"
+							class="btn btn-ghost btn-sm gap-1.5 {pending.length > 0 ? 'text-attention' : ''}"
+						>
+							<Icon icon="tabler:git-pull-request" class="h-4 w-4" />
+							{m.resources_pending_changes({ count: pending.length })}
+						</a>
+						<a
+							href="{base}/edit?new=resource{selectedFolder ? `&folder=${encodePath(selectedFolder)}` : ''}"
+							class="btn btn-primary btn-sm gap-1.5"
+						>
+							<Icon icon="tabler:plus" class="h-4 w-4" />
+							{m.common_new()}
+						</a>
+					</div>
 				{/if}
+			</div>
+			<div class="flex items-center justify-end gap-2">
 				<label
 					class="input input-sm flex items-center gap-2 border border-base-300 bg-base-100 outline-none focus-within:border-primary"
 				>

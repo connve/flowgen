@@ -320,6 +320,7 @@ mod tests {
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             leaf_count: 1,
             max_in_flight: std::num::NonZeroUsize::MIN,
+            handles_failed: false,
             startup_delay: None,
             client_registry: Arc::new(flowgen_core::client_registry::ClientRegistry::new()),
             inproc: Arc::new(flowgen_core::task::inproc::registry::InprocRegistry::new()),

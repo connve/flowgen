@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2279,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen-chart-tests"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2287,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_ai_agent"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_braze"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_client"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2353,7 +2353,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_core"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_gcp"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_git"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_html"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "flowgen_core",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_http"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow-json",
  "async-trait",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_kafka"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_klaviyo"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_macros"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mcp"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mongodb"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_mssql"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2636,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_nats"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "arrow",
  "async-nats",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_object_store"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_oci"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "flowgen_salesforce"
-version = "0.150.0"
+version = "0.151.0"
 dependencies = [
  "apache-avro",
  "arrow",
@@ -5237,9 +5237,9 @@ dependencies = [
 
 [[package]]
 name = "klaviyo"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8e3627aefe3d933eb8297314f1beee77e88c0acb8e6c320f9143f2c912f4c81"
+checksum = "4b1b7bf4abff2046b0d48d84d78bfb4bc3ca1f8cdc3695e28145189335eabe43"
 dependencies = [
  "chrono",
  "klaviyo_generated",
@@ -5253,9 +5253,9 @@ dependencies = [
 
 [[package]]
 name = "klaviyo_generated"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d13c03c6b893f9152846e7e45369c876d06408ec4edc88bef9f3f1fe8e551ff7"
+checksum = "4b4ccc76ad41e4447a9a3ae50f3f0725e666985ab65e78ea27a9ef78d0b1beb6"
 dependencies = [
  "chrono",
  "heck",

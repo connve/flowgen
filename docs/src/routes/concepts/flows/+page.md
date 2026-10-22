@@ -194,20 +194,20 @@ The same model applies to other sources:
 
 ### Failure handling
 
-A task that fails (after retries exhausted) emits an error event downstream rather than calling completion directly. Downstream tasks can inspect `event.error` and route it explicitly — to a dead-letter publisher, an audit log, or an alerting endpoint:
+A task that fails (after retries exhausted) sends the event on with `event.error` set. The tasks after it pass the event on without handling it, so one failure shows up once in the logs. A `script` with `handles_failed: true` runs on it and can route it — to a dead-letter publisher, an audit log, or an alerting endpoint. The event the script returns carries no error, so the tasks after it run as usual:
 
 ```yaml
 - script:
     name: dlq_router
+    handles_failed: true
     code: |
       if event.error != () {
-          // route to a different downstream branch via meta
-          event.meta.lane = "dlq";
+          ctx.meta.lane = "dlq";
       }
       event.data
 ```
 
-If no leaf processes the error event to completion, the source's acknowledgement timeout fires, the message is not acked, and redelivery handles the rest. Partial failures never silently ack: either every leaf reports success, or the source learns the flow did not complete.
+A failed event that reaches a leaf reports the error to the source: the message is not acked, and an MCP tool or HTTP caller gets the error. Partial failures never silently ack: either every leaf reports success, or the source learns the flow did not complete.
 
 ## Leader election
 

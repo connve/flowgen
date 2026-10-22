@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.151.0
+
+### Breaking
+
+- **A failed event skips the tasks after it.** An event whose task failed
+  after retries is passed on unhandled, so one failure logs one error, and
+  at the last task it reports the error to the source. `buffer` passes it on
+  without adding it to a batch. A `script` runs on it only with
+  `handles_failed: true`, and the event it returns carries no error. A flow
+  that routes failures by putting a task such as a publisher, `log` or
+  `http_request` straight after the failing task needs a `script` with
+  `handles_failed: true` in front of it.
+- **Klaviyo campaigns follow Klaviyo's campaign model of API revision
+  `2026-10-15`.**
+  - `create` takes a `definition` with the campaign name, `audiences` with a
+    `temporary_id`, and `messages` that each carry their `variations`. A
+    variation holds the subject, sender and `template_id`.
+  - Responses follow the same model: a campaign's name and send settings
+    are under `attributes.definition`, and status is on each message
+    (`definition.status`).
+  - `assign_template` is removed. Set `template_id` in the variation at
+    `create`, or later with `update_variation`.
+  - `list` takes an optional `filter`, on `id`, `name` (`contains` only),
+    `archived`, `builder`, `created_at` or `updated_at`.
+  - `clone` names the copy `payload.name`.
+  - `template_id` is removed from the task's fields.
+
+### Changed
+
+- The web UI's Agents tab is called Ask, at `/ask`. Links to `/agents`
+  don't resolve. The `web.agents` config and `/api/agents` stay as they are.
+
+### Added
+
+- `klaviyo_campaigns` operations `variations` (a message's variations) and
+  `update_variation` (sends only the given fields).
+- `fields` on `klaviyo_templates` `get` and `list` picks the template
+  attributes Klaviyo returns, e.g. `[name, editor_type, html]`.
+- `handles_failed` on `script` runs the script on events whose upstream task
+  failed.
+
+### Fixed
+
+- `klaviyo_templates` reads drag-and-drop templates (klaviyo 0.4.0).
+
 ## 0.150.0
 
 ### Breaking

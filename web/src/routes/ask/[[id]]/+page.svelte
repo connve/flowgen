@@ -148,8 +148,8 @@
 
 	// Conversation history, served from flowgen's system cache. Summaries only
 	// (no message bodies); the active one is fetched in full on demand. The URL
-	// is the source of truth for which conversation is open: `/agents/{id}`, or
-	// `/agents` for a fresh unsaved chat.
+	// is the source of truth for which conversation is open: `/ask/{id}`, or
+	// `/ask` for a fresh unsaved chat.
 	let conversations = $state<ConversationSummary[]>([]);
 	let activeId = $derived(page.params.id ?? null);
 	let historyPaneOpen = $state(true);
@@ -188,12 +188,12 @@
 	}
 
 	// Whenever the URL id changes, load that conversation's messages (or clear
-	// to a fresh chat for `/agents`). Skips a reload of the id we already show.
+	// to a fresh chat for `/ask`). Skips a reload of the id we already show.
 	$effect(() => {
 		const id = activeId;
 		if (id === loadedId) return;
 		// While a reply is streaming, `persistConversation` mints an id and
-		// navigates to `/agents/{id}` — that URL change must NOT reload messages
+		// navigates to `/ask/{id}` — that URL change must NOT reload messages
 		// out from under the live stream. Adopt the id as already-loaded and
 		// leave the on-screen messages untouched.
 		if (sending) {
@@ -238,12 +238,12 @@
 	// the wrong conversation. Block navigation until the stream finishes.
 	function openConversation(id: string) {
 		if (sending) return;
-		goto(`${base}/agents/${id}`);
+		goto(`${base}/ask/${id}`);
 	}
 
 	function newConversation() {
 		if (sending) return;
-		goto(`${base}/agents`);
+		goto(`${base}/ask`);
 	}
 
 	// Deletes a stored conversation. If it's the one on screen, navigate back to
@@ -259,7 +259,7 @@
 	}
 
 	// Persists the current messages, minting an id + title on first save and
-	// navigating to `/agents/{id}` so the URL reflects the live conversation.
+	// navigating to `/ask/{id}` so the URL reflects the live conversation.
 	// Runs on send and after each reply so history survives a reload.
 	async function persistConversation() {
 		if (messages.length === 0) return;
@@ -276,7 +276,7 @@
 				messages.map((msg) => ({ role: msg.role, content: msg.content, at: msg.at, steps: msg.steps })),
 				model || undefined
 			);
-			if (isNew) goto(`${base}/agents/${id}`);
+			if (isNew) goto(`${base}/ask/${id}`);
 			await refreshConversations();
 		} catch (err) {
 			error = errorMessage(err, m.agents_conversation_save_failed());
@@ -632,7 +632,7 @@
 	<div class="shrink-0 border-b border-base-200 bg-base-100 px-6 pb-4 pt-6">
 		<div class="flex flex-wrap items-center gap-2">
 			<div class="flex min-w-0 items-center gap-1.5 text-sm">
-				<a href="{base}/agents" class="shrink-0 hover:text-primary">{m.agents_breadcrumb()}</a>
+				<a href="{base}/ask" class="shrink-0 hover:text-primary">{m.agents_breadcrumb()}</a>
 				<span class="shrink-0 opacity-40">/</span>
 				<span
 					class="tooltip tooltip-bottom min-w-0 before:max-w-xs before:whitespace-normal before:break-words"

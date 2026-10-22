@@ -16,13 +16,13 @@
 	let { children, data }: LayoutProps = $props();
 
 	const NAV = [
-		{ href: '/agents', icon: 'tabler:robot', label: m.nav_agents(), match: (p: string) => p.startsWith(base + '/agents') },
+		{ href: '/ask', icon: 'tabler:message-question', label: m.nav_ask(), match: (p: string) => p.startsWith(base + '/ask') },
 		{ href: '/', icon: 'tabler:binary-tree', label: m.nav_flows(), match: (p: string) => p === base + '/' || p === base || p.startsWith(base + '/flows') || p.startsWith(base + '/changes') },
 		{ href: '/resources', icon: 'tabler:file-code', label: m.nav_resources(), match: (p: string) => p.startsWith(base + '/resources') },
 		{ href: '/connections', icon: 'tabler:plug-connected', label: m.nav_connections(), match: (p: string) => p.startsWith(base + '/connections') },
 		{ href: '/monitor/logs', icon: 'tabler:activity', label: m.nav_monitor(), match: (p: string) => p.startsWith(base + '/monitor') }
 	];
-	let nav = $derived(data.agents ? NAV : NAV.filter((item) => item.href !== '/agents'));
+	let nav = $derived(data.agents ? NAV : NAV.filter((item) => item.href !== '/ask'));
 
 	let collapsed = $state(true);
 	let version = $state<string | null>(null);

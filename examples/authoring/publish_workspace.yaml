@@ -38,5 +38,4 @@ flow:
     - script:
         name: result
         code: |
-          if event.error != () { throw event.error; }
           #{ commit: event.data.commit, changed: event.data.changed }

@@ -95,6 +95,8 @@ pub struct TaskContext {
     pub leaf_count: usize,
     /// Events the task handles at once when its config doesn't set `max_in_flight`.
     pub max_in_flight: std::num::NonZeroUsize,
+    /// Whether the task handles events whose upstream task failed, instead of passing them on.
+    pub handles_failed: bool,
     /// Optional startup delay for staggering task initialization across replicas.
     pub startup_delay: Option<std::time::Duration>,
     /// Shared client registry for deduplicating connections to external services.
@@ -133,6 +135,7 @@ impl std::fmt::Debug for TaskContext {
             .field("cancellation_token", &"<CancellationToken>")
             .field("leaf_count", &self.leaf_count)
             .field("max_in_flight", &self.max_in_flight)
+            .field("handles_failed", &self.handles_failed)
             .field("client_registry", &"<ClientRegistry>")
             .finish()
     }
@@ -326,6 +329,7 @@ impl TaskContextBuilder {
             },
             leaf_count: self.leaf_count.unwrap_or(1),
             max_in_flight: crate::task::runner::max_in_flight(true),
+            handles_failed: false,
             startup_delay: None,
             client_registry: match self.client_registry {
                 Some(registry) => registry,

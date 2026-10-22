@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { base } from '$app/paths';
 	import { afterNavigate, beforeNavigate, goto } from '$app/navigation';
+	import { onDestroy } from 'svelte';
 	import Icon from '@iconify/svelte';
 	import { load } from 'js-yaml';
 	import Badge from '$lib/Badge.svelte';
 	import FlowInspector from '$lib/flow/FlowInspector.svelte';
 	import CodeEditor from '$lib/CodeEditor.svelte';
+	import { activitiesFor, releaseFlowSubscription } from '$lib/activityStore.svelte';
 	import {
 		apiUrl,
 		encodePath,
@@ -86,6 +88,11 @@
 		}
 		return `${base}/resources/${encodePath(data.file.slice('resources/'.length))}`;
 	});
+	let activities = $derived(
+		data.file?.startsWith('flows/') && !isNew
+			? activitiesFor(stripFlowExtension(data.file.slice('flows/'.length)))
+			: undefined
+	);
 	let label = $derived(isFlow ? displayName(content) : null);
 	let placeholder = $derived(isFlow ? m.editor_new_flow() : m.editor_new_resource());
 	let canDelete = $derived(data.file !== null && targetOf(data.targets, data.file) !== undefined);
@@ -125,6 +132,10 @@
 
 	afterNavigate(() => {
 		leaving = false;
+	});
+
+	onDestroy(() => {
+		releaseFlowSubscription();
 	});
 
 	// Unsaved edits hold any navigation until the user discards them; closing
@@ -249,8 +260,8 @@
 	<title>{label || leafName || placeholder} | Flowgen</title>
 </svelte:head>
 
-<section class="p-6">
-	<div class="mb-4">
+<section class="flex h-[calc(100vh-4rem)] flex-col p-6">
+	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 items-center justify-between gap-2">
 			<div class="flex items-center gap-1.5 text-sm">
 				{#if isFlow}
@@ -342,7 +353,7 @@
 		{/if}
 	</div>
 
-	<div class="mb-3 flex items-center gap-2">
+	<div class="mb-3 flex shrink-0 items-center gap-2">
 		{#if isNew && data.targets.length > 1}
 			<select
 				class="select select-sm w-auto border border-base-300 bg-base-100 outline-none focus:border-primary"
@@ -372,7 +383,7 @@
 		</label>
 	</div>
 
-	<div class="flex h-[calc(100vh-16rem)] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
+	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
 		{#if issues && issues.length > 0}
 			<ul class="max-h-32 shrink-0 space-y-0.5 overflow-auto border-b border-error/40 bg-error/5 px-4 py-2">
 				{#each issues as issue, i (i)}
@@ -384,7 +395,7 @@
 		{/if}
 		{#key data}
 			{#if isFlow}
-				<FlowInspector bind:yaml={content} editable />
+				<FlowInspector bind:yaml={content} {activities} editable />
 			{:else}
 				<div class="flex h-10 shrink-0 items-center border-b border-base-200 px-4 text-xs font-medium opacity-70">
 					{m.editor_content_heading()}

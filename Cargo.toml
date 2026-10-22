@@ -22,7 +22,7 @@ debug = "line-tables-only"
 allow_attributes = "deny"
 
 [workspace.package]
-version = "0.150.0"
+version = "0.151.0"
 authors = ["CONNVE"]
 license = "MPL-2.0"
 edition = "2021"
@@ -102,7 +102,7 @@ flate2 = { version = "1.0", default-features = false, features = [
 ] }
 tar = { version = "0.4", default-features = false }
 braze = { version = "0.3.1", features = ["export", "messaging"] }
-klaviyo = { version = "0.2.0", features = [
+klaviyo = { version = "0.4.0", features = [
     "campaigns",
     "events",
     "lists",

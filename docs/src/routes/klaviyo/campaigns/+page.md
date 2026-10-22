@@ -1,16 +1,15 @@
 # Klaviyo Campaigns
 
-Reads and writes Klaviyo campaigns.
+Reads and writes Klaviyo campaigns, their messages and their variations.
 
 ## Configuration
 
 ```yaml
 - klaviyo_campaigns:
-    name: assign_template
-    operation: assign_template
+    name: find_campaign
+    operation: list
     credentials_path: /etc/klaviyo/credentials.json
-    campaign_id: "{{event.data.data.id}}"
-    template_id: "{{event.meta.template_id}}"
+    filter: "contains(name,'{{event.data.name}}')"
 ```
 
 ### Fields
@@ -22,10 +21,10 @@ Reads and writes Klaviyo campaigns.
 | `credentials_path` | string | required | Path to the [credentials](/docs/flowgen/klaviyo) file. |
 | `base_url` | string | Klaviyo's | Klaviyo API address, for example a proxy. |
 | `campaign_id` | string | | Campaign ID. |
-| `message_id` | string | | Campaign message ID for `assign_template`. |
-| `template_id` | string | | Template ID for `assign_template`. |
-| `filter` | string | | Klaviyo filter for `list`. It must name a channel, e.g. `equals(messages.channel,'email')`. |
-| `payload` | object | | The campaign's attributes, or `from_event: true`. See [Payload](/docs/flowgen/klaviyo#payload). |
+| `message_id` | string | | Campaign message ID for `variations`. |
+| `variation_id` | string | | Campaign variation ID for `update_variation`. |
+| `filter` | string | | Klaviyo filter for `list`, e.g. `equals(archived,false)`. |
+| `payload` | object | | The campaign's or variation's attributes, or `from_event: true`. See [Payload](/docs/flowgen/klaviyo#payload). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |
 
@@ -34,32 +33,39 @@ Reads and writes Klaviyo campaigns.
 | Operation | Needs | What it does |
 |---|---|---|
 | `get` | `campaign_id` | Gets the campaign. |
-| `list` | `filter` | Lists campaigns matching `filter`. |
-| `create` | `payload` | Creates a draft campaign. Attributes: `name`, `audiences.included` (list or segment IDs), and `campaign-messages`. |
-| `update` | `campaign_id`, `payload` | Updates the campaign. |
+| `list` | | Lists campaigns, narrowed by `filter` if set. Klaviyo filters campaigns on `id`, `name`, `archived`, `builder`, `created_at` and `updated_at`; `name` takes only `contains`, so an exact name match is checked after the list. |
+| `create` | `payload` | Creates a draft campaign with its audiences, messages and variations. |
+| `update` | `campaign_id`, `payload` | Updates the campaign's `definition`. |
 | `delete` | `campaign_id` | Deletes the campaign. |
-| `clone` | `campaign_id` | Copies the campaign, named `payload.new_name` if set. |
+| `clone` | `campaign_id` | Copies the campaign, named `payload.name` if set. |
 | `messages` | `campaign_id` | Lists the campaign's messages. |
-| `assign_template` | `template_id`, and `message_id` or `campaign_id` | Uses the template for the message, or for every message of the campaign. |
-| `send` | `campaign_id` | Sends or schedules the campaign as its send strategy says. Delivers real messages and is never retried. |
+| `variations` | `message_id` | Lists the message's variations, each with its subject, sender and `template_id`. |
+| `update_variation` | `variation_id`, `payload` | Updates the variation. Only the fields in `payload` are sent, so `{definition: {details: {channel: email, template_id: ...}}}` changes the template and keeps the subject. |
+| `send` | `campaign_id` | Sends or schedules the campaign as its send settings say. Delivers real messages and is never retried. |
 
-A `campaign-messages` entry is a JSON:API resource of its own, so it carries its `type`:
+A campaign is created with its audiences and messages inline. A message refers to its audience by `audience_temporary_id`, and each variation carries the subject, sender and template:
 
 ```json
 {
-  "data": [{
-    "type": "campaign-message",
-    "attributes": {
+  "definition": { "name": "Spring newsletter" },
+  "audiences": [{ "temporary_id": "newsletter", "included": ["LIST_ID"] }],
+  "messages": [{
+    "audience_temporary_id": "newsletter",
+    "name": "Spring newsletter",
+    "variations": [{
       "definition": {
-        "channel": "email",
-        "label": "Spring newsletter",
-        "content": { "subject": "What's new this spring" }
+        "name": "Spring newsletter",
+        "details": {
+          "channel": "email",
+          "subject": "What's new this spring",
+          "template_id": "TEMPLATE_ID"
+        }
       }
-    }
+    }]
   }]
 }
 ```
 
 ## Output
 
-The Klaviyo response as JSON. `list` emits one event per page, with the campaigns in `data`. `delete` emits `{"id": "...", "done": true}`. `assign_template` with `campaign_id` emits one event per message.
+The Klaviyo response as JSON. `list` emits one event per page, with the campaigns in `data`. `delete` emits `{"id": "...", "done": true}`.

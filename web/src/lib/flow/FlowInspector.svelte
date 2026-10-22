@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { untrack } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { load } from 'js-yaml';
 	import Icon from '@iconify/svelte';
 	import ResourceViewer from '$lib/ResourceViewer.svelte';
@@ -31,7 +31,7 @@
 		editable?: boolean;
 	}
 
-	let { yaml = $bindable(), activities = [], editable = false }: Props = $props();
+	let { yaml = $bindable(), activities, editable = false }: Props = $props();
 
 	// While editing, the graph keeps the last YAML that parsed, so it does not
 	// blank out mid-keystroke.
@@ -74,6 +74,16 @@
 	let dagPane = $state<HTMLElement | null>(null);
 	let activityPanel = $state<ActivityPanel | null>(null);
 	let activityExpanded = $state(false);
+	let configHidden = $state(false);
+
+	onMount(() => {
+		configHidden = localStorage.getItem('flowgen-config-hidden') === '1';
+	});
+
+	function toggleConfig() {
+		configHidden = !configHidden;
+		localStorage.setItem('flowgen-config-hidden', configHidden ? '1' : '0');
+	}
 	let highlightTimeout: ReturnType<typeof setTimeout> | null = null;
 	let flashedEl: HTMLElement | null = null;
 
@@ -90,7 +100,7 @@
 	}
 	let nodeStates = $derived.by(() => {
 		const map = new Map<string, NodeState>();
-		for (const a of activities) {
+		for (const a of activities ?? []) {
 			if (!a.task) continue;
 			if (a.level !== 'info' && a.level !== 'warn' && a.level !== 'error') continue;
 			const prev = map.get(a.task);
@@ -196,16 +206,41 @@
 <svelte:window on:keydown={onKeydown} />
 
 <div class="flex min-h-0 flex-1 flex-col">
-	<div class="grid min-h-0 flex-1 grid-cols-2 gap-0 divide-x divide-base-200">
+	<div
+		class="grid min-h-0 flex-1 gap-0 divide-x divide-base-200 {configHidden && !editable
+			? 'grid-cols-1'
+			: 'grid-cols-2'}"
+	>
 		<div class="flex min-h-0 flex-col">
-			<div class="flex h-10 shrink-0 items-center border-b border-base-200 bg-base-100 px-4 text-xs font-medium opacity-70">
-				{m.flow_graph_heading()}
+			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
+				<span class="text-xs font-medium opacity-70">{m.flow_graph_heading()}</span>
+				{#if !editable}
+					<div
+						class="tooltip tooltip-left"
+						data-tip={configHidden ? m.flow_config_expand() : m.flow_config_collapse()}
+					>
+						<button
+							type="button"
+							class="btn btn-ghost btn-sm btn-circle"
+							aria-label={configHidden ? m.flow_config_expand() : m.flow_config_collapse()}
+							aria-pressed={configHidden}
+							onclick={toggleConfig}
+						>
+							<Icon
+								icon={configHidden
+									? 'tabler:layout-sidebar-right-expand'
+									: 'tabler:layout-sidebar-right-collapse'}
+								class="h-5 w-5"
+							/>
+						</button>
+					</div>
+				{/if}
 			</div>
 			<div bind:this={dagPane} class="min-h-0 flex-1">
 				<FlowDag yaml={graphYaml} onNodeClick={onNodeClick} />
 			</div>
 		</div>
-		<div class="flex min-h-0 flex-col">
+		<div class="flex min-h-0 flex-col {configHidden && !editable ? 'hidden' : ''}">
 			<div class="flex h-10 shrink-0 items-center justify-between border-b border-base-200 bg-base-100 px-4">
 				<span class="text-xs font-medium opacity-70">{m.flow_config_heading()}</span>
 				<CopyButton text={yaml} label={m.flow_copy_yaml()} />
@@ -224,7 +259,7 @@
 			</div>
 		</div>
 	</div>
-	{#if !editable}
+	{#if activities}
 		<ActivityPanel
 			bind:this={activityPanel}
 			{activities}

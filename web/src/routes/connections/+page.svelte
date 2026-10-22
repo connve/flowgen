@@ -27,11 +27,17 @@
 		idle: { label: m.flows_status_idle, variant: 'neutral' }
 	};
 
+	function credentialsName(path: string | undefined): string | null {
+		if (!path || path.includes('{{')) return null;
+		const file = path.split('/').pop() ?? '';
+		return file.replace(/\.[^.]+$/, '') || null;
+	}
+
 	function subtitle(connection: Connection): string {
 		const parts = connection.account ? [connection.account, ...connection.targets] : [...connection.targets];
 		if (connection.perEvent) parts.push(m.connections_per_event());
 		if (connection.onBehalfOfUser) parts.push(m.connections_on_behalf_of_user());
-		return parts.join(' · ');
+		return parts.length > 0 ? parts.join(' · ') : (credentialsName(connection.credentialsPath) ?? '');
 	}
 </script>
 

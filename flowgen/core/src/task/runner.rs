@@ -78,7 +78,8 @@ pub fn max_in_flight(cpu_intensive: bool) -> NonZeroUsize {
 /// It takes the next event only when a slot frees up, so with a slow handler
 /// events stay in the channel and the task upstream waits. On cancellation it
 /// closes the channel, so upstream sends fail instead of hanging, and lets the
-/// events it already took finish without retrying them.
+/// events it already took finish without retrying them. An event whose
+/// upstream task failed is passed on unhandled, unless the task handles failed events.
 pub async fn process_events<H: Handler>(
     mut rx: Receiver<Event>,
     handler: Arc<H>,
@@ -113,10 +114,14 @@ pub async fn process_events<H: Handler>(
         let handler = Arc::clone(&handler);
         let delays = retry.strategy();
         let cancellation = cancellation.clone();
+        let handles_failed = task_context.handles_failed;
         running.spawn(
             async move {
                 let _slot = slot;
-                handle_with_retry(handler.as_ref(), event, delays, &cancellation).await;
+                match (event.error.clone(), handles_failed) {
+                    (Some(error), false) => event.forward_failure(handler.sender(), error).await,
+                    _ => handle_with_retry(handler.as_ref(), event, delays, &cancellation).await,
+                }
             }
             .instrument(tracing::Span::current()),
         );
@@ -251,8 +256,19 @@ mod tests {
         max_in_flight: usize,
         cancellation: &tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        run_handling_failed(rx, handler, retry, max_in_flight, cancellation, false)
+    }
+
+    fn run_handling_failed(
+        rx: Receiver<Event>,
+        handler: &Arc<Gated>,
+        retry: crate::retry::RetryConfig,
+        max_in_flight: usize,
+        cancellation: &tokio_util::sync::CancellationToken,
+        handles_failed: bool,
+    ) -> tokio::task::JoinHandle<()> {
         let handler = Arc::clone(handler);
-        let task_context = crate::task::context::TaskContextBuilder::new()
+        let mut task_context = crate::task::context::TaskContextBuilder::new()
             .flow_name("a".to_string())
             .task_manager(Arc::new(
                 crate::task::manager::TaskManagerBuilder::new()
@@ -263,6 +279,7 @@ mod tests {
             .cancellation_token(cancellation.clone())
             .build()
             .unwrap();
+        task_context.handles_failed = handles_failed;
         tokio::spawn(async move {
             process_events(
                 rx,
@@ -349,6 +366,70 @@ mod tests {
             failed_rx.recv().await.unwrap().error.as_deref(),
             Some("bad input")
         );
+    }
+
+    fn failed_upstream() -> Event {
+        let mut event = event();
+        event.error = Some("upstream failed".to_string());
+        event
+    }
+
+    #[tokio::test]
+    async fn an_event_whose_upstream_failed_is_passed_on_unhandled() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(1);
+        let handler = gated(1, false, false, Some(out_tx));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        tx.send(failed_upstream()).await.unwrap();
+        drop(tx);
+
+        run(rx, &handler, Default::default(), 1, &cancellation)
+            .await
+            .unwrap();
+
+        assert_eq!(handler.started.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            out_rx.recv().await.unwrap().error.as_deref(),
+            Some("upstream failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_at_the_last_task_reports_the_error_to_the_source() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let handler = gated(1, false, false, None);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let (completion_tx, completion_rx) = crate::event::new_completion_channel(1);
+        let mut event = failed_upstream();
+        event.completion_tx = Some(completion_tx);
+        tx.send(event).await.unwrap();
+        drop(tx);
+
+        run(rx, &handler, Default::default(), 1, &cancellation)
+            .await
+            .unwrap();
+
+        let reported = completion_rx.await.unwrap();
+        assert_eq!(
+            reported.map_err(|error| error.to_string()),
+            Err("upstream failed".to_string())
+        );
+        assert_eq!(handler.started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_task_that_handles_failed_events_runs_on_them() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let handler = gated(1, false, false, None);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        tx.send(failed_upstream()).await.unwrap();
+        drop(tx);
+
+        run_handling_failed(rx, &handler, Default::default(), 1, &cancellation, true)
+            .await
+            .unwrap();
+
+        assert_eq!(handler.started.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

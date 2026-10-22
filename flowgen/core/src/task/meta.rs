@@ -179,6 +179,11 @@ pub trait TaskMeta {
     fn validate(&self) -> Result<(), TaskError> {
         Ok(())
     }
+
+    /// Handles events whose upstream task failed; other tasks pass them on.
+    fn handles_failed(&self) -> bool {
+        false
+    }
 }
 
 /// The fields every task config has, implemented with `#[derive(TaskConfig)]`.
@@ -245,6 +250,10 @@ impl TaskMeta for super::script::Script {
             crate::resource::Source::Inline(code) => Ok(self.limits.compile(code)?),
             crate::resource::Source::Resource { .. } => Ok(()),
         }
+    }
+
+    fn handles_failed(&self) -> bool {
+        self.handles_failed
     }
 }
 

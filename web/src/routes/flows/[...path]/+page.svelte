@@ -30,8 +30,8 @@
 	<title>{m.flow_page_title({ name: data.detail.display_name ?? data.identity })}</title>
 </svelte:head>
 
-<section class="p-6">
-	<div class="mb-4">
+<section class="flex h-[calc(100vh-4rem)] flex-col p-6">
+	<div class="mb-4 shrink-0">
 		<div class="flex min-h-8 items-center justify-between gap-2">
 			<div class="flex items-center gap-1.5 text-sm">
 				<a href="{base}/" class="text-primary hover:underline">{m.flow_breadcrumb_flows()}</a>
@@ -55,7 +55,7 @@
 
 	<PendingChanges changes={data.pending} />
 
-	<div class="flex h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
+	<div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-base-300 bg-base-100">
 		<FlowInspector yaml={data.detail.yaml} {activities} />
 	</div>
 </section>

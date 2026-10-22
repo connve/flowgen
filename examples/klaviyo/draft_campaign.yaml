@@ -9,7 +9,7 @@
 flow:
   labels:
     display_name: "Klaviyo Draft Campaign"
-    description: "Creates a draft Klaviyo email campaign for a list by name and assigns it an existing template, without sending it."
+    description: "Creates a draft Klaviyo email campaign for a list by name with an existing template, without sending it."
     tags: ["klaviyo", "campaigns", "templates", "example"]
   tasks:
 
@@ -35,7 +35,7 @@ flow:
         credentials_path: /etc/klaviyo/credentials.json
         filter: "equals(name,'{{event.data.list_name}}')"
 
-    # The draft campaign for that list, with one email message.
+    # The draft campaign for that list, with one email that uses the template.
     - script:
         name: to_campaign
         code: |
@@ -43,16 +43,22 @@ flow:
             throw "No list with that name";
           }
           #{
-            name: event.meta.campaign_name,
-            audiences: #{ included: [event.data.data[0].id] },
-            "campaign-messages": #{ data: [#{
-              "type": "campaign-message",
-              attributes: #{ definition: #{
-                channel: "email",
-                label: event.meta.campaign_name,
-                content: #{ subject: event.meta.subject }
-              } }
-            }] }
+            definition: #{ name: event.meta.campaign_name },
+            audiences: [#{ temporary_id: "list", included: [event.data.data[0].id] }],
+            messages: [#{
+              audience_temporary_id: "list",
+              name: event.meta.campaign_name,
+              variations: [#{
+                definition: #{
+                  name: event.meta.campaign_name,
+                  details: #{
+                    channel: "email",
+                    subject: event.meta.subject,
+                    template_id: event.meta.template_id
+                  }
+                }
+              }]
+            }]
           }
 
     # Create the draft.
@@ -62,11 +68,3 @@ flow:
         credentials_path: /etc/klaviyo/credentials.json
         payload:
           from_event: true
-
-    # Use the template for the campaign's email.
-    - klaviyo_campaigns:
-        name: assign_template
-        operation: assign_template
-        credentials_path: /etc/klaviyo/credentials.json
-        campaign_id: "{{event.data.data.id}}"
-        template_id: "{{event.meta.template_id}}"

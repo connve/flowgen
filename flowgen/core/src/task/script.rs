@@ -64,6 +64,9 @@ pub struct Script {
     /// Events handled at once; defaults to the number of CPUs.
     #[serde(default)]
     pub max_in_flight: Option<std::num::NonZeroUsize>,
+    /// Runs on events whose upstream task failed, with `event.error` set; otherwise they pass on.
+    #[serde(default)]
+    pub handles_failed: bool,
 }
 
 impl Default for Script {
@@ -77,6 +80,7 @@ impl Default for Script {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         }
     }
 }
@@ -1399,6 +1403,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         });
         let (tx, rx) = mpsc::channel(100);
 
@@ -1903,6 +1908,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -1962,6 +1968,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2023,6 +2030,7 @@ mod tests {
                     depends_on: None,
                     retry: None,
                     max_in_flight: None,
+                    handles_failed: false,
                 }),
                 tx: Some(tx),
                 rx: mpsc::channel(100).1,
@@ -2090,6 +2098,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2158,6 +2167,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2228,6 +2238,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2295,6 +2306,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         });
 
         let (_event_tx, rx_in) = mpsc::channel(100);
@@ -2359,6 +2371,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         });
 
         let (_event_tx, rx_in) = mpsc::channel(100);
@@ -2424,6 +2437,7 @@ mod tests {
                 depends_on: None,
                 retry: None,
                 max_in_flight: None,
+                handles_failed: false,
             }),
             tx: Some(tx),
             rx: mpsc::channel(100).1,
@@ -2497,6 +2511,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         };
 
         assert_eq!(config.name, "test_script");
@@ -2534,6 +2549,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         };
 
         let serialized = serde_json::to_string(&config).unwrap();
@@ -2552,6 +2568,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         };
 
         let cloned = config.clone();
@@ -2571,6 +2588,7 @@ mod tests {
             depends_on: None,
             retry: None,
             max_in_flight: None,
+            handles_failed: false,
         };
 
         assert_eq!(config.name, "resource_script");

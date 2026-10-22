@@ -23,6 +23,7 @@ Reads and writes Klaviyo email templates.
 | `base_url` | string | Klaviyo's | Klaviyo API address, for example a proxy. |
 | `template_id` | string | | Template ID for `get`, `update`, `delete`, `render`, and `clone`. |
 | `filter` | string | | Klaviyo filter for `list`, e.g. `equals(name,'Welcome')`. |
+| `fields` | list | all | Template attributes `get` and `list` return, e.g. `[name, editor_type, html]`. Leaves out the drag-and-drop `definition`, which can be large. |
 | `payload` | object | | The template's attributes, or `from_event: true`. See [Payload](/docs/flowgen/klaviyo#payload). |
 | `depends_on` | list | | Upstream task names. |
 | `retry` | object | | [Retry configuration](/docs/flowgen/concepts/retry). |

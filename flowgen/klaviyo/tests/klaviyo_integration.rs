@@ -183,6 +183,7 @@ fn templates(base_url: &str, credentials: PathBuf) -> Templates {
         base_url: Some(base_url.to_string()),
         template_id: None,
         filter: None,
+        fields: None,
         payload: Some(Payload::FromEvent { from_event: true }),
         depends_on: None,
         retry: None,
@@ -343,6 +344,57 @@ async fn upsert_creates_the_template_when_none_has_the_name() {
     assert_eq!(methods, ["GET", "POST"]);
 }
 
+#[tokio::test]
+async fn get_asks_only_for_the_given_fields() {
+    let (url, received) = serve(vec![ok(
+        "GET",
+        "/api/templates/T1",
+        &types::GetTemplateDndResponse {
+            data: types::GetTemplateDndResponseData {
+                attributes: types::GetTemplateDndResponseDataAttributes {
+                    amp: None,
+                    created: None,
+                    definition: None,
+                    editor_type: "CODE".to_string(),
+                    html: "<p>a</p>".to_string(),
+                    name: "Spring".to_string(),
+                    screenshot_url: None,
+                    text: None,
+                    updated: None,
+                },
+                id: "T1".to_string(),
+                links: object_links("templates/T1"),
+                type_: types::TemplateEnum::Template,
+            },
+            links: None,
+            meta: None,
+        },
+    )])
+    .await;
+    let credentials = credentials();
+
+    run(
+        Templates {
+            operation: TemplateOperation::Get,
+            template_id: Some("T1".to_string()),
+            fields: Some(vec!["name".to_string(), "html".to_string()]),
+            payload: None,
+            ..templates(&url, credentials.path().to_path_buf())
+        },
+        Value::Null,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        received.lock().await[0]
+            .query
+            .get("fields[template]")
+            .map(String::as_str),
+        Some("name,html")
+    );
+}
+
 fn list(id: &str) -> types::ListListResponseObjectResource {
     types::ListListResponseObjectResource {
         attributes: types::ListListResponseObjectResourceAttributes {
@@ -421,7 +473,7 @@ fn campaigns(base_url: &str, credentials: PathBuf, operation: CampaignOperation)
         base_url: Some(base_url.to_string()),
         campaign_id: Some("C1".to_string()),
         message_id: None,
-        template_id: Some("T1".to_string()),
+        variation_id: None,
         filter: None,
         payload: None,
         depends_on: None,
@@ -430,111 +482,115 @@ fn campaigns(base_url: &str, credentials: PathBuf, operation: CampaignOperation)
     }
 }
 
-fn message(id: &str) -> types::CampaignMessageResponseObjectResource {
-    types::CampaignMessageResponseObjectResource {
-        attributes: types::CampaignMessageResponseObjectResourceAttributes {
-            created_at: None,
-            definition: None,
-            send_times: None,
-            updated_at: None,
-        },
-        id: id.to_string(),
-        links: object_links(&format!("campaign-messages/{id}")),
-        relationships: None,
-        type_: types::CampaignMessageEnum::CampaignMessage,
+fn email(details: types::EmailChannelDetails) -> types::VariationDefinition {
+    types::VariationDefinition {
+        details: Some(details.into()),
+        name: None,
     }
 }
 
-fn messages(ids: &[&str]) -> types::GetCampaignMessageResponseCollectionCompoundDocument {
-    types::GetCampaignMessageResponseCollectionCompoundDocument {
-        data: ids.iter().map(|id| message(id)).collect(),
-        included: Vec::new(),
-        links: None,
-        meta: None,
-    }
-}
-
-fn assigned(id: &str) -> types::PostCampaignMessageResponse {
-    types::PostCampaignMessageResponse {
-        data: types::PostCampaignMessageResponseData {
-            attributes: types::PostCampaignMessageResponseDataAttributes {
-                channel: "email".to_string(),
-                content:
-                    types::PostCampaignMessageResponseDataAttributesContent::EmailContentSubObject(
-                        types::EmailContentSubObject {
-                            bcc_email: None,
-                            cc_email: None,
-                            from_email: None,
-                            from_label: None,
-                            preview_text: None,
-                            reply_to_email: None,
-                            subject: None,
-                        },
-                    ),
-                created_at: None,
-                label: "a".to_string(),
-                render_options: None,
-                send_times: None,
-                updated_at: None,
-            },
-            id: id.to_string(),
-            links: object_links(&format!("campaign-messages/{id}")),
-            relationships: None,
-            type_: types::CampaignMessageEnum::CampaignMessage,
-        },
-        links: None,
-        meta: None,
+fn template_details(template_id: &str) -> types::EmailChannelDetails {
+    types::EmailChannelDetails {
+        channel: Some(types::EmailChannelDetailsChannel::Email),
+        template_id: Some(template_id.to_string()),
+        ..Default::default()
     }
 }
 
 #[tokio::test]
-async fn assign_template_covers_every_message_of_the_campaign() {
-    let (url, received) = serve(vec![
-        ok(
-            "GET",
-            "/api/campaigns/C1/campaign-messages",
-            &messages(&["M1", "M2"]),
-        ),
-        ok(
-            "POST",
-            "/api/campaign-message-assign-template",
-            &assigned("M1"),
-        ),
-    ])
+async fn variations_lists_the_variations_of_the_message() {
+    let (url, _) = serve(vec![ok(
+        "GET",
+        "/api/campaign-messages/M1/campaign-variations",
+        &types::GetVariationResponseCollection {
+            data: vec![types::VariationResponseObjectResource {
+                attributes: types::VariationResponseObjectResourceAttributes {
+                    created: klaviyo::chrono::DateTime::UNIX_EPOCH,
+                    definition: email(template_details("T1")),
+                    updated: klaviyo::chrono::DateTime::UNIX_EPOCH,
+                },
+                id: "V1".to_string(),
+                links: object_links("campaign-variations/V1"),
+                relationships: None,
+                type_: types::CampaignVariationEnum::CampaignVariation,
+            }],
+            links: None,
+            meta: None,
+        },
+    )])
     .await;
     let credentials = credentials();
 
     let emitted = run(
-        campaigns(
-            &url,
-            credentials.path().to_path_buf(),
-            CampaignOperation::AssignTemplate,
-        ),
+        Campaigns {
+            message_id: Some("M1".to_string()),
+            ..campaigns(
+                &url,
+                credentials.path().to_path_buf(),
+                CampaignOperation::Variations,
+            )
+        },
         Value::Null,
     )
     .await
     .unwrap();
 
-    assert_eq!(emitted.len(), 2);
-    let assigned: Vec<(String, String)> = received
-        .lock()
-        .await
-        .iter()
-        .filter(|request| request.method == "POST")
-        .map(|request| {
-            let sent: types::CampaignMessageAssignTemplateQuery =
-                serde_json::from_str(&request.body).unwrap();
-            let template = sent.data.relationships.template.data.unwrap();
-            (sent.data.id, template.id)
-        })
-        .collect();
+    let emitted: types::GetVariationResponseCollection =
+        serde_json::from_value(emitted[0].clone()).unwrap();
+    assert_eq!(emitted.data[0].id, "V1");
+}
+
+#[tokio::test]
+async fn update_variation_sends_only_the_given_fields() {
+    let (url, received) = serve(vec![ok(
+        "PATCH",
+        "/api/campaign-variations/V1",
+        &types::PatchVariationResponse {
+            data: types::PatchVariationResponseData {
+                attributes: types::PatchVariationResponseDataAttributes {
+                    created: klaviyo::chrono::DateTime::UNIX_EPOCH,
+                    definition: email(template_details("T2")),
+                    updated: klaviyo::chrono::DateTime::UNIX_EPOCH,
+                },
+                id: "V1".to_string(),
+                links: object_links("campaign-variations/V1"),
+                relationships: None,
+                type_: types::CampaignVariationEnum::CampaignVariation,
+            },
+            links: None,
+            meta: None,
+        },
+    )])
+    .await;
+    let credentials = credentials();
+
+    run(
+        Campaigns {
+            variation_id: Some("V1".to_string()),
+            payload: Some(Payload::FromEvent { from_event: true }),
+            ..campaigns(
+                &url,
+                credentials.path().to_path_buf(),
+                CampaignOperation::UpdateVariation,
+            )
+        },
+        data(
+            &types::VariationPartialUpdateQueryResourceObjectAttributes {
+                definition: email(template_details("T2")),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+
+    let received = received.lock().await;
+    let sent: types::VariationPartialUpdateQuery = serde_json::from_str(&received[0].body).unwrap();
+    assert_eq!(sent.data.id, "V1");
     assert_eq!(
-        assigned,
-        [
-            ("M1".to_string(), "T1".to_string()),
-            ("M2".to_string(), "T1".to_string())
-        ]
+        data(&sent.data.attributes.definition),
+        data(&email(template_details("T2")))
     );
+    assert!(!received[0].body.contains("subject"));
 }
 
 #[tokio::test]
@@ -586,18 +642,15 @@ async fn a_missing_field_stops_the_task_at_startup() {
     let credentials = credentials();
 
     let result = run(
-        Campaigns {
-            filter: None,
-            ..campaigns(
-                &url,
-                credentials.path().to_path_buf(),
-                CampaignOperation::List,
-            )
-        },
+        campaigns(
+            &url,
+            credentials.path().to_path_buf(),
+            CampaignOperation::Variations,
+        ),
         Value::Null,
     )
     .await;
 
-    assert!(matches!(result, Err(Error::MissingField("filter"))));
+    assert!(matches!(result, Err(Error::MissingField("message_id"))));
     assert!(received.lock().await.is_empty());
 }

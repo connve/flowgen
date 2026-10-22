@@ -44,7 +44,7 @@ Most tasks use the retry config as a circuit breaker. They retry up to `max_atte
 
 This applies to: `script`, `convert`, `iterate`, `buffer`, `log`, `http_request`, `http_endpoint`, `ai_completion`, `llm_proxy`, and every connector processor (database queries, object store operations, message publishers, and so on).
 
-Failed events are not silently dropped. The error event carries `event.error` with the failure message, which downstream tasks can inspect and route to a dead-letter destination, an audit log, or an alerting endpoint.
+Failed events are not silently dropped. The error event carries `event.error` with the failure message. The tasks after it pass it on without handling it, and a `script` with `handles_failed: true` can inspect it and route it to a dead-letter destination, an audit log, or an alerting endpoint.
 
 ### Infinite reconnect (subscribers)
 

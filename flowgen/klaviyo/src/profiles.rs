@@ -10,9 +10,6 @@ use klaviyo::types;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// JSON:API type of a profile.
-const RESOURCE: &str = "profile";
-
 /// What the task does with a profile.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,23 +119,20 @@ impl Operation for Profiles {
             }
             ProfileOperation::Create => {
                 let request: types::ProfileCreateQuery =
-                    request(RESOURCE, None, attributes(self.payload.as_ref(), event)?)?;
+                    request(None, attributes(self.payload.as_ref(), event)?)?;
                 emitter.emit(&profiles.create(&request).send().await?).await
             }
             ProfileOperation::Update => {
                 let id = required(self.profile_id.as_deref(), "profile_id")?;
-                let request: types::ProfilePartialUpdateQuery = request(
-                    RESOURCE,
-                    Some(id),
-                    attributes(self.payload.as_ref(), event)?,
-                )?;
+                let request: types::ProfilePartialUpdateQuery =
+                    request(Some(id), attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&profiles.update(id, &request).send().await?)
                     .await
             }
             ProfileOperation::Upsert => {
                 let request: types::ProfileUpsertQuery =
-                    request(RESOURCE, None, attributes(self.payload.as_ref(), event)?)?;
+                    request(None, attributes(self.payload.as_ref(), event)?)?;
                 emitter.emit(&profiles.upsert(&request).send().await?).await
             }
         }

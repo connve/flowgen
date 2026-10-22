@@ -11,16 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::path::{Path, PathBuf};
 
-/// JSON:API type of a campaign.
-const RESOURCE: &str = "campaign";
-
 /// What the task does with a campaign.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CampaignOperation {
     /// Get a campaign by `campaign_id`.
     Get,
-    /// List campaigns matching `filter`, which must name a channel.
+    /// List campaigns, narrowed by `filter` if set.
     List,
     /// Create a draft campaign from `payload`.
     Create,
@@ -28,14 +25,15 @@ pub enum CampaignOperation {
     Update,
     /// Delete the campaign `campaign_id`.
     Delete,
-    /// Copy the campaign `campaign_id`, named `payload.new_name` if set.
+    /// Copy the campaign `campaign_id`, named `payload.name` if set.
     Clone,
     /// List the messages of the campaign `campaign_id`.
     Messages,
-    /// Use `template_id` for the message `message_id`, or for every message
-    /// of the campaign `campaign_id`.
-    AssignTemplate,
-    /// Send or schedule the campaign `campaign_id` as its send strategy says.
+    /// List the variations of the message `message_id`.
+    Variations,
+    /// Update the variation `variation_id` with `payload`.
+    UpdateVariation,
+    /// Send or schedule the campaign `campaign_id` as its send settings say.
     Send,
 }
 
@@ -43,11 +41,10 @@ pub enum CampaignOperation {
 ///
 /// ```yaml
 /// - klaviyo_campaigns:
-///     name: assign_template
-///     operation: assign_template
+///     name: find_campaign
+///     operation: list
 ///     credentials_path: /etc/klaviyo/credentials.json
-///     campaign_id: "{{event.data.data.id}}"
-///     template_id: "{{event.meta.template_id}}"
+///     filter: "contains(name,'{{event.data.name}}')"
 /// ```
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, TaskConfig)]
 #[serde(deny_unknown_fields)]
@@ -61,19 +58,19 @@ pub struct Campaigns {
     /// Klaviyo API address, e.g. a proxy; Klaviyo's own when unset.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Campaign ID (get, update, delete, clone, messages, assign_template, send).
+    /// Campaign ID (get, update, delete, clone, messages, send).
     #[serde(default)]
     pub campaign_id: Option<String>,
-    /// Campaign message ID (assign_template).
+    /// Campaign message ID (variations).
     #[serde(default)]
     pub message_id: Option<String>,
-    /// Template ID (assign_template).
+    /// Campaign variation ID (update_variation).
     #[serde(default)]
-    pub template_id: Option<String>,
-    /// Klaviyo filter expression (list), e.g. `equals(messages.channel,'email')`.
+    pub variation_id: Option<String>,
+    /// Klaviyo filter expression (list), e.g. `equals(archived,false)`.
     #[serde(default)]
     pub filter: Option<String>,
-    /// The campaign's attributes (create, update, clone).
+    /// The attributes of the campaign (create, update, clone) or variation (update_variation).
     #[serde(default)]
     pub payload: Option<Payload>,
     /// Upstream task names, when they differ from the previous task.
@@ -110,14 +107,12 @@ impl Operation for Campaigns {
                 present(self.campaign_id.as_ref(), "campaign_id")?;
                 present(self.payload.as_ref(), "payload")
             }
-            CampaignOperation::List => present(self.filter.as_ref(), "filter"),
+            CampaignOperation::List => Ok(()),
             CampaignOperation::Create => present(self.payload.as_ref(), "payload"),
-            CampaignOperation::AssignTemplate => {
-                present(self.template_id.as_ref(), "template_id")?;
-                match (&self.message_id, &self.campaign_id) {
-                    (None, None) => Err(Error::MissingField("message_id or campaign_id")),
-                    _ => Ok(()),
-                }
+            CampaignOperation::Variations => present(self.message_id.as_ref(), "message_id"),
+            CampaignOperation::UpdateVariation => {
+                present(self.variation_id.as_ref(), "variation_id")?;
+                present(self.payload.as_ref(), "payload")
             }
         }
     }
@@ -140,8 +135,10 @@ impl Operation for Campaigns {
                 emitter.emit(&campaigns.get(id).send().await?).await
             }
             CampaignOperation::List => {
-                let filter = required(self.filter.as_deref(), "filter")?;
-                let mut pages = campaigns.list(filter).pages();
+                let mut pages = match &self.filter {
+                    Some(filter) => campaigns.list().filter(filter).pages(),
+                    None => campaigns.list().pages(),
+                };
                 while let Some(page) = pages.next_page().await {
                     emitter.emit(&page?).await?;
                 }
@@ -149,18 +146,15 @@ impl Operation for Campaigns {
             }
             CampaignOperation::Create => {
                 let request: types::CampaignCreateQuery =
-                    request(RESOURCE, None, attributes(self.payload.as_ref(), event)?)?;
+                    request(None, attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&campaigns.create(&request).send().await?)
                     .await
             }
             CampaignOperation::Update => {
                 let id = required(self.campaign_id.as_deref(), "campaign_id")?;
-                let request: types::CampaignPartialUpdateQuery = request(
-                    RESOURCE,
-                    Some(id),
-                    attributes(self.payload.as_ref(), event)?,
-                )?;
+                let request: types::CampaignPartialUpdateQuery =
+                    request(Some(id), attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&campaigns.update(id, &request).send().await?)
                     .await
@@ -176,7 +170,7 @@ impl Operation for Campaigns {
                     Some(payload) => attributes(Some(payload), event)?,
                     None => Map::new(),
                 };
-                let request: types::CampaignCloneQuery = request(RESOURCE, Some(id), attributes)?;
+                let request: types::CampaignCloneQuery = request(Some(id), attributes)?;
                 emitter
                     .emit(&campaigns.clone_campaign(id, &request).send().await?)
                     .await
@@ -185,29 +179,17 @@ impl Operation for Campaigns {
                 let id = required(self.campaign_id.as_deref(), "campaign_id")?;
                 emitter.emit(&campaigns.messages(id).send().await?).await
             }
-            CampaignOperation::AssignTemplate => {
-                let template_id = required(self.template_id.as_deref(), "template_id")?;
-                match (&self.message_id, &self.campaign_id) {
-                    (Some(message_id), _) => {
-                        let assigned = campaigns
-                            .assign_template(message_id, template_id)
-                            .send()
-                            .await?;
-                        emitter.emit(&assigned).await
-                    }
-                    (None, Some(campaign_id)) => {
-                        let messages = campaigns.messages(campaign_id).send().await?;
-                        for message in &messages.data {
-                            let assigned = campaigns
-                                .assign_template(&message.id, template_id)
-                                .send()
-                                .await?;
-                            emitter.emit(&assigned).await?;
-                        }
-                        Ok(())
-                    }
-                    (None, None) => Err(Error::MissingField("message_id or campaign_id")),
-                }
+            CampaignOperation::Variations => {
+                let id = required(self.message_id.as_deref(), "message_id")?;
+                emitter.emit(&campaigns.variations(id).send().await?).await
+            }
+            CampaignOperation::UpdateVariation => {
+                let id = required(self.variation_id.as_deref(), "variation_id")?;
+                let request: types::VariationPartialUpdateQuery =
+                    request(Some(id), attributes(self.payload.as_ref(), event)?)?;
+                emitter
+                    .emit(&campaigns.update_variation(id, &request).send().await?)
+                    .await
             }
             CampaignOperation::Send => {
                 let id = required(self.campaign_id.as_deref(), "campaign_id")?;

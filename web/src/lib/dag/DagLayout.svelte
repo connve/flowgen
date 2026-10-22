@@ -1,15 +1,16 @@
 <script lang="ts">
 	import dagre from '@dagrejs/dagre';
+	import { untrack } from 'svelte';
 	import { useNodesInitialized, useSvelteFlow, type Edge } from '@xyflow/svelte';
 
 	// Runs inside <SvelteFlow> so it can read each node's real rendered size.
 	// Dagre needs node dimensions to lay out ranks; taking them from
 	// `node.measured` (populated by SvelteFlow after the first render) keeps the
 	// layout correct without duplicating the node's CSS size in code.
-	let { edges }: { edges: Edge[] } = $props();
+	let { edges, width }: { edges: Edge[]; width: number } = $props();
 
 	const nodesInitialized = useNodesInitialized();
-	const { getNodes, updateNode, fitView } = useSvelteFlow();
+	const { getNodes, updateNode, fitView, getViewport, setViewport } = useSvelteFlow();
 
 	// Re-layout whenever the edge set changes or the nodes (re-)measure.
 	// `laidOutKey` must reset when `nodesInitialized` drops to `false` —
@@ -45,5 +46,17 @@
 		}
 		laidOutKey = key;
 		fitView({ maxZoom: 1.5, padding: 0.15 });
+	});
+
+	// Keeps the graph's centre and zoom when the pane is resized.
+	let previousWidth = 0;
+
+	$effect(() => {
+		const delta = width - previousWidth;
+		const resized = previousWidth > 0 && delta !== 0;
+		previousWidth = width;
+		if (!resized || untrack(() => laidOutKey) === '') return;
+		const { x, y, zoom } = getViewport();
+		setViewport({ x: x + delta / 2, y, zoom }, { duration: 200 });
 	});
 </script>

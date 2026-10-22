@@ -130,20 +130,6 @@ pub trait Operation:
     ) -> Result<(), Error>;
 }
 
-#[derive(Serialize)]
-struct Document<'a> {
-    data: Resource<'a>,
-}
-
-#[derive(Serialize)]
-struct Resource<'a> {
-    #[serde(rename = "type")]
-    resource_type: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a str>,
-    attributes: Map<String, Value>,
-}
-
 /// What a delete emits, since Klaviyo answers it without a body.
 #[derive(Serialize)]
 pub(crate) struct Done<'a> {
@@ -214,22 +200,27 @@ pub(crate) fn attributes(
     }
 }
 
-/// Wraps `attributes` in a JSON:API document and reads it as the SDK request.
-pub(crate) fn request<T: DeserializeOwned>(
-    resource_type: &str,
+/// The SDK request `T` with `attributes` and `id`; the JSON:API `type` comes from `T::default()`.
+pub(crate) fn request<T: Default + Serialize + DeserializeOwned>(
     id: Option<&str>,
     attributes: Map<String, Value>,
 ) -> Result<T, Error> {
-    let document = Document {
-        data: Resource {
-            resource_type,
-            id,
-            attributes,
-        },
-    };
-    let value =
-        serde_json::to_value(document).map_err(|source| Error::InvalidPayload { source })?;
-    serde_json::from_value(value).map_err(|source| Error::InvalidPayload { source })
+    let mut document =
+        serde_json::to_value(T::default()).map_err(|source| Error::InvalidPayload { source })?;
+    match document.get_mut("data") {
+        Some(Value::Object(data)) => {
+            data.insert("attributes".to_owned(), Value::Object(attributes));
+            if let Some(id) = id {
+                data.insert("id".to_owned(), Value::from(id));
+            }
+        }
+        _ => {
+            return Err(Error::InvalidPayload {
+                source: serde::de::Error::custom("The request type has no `data` object"),
+            })
+        }
+    }
+    serde_json::from_value(document).map_err(|source| Error::InvalidPayload { source })
 }
 
 /// The value of a field the operation needs.
@@ -504,19 +495,22 @@ mod tests {
     fn attributes_are_wrapped_in_a_json_api_document() {
         let mut attributes = Map::new();
         attributes.insert("name".to_string(), Value::from("Welcome"));
-        attributes.insert("editor_type".to_string(), Value::from("CODE"));
 
-        let request: klaviyo::types::TemplateCreateHtmlOrDndQuery =
-            request("template", None, attributes).unwrap();
+        let request: klaviyo::types::TemplateUpdateHtmlOrDndQuery =
+            request(Some("T1"), attributes).unwrap();
 
-        assert_eq!(request.data.attributes.name, "Welcome");
-        assert_eq!(request.data.attributes.editor_type, "CODE");
+        assert_eq!(request.data.id, "T1");
+        assert_eq!(request.data.attributes.name.as_deref(), Some("Welcome"));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["data"]["type"],
+            Value::from("template")
+        );
     }
 
     #[test]
     fn attributes_missing_a_required_field_are_rejected() {
         let result: Result<klaviyo::types::TemplateCreateHtmlOrDndQuery, Error> =
-            request("template", None, Map::new());
+            request(None, Map::new());
 
         assert!(matches!(result, Err(Error::InvalidPayload { .. })));
     }

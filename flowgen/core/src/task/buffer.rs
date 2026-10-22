@@ -383,6 +383,17 @@ impl Processor {
         }
     }
 
+    /// Passes on an event whose upstream task failed, and returns the others.
+    async fn pass_on_failed(&self, mut event: Event) -> Option<Event> {
+        match event.error.take() {
+            Some(error) => {
+                event.forward_failure(self.tx.as_ref(), error).await;
+                None
+            }
+            None => Some(event),
+        }
+    }
+
     /// Processes events with a single buffer (no keying).
     async fn process_events_single(&mut self, timeout_duration: Duration) -> Result<(), Error> {
         let mut buffer: Vec<Value> = Vec::with_capacity(self.config.size);
@@ -412,6 +423,9 @@ impl Processor {
                 result = self.rx.recv() => {
                     match result {
                         Some(event) => {
+                            let Some(event) = self.pass_on_failed(event).await else {
+                                continue;
+                            };
                             // Capture meta and start the timeout on the first event in buffer.
                             match buffer.is_empty() {
                                 true => {
@@ -520,7 +534,10 @@ impl Processor {
                 // Receive and buffer incoming events.
                 result = self.rx.recv() => {
                     match result {
-                        Some(mut event) => {
+                        Some(event) => {
+                            let Some(mut event) = self.pass_on_failed(event).await else {
+                                continue;
+                            };
                             // Render the config with event data to get the rendered buffer key.
                             let rendered_config = self.config.render_for_event(&event)
                                 .map_err(|source| Error::Render { source })?;
@@ -1487,6 +1504,59 @@ mod tests {
 
         drop(upstream_tx);
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn an_event_whose_upstream_failed_is_passed_on_and_not_batched() {
+        use serde_json::json;
+
+        let config = Arc::new(Buffer {
+            name: "test".to_string(),
+            size: 10,
+            timeout: Some(Duration::from_secs(30)),
+            partition_key: None,
+            flush_on_completion: false,
+            depends_on: None,
+            retry: None,
+        });
+        let (downstream_tx, mut downstream_rx) = mpsc::channel(10);
+        let (upstream_tx, upstream_rx) = mpsc::channel(10);
+        let processor = ProcessorBuilder::new()
+            .config(config)
+            .sender(downstream_tx)
+            .receiver(upstream_rx)
+            .task_id(1)
+            .task_type("buffer")
+            .task_context(create_mock_task_context())
+            .build()
+            .await
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            use crate::task::runner::Runner;
+            let _ = processor.run().await;
+        });
+
+        let event = |i: i64| {
+            EventBuilder::new()
+                .data(EventData::Json(json!({ "i": i })))
+                .subject("a".into())
+                .task_id(0)
+                .task_type("test")
+                .build()
+                .unwrap()
+        };
+        let mut failed = event(0);
+        failed.error = Some("upstream failed".to_string());
+        upstream_tx.send(failed).await.unwrap();
+        upstream_tx.send(event(1)).await.unwrap();
+        drop(upstream_tx);
+        let _ = handle.await;
+
+        let passed_on = downstream_rx.recv().await.unwrap();
+        let batch = downstream_rx.recv().await.unwrap();
+        assert_eq!(passed_on.error.as_deref(), Some("upstream failed"));
+        assert_eq!(batch.error, None);
+        assert_eq!(batch.data_as_json().unwrap()["batch_size"], json!(1));
     }
 
     #[test]

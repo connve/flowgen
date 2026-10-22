@@ -11,9 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-/// JSON:API type of a template.
-const RESOURCE: &str = "template";
-
 /// What the task does with a template.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +61,9 @@ pub struct Templates {
     /// Klaviyo filter expression (list), e.g. `equals(name,'Welcome')`.
     #[serde(default)]
     pub filter: Option<String>,
+    /// Template attributes to return (get, list), e.g. `[name, editor_type, html]`; all when unset.
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
     /// The template's attributes (create, update, upsert, render, clone).
     #[serde(default)]
     pub payload: Option<Payload>,
@@ -116,13 +116,22 @@ impl Operation for Templates {
         match self.operation {
             TemplateOperation::Get => {
                 let id = required(self.template_id.as_deref(), "template_id")?;
-                emitter.emit(&templates.get(id).send().await?).await
+                let get = match &self.fields {
+                    Some(fields) => templates.get(id).fields("template", &names(fields)),
+                    None => templates.get(id),
+                };
+                emitter.emit(&get.send().await?).await
             }
             TemplateOperation::List => {
-                let mut pages = match &self.filter {
-                    Some(filter) => templates.list().filter(filter).pages(),
-                    None => templates.list().pages(),
+                let list = match &self.filter {
+                    Some(filter) => templates.list().filter(filter),
+                    None => templates.list(),
                 };
+                let list = match &self.fields {
+                    Some(fields) => list.fields("template", &names(fields)),
+                    None => list,
+                };
+                let mut pages = list.pages();
                 while let Some(page) = pages.next_page().await {
                     emitter.emit(&page?).await?;
                 }
@@ -130,18 +139,15 @@ impl Operation for Templates {
             }
             TemplateOperation::Create => {
                 let request: types::TemplateCreateHtmlOrDndQuery =
-                    request(RESOURCE, None, attributes(self.payload.as_ref(), event)?)?;
+                    request(None, attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&templates.create(&request).send().await?)
                     .await
             }
             TemplateOperation::Update => {
                 let id = required(self.template_id.as_deref(), "template_id")?;
-                let request: types::TemplateUpdateHtmlOrDndQuery = request(
-                    RESOURCE,
-                    Some(id),
-                    attributes(self.payload.as_ref(), event)?,
-                )?;
+                let request: types::TemplateUpdateHtmlOrDndQuery =
+                    request(Some(id), attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&templates.update(id, &request).send().await?)
                     .await
@@ -160,13 +166,13 @@ impl Operation for Templates {
                 match existing.data.first() {
                     Some(template) => {
                         let request: types::TemplateUpdateHtmlOrDndQuery =
-                            request(RESOURCE, Some(&template.id), attributes)?;
+                            request(Some(&template.id), attributes)?;
                         let updated = templates.update(&template.id, &request).send().await?;
                         emitter.emit(&updated).await
                     }
                     None => {
                         let request: types::TemplateCreateHtmlOrDndQuery =
-                            request(RESOURCE, None, attributes)?;
+                            request(None, attributes)?;
                         emitter
                             .emit(&templates.create(&request).send().await?)
                             .await
@@ -180,11 +186,8 @@ impl Operation for Templates {
             }
             TemplateOperation::Render => {
                 let id = required(self.template_id.as_deref(), "template_id")?;
-                let request: types::TemplateRenderQuery = request(
-                    RESOURCE,
-                    Some(id),
-                    attributes(self.payload.as_ref(), event)?,
-                )?;
+                let request: types::TemplateRenderQuery =
+                    request(Some(id), attributes(self.payload.as_ref(), event)?)?;
                 emitter
                     .emit(&templates.render(id, &request).send().await?)
                     .await
@@ -195,11 +198,15 @@ impl Operation for Templates {
                     Some(payload) => attributes(Some(payload), event)?,
                     None => Map::new(),
                 };
-                let request: types::TemplateCloneQuery = request(RESOURCE, Some(id), attributes)?;
+                let request: types::TemplateCloneQuery = request(Some(id), attributes)?;
                 emitter
                     .emit(&templates.clone_template(id, &request).send().await?)
                     .await
             }
         }
     }
+}
+
+fn names(fields: &[String]) -> Vec<&str> {
+    fields.iter().map(String::as_str).collect()
 }

@@ -976,6 +976,7 @@ fn spawn_task(
     let mut context = (**task_context).clone();
     context.leaf_count = task_desc.downstream_leaves;
     context.max_in_flight = flowgen_core::task::runner::max_in_flight(task_type.cpu_intensive());
+    context.handles_failed = task_type.handles_failed();
     if !task_type.starts_at_once() {
         let retry_config = flowgen_core::retry::RetryConfig::merge(&context.retry, &None);
         context.startup_delay = Some(retry_config.startup_jitter());

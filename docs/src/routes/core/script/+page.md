@@ -28,6 +28,7 @@ Rhai is a sandboxed, embedded scripting language: it cannot perform IO, spawn pr
 | `limits` | object | | Rhai engine resource limits (see below). Defaults bound a single script's CPU and memory so a misbehaving script cannot stall the worker. |
 | `depends_on` | list | | Upstream task names. See [Flows](/docs/flowgen/concepts/flows). |
 | `retry` | object | | Retry overrides. See [Retry](/docs/flowgen/concepts/retry). |
+| `handles_failed` | bool | `false` | Runs on events whose upstream task failed, with `event.error` set. Otherwise those events pass the script unhandled. See [Failure handling](/docs/flowgen/concepts/flows#failure-handling). |
 
 #### `limits`
 
@@ -94,7 +95,7 @@ Two top-level variables:
 | `event.meta` | Metadata snapshot from the upstream event. **Read-only here** — to mutate metadata, use `ctx.meta` (see below). |
 | `event.id` | Optional identifier set by the source task. |
 | `event.subject` | Subject string set by the producing task. |
-| `event.error` | Error string when an upstream task failed after retries. Useful for routing to dead-letter destinations. |
+| `event.error` | Error string when an upstream task failed after retries. Seen only with `handles_failed: true`; useful for routing to dead-letter destinations. |
 
 ### `ctx.meta` (mutable)
 
@@ -261,6 +262,7 @@ event.data
 ```yaml
 - script:
     name: dlq_router
+    handles_failed: true
     code: |
       if event.error != () {
           ctx.meta.lane = "dlq";

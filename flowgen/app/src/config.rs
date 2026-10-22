@@ -272,6 +272,13 @@ macro_rules! task_types {
                 }
             }
 
+            /// Whether this task handles events whose upstream task failed.
+            pub fn handles_failed(&self) -> bool {
+                match self {
+                    $(TaskType::$tag(config) => config.handles_failed(),)+
+                }
+            }
+
             /// Spawns the task in the current span.
             pub fn spawn(
                 self,

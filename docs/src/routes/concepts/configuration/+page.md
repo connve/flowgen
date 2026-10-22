@@ -190,7 +190,7 @@ Embedded web dashboard and JSON API.
 | `port` | int | `8080` | Listening port. |
 | `path` | string | `/` | Path prefix for both the UI and the API. |
 | `headers` | map of string to string | `{}` | HTTP headers sent with every outbound request the web server makes on its own behalf (currently the built-in Agents chat proxy to the AI gateway). Set this so `llm_proxy`/`mcp_tool` tasks scoped with a matching `headers` field can identify and allow the web server as a caller — see [AI Gateway](/docs/flowgen/ai/gateway) and [MCP](/docs/flowgen/ai/mcp). |
-| `agents.enabled` | bool | required | Shows the Agents tab and enables `/api/agents`. Omit `agents` to hide the tab. |
+| `agents.enabled` | bool | required | Shows the Ask tab and enables `/api/agents`. Omit `agents` to hide the tab. |
 | `agents.conversation_history_ttl` | duration | `30d` | How long a conversation is kept after its last message; `0` keeps it indefinitely. |
 | `agents.on_behalf_of_user` | bool | `false` | Calls the AI gateway as the signed-in user, with their login token as the bearer. The gateway's `auth` must be `oidc` with the issuer of `web.auth` and its `client_id` as the audience. |
 | `ai_gateway_url` | string | same-process `ai_gateway` | Base URL the Agents chat is proxied to, e.g. `http://127.0.0.1:3002/v1`. Set when the AI gateway runs in another process or pod. |
